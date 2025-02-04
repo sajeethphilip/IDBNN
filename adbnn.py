@@ -272,6 +272,126 @@ class DatasetConfig:
 
         return config
 
+    def _ensure_complete_config(self, dataset_name: str) -> Dict:
+        """
+        Ensure configuration file is complete with all options and default values.
+        Creates or updates config file in data/<dataset_name>/ folder.
+        """
+        # Define default configuration
+        default_config = {
+            "file_path": f"data/{dataset_name}/{dataset_name}.csv",
+            "separator": ",",
+            "has_header": True,
+            "target_column": "target",  # Will be updated when reading CSV
+
+            "modelType": "Histogram",
+
+            "likelihood_config": {
+                "feature_group_size": 2,
+                "max_combinations": 1000,
+                "bin_sizes": [20]
+            },
+
+            "active_learning": {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.3,
+                "marginal_margin_threshold": 0.1,
+                "min_divergence": 0.1
+            },
+
+            "training_params": {
+                "trials": 100,
+                "epochs": 1000,
+                "learning_rate": 0.1,
+                "test_fraction": 0.2,
+                "random_seed": 42,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "n_bins_per_dim": 20,
+                "enable_adaptive": True,
+                "invert_DBNN": False,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1,
+                "Save_training_epochs": False,
+                "training_save_path": f"training_data/{dataset_name}"
+            },
+
+            "execution_flags": {
+                "train": True,
+                "train_only": False,
+                "predict": True,
+                "fresh_start": False,
+                "use_previous_model": True
+            }
+        }
+
+        # Create dataset folder if it doesn't exist
+        dataset_folder = os.path.join('data', dataset_name)
+        os.makedirs(dataset_folder, exist_ok=True)
+
+        config_path = os.path.join(dataset_folder, f"{dataset_name}.conf")
+
+        # Load existing configuration if it exists
+        existing_config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    existing_config = json.load(f)
+                print(f"Loaded existing configuration from {config_path}")
+            except Exception as e:
+                print(f"Warning: Error loading existing config: {str(e)}")
+
+        # Try to read CSV to get column names if not in existing config
+        csv_path = os.path.join(dataset_folder, f"{dataset_name}.csv")
+        if os.path.exists(csv_path) and "column_names" not in existing_config:
+            try:
+                df = pd.read_csv(csv_path, nrows=0)
+                default_config["column_names"] = df.columns.tolist()
+                default_config["target_column"] = df.columns[-1]
+            except Exception as e:
+                print(f"Warning: Error reading CSV headers: {str(e)}")
+                default_config["column_names"] = []
+
+        # Deep merge existing config with default config
+        def deep_merge(default: Dict, existing: Dict) -> Dict:
+            result = default.copy()
+            for key, value in existing.items():
+                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+
+        merged_config = deep_merge(default_config, existing_config)
+
+        # Save updated configuration
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(merged_config, f, indent=4)
+            print(f"Saved complete configuration to {config_path}")
+
+            # Also save a documented version with comments
+            documented_path = os.path.join(dataset_folder, f"{dataset_name}_documented.conf")
+            with open(documented_path, 'w') as f:
+                f.write("{\n")
+                f.write("    // Basic dataset configuration\n")
+                f.write(f'    "file_path": "{merged_config["file_path"]}",  // Path to the dataset file\n')
+                f.write('    "column_names": [                    // List of column names in order\n')
+                for col in merged_config["column_names"]:
+                    f.write(f'        "{col}",\n')
+                f.write('    ],\n')
+                # ... Continue with all parameters and their comments
+                f.write("}\n")
+            print(f"Saved documented configuration to {documented_path}")
+
+        except Exception as e:
+            print(f"Warning: Error saving configuration: {str(e)}")
+            return merged_config
+
+        return merged_config
 
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
@@ -1007,6 +1127,145 @@ class GPUDBNN:
         self._load_categorical_encoders()
 
 #----------------------
+
+    def _save_predictions_with_reconstruction(self, X_test_df: pd.DataFrame, predictions: torch.Tensor,
+                                           save_path: str, true_labels: pd.Series = None,
+                                           reconstructed_features: torch.Tensor = None):
+        """Save predictions with reconstruction analysis"""
+        result_df = X_test_df.copy()
+
+        # Convert predictions to labels
+        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+        result_df['predicted_class'] = pred_labels
+
+        if true_labels is not None:
+            result_df['true_class'] = true_labels
+
+        # Add reconstructed features
+        if reconstructed_features is not None:
+            recon_features = reconstructed_features.cpu().numpy()
+            for i in range(recon_features.shape[1]):
+                result_df[f'reconstructed_feature_{i}'] = recon_features[:, i]
+
+            # Add reconstruction error
+            original_features = X_test_df.values
+            feature_errors = np.mean((original_features - recon_features) ** 2, axis=1)
+            result_df['reconstruction_error'] = feature_errors
+
+        # Save results
+        base_path = os.path.splitext(save_path)[0]
+        result_df.to_csv(f"{base_path}_with_reconstruction.csv", index=False)
+
+        # Generate reconstruction report
+        self._generate_reconstruction_report(
+            original_features=X_test_df.values,
+            reconstructed_features=recon_features,
+            true_labels=true_labels,
+            predictions=pred_labels,
+            save_path=base_path
+        )
+
+    def _generate_reconstruction_report(self, original_features: np.ndarray,
+                                     reconstructed_features: np.ndarray,
+                                     true_labels: np.ndarray,
+                                     predictions: np.ndarray,
+                                     save_path: str):
+        """Generate detailed reconstruction analysis report"""
+        report = {
+            'overall_metrics': {
+                'mse': float(np.mean((original_features - reconstructed_features) ** 2)),
+                'mae': float(np.mean(np.abs(original_features - reconstructed_features))),
+                'correlation': float(np.corrcoef(original_features.flatten(),
+                                              reconstructed_features.flatten())[0, 1])
+            },
+            'per_feature_metrics': [],
+            'per_class_metrics': {},
+            'reconstruction_quality': {}
+        }
+
+        # Per-feature analysis
+        for i in range(original_features.shape[1]):
+            orig = original_features[:, i]
+            recon = reconstructed_features[:, i]
+            report['per_feature_metrics'].append({
+                'feature_idx': i,
+                'mse': float(np.mean((orig - recon) ** 2)),
+                'correlation': float(np.corrcoef(orig, recon)[0, 1]),
+                'mean_error': float(np.mean(np.abs(orig - recon)))
+            })
+
+        # Per-class analysis
+        unique_classes = np.unique(true_labels)
+        for class_label in unique_classes:
+            mask = (true_labels == class_label)
+            orig_class = original_features[mask]
+            recon_class = reconstructed_features[mask]
+
+            report['per_class_metrics'][str(class_label)] = {
+                'mse': float(np.mean((orig_class - recon_class) ** 2)),
+                'sample_count': int(np.sum(mask)),
+                'accuracy': float(np.mean(predictions[mask] == true_labels[mask]))
+            }
+
+        # Quality assessment
+        errors = np.mean((original_features - reconstructed_features) ** 2, axis=1)
+        report['reconstruction_quality'] = {
+            'excellent': float(np.mean(errors < 0.1)),
+            'good': float(np.mean((errors >= 0.1) & (errors < 0.3))),
+            'fair': float(np.mean((errors >= 0.3) & (errors < 0.5))),
+            'poor': float(np.mean(errors >= 0.5))
+        }
+
+        # Save reports
+        with open(f"{save_path}_reconstruction_analysis.json", 'w') as f:
+            json.dump(report, f, indent=4)
+
+        self._save_reconstruction_plots(
+            original_features, reconstructed_features,
+            true_labels, save_path
+        )
+
+    def _save_reconstruction_plots(self, original_features: np.ndarray,
+                                reconstructed_features: np.ndarray,
+                                true_labels: np.ndarray,
+                                save_path: str):
+        """Generate visualization plots for reconstruction analysis"""
+        plt.figure(figsize=(15, 5))
+
+        # Feature-wise reconstruction error
+        plt.subplot(131)
+        errors = np.mean((original_features - reconstructed_features) ** 2, axis=0)
+        plt.bar(range(len(errors)), errors)
+        plt.title('Feature-wise Reconstruction Error')
+        plt.xlabel('Feature Index')
+        plt.ylabel('MSE')
+
+        # Class-wise reconstruction quality
+        plt.subplot(132)
+        unique_classes = np.unique(true_labels)
+        class_errors = []
+        for class_label in unique_classes:
+            mask = (true_labels == class_label)
+            error = np.mean((original_features[mask] - reconstructed_features[mask]) ** 2)
+            class_errors.append(error)
+
+        plt.bar(unique_classes, class_errors)
+        plt.title('Class-wise Reconstruction Error')
+        plt.xlabel('Class')
+        plt.ylabel('MSE')
+
+        # Error distribution
+        plt.subplot(133)
+        all_errors = np.mean((original_features - reconstructed_features) ** 2, axis=1)
+        plt.hist(all_errors, bins=30)
+        plt.title('Error Distribution')
+        plt.xlabel('MSE')
+        plt.ylabel('Count')
+
+        plt.tight_layout()
+        plt.savefig(f"{save_path}_reconstruction_plots.png")
+        plt.close()
+
     def _compute_balanced_accuracy(self, y_true, y_pred):
         """Compute class-balanced accuracy"""
         cm = confusion_matrix(y_true, y_pred)
@@ -1231,7 +1490,26 @@ class DBNN(GPUDBNN):
         self.model_config = config
         self.training_log = pd.DataFrame()
 
+    def update_results_with_reconstruction(self, results: Dict, original_features: torch.Tensor,
+                                         reconstructed_features: torch.Tensor,
+                                         class_probs: torch.Tensor,
+                                         true_labels: torch.Tensor) -> Dict:
+        """Update results dictionary with reconstruction metrics"""
+        reconstruction_metrics = self._compute_reconstruction_metrics(
+            original_features=original_features,
+            reconstructed_features=reconstructed_features,
+            class_probs=class_probs,
+            true_labels=true_labels
+        )
 
+        results['reconstruction_analysis'] = {
+            'overall_quality': reconstruction_metrics['overall'],
+            'per_feature': reconstruction_metrics['per_feature'],
+            'per_class': reconstruction_metrics['per_class'],
+            'quality_distribution': reconstruction_metrics['reconstruction_stats']
+        }
+
+        return results
 
     def process_dataset(self, config_path: str) -> Dict:
         """
@@ -3925,11 +4203,16 @@ class DBNN(GPUDBNN):
         return results
 #-------------------------------------------------------------------------------------------------------------------------------------------------
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
-        """Full training and prediction pipeline with GPU optimization, inverse model support, and prediction saving"""
+        """Full training and prediction pipeline with enhanced inverse model support"""
         try:
             self._last_metrics_printed = True
+            inverse_metrics = None
+            reconstructed_features = None
 
-            # Initialize inverse model if configured
+            # Data preparation phase
+            X_train, X_test, y_train, y_test = self._prepare_training_data(batch_size)
+
+            # Initialize and configure inverse model if enabled
             if hasattr(self.config, 'invert_DBNN') and self.config.invert_DBNN:
                 self.inverse_model = InvertibleDBNN(
                     forward_model=self,
@@ -3938,56 +4221,7 @@ class DBNN(GPUDBNN):
                     feedback_strength=self.config.feedback_strength
                 )
 
-            # Handle data preparation based on training mode
-            if self.in_adaptive_fit:
-                if not hasattr(self, 'X_tensor') or not hasattr(self, 'y_tensor'):
-                    raise ValueError("X_tensor or y_tensor not found. Initialize them in adaptive_fit_predict first.")
-
-                if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
-                    raise ValueError("train_indices or test_indices not found")
-
-                try:
-                    X_train = self.X_tensor[self.train_indices]
-                    X_test = self.X_tensor[self.test_indices]
-                    y_train = self.y_tensor[self.train_indices]
-                    y_test = self.y_tensor[self.test_indices]
-                except Exception as e:
-                    DEBUG.log(f"Error using stored indices: {str(e)}. Falling back to regular training.")
-                    self.in_adaptive_fit = False
-                    self.train_indices = None
-                    self.test_indices = None
-                    return self.fit_predict(batch_size=batch_size, save_path=save_path)
-            else:
-                # Regular training path
-                X = self.data.drop(columns=[self.target_column])
-                y = self.data[self.target_column]
-
-                # Handle label encoding
-                if not hasattr(self.label_encoder, 'classes_'):
-                    y_encoded = self.label_encoder.fit_transform(y)
-                else:
-                    y_encoded = self.label_encoder.transform(y)
-
-                X_processed = self._preprocess_data(X, is_training=True)
-                X_tensor = torch.FloatTensor(X_processed).to(self.device)
-                y_tensor = torch.LongTensor(y_encoded).to(self.device)
-
-                X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
-
-                # Ensure proper device and dtype
-                X_train = X_train.to(self.device, dtype=torch.float32)
-                X_test = X_test.to(self.device, dtype=torch.float32)
-                y_train = y_train.to(self.device, dtype=torch.long)
-                y_test = y_test.to(self.device, dtype=torch.long)
-
-            # Verify tensor sizes
-            if X_train.size(0) != y_train.size(0) or X_test.size(0) != y_test.size(0):
-                raise ValueError(f"Tensor size mismatch. X_train: {X_train.size(0)}, y_train: {y_train.size(0)}, "
-                               f"X_test: {X_test.size(0)}, y_test: {y_test.size(0)}")
-
-            # Training phase
-            if hasattr(self.config, 'invert_DBNN') and self.config.invert_DBNN:
-                # Train both forward and inverse models
+                # Train with inverse model
                 inverse_metrics = self.inverse_model.fit(
                     features=X_train,
                     labels=y_train,
@@ -3998,74 +4232,45 @@ class DBNN(GPUDBNN):
                 final_W = self.current_W
                 error_rates = inverse_metrics.get('forward_error_rates', [])
             else:
-                # Standard forward model training
+                # Standard forward training
                 final_W, error_rates = self.train(X_train, y_train, X_test, y_test, batch_size=batch_size)
 
             # Save encoders and compute training accuracy
             self._save_categorical_encoders()
-            with torch.no_grad():
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
+            train_metrics = self._compute_training_metrics(X_train, y_train, batch_size)
 
             # Test phase based on training performance
-            min_training_accuracy = getattr(self.config, 'minimum_training_accuracy', 0.95)
-            if not self.in_adaptive_fit or train_accuracy >= min_training_accuracy:
-                y_pred = self.predict(X_test, batch_size=batch_size)
+            test_metrics = self._compute_test_metrics(
+                X_test, y_test, train_metrics['accuracy'], batch_size
+            )
 
-                if y_pred.size(0) != y_test.size(0):
-                    raise ValueError(f"Prediction size mismatch. Predictions: {y_pred.size(0)}, Test set: {y_test.size(0)}")
+            # Handle predictions and reconstruction
+            if save_path and test_metrics['predictions'] is not None:
+                X_test_df, y_test_series = self._prepare_test_data(X_test, y_test)
 
-                # Handle predictions saving
-                if save_path:
-                    X_test_df = self.data.drop(columns=[self.target_column]).iloc[
-                        self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                    ]
-                    y_test_series = self.data[self.target_column].iloc[
-                        self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                    ]
+                if hasattr(self.config, 'invert_DBNN') and self.config.invert_DBNN:
+                    test_probs = self._get_test_probabilities(X_test)
+                    reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
+                    self._save_predictions_with_reconstruction(
+                        X_test_df, test_metrics['predictions'], save_path,
+                        y_test_series, reconstructed_features
+                    )
+                else:
+                    self.save_predictions(X_test_df, test_metrics['predictions'],
+                                       save_path, y_test_series)
 
-                    # Get reconstruction data if inverse model is enabled
-                    reconstructed_features = None
-                    if hasattr(self.config, 'invert_DBNN') and self.config.invert_DBNN:
-                        if self.model_type == "Histogram":
-                            test_probs, _ = self._compute_batch_posterior(X_test)
-                        else:  # Gaussian model
-                            test_probs, _ = self._compute_batch_posterior_std(X_test)
-                        reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
-
-                    # Save predictions with reconstruction if available
-                    if reconstructed_features is not None:
-                        self._save_predictions_with_reconstruction(
-                            X_test_df, y_pred, save_path, y_test_series, reconstructed_features
-                        )
-                    else:
-                        self.save_predictions(X_test_df, y_pred, save_path, y_test_series)
-
-                # Calculate metrics
-                y_test_cpu = y_test.cpu().numpy()
-                y_pred_cpu = y_pred.cpu().numpy()
-                y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
-                y_pred_labels = self.label_encoder.inverse_transform(y_pred_cpu)
-                test_accuracy = (y_pred_cpu == y_test_cpu).mean()
-                print(f"\nTest Accuracy: {test_accuracy:.4f}")
-            else:
-                test_accuracy = 0.0
-                y_test_labels = []
-                y_pred_labels = []
-
-            # Prepare results
+            # Prepare comprehensive results
             results = {
-                'classification_report': classification_report(y_test_labels, y_pred_labels) if len(y_test_labels) > 0 else "",
-                'confusion_matrix': confusion_matrix(y_test_labels, y_pred_labels) if len(y_test_labels) > 0 else None,
+                'classification_report': test_metrics.get('classification_report', ''),
+                'confusion_matrix': test_metrics.get('confusion_matrix'),
                 'error_rates': error_rates,
-                'train_accuracy': train_accuracy,
-                'test_accuracy': test_accuracy,
-                'training_complete': train_accuracy >= min_training_accuracy
+                'train_accuracy': train_metrics['accuracy'],
+                'test_accuracy': test_metrics.get('accuracy', 0.0),
+               'training_complete': train_metrics['accuracy'] >= self._get_config_value('minimum_training_accuracy', 0.95)
             }
 
             # Add inverse model metrics if enabled
-            if hasattr(self.config, 'invert_DBNN') and self.config.invert_DBNN:
-                # Keep existing training-time metrics
+            if inverse_metrics is not None:
                 results.update({
                     'inverse_metrics': inverse_metrics,
                     'reconstruction_metrics': {
@@ -4075,23 +4280,13 @@ class DBNN(GPUDBNN):
                     }
                 })
 
-                # Add detailed reconstruction analysis if we have reconstructed features
                 if reconstructed_features is not None:
-                    # Get class probabilities based on model type
-                    if self.model_type == "Histogram":
-                        class_probs, _ = self._compute_batch_posterior(X_test)
-                    else:  # Gaussian model
-                        class_probs, _ = self._compute_batch_posterior_std(X_test)
-
-                    # Add detailed reconstruction metrics
+                    test_probs = self._get_test_probabilities(X_test)
                     results = self.update_results_with_reconstruction(
-                        results,
-                        X_test,
-                        reconstructed_features,
-                        class_probs,
-                        y_test,
-                        save_path
+                        results, X_test, reconstructed_features,
+                        test_probs, y_test, save_path
                     )
+
             self._save_model_components()
             return results
 
@@ -4099,6 +4294,95 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error in fit_predict: {str(e)}")
             DEBUG.log(f"Traceback: {traceback.format_exc()}")
             raise
+
+    def _get_config_value(self, param_name: str, default_value: Any) -> Any:
+        """Get configuration value with proper fallbacks"""
+        if hasattr(self.config, 'to_dict'):
+            return getattr(self.config, param_name, default_value)
+        elif isinstance(self.config, dict):
+            return self.config.get('training_params', {}).get(param_name, default_value)
+        return default_value
+
+    def _compute_test_metrics(self, X_test, y_test, train_accuracy, batch_size):
+        """Compute test metrics based on training performance"""
+        min_training_accuracy = getattr(self.config, 'minimum_training_accuracy', 0.95)
+
+        if not self.in_adaptive_fit or train_accuracy >= min_training_accuracy:
+            y_pred = self.predict(X_test, batch_size=batch_size)
+            if y_pred.size(0) != y_test.size(0):
+                raise ValueError(f"Prediction size mismatch: {y_pred.size(0)} vs {y_test.size(0)}")
+
+            y_test_cpu = y_test.cpu().numpy()
+            y_pred_cpu = y_pred.cpu().numpy()
+            y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
+            y_pred_labels = self.label_encoder.inverse_transform(y_pred_cpu)
+
+            return {
+                'predictions': y_pred,
+                'accuracy': (y_pred_cpu == y_test_cpu).mean(),
+                'classification_report': classification_report(y_test_labels, y_pred_labels),
+                'confusion_matrix': confusion_matrix(y_test_labels, y_pred_labels)
+            }
+
+        return {'predictions': None, 'accuracy': 0.0}
+
+    def _prepare_test_data(self, X_test, y_test):
+        """Prepare test data for prediction saving"""
+        indices = self.test_indices if self.in_adaptive_fit else range(len(X_test))
+        X_test_df = self.data.drop(columns=[self.target_column]).iloc[indices]
+        y_test_series = self.data[self.target_column].iloc[indices]
+        return X_test_df, y_test_series
+
+    def _get_test_probabilities(self, X_test):
+        """Get class probabilities based on model type"""
+        if self.model_type == "Histogram":
+            probs, _ = self._compute_batch_posterior(X_test)
+        else:  # Gaussian model
+            probs, _ = self._compute_batch_posterior_std(X_test)
+        return probs
+
+
+    def _compute_training_metrics(self, X_train, y_train, batch_size):
+        """Compute training metrics with proper error handling"""
+        with torch.no_grad():
+            train_predictions = self.predict(X_train, batch_size=batch_size)
+            train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
+        return {'predictions': train_predictions, 'accuracy': train_accuracy}
+
+    def _prepare_training_data(self, batch_size):
+        """Prepare training data with proper handling for adaptive and regular modes"""
+        if self.in_adaptive_fit:
+            if not hasattr(self, 'X_tensor') or not hasattr(self, 'y_tensor'):
+                raise ValueError("X_tensor or y_tensor not found.")
+            if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
+                raise ValueError("train_indices or test_indices not found")
+
+            return (self.X_tensor[self.train_indices], self.X_tensor[self.test_indices],
+                    self.y_tensor[self.train_indices], self.y_tensor[self.test_indices])
+
+        # Regular training path
+        X = self.data.drop(columns=[self.target_column])
+        y = self.data[self.target_column]
+
+        # Handle label encoding
+        y_encoded = (self.label_encoder.transform(y) if hasattr(self.label_encoder, 'classes_')
+                    else self.label_encoder.fit_transform(y))
+
+        # Process and convert data
+        X_processed = self._preprocess_data(X, is_training=True)
+        X_tensor = torch.FloatTensor(X_processed).to(self.device)
+        y_tensor = torch.LongTensor(y_encoded).to(self.device)
+
+        # Get train/test split
+        X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
+
+        # Ensure proper device and dtype
+        return (X_train.to(self.device, dtype=torch.float32),
+                X_test.to(self.device, dtype=torch.float32),
+                y_train.to(self.device, dtype=torch.long),
+                y_test.to(self.device, dtype=torch.long))
+
+
     def _get_model_components_filename(self):
         """Get filename for model components"""
         return os.path.join('Model', f'Best{self.model_type}_{self.dataset_name}_components.pkl')
