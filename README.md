@@ -51,7 +51,8 @@
         "enable_adaptive": true,         // Enable adaptive learning
 
         // Inverse DBNN parameters (all default to false/0 if not specified)
-        'epochs': 1000,
+
+        "epochs": 1000,
         "invert_DBNN": false,           // Enable inverse model functionality
         "reconstruction_weight": 0.5,    // Weight for reconstruction loss (0-1)
         "feedback_strength": 0.3,        // Strength of feedback between models (0-1)
