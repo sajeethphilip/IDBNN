@@ -322,7 +322,49 @@ class BaseFeatureExtractor(ABC):
         model.setdefault('learning_rate', 0.001)
         model.setdefault('encoder_type', 'cnn')
         model.setdefault('modelType', 'Histogram')
-
+        # Add loss functions configuration
+        loss_functions = model.setdefault('loss_functions', {})
+        loss_functions.setdefault('default', {
+            'enabled': True,
+            'type': 'CrossEntropy',
+            'weight': 1.0
+        })
+        loss_functions.setdefault('structural', {
+            'enabled': True,
+            'type': 'StructuralLoss',
+            'weight': 0.7,
+            'params': {
+                'edge_weight': 1.0,
+                'smoothness_weight': 0.5
+            }
+        })
+        loss_functions.setdefault('color_enhancement', {
+            'enabled': True,
+            'type': 'ColorEnhancementLoss',
+            'weight': 0.5,
+            'params': {
+                'channel_weight': 0.5,
+                'contrast_weight': 0.3
+            }
+        })
+        loss_functions.setdefault('morphology', {
+            'enabled': True,
+            'type': 'MorphologyLoss',
+            'weight': 0.3,
+            'params': {
+                'shape_weight': 0.7,
+                'symmetry_weight': 0.3
+            }
+        })
+        loss_functions.setdefault('autoencoder', {
+            'enabled': False,
+            'type': 'AutoencoderLoss',
+            'weight': 1.0,
+            'params': {
+                'reconstruction_weight': 1.0,
+                'feature_weight': 0.1
+            }
+        })
         # Verify training section
         training = config.setdefault('training', {})
         training.setdefault('batch_size', 32)
@@ -500,6 +542,55 @@ class BaseFeatureExtractor(ABC):
                     "target_column": "target",
                     "modelType": "Histogram",
 
+                    "model": {
+                        "feature_dims": features.shape[1],
+                        "learning_rate": 0.001,
+                        "encoder_type": "cnn",
+                        "loss_functions": {
+                            "default": {
+                                "enabled": True,
+                                "type": "CrossEntropy",
+                                "weight": 1.0
+                            },
+                            "structural": {
+                                "enabled": True,
+                                "type": "StructuralLoss",
+                                "weight": 0.7,
+                                "params": {
+                                    "edge_weight": 1.0,
+                                    "smoothness_weight": 0.5
+                                }
+                            },
+                            "color_enhancement": {
+                                "enabled": True,
+                                "type": "ColorEnhancementLoss",
+                                "weight": 0.5,
+                                "params": {
+                                    "channel_weight": 0.5,
+                                    "contrast_weight": 0.3
+                                }
+                            },
+                            "morphology": {
+                                "enabled": True,
+                                "type": "MorphologyLoss",
+                                "weight": 0.3,
+                                "params": {
+                                    "shape_weight": 0.7,
+                                    "symmetry_weight": 0.3
+                                }
+                            },
+                            "autoencoder": {
+                                "enabled": False,
+                                "type": "AutoencoderLoss",
+                                "weight": 1.0,
+                                "params": {
+                                    "reconstruction_weight": 1.0,
+                                    "feature_weight": 0.1
+                                }
+                            }
+                        }
+                    },
+
                     "likelihood_config": {
                         "feature_group_size": 2,
                         "max_combinations": min(1000, features.shape[1] * (features.shape[1] - 1) // 2),
@@ -543,6 +634,13 @@ class BaseFeatureExtractor(ABC):
                 }
                 with open(config_path, 'w') as f:
                     json.dump(complete_config, f, indent=4)
+
+            # Prompt user for editing
+            print("\nConfiguration file created. Would you like to edit it before training?")
+            response = input("Edit configuration? (y/n): ").lower()
+            if response == 'y':
+                config_manager = ConfigManager(os.path.dirname(output_path))
+                config_manager._open_editor(config_path)
 
             config_manager = ConfigManager(os.path.dirname(output_path))
             if config_manager.manage_csv(output_path, headers):
@@ -2826,53 +2924,49 @@ def get_interactive_args():
 def main():
     """Main execution function"""
     try:
-        # Set up logging
         logger = setup_logging()
-        logger.info("Starting feature extraction process...")
-
-        # Get arguments
         args = parse_arguments()
         config = None
 
-        # Handle interactive mode if no arguments provided
         if args is None:
             print("\nEntering interactive mode...")
             args = get_interactive_args()
 
-        # Load configuration if provided
         if args.config:
-            logger.info(f"Loading configuration from {args.config}")
             with open(args.config, 'r') as f:
                 config = json.load(f)
 
-        # Initialize processor
         processor = DatasetProcessor(
             datafile=args.data,
             datatype=args.data_type.lower(),
             output_dir=args.output_dir
         )
 
-        # Process dataset
-        logger.info("Processing dataset...")
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
-        # Generate or update configuration
-        if not config:
-            logger.info("Generating configuration...")
-            config = processor.generate_default_config(train_dir)
+        logger.info("Generating configuration...")
+        config = processor.generate_default_config(train_dir)
 
-        # Update config with command line arguments
+        # Prompt for configuration editing
+        print("\nConfiguration files have been created. Would you like to edit them before training?")
+        response = input("Edit configuration? (y/n): ").lower()
+        if response == 'y':
+            config_manager = ConfigManager(processor.dataset_dir)
+            config_manager._open_editor(os.path.join(processor.dataset_dir, f"{processor.dataset_name}.json"))
+            config_manager._open_editor(os.path.join(processor.dataset_dir, f"{processor.dataset_name}.conf"))
+            config_manager._open_editor(os.path.join(processor.dataset_dir, "adaptive_dbnn.conf"))
+
+            # Reload configuration after editing
+            with open(os.path.join(processor.dataset_dir, f"{processor.dataset_name}.json"), 'r') as f:
+                config = json.load(f)
+
         config = update_config_with_args(config, args)
-
-        # Get transforms
         transform = processor.get_transforms(config)
-
-        # Prepare datasets
         train_dataset, test_dataset = get_dataset(config, transform)
+
         if train_dataset is None:
             raise ValueError("No training dataset available")
-        num_workers=config['training']['num_workers']
 
         train_loader = DataLoader(
             train_dataset,
@@ -2890,15 +2984,17 @@ def main():
                 num_workers=config['training']['num_workers']
             )
 
-        # Create feature extractor
         logger.info(f"Initializing {config['model']['encoder_type']} feature extractor...")
         feature_extractor = get_feature_extractor(config)
 
-        # Train model
+        proceed = input("\nReady to start training. Proceed? (y/n): ").lower()
+        if proceed != 'y':
+            logger.info("Training cancelled by user")
+            return 0
+
         logger.info("Starting model training...")
         history = feature_extractor.train(train_loader, test_loader)
 
-        # Extract features
         logger.info("Extracting features...")
         train_features, train_labels = feature_extractor.extract_features(train_loader)
 
@@ -2910,13 +3006,11 @@ def main():
             features = train_features
             labels = train_labels
 
-        # Save features
         output_path = os.path.join(args.output_dir, config['dataset']['name'],
                                 f"{config['dataset']['name']}.csv")
         feature_extractor.save_features(features, labels, output_path)
         logger.info(f"Features saved to {output_path}")
 
-        # Plot training history
         if history:
             plot_path = os.path.join(args.output_dir, config['dataset']['name'],
                                   'training_history.png')

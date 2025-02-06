@@ -122,14 +122,14 @@ class GlobalConfig:
             # print(f"DEBUG:  {param} = {value}")
 
         # Load execution flags
-        print("\nDEBUG: Loading execution flags:")
+        #print("\nDEBUGLoading execution flags:")
         config.fresh_start = execution_flags.get('fresh_start', False)
         config.use_previous_model = execution_flags.get('use_previous_model', True)
         # print(f"DEBUG:  fresh_start = {config.fresh_start}")
         # print(f"DEBUG:  use_previous_model = {config.use_previous_model}")
 
-        print("\nDEBUG: Final GlobalConfig state:")
-        print(json.dumps(config.to_dict(), indent=2))
+        ##print("\nDEBUGFinal GlobalConfig state:")
+        #print(json.dumps(config.to_dict(), indent=2))
 
         return config
 
@@ -460,7 +460,7 @@ class DatasetConfig:
     def load_config(dataset_name: str) -> Dict:
         """Load and validate dataset configuration with enhanced error handling."""
         config_path = f"{dataset_name}.conf"
-        print(f"\nDEBUG: Attempting to load config from: {config_path}")
+        # print(f"\nDEBUG: Attempting to load config from: {config_path}")
 
         config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
         # print(f"DEBUG:  Trying alternate path: {config_path}")
@@ -473,7 +473,7 @@ class DatasetConfig:
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-                print("\nDEBUG: Raw config loaded successfully")
+                #print("\nDEBUGRaw config loaded successfully")
             # Remove comments from config
             def remove_comments(json_str):
                 lines = []
@@ -582,7 +582,7 @@ class DatasetConfig:
 
             # Verify inverse DBNN settings
             if config.get('training_params', {}).get('invert_DBNN'):
-                print("\nDEBUG: Found inverse DBNN configuration:")
+                #print("\nDEBUGFound inverse DBNN configuration:")
                 tp = config['training_params']
                 print(f"invert_DBNN: {tp.get('invert_DBNN')}")
                 print(f"reconstruction_weight: {tp.get('reconstruction_weight')}")
@@ -3821,182 +3821,117 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"Warning: Could not save confusion matrix plot: {str(e)}")
 
-    def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
-        """Training loop with testing only at end of rounds"""
+    def train(self, X_train, y_train, X_test, y_test, batch_size=32):
+        """Complete training with progress tracking and confusion matrix"""
         print("\nStarting training...")
-        early_stopping_patience = 5
-        min_improvement = 0.001
-        min_training_accuracy = self._get_config_value('minimum_training_accuracy', 0.95)
-        max_accuracy_plateau = 5
-
-        # Initialize progress bar for epochs and set GPU memory handling
-        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs")
-        if torch.cuda.is_available():
-            # Clear GPU cache and set memory handling
-            torch.cuda.empty_cache()
-            torch.backends.cudnn.benchmark = True
-            torch.cuda.set_device(torch.cuda.current_device())
-
-        # Store current weights for prediction during training
-        train_weights = self.current_W.clone() if self.current_W is not None else None
-
-        # Pre-allocate tensors for batch processing
         n_samples = len(X_train)
-        predictions = torch.empty(batch_size, dtype=torch.long, device=self.device)
-        batch_mask = torch.empty(batch_size, dtype=torch.bool, device=self.device)
+        n_batches = (n_samples + batch_size - 1) // batch_size
 
-        # Initialize tracking variables
+        # Initialize tracking
         error_rates = []
-        train_losses = []
-        train_accuracies = []
-        prev_train_error = float('inf')
-        prev_train_accuracy = 0.0
-        patience_counter = 0
         best_train_accuracy = 0.0
-        accuracy_plateau_counter = 0
+        best_test_accuracy = 0.0
+        patience_counter = 0
+        plateau_counter = 0
+        min_improvement = 0.001
         patience = 5 if self.in_adaptive_fit else 100
+        max_plateau = 5
+        prev_accuracy = 0.0
 
-        for epoch in range(self.max_epochs):
-            # Save epoch data
-            self.save_epoch_data(epoch, self.train_indices, self.test_indices)
+        # Main training loop with dynamic progress bar
+        with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
+            for epoch in range(self.max_epochs):
+                # Train on all batches
+                failed_cases = []
+                n_errors = 0
 
-            Trstart_time = time.time()
-            failed_cases = []
-            n_errors = 0
+                with tqdm(total=n_batches, desc=f"Training batches", leave=False) as batch_pbar:
+                    for i in range(0, n_samples, batch_size):
+                        batch_end = min(i + batch_size, n_samples)
+                        batch_X = X_train[i:batch_end]
+                        batch_y = y_train[i:batch_end]
 
-            # Process training data in batches
-            n_batches = (len(X_train) + batch_size - 1) // batch_size
-            batch_pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1} batches", leave=False)
+                        posteriors = self._compute_batch_posterior(batch_X)[0]
+                        predictions = torch.argmax(posteriors, dim=1)
+                        errors = (predictions != batch_y)
+                        n_errors += errors.sum().item()
 
-            for i in range(0, n_samples, batch_size):
-                batch_end = min(i + batch_size, n_samples)
-                current_batch_size = batch_end - i
+                        if errors.any():
+                            fail_idx = torch.where(errors)[0]
+                            for idx in fail_idx:
+                                failed_cases.append((
+                                    batch_X[idx],
+                                    batch_y[idx].item(),
+                                    posteriors[idx].cpu().numpy()
+                                ))
+                        batch_pbar.update(1)
 
-                batch_X = X_train[i:batch_end]
-                batch_y = y_train[i:batch_end]
+                if failed_cases:
+                    self._update_priors_parallel(failed_cases, batch_size)
 
-                # Compute posteriors for batch
-                if self.model_type == "Histogram":
-                    posteriors, bin_indices = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    posteriors, comp_resp = self._compute_batch_posterior_std(batch_X)
+                # Calculate training metrics
+                train_error_rate = n_errors / n_samples
+                train_accuracy = 1 - train_error_rate
+                error_rates.append(train_error_rate)
 
-                predictions[:current_batch_size] = torch.argmax(posteriors, dim=1)
-                batch_mask[:current_batch_size] = (predictions[:current_batch_size] != batch_y)
+                # Calculate test metrics if test data provided
+                test_accuracy = 0
+                if X_test is not None and y_test is not None:
+                    test_predictions = self.predict(X_test, batch_size=batch_size)
+                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
+                    if test_accuracy > best_test_accuracy:
+                        best_test_accuracy = test_accuracy
+                        # Print confusion matrix for best test performance
+                        print("\nTest Set Performance:")
+                        y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+                        test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
+                        self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
 
-                n_errors += batch_mask[:current_batch_size].sum().item()
+                # Update progress bar with both accuracies
+                epoch_pbar.set_postfix({
+                    'train_acc': f"{train_accuracy:.4f}",
+                    'best_train': f"{best_train_accuracy:.4f}",
+                    'test_acc': f"{test_accuracy:.4f}",
+                    'best_test': f"{best_test_accuracy:.4f}"
+                })
+                epoch_pbar.update(1)
 
-                if batch_mask[:current_batch_size].any():
-                    failed_indices = torch.where(batch_mask[:current_batch_size])[0]
-                    for idx in failed_indices:
-                        failed_cases.append((
-                            batch_X[idx],
-                            batch_y[idx].item(),
-                            posteriors[idx].cpu().numpy()
-                        ))
-                batch_pbar.update(1)
-
-            batch_pbar.close()
-
-            # Calculate training error rate
-            train_error_rate = n_errors / n_samples
-            error_rates.append(train_error_rate)
-
-            # Calculate training metrics
-            with torch.no_grad():
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
-                train_loss = n_errors / n_samples
-
-                # Check for accuracy plateau
-                if len(train_accuracies) > 0:
-                    accuracy_improvement = train_accuracy - train_accuracies[-1]
-                    if accuracy_improvement < min_improvement:
-                        accuracy_plateau_counter += 1
-                    else:
-                        accuracy_plateau_counter = 0
-
-            # Update best accuracy
-            best_train_accuracy = max(best_train_accuracy, train_accuracy)
-
-            # Store metrics
-            train_losses.append(train_loss)
-            train_accuracies.append(train_accuracy)
-
-            # Calculate training time
-            Trend_time = time.time()
-            training_time = Trend_time - Trstart_time
-
-            # Update progress display
-            epoch_pbar.update(1)
-            epoch_pbar.set_postfix({
-                'train_err': f"{train_error_rate:.4f} (best: {1-best_train_accuracy:.4f})",
-                'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
-            })
-
-            print(f"\nEpoch {epoch + 1}/{self.max_epochs}:")
-            print(f"Training time: {Colors.highlight_time(training_time)} seconds")
-            print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})")
-            print(f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})")
-
-            if accuracy_plateau_counter > 0:
-                print(f"Training accuracy plateau counter: {accuracy_plateau_counter}/{max_accuracy_plateau}")
-
-            # Update previous values
-            prev_train_error = train_error_rate
-            prev_train_accuracy = train_accuracy
-
-            # Run test evaluation at end of round
-            test_predictions = self.predict(X_test, batch_size=batch_size)
-            test_accuracy = (test_predictions == y_test.cpu()).float().mean()
-            print(f"\nTest Set Performance - Round {epoch + 1}")
-            y_test_cpu = y_test.cpu().numpy()
-            test_predictions_cpu = test_predictions.cpu().numpy()
-            # Convert predictions and labels to original classes before confusion matrix
-            y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
-            test_pred_labels = self.label_encoder.inverse_transform(test_predictions_cpu)
-            self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
-
-            # Update best model if improved
-            if train_error_rate <= self.best_error:
-                improvement = self.best_error - train_error_rate
-                self.best_error = train_error_rate
-                self.best_W = self.current_W.clone()
-                self._save_best_weights()
-
-                if improvement <= 0.001:
-                    patience_counter += 1
+                # Check improvement and update tracking
+                accuracy_improvement = train_accuracy - prev_accuracy
+                if accuracy_improvement <= min_improvement:
+                    plateau_counter += 1
                 else:
+                    plateau_counter = 0
+
+                if train_accuracy > best_train_accuracy + min_improvement:
+                    best_train_accuracy = train_accuracy
                     patience_counter = 0
-                    self.learning_rate = 0.1
-            else:
-                patience_counter += 1
+                else:
+                    patience_counter += 1
 
-            # Early stopping check
-            if train_accuracy >= min_training_accuracy:
-                if patience_counter >= patience or train_accuracy == 1.00:
-                    print(f"\nReached target accuracy and no improvement for {patience} epochs. Early stopping.")
+                # Save best model
+                if train_error_rate <= self.best_error:
+                    self.best_error = train_error_rate
+                    self.best_W = self.current_W.clone()
+                    self._save_best_weights()
+
+                # Early stopping checks
+                if train_accuracy == 1.0:
+                    print("\nReached 100% training accuracy")
                     break
-            elif accuracy_plateau_counter >= max_accuracy_plateau:
-                print(f"\nTraining accuracy plateaued for {max_accuracy_plateau} epochs. Continuing with adaptive process.")
-                break
 
-            # Update weights if there were failures
-            if failed_cases:
-                self._update_priors_parallel(failed_cases, batch_size)
+                if patience_counter >= patience:
+                    print(f"\nNo improvement for {patience} epochs")
+                    break
 
-            # Plot training metrics
-            self.plot_training_metrics(
-                train_losses, train_losses,
-                train_accuracies, train_accuracies,
-                save_path=f'{self.dataset_name}_training_metrics.png'
-            )
+                if plateau_counter >= max_plateau:
+                    print(f"\nAccuracy plateaued for {max_plateau} epochs")
+                    break
 
-        # Training complete
-        epoch_pbar.close()
+                prev_accuracy = train_accuracy
+
         self._save_model_components()
         return self.current_W.cpu(), error_rates
-
 
 
     def plot_training_metrics(self, train_loss, test_loss, train_acc, test_acc, save_path=None):
@@ -4559,7 +4494,7 @@ class DBNN(GPUDBNN):
 #-------------------------------------------------------------------------------------------------------------------------------------------------
     def _get_config_param(self, param_name: str, default_value: Any) -> Any:
         """Enhanced configuration parameter retrieval with debug logging"""
-        print(f"\nDEBUG: Getting config parameter: {param_name}")
+        # # print(f"\nDEBUG: Getting config parameter: {param_name}")
         # print(f"DEBUG:  Default value: {default_value}")
         # print(f"DEBUG:  Config type: {type(self.config)}")
 
@@ -5794,7 +5729,7 @@ class DatasetProcessor:
     # In DatasetProcessor class
     def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
         """Handle dataset with single CSV file and debug config processing"""
-        print("\nDEBUG: Entering _handle_single_csv")
+        #print("\nDEBUGEntering _handle_single_csv")
         # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
 
         # Handle CSV paths
@@ -5812,8 +5747,8 @@ class DatasetProcessor:
            ## print("DEBUG: No config provided, validating...")
             config = self._validate_config(folder_path, base_name)
 
-        print("\nDEBUG: Config before GlobalConfig conversion:")
-        print(json.dumps(config, indent=2))
+        ##print("\nDEBUGConfig before GlobalConfig conversion:")
+        #print(json.dumps(config, indent=2))
 
         # Create GlobalConfig
         global_config = GlobalConfig.from_dict(config)
@@ -5972,7 +5907,7 @@ class DatasetProcessor:
        try:
            print(f"\nBenchmarking {self.colors.highlight_dataset(dataset_name)}")
 
-           print("\nDEBUG: Configuration Loading Phase")
+           #print("\nDEBUGConfiguration Loading Phase")
            if hasattr(model.config, 'to_dict'):
                config_dict = model.config.to_dict()
            elif isinstance(model.config, dict):
@@ -6028,7 +5963,7 @@ class DatasetProcessor:
                print("\nDEBUG: Inverse DBNN Settings:")
                for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
                    value = config_dict.get('training_params', {}).get(param, 0.1)
-                   print(f"- {param}: {value}")
+                   #print(f"- {param}: {value}")
               ## print("DEBUG: Initializing inverse model...")
 
                if not should_train:
@@ -6167,7 +6102,7 @@ class DatasetProcessor:
         config_path = os.path.join(folder_path, f"{base_name}.conf")
 
         try:
-            print(f"\nDEBUG: Loading config from {config_path}")
+            # # print(f"\nDEBUG: Loading config from {config_path}")
 
             with open(config_path, 'r') as f:
                 config = json.load(f)
