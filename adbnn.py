@@ -2553,9 +2553,6 @@ class DBNN(GPUDBNN):
         self.in_adaptive_fit = True
         train_indices = []
         test_indices = None
-
-
-
         try:
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
@@ -6697,137 +6694,121 @@ class InvertibleDBNN(torch.nn.Module):
             return combined_loss.mean()
         return combined_loss
 
-    def train_step(self, features: torch.Tensor, labels: torch.Tensor, learning_rate: float) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Training step with proper gradient computation"""
-        # Zero gradients
-        self.zero_grad()
-
-        # Ensure input tensors require gradients
-        features = features.detach().requires_grad_(True)
-
-        # Forward pass
-        if self.forward_model.model_type == "Histogram":
-            class_probs, _ = self.forward_model._compute_batch_posterior(features)
-        else:
-            class_probs, _ = self.forward_model._compute_batch_posterior_std(features)
-
-        # Reconstruction
-        reconstructed_features = self._compute_inverse_posterior(class_probs)
-
-        # Compute losses
-        reconstruction_loss = self._compute_reconstruction_loss(
-            features, reconstructed_features, class_probs
-        )
-
-        forward_loss = torch.mean(
-            -torch.log(class_probs[torch.arange(len(labels)), labels] + 1e-10)
-        )
-
-        # Dynamic loss weighting
-        alpha = torch.sigmoid(torch.tensor(self.feedback_strength))
-        total_loss = (
-            (1 - alpha) * forward_loss +
-            alpha * reconstruction_loss
-        )
-
-        # Backward pass
-        total_loss.backward()
-
-        # Apply gradient clipping and updates
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-
-        # Update parameters
-        with torch.no_grad():
-            for param in self.parameters():
-                if param.grad is not None:
-                    param.data.sub_(learning_rate * param.grad)
-
-        return total_loss.detach(), reconstruction_loss.detach()
-
-    def fit(self,
-            features: torch.Tensor,
-            labels: torch.Tensor,
-            n_epochs: int = 100,
-            learning_rate: float = 0.1,
-            batch_size: int = 32,
-            patience: int = 5) -> Dict:
-        """Train the invertible DBNN with early stopping"""
-        print("\nTraining invertible DBNN...")
-
-        # Compute feature scaling parameters
-        self._compute_feature_scaling(features)
-
-        # Training setup
-        n_samples = len(features)
+    def train(self, X_train, y_train, X_test, y_test, batch_size=32):
+        """Complete training with optimized test evaluation"""
+        print("\nStarting training...")
+        n_samples = len(X_train)
         n_batches = (n_samples + batch_size - 1) // batch_size
-        best_loss = float('inf')
+
+        # Initialize tracking metrics
+        error_rates = []
+        best_train_accuracy = 0.0
+        best_test_accuracy = 0.0
         patience_counter = 0
+        plateau_counter = 0
+        min_improvement = 0.001
+        patience = 5 if self.in_adaptive_fit else 100
+        max_plateau = 5
+        prev_accuracy = 0.0
 
-        # Training loop
-        for epoch in range(n_epochs):
-            epoch_total_loss = 0.0
-            epoch_recon_loss = 0.0
+        # Main training loop with progress tracking
+        with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
+            for epoch in range(self.max_epochs):
+                # Train on all batches
+                failed_cases = []
+                n_errors = 0
 
-            # Process mini-batches
-            pbar = tqdm(range(0, n_samples, batch_size), desc=f"Epoch {epoch+1}/{n_epochs}")
-            for i in pbar:
-                batch_end = min(i + batch_size, n_samples)
-                batch_features = features[i:batch_end]
-                batch_labels = labels[i:batch_end]
+                # Process training batches
+                with tqdm(total=n_batches, desc=f"Training batches", leave=False) as batch_pbar:
+                    for i in range(0, n_samples, batch_size):
+                        batch_end = min(i + batch_size, n_samples)
+                        batch_X = X_train[i:batch_end]
+                        batch_y = y_train[i:batch_end]
 
-                # Training step
-                total_loss, recon_loss = self.train_step(
-                    batch_features,
-                    batch_labels,
-                    learning_rate
-                )
+                        # Forward pass and error collection
+                        posteriors = self._compute_batch_posterior(batch_X)[0]
+                        predictions = torch.argmax(posteriors, dim=1)
+                        errors = (predictions != batch_y)
+                        n_errors += errors.sum().item()
 
-                epoch_total_loss += total_loss.item()
-                epoch_recon_loss += recon_loss.item()
+                        # Collect failed cases for weight updates
+                        if errors.any():
+                            fail_idx = torch.where(errors)[0]
+                            for idx in fail_idx:
+                                failed_cases.append((
+                                    batch_X[idx],
+                                    batch_y[idx].item(),
+                                    posteriors[idx].cpu().numpy()
+                                ))
+                        batch_pbar.update(1)
 
-                pbar.set_postfix({
-                    'total_loss': f"{total_loss.item():.4f}",
-                    'recon_loss': f"{recon_loss.item():.4f}"
+                # Update weights after processing all batches
+                if failed_cases:
+                    self._update_priors_parallel(failed_cases, batch_size)
+
+                # Calculate training metrics
+                train_error_rate = n_errors / n_samples
+                train_accuracy = 1 - train_error_rate
+                error_rates.append(train_error_rate)
+
+                # Evaluate on test set once per epoch
+                if X_test is not None and y_test is not None:
+                    test_predictions = self.predict(X_test, batch_size=batch_size)
+                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
+
+                    # Print confusion matrix only for best test performance
+                    if test_accuracy > best_test_accuracy:
+                        best_test_accuracy = test_accuracy
+                        print("\nTest Set Performance:")
+                        y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+                        test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
+                        self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
+
+                # Update progress bar with metrics
+                epoch_pbar.set_postfix({
+                    'train_acc': f"{train_accuracy:.4f}",
+                    'best_train': f"{best_train_accuracy:.4f}",
+                    'test_acc': f"{test_accuracy:.4f}",
+                    'best_test': f"{best_test_accuracy:.4f}"
                 })
+                epoch_pbar.update(1)
 
-            # Compute epoch metrics
-            avg_total_loss = epoch_total_loss / n_batches
-            avg_recon_loss = epoch_recon_loss / n_batches
-
-            self.metrics['total_losses'].append(avg_total_loss)
-            self.metrics['reconstruction_errors'].append(avg_recon_loss)
-
-            # Compute forward model accuracy
-            with torch.no_grad():
-                if self.forward_model.model_type == "Histogram":
-                    probs, _ = self.forward_model._compute_batch_posterior(features)
+                # Check improvement and update tracking
+                accuracy_improvement = train_accuracy - prev_accuracy
+                if accuracy_improvement <= min_improvement:
+                    plateau_counter += 1
                 else:
-                    probs, _ = self.forward_model._compute_batch_posterior_std(features)
+                    plateau_counter = 0
 
-                predictions = torch.argmax(probs, dim=1)
-                accuracy = (predictions == labels).float().mean().item()
-                self.metrics['accuracies'].append(accuracy)
+                if train_accuracy > best_train_accuracy + min_improvement:
+                    best_train_accuracy = train_accuracy
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
-            # Early stopping check
-            if avg_total_loss < best_loss:
-                best_loss = avg_total_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                # Save best model
+                if train_error_rate <= self.best_error:
+                    self.best_error = train_error_rate
+                    self.best_W = self.current_W.clone()
+                    self._save_best_weights()
+
+                # Early stopping checks
+                if train_accuracy == 1.0:
+                    print("\nReached 100% training accuracy")
                     break
 
-            # Print epoch summary
-            if (epoch + 1) % 10 == 0:
-                print(f"\nEpoch {epoch+1}/{n_epochs}:")
-                print(f"Total Loss: {avg_total_loss:.4f}")
-                print(f"Reconstruction Loss: {avg_recon_loss:.4f}")
-                print(f"Forward Accuracy: {accuracy:.4f}")
+                if patience_counter >= patience:
+                    print(f"\nNo improvement for {patience} epochs")
+                    break
 
-        # After training loop completes, save the model
-        self.save_inverse_model()
-        return self.metrics
+                if plateau_counter >= max_plateau:
+                    print(f"\nAccuracy plateaued for {max_plateau} epochs")
+                    break
+
+                prev_accuracy = train_accuracy
+
+            self._save_model_components()
+            return self.current_W.cpu(), error_rates
 
     def reconstruct_features(self, class_probs: torch.Tensor) -> torch.Tensor:
         """Reconstruct input features from class probabilities with dtype handling"""
@@ -6947,4 +6928,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
