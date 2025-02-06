@@ -2123,9 +2123,10 @@ class DBNN(GPUDBNN):
        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
        # Process all feature pairs at once
+       feature_pairs = self.likelihood_params['feature_pairs'].to(features.device)
        feature_groups = torch.stack([
            features[:, pair].contiguous()
-           for pair in self.likelihood_params['feature_pairs']
+           for pair in feature_pairs
        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
 
        # Compute all bin indices at once
