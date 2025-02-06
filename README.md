@@ -122,5 +122,247 @@ Generate new examples with desired classification properties
 The reconstruction accuracy serves as a measure of how well the model has captured the underlying structure of the data, beyond just classification performance.
 
 
+Certainly! Below is the formatted version of your Feature Extraction System User Manual in Markdown format, suitable for a GitHub README file:
+
+```markdown
+# Feature Extraction System User Manual
+
+## Unit 1: Algorithm Description and Technical Details
+
+### 1.1 System Overview
+
+The system implements a hybrid feature extraction approach combining convolutional neural networks (CNNs) and autoencoders with specialized loss functions for enhanced feature detection. It's designed to process image datasets and extract meaningful features while preserving important visual characteristics like structures, colors, and morphological properties.
+
+### 1.2 Core Algorithms
+
+#### 1.2.1 CNN Feature Extractor
+
+The CNN-based feature extractor employs a hierarchical architecture:
+
+```
+Input → Conv1(32) → BN → ReLU → MaxPool 
+     → Conv2(64) → BN → ReLU → MaxPool 
+     → Conv3(128) → BN → ReLU → AdaptiveAvgPool 
+     → Linear(feature_dims) → BatchNorm
+```
+
+**Mathematical formulation for each layer:**
+- **Convolution:** `F(x) = W * x + b`
+- **Batch Normalization:** `y = γ(x-μ)/σ + β`
+- **ReLU:** `f(x) = max(0,x)`
+- **MaxPool:** `y[i] = max(x[i:i+k])`
+
+#### 1.2.2 Autoencoder Architecture
+
+The autoencoder implements a symmetric architecture with dynamic sizing:
+
+**Encoder:**
+```
+Input → Conv(32) → BN → LeakyReLU 
+     → Conv(64) → BN → LeakyReLU 
+     → Conv(128) → BN → LeakyReLU 
+     → Linear(feature_dims)
+```
+
+**Decoder:**
+```
+Linear(feature_dims) → ConvTranspose 
+                    → BN → LeakyReLU 
+                    → ConvTranspose 
+                    → Output
+```
+
+#### 1.2.3 Loss Functions
+
+The system implements multiple specialized loss functions:
+
+1. **Structural Loss:**
+   ```
+   L_struct = MSE(x,x̂) + λ₁‖∇x - ∇x̂‖₂ + λ₂TV(x̂)
+   ```
+   where `∇` is the Sobel gradient operator and `TV` is total variation.
+
+2. **Color Enhancement Loss:**
+   ```
+   L_color = MSE(x,x̂) + λ₁‖Corr(x) - Corr(x̂)‖₂ + λ₂‖σ(x) - σ(x̂)‖₂
+   ```
+   where `Corr` computes channel correlations and `σ` is channel-wise standard deviation.
+
+3. **Morphology Loss:**
+   ```
+   L_morph = MSE(x,x̂) + λ₁‖M(x) - M(x̂)‖₂ + λ₂(Sym_h(x̂) + Sym_v(x̂))
+   ```
+   where `M` computes moment statistics and `Sym_{h,v}` measure horizontal and vertical symmetry.
+
+### 1.3 Data Flow
+
+1. **Input Processing:**
+   - Image loading and preprocessing
+   - Resolution standardization
+   - Channel normalization
+   - Data augmentation (if enabled)
+
+2. **Feature Extraction:**
+   - Forward pass through selected architecture
+   - Loss computation and backpropagation
+   - Feature vector generation
+   - Dimensionality reduction
+
+3. **Output Generation:**
+   - Feature vector serialization
+   - CSV file generation
+   - Configuration file creation
+   - Optional visualization generation
+
+### 1.4 Memory Management
+
+The system implements several memory optimization techniques:
+- Chunked data processing
+- Garbage collection triggers
+- GPU memory clearing
+- Batch processing with configurable sizes
+
+---
+
+## Unit 2: Configuration Parameters
+
+### 2.1 Model Configuration
+
+#### Basic Parameters
+- **`encoder_type`:** CNN or Autoencoder selection
+  - **Effects:** Determines feature extraction approach
+  - **Values:** `"cnn"` or `"autoenc"`
+
+- **`feature_dims`:** Output feature dimensionality
+  - **Effects:** Controls compression level
+  - **Range:** `32-1024` (recommended)
+
+#### Loss Function Parameters
+
+1. **Structural Loss:**
+   ```json
+   "structural": {
+       "enabled": true,
+       "weight": 0.7,
+       "params": {
+           "edge_weight": 1.0,
+           "smoothness_weight": 0.5
+       }
+   }
+   ```
+   - **`edge_weight`:** Controls edge detection sensitivity
+   - **`smoothness_weight`:** Balances region continuity
+
+2. **Color Enhancement:**
+   ```json
+   "color_enhancement": {
+       "enabled": true,
+       "weight": 0.5,
+       "params": {
+           "channel_weight": 0.5,
+           "contrast_weight": 0.3
+       }
+   }
+   ```
+   - **`channel_weight`:** Controls channel correlation importance
+   - **`contrast_weight`:** Adjusts color contrast preservation
+
+3. **Morphology:**
+   ```json
+   "morphology": {
+       "enabled": true,
+       "weight": 0.3,
+       "params": {
+           "shape_weight": 0.7,
+           "symmetry_weight": 0.3
+       }
+   }
+   ```
+   - **`shape_weight`:** Controls shape preservation strength
+   - **`symmetry_weight`:** Adjusts symmetry importance
+
+### 2.2 Training Parameters
+
+#### Basic Training
+```json
+"training_params": {
+    "batch_size": 32,
+    "epochs": 1000,
+    "learning_rate": 0.1,
+    "test_fraction": 0.2
+}
+```
+- **Effects on training:**
+  - Larger `batch_size`: Faster training, more memory usage
+  - Higher `learning_rate`: Faster convergence but potential instability
+  - More `epochs`: Better accuracy but longer training time
+
+#### Advanced Parameters
+```json
+"training_params": {
+    "minimum_training_accuracy": 0.95,
+    "cardinality_threshold": 0.9,
+    "cardinality_tolerance": 4,
+    "enable_adaptive": true
+}
+```
+- **Effects on model behavior:**
+  - `minimum_training_accuracy`: Controls early stopping
+  - `cardinality_threshold`: Affects feature discretization
+  - `enable_adaptive`: Enables dynamic learning rate adjustment
+
+### 2.3 Execution Parameters
+
+```json
+"execution_flags": {
+    "train": true,
+    "train_only": false,
+    "predict": true,
+    "fresh_start": false,
+    "use_previous_model": true
+}
+```
+- **Controls workflow:**
+  - `train_only`: Training without prediction
+  - `fresh_start`: Ignores previous checkpoints
+  - `use_previous_model`: Enables transfer learning
+
+### 2.4 Performance Optimization
+
+1. **Memory Management:**
+   ```json
+   "training": {
+       "batch_size": 32,
+       "num_workers": 4
+   }
+   ```
+   - Adjust based on available system resources
+   - Larger values improve speed but increase memory usage
+
+2. **GPU Utilization:**
+   ```json
+   "execution_flags": {
+       "use_gpu": true,
+       "mixed_precision": true
+   }
+   ```
+   - Enable for faster training on compatible systems
+   - `mixed_precision` reduces memory usage with minimal accuracy impact
+
+### 2.5 Output Configuration
+
+```json
+"output": {
+    "features_file": "path/to/output.csv",
+    "model_dir": "path/to/models",
+    "visualization_dir": "path/to/viz"
+}
+```
+- Controls output organization
+- Enables selective saving of models and visualizations
+```
+
+
+
 
 ```
