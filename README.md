@@ -73,6 +73,54 @@
     }
 }
 
+```
+```
+The reconstruction process involves two key mappings:
+
+The forward mapping (f): Features → Class Probabilities
+The inverse mapping (g): Class Probabilities → Reconstructed Features
+
+In the forward direction, we compute class probabilities using histogram-based likelihood estimation:
+P(class|features) ∝ exp(∑ log(w_ij * h_ij(features)))
+where:
+
+w_ij are the learned weights
+h_ij are the histogram bin probabilities
+The sum is over feature pairs (i,j)
+
+For reconstruction, we implement an inverse mapping that tries to recover the original features from these class probabilities. This inverse mapping uses both linear and nonlinear components:
+g(p) = α * g_linear(p) + (1-α) * g_nonlinear(p)
+where:
+
+p is the vector of class probabilities
+α is the attention weight (learned during training)
+g_linear is a linear transformation: W_l * p + b_l
+g_nonlinear is a nonlinear transformation: tanh(W_nl * p + b_nl)
+
+The reconstruction is trained to minimize two objectives:
+
+Reconstruction Loss: ||x - g(f(x))||²
+This measures how well we can recover the original features
+Forward Consistency Loss: ||f(g(p)) - p||²
+This ensures reconstructed features produce similar class probabilities
+
+The total loss is:
+L = β * Reconstruction_Loss + (1-β) * Forward_Consistency_Loss
+where β is the reconstruction weight (typically 0.5).
+The reconstruction quality is then measured in three ways:
+
+Feature-wise error: How close are the reconstructed values to the originals?
+Classification consistency: Do the reconstructed features produce the same classifications?
+Distribution matching: Do the reconstructed features maintain the same statistical properties?
+
+This formalism creates a bidirectional mapping between feature space and probability space, allowing us to:
+
+Understand what feature values led to specific classifications
+Validate the model's learned representations
+Generate new examples with desired classification properties
+
+The reconstruction accuracy serves as a measure of how well the model has captured the underlying structure of the data, beyond just classification performance.
+
 
 
 ```
