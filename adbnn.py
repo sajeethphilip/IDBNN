@@ -93,7 +93,7 @@ class GlobalConfig:
     def from_dict(cls, config_dict: Dict) -> 'GlobalConfig':
         """Create configuration from dictionary with debug tracking"""
         print("\nDEBUG: Creating GlobalConfig from dictionary")
-        print(f"DEBUG: Input config: {json.dumps(config_dict, indent=2)}")
+        # print(f"DEBUG:  Input config: {json.dumps(config_dict, indent=2)}")
 
         config = cls()
         training_params = config_dict.get('training_params', {})
@@ -119,14 +119,14 @@ class GlobalConfig:
         ]:
             value = training_params.get(param, default)
             setattr(config, param, value)
-            print(f"DEBUG: {param} = {value}")
+            # print(f"DEBUG:  {param} = {value}")
 
         # Load execution flags
         print("\nDEBUG: Loading execution flags:")
         config.fresh_start = execution_flags.get('fresh_start', False)
         config.use_previous_model = execution_flags.get('use_previous_model', True)
-        print(f"DEBUG: fresh_start = {config.fresh_start}")
-        print(f"DEBUG: use_previous_model = {config.use_previous_model}")
+        # print(f"DEBUG:  fresh_start = {config.fresh_start}")
+        # print(f"DEBUG:  use_previous_model = {config.use_previous_model}")
 
         print("\nDEBUG: Final GlobalConfig state:")
         print(json.dumps(config.to_dict(), indent=2))
@@ -463,7 +463,7 @@ class DatasetConfig:
         print(f"\nDEBUG: Attempting to load config from: {config_path}")
 
         config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-        print(f"DEBUG: Trying alternate path: {config_path}")
+        # print(f"DEBUG:  Trying alternate path: {config_path}")
 
         try:
             if not os.path.exists(config_path):
@@ -501,7 +501,7 @@ class DatasetConfig:
             clean_config = remove_comments(config_text)
             try:
                 config = json.loads(clean_config)
-                print("DEBUG: Config parsed successfully")
+               # print("DEBUG: Config parsed successfully")
             except json.JSONDecodeError:
                 print(f"Invalid config, attempting to infer from CSV...")
                 csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
@@ -544,13 +544,13 @@ class DatasetConfig:
                     alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                     if os.path.exists(alt_path):
                         config['file_path'] = alt_path
-                        print(f"DEBUG: Updated file path to {alt_path}")
+                        # print(f"DEBUG:  Updated file path to {alt_path}")
 
             if not config.get('file_path'):
                 default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if os.path.exists(default_path):
                     config['file_path'] = default_path
-                    print(f"DEBUG: Set default file path to {default_path}")
+                    # print(f"DEBUG:  Set default file path to {default_path}")
 
             # Validate column names and target
             if not config.get('column_names'):
@@ -559,8 +559,8 @@ class DatasetConfig:
                     config['column_names'] = df.columns.tolist()
                     if not config.get('target_column'):
                         config['target_column'] = df.columns[-1]
-                    print(f"DEBUG: Inferred columns: {config['column_names']}")
-                    print(f"DEBUG: Target column set to: {config['target_column']}")
+                    # print(f"DEBUG:  Inferred columns: {config['column_names']}")
+                    # print(f"DEBUG:  Target column set to: {config['target_column']}")
                 except Exception as e:
                     print(f"Warning: Could not infer columns: {str(e)}")
 
@@ -576,7 +576,7 @@ class DatasetConfig:
                             # Default to last column
                             config['target_column'] = df.columns[-1]
                             config['column_names'] = df.columns.tolist()
-                        print(f"DEBUG: Updated target column to: {config['target_column']}")
+                        # print(f"DEBUG:  Updated target column to: {config['target_column']}")
                     except Exception as e:
                         print(f"Warning: Error validating target column: {str(e)}")
 
@@ -593,7 +593,7 @@ class DatasetConfig:
             try:
                 with open(config_path, 'w') as f:
                     json.dump(config, f, indent=4)
-                print(f"DEBUG: Saved validated config to {config_path}")
+                # print(f"DEBUG:  Saved validated config to {config_path}")
             except Exception as e:
                 print(f"Warning: Could not save validated config: {str(e)}")
 
@@ -3822,23 +3822,20 @@ class DBNN(GPUDBNN):
             print(f"Warning: Could not save confusion matrix plot: {str(e)}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
-        """Training loop focused purely on training accuracy"""
+        """Training loop with testing only at end of rounds"""
         print("\nStarting training...")
         early_stopping_patience = 5
         min_improvement = 0.001
-
-        # Get minimum_training_accuracy from config
-        if hasattr(self.config, 'to_dict'):
-            min_training_accuracy = getattr(self.config, 'minimum_training_accuracy', 0.95)
-        elif isinstance(self.config, dict):
-            min_training_accuracy = self.config.get('training_params', {}).get('minimum_training_accuracy', 0.95)
-        else:
-            min_training_accuracy = 0.95
-
+        min_training_accuracy = self._get_config_value('minimum_training_accuracy', 0.95)
         max_accuracy_plateau = 5
 
-        # Initialize progress bar for epochs
+        # Initialize progress bar for epochs and set GPU memory handling
         epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs")
+        if torch.cuda.is_available():
+            # Clear GPU cache and set memory handling
+            torch.cuda.empty_cache()
+            torch.backends.cudnn.benchmark = True
+            torch.cuda.set_device(torch.cuda.current_device())
 
         # Store current weights for prediction during training
         train_weights = self.current_W.clone() if self.current_W is not None else None
@@ -3857,11 +3854,7 @@ class DBNN(GPUDBNN):
         patience_counter = 0
         best_train_accuracy = 0.0
         accuracy_plateau_counter = 0
-
-        if self.in_adaptive_fit:
-            patience = 5
-        else:
-            patience = 100
+        patience = 5 if self.in_adaptive_fit else 100
 
         for epoch in range(self.max_epochs):
             # Save epoch data
@@ -3909,9 +3902,8 @@ class DBNN(GPUDBNN):
             train_error_rate = n_errors / n_samples
             error_rates.append(train_error_rate)
 
-            # Calculate training metrics only
+            # Calculate training metrics
             with torch.no_grad():
-                # Training metrics
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
@@ -3950,9 +3942,20 @@ class DBNN(GPUDBNN):
             if accuracy_plateau_counter > 0:
                 print(f"Training accuracy plateau counter: {accuracy_plateau_counter}/{max_accuracy_plateau}")
 
-            # Update previous values for next iteration
+            # Update previous values
             prev_train_error = train_error_rate
             prev_train_accuracy = train_accuracy
+
+            # Run test evaluation at end of round
+            test_predictions = self.predict(X_test, batch_size=batch_size)
+            test_accuracy = (test_predictions == y_test.cpu()).float().mean()
+            print(f"\nTest Set Performance - Round {epoch + 1}")
+            y_test_cpu = y_test.cpu().numpy()
+            test_predictions_cpu = test_predictions.cpu().numpy()
+            # Convert predictions and labels to original classes before confusion matrix
+            y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
+            test_pred_labels = self.label_encoder.inverse_transform(test_predictions_cpu)
+            self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
 
             # Update best model if improved
             if train_error_rate <= self.best_error:
@@ -3969,9 +3972,9 @@ class DBNN(GPUDBNN):
             else:
                 patience_counter += 1
 
-            # Early stopping check with consideration for training accuracy
+            # Early stopping check
             if train_accuracy >= min_training_accuracy:
-                if patience_counter >= patience or train_accuracy==1.00:
+                if patience_counter >= patience or train_accuracy == 1.00:
                     print(f"\nReached target accuracy and no improvement for {patience} epochs. Early stopping.")
                     break
             elif accuracy_plateau_counter >= max_accuracy_plateau:
@@ -3982,10 +3985,10 @@ class DBNN(GPUDBNN):
             if failed_cases:
                 self._update_priors_parallel(failed_cases, batch_size)
 
-            # Plot training metrics only
+            # Plot training metrics
             self.plot_training_metrics(
-                train_losses, train_losses,  # Use same values for test_losses
-                train_accuracies, train_accuracies,  # Use same values for test_accuracies
+                train_losses, train_losses,
+                train_accuracies, train_accuracies,
                 save_path=f'{self.dataset_name}_training_metrics.png'
             )
 
@@ -4557,38 +4560,38 @@ class DBNN(GPUDBNN):
     def _get_config_param(self, param_name: str, default_value: Any) -> Any:
         """Enhanced configuration parameter retrieval with debug logging"""
         print(f"\nDEBUG: Getting config parameter: {param_name}")
-        print(f"DEBUG: Default value: {default_value}")
-        print(f"DEBUG: Config type: {type(self.config)}")
+        # print(f"DEBUG:  Default value: {default_value}")
+        # print(f"DEBUG:  Config type: {type(self.config)}")
 
         # First check if we have a GlobalConfig object
         if hasattr(self.config, 'to_dict'):
-            print("DEBUG: Using GlobalConfig object")
+           ## print("DEBUG: Using GlobalConfig object")
             value = getattr(self.config, param_name, default_value)
-            print(f"DEBUG: Found value: {value}")
+            ## print(f"DEBUG:  Found value: {value}")
             return value
 
         # Then check dictionary config
         elif isinstance(self.config, dict):
-            print("DEBUG: Using dictionary config")
+           ## print("DEBUG: Using dictionary config")
             # Check in training_params
             if 'training_params' in self.config:
-                print("DEBUG: Found training_params")
+               ## print("DEBUG: Found training_params")
                 if param_name in self.config['training_params']:
                     value = self.config['training_params'][param_name]
-                    print(f"DEBUG: Found in training_params: {value}")
+                    # print(f"DEBUG:  Found in training_params: {value}")
                     return value
                 else:
-                    print(f"DEBUG: {param_name} not found in training_params")
+                     print(f"DEBUG:  {param_name} not found in training_params")
 
             # Check top level config
             if param_name in self.config:
                 value = self.config[param_name]
-                print(f"DEBUG: Found at top level: {value}")
+                # print(f"DEBUG:  Found at top level: {value}")
                 return value
             else:
-                print(f"DEBUG: {param_name} not found at top level")
+                print(f"DEBUG:  {param_name} not found at top level")
 
-        print(f"DEBUG: Using default value: {default_value}")
+        # print(f"DEBUG:  Using default value: {default_value}")
         return default_value
 
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
@@ -5792,7 +5795,7 @@ class DatasetProcessor:
     def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
         """Handle dataset with single CSV file and debug config processing"""
         print("\nDEBUG: Entering _handle_single_csv")
-        print(f"DEBUG: Initial config: {json.dumps(config, indent=2) if config else 'None'}")
+        # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
 
         # Handle CSV paths
         csv_paths = [
@@ -5806,7 +5809,7 @@ class DatasetProcessor:
 
         # Ensure we have a valid config
         if config is None:
-            print("DEBUG: No config provided, validating...")
+           ## print("DEBUG: No config provided, validating...")
             config = self._validate_config(folder_path, base_name)
 
         print("\nDEBUG: Config before GlobalConfig conversion:")
@@ -6026,7 +6029,7 @@ class DatasetProcessor:
                for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
                    value = config_dict.get('training_params', {}).get(param, 0.1)
                    print(f"- {param}: {value}")
-               print("DEBUG: Initializing inverse model...")
+              ## print("DEBUG: Initializing inverse model...")
 
                if not should_train:
                    inverse_model_path = os.path.join('Model', f'Best_inverse_{dataset_name}', 'inverse_model.pt')
@@ -6039,19 +6042,19 @@ class DatasetProcessor:
            print("\nDEBUG: Starting Processing Phase")
            if should_train:
                if enable_adaptive:
-                   print("DEBUG: Running adaptive training...")
+                  ## print("DEBUG: Running adaptive training...")
                    history = model.adaptive_fit_predict(
                        max_rounds=model.max_epochs,
                        batch_size=batch_size
                    )
-                   print("DEBUG: Adaptive training completed")
+                  ## print("DEBUG: Adaptive training completed")
 
-               print("DEBUG: Running prediction and save...")
+              ## print("DEBUG: Running prediction and save...")
                results = model.predict_and_save(
                    save_path=f"{dataset_name}_predictions.csv",
                    batch_size=batch_size
                )
-               print("DEBUG: Prediction completed")
+              ## print("DEBUG: Prediction completed")
 
                if not isinstance(results, dict):
                    if hasattr(history, 'get'):
@@ -6066,7 +6069,7 @@ class DatasetProcessor:
 
                if invert_DBNN and hasattr(model, 'inverse_model'):
                    try:
-                       print("DEBUG: Processing inverse model...")
+                      ## print("DEBUG: Processing inverse model...")
                        X_test = model.data.drop(columns=[model.target_column])
                        test_probs = model._get_test_probabilities(X_test)
                        reconstruction_features = model.inverse_model.reconstruct_features(test_probs)
@@ -6168,7 +6171,7 @@ class DatasetProcessor:
 
             with open(config_path, 'r') as f:
                 config = json.load(f)
-                print(f"DEBUG: Loaded raw config: {json.dumps(config, indent=2)}")
+                # # print(f"DEBUG:   Loaded raw config: {json.dumps(config, indent=2)}")
 
             # Ensure required sections exist
             if 'training_params' not in config:

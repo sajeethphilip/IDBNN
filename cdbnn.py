@@ -310,7 +310,8 @@ class BaseFeatureExtractor(ABC):
             raise ValueError("Configuration must contain 'dataset' section")
 
         # Ensure all required sections exist
-        required_sections = ['dataset', 'model', 'training', 'execution_flags']
+        required_sections = ['dataset', 'model', 'training', 'execution_flags',
+                            'likelihood_config', 'active_learning']
         for section in required_sections:
             if section not in config:
                 config[section] = {}
@@ -320,6 +321,7 @@ class BaseFeatureExtractor(ABC):
         model.setdefault('feature_dims', 128)
         model.setdefault('learning_rate', 0.001)
         model.setdefault('encoder_type', 'cnn')
+        model.setdefault('modelType', 'Histogram')
 
         # Verify training section
         training = config.setdefault('training', {})
@@ -327,6 +329,20 @@ class BaseFeatureExtractor(ABC):
         training.setdefault('epochs', 20)
         training.setdefault('num_workers', min(4, os.cpu_count() or 1))
         training.setdefault('checkpoint_dir', os.path.join('Model', 'checkpoints'))
+        training.setdefault('trials', 100)
+        training.setdefault('test_fraction', 0.2)
+        training.setdefault('random_seed', 42)
+        training.setdefault('minimum_training_accuracy', 0.95)
+        training.setdefault('cardinality_threshold', 0.9)
+        training.setdefault('cardinality_tolerance', 4)
+        training.setdefault('n_bins_per_dim', 20)
+        training.setdefault('enable_adaptive', True)
+        training.setdefault('invert_DBNN', False)
+        training.setdefault('reconstruction_weight', 0.5)
+        training.setdefault('feedback_strength', 0.3)
+        training.setdefault('inverse_learning_rate', 0.1)
+        training.setdefault('Save_training_epochs', False)
+        training.setdefault('training_save_path', 'training_data')
 
         # Verify execution flags
         exec_flags = config.setdefault('execution_flags', {})
@@ -337,6 +353,23 @@ class BaseFeatureExtractor(ABC):
         exec_flags.setdefault('debug_mode', False)
         exec_flags.setdefault('use_previous_model', True)
         exec_flags.setdefault('fresh_start', False)
+        exec_flags.setdefault('train', True)
+        exec_flags.setdefault('train_only', False)
+        exec_flags.setdefault('predict', True)
+
+        # Verify likelihood config
+        likelihood = config.setdefault('likelihood_config', {})
+        likelihood.setdefault('feature_group_size', 2)
+        likelihood.setdefault('max_combinations', 1000)
+        likelihood.setdefault('bin_sizes', [20])
+
+        # Verify active learning config
+        active = config.setdefault('active_learning', {})
+        active.setdefault('tolerance', 1.0)
+        active.setdefault('cardinality_threshold_percentile', 95)
+        active.setdefault('strong_margin_threshold', 0.3)
+        active.setdefault('marginal_margin_threshold', 0.1)
+        active.setdefault('min_divergence', 0.1)
 
         return config
 
@@ -454,9 +487,62 @@ class BaseFeatureExtractor(ABC):
         """Save extracted features to CSV with user oversight"""
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # Create headers
             headers = [f'feature_{i}' for i in range(features.shape[1])] + ['target']
+            config_path = os.path.join(os.path.dirname(output_path), "config.json")
+
+            # Create complete configuration if none exists
+            if not os.path.exists(config_path):
+                complete_config = {
+                    "file_path": output_path,
+                    "column_names": headers,
+                    "separator": ",",
+                    "has_header": True,
+                    "target_column": "target",
+                    "modelType": "Histogram",
+
+                    "likelihood_config": {
+                        "feature_group_size": 2,
+                        "max_combinations": min(1000, features.shape[1] * (features.shape[1] - 1) // 2),
+                        "bin_sizes": [20]
+                    },
+
+                    "active_learning": {
+                        "tolerance": 1.0,
+                        "cardinality_threshold_percentile": 95,
+                        "strong_margin_threshold": 0.3,
+                        "marginal_margin_threshold": 0.1,
+                        "min_divergence": 0.1
+                    },
+
+                    "training_params": {
+                        "trials": 100,
+                        "epochs": 1000,
+                        "learning_rate": 0.1,
+                        "test_fraction": 0.2,
+                        "random_seed": 42,
+                        "minimum_training_accuracy": 0.95,
+                        "cardinality_threshold": 0.9,
+                        "cardinality_tolerance": 4,
+                        "n_bins_per_dim": 20,
+                        "enable_adaptive": True,
+                        "invert_DBNN": False,
+                        "reconstruction_weight": 0.5,
+                        "feedback_strength": 0.3,
+                        "inverse_learning_rate": 0.1,
+                        "Save_training_epochs": False,
+                        "training_save_path": "training_data"
+                    },
+
+                    "execution_flags": {
+                        "train": True,
+                        "train_only": False,
+                        "predict": True,
+                        "fresh_start": False,
+                        "use_previous_model": True
+                    }
+                }
+                with open(config_path, 'w') as f:
+                    json.dump(complete_config, f, indent=4)
 
             config_manager = ConfigManager(os.path.dirname(output_path))
             if config_manager.manage_csv(output_path, headers):
@@ -465,7 +551,6 @@ class BaseFeatureExtractor(ABC):
 
                 for start_idx in range(0, total_samples, chunk_size):
                     end_idx = min(start_idx + chunk_size, total_samples)
-
                     feature_dict = {
                         f'feature_{i}': features[start_idx:end_idx, i].numpy()
                         for i in range(features.shape[1])
