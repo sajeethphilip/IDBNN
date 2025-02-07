@@ -2527,23 +2527,20 @@ class DBNN(GPUDBNN):
         return final_selected_indices
 
     def adaptive_fit_predict(self, max_rounds: int = None,
-                            improvement_threshold: float = 0.001,
-                            load_epoch: int = None,
-                            batch_size: int = 32):
-        """Modified adaptive training strategy with proper fresh start handling"""
+                             improvement_threshold: float = 0.001,
+                             load_epoch: int = None,
+                             batch_size: int = 32):
+        """Modified adaptive training strategy with proper fresh start handling and accuracy tracking"""
         DEBUG.log(" Starting adaptive_fit_predict")
         if max_rounds is None:
             max_rounds = self.config.epochs
 
         # Check if adaptive learning is enabled in config
         if hasattr(self.config, 'to_dict'):
-            # GlobalConfig object
             enable_adaptive = self.config.enable_adaptive
         elif isinstance(self.config, dict):
-            # Dictionary config
             enable_adaptive = self.config.get('training_params', {}).get('enable_adaptive', True)
         else:
-            # Default to True if no config
             enable_adaptive = True
 
         if not enable_adaptive:
@@ -2553,6 +2550,8 @@ class DBNN(GPUDBNN):
         self.in_adaptive_fit = True
         train_indices = []
         test_indices = None
+        best_test_accuracy = 0.0
+
         try:
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
@@ -2586,32 +2585,15 @@ class DBNN(GPUDBNN):
                         prev_train_file = f'{self.dataset_name}_Last_training.csv'
                         if os.path.exists(prev_train_file):
                             prev_train_data = pd.read_csv(prev_train_file)
-
-                            # Match rows between previous training data and current data
-                            train_indices = []
-                            prev_features = prev_train_data.drop(columns=[self.target_column])
-                            current_features = X
-
-                            # Ensure columns match
-                            common_cols = list(set(prev_features.columns) & set(current_features.columns))
-
-                            # Find matching rows
-                            for idx, row in current_features[common_cols].iterrows():
-                                # Check if this row exists in previous training data
-                                matches = (prev_features[common_cols] == row).all(axis=1)
-                                if matches.any():
-                                    train_indices.append(idx)
-
-                            print(f"Loaded {len(train_indices)} previous training samples")
-
-                            # Initialize test indices as all indices not in training
-                            test_indices = list(set(range(len(X))) - set(train_indices))
+                            train_indices, test_indices = self.load_last_known_split()
+                            if train_indices is None:
+                                print("No valid previous split found - starting fresh")
+                                train_indices = []
+                                test_indices = list(range(len(X)))
                         else:
                             print("No previous training data found - starting fresh")
                             train_indices = []
                             test_indices = list(range(len(X)))
-                else:
-                    print("No previous model found - starting fresh")
 
             if not model_loaded:
                 print("Initializing fresh model")
@@ -2684,7 +2666,11 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial training set size: {len(train_indices)}")
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
 
-            # Continue with training loop...
+            # Training loop
+            last_results = None
+            adaptive_patience_counter = 0
+            best_train_accuracy = 0.0
+
             for round_num in range(max_rounds):
                 print(f"\nRound {round_num + 1}/{max_rounds}")
                 print(f"Training set size: {len(train_indices)}")
@@ -2693,112 +2679,90 @@ class DBNN(GPUDBNN):
                 # Save indices for this epoch
                 self.save_epoch_data(round_num, train_indices, test_indices)
 
-                # Create feature tensors for training
-                X_train = self.X_tensor[train_indices]
-                y_train = self.y_tensor[train_indices]
-
-                # Train the model
-                save_path = f"round_{round_num}_predictions.csv"
+                # Set current indices for training
                 self.train_indices = train_indices
                 self.test_indices = test_indices
+
+                # Train and get results
+                save_path = f"round_{round_num}_predictions.csv"
                 results = self.fit_predict(batch_size=batch_size, save_path=save_path)
 
-                # Check training accuracy
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
-                print(f"Training accuracy: {train_accuracy:.4f}")
+                if results is None:
+                    print("Training failed - stopping adaptive process")
+                    break
 
-                # Get test accuracy from results
-                test_accuracy = results['test_accuracy']
+                # Track accuracies
+                train_accuracy = results.get('train_accuracy', 0.0)
+                test_accuracy = results.get('test_accuracy', 0.0)
 
-                # Check if we're improving overall
+                if test_accuracy > best_test_accuracy:
+                    best_test_accuracy = test_accuracy
+
+                # Check improvement
                 improved = False
-                if 'best_train_accuracy' not in locals():
-                    best_train_accuracy = train_accuracy
-                    improved = True
-                elif train_accuracy > best_train_accuracy + improvement_threshold:
+                if train_accuracy > best_train_accuracy + improvement_threshold:
                     best_train_accuracy = train_accuracy
                     improved = True
                     print(f"Improved training accuracy to {train_accuracy:.4f}")
 
-                if 'best_test_accuracy' not in locals():
-                    best_test_accuracy = test_accuracy
-                    improved = True
-                elif test_accuracy > best_test_accuracy + improvement_threshold:
-                    best_test_accuracy = test_accuracy
-                    improved = True
-                    print(f"Improved test accuracy to {test_accuracy:.4f}")
-
-                # Reset adaptive patience if improved
-                if improved:
-                    adaptive_patience_counter = 0
-                else:
+                if not improved:
                     adaptive_patience_counter += 1
-                    print(f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                    if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
-                        print(f"No improvement in accuracy after 5 rounds of adding samples.")
-                        print(f"Best training accuracy achieved: {best_train_accuracy:.4f}")
-                        print(f"Best test accuracy achieved: {best_test_accuracy:.4f}")
-                        print("Stopping adaptive training.")
+                    print(f"No significant improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                    if adaptive_patience_counter >= 5:
+                        print(f"No improvement after 5 rounds of adding samples.")
+                        print(f"Best training accuracy: {best_train_accuracy:.4f}")
+                        print(f"Best test accuracy: {best_test_accuracy:.4f}")
                         break
 
-                # Evaluate test data
-                X_test = self.X_tensor[test_indices]
-                y_test = self.y_tensor[test_indices]
-                test_predictions = self.predict(X_test, batch_size=batch_size)
-
-                # Only print test performance header if we didn't just print metrics in fit_predict
-                if not hasattr(self, '_last_metrics_printed') or not self._last_metrics_printed:
-                    print(f"\n{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
-                    y_test_cpu = y_test.cpu().numpy()
-                    test_predictions_cpu = test_predictions.cpu().numpy()
-                    self.print_colored_confusion_matrix(y_test_cpu, test_predictions_cpu)
-
-                # Reset the metrics printed flag
-                self._last_metrics_printed = False
-
-                # Check if we've achieved perfect accuracy
+                # Check if training reached perfection
+                min_training_accuracy = self._get_config_param('minimum_training_accuracy', 0.95)
                 if train_accuracy == 1.0:
                     if len(test_indices) == 0:
                         print("No more test samples available. Training complete.")
                         break
 
-                    # Get new training samples from misclassified examples
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        test_predictions, y_test, test_indices
-                    )
+                # Select new training samples
+                X_test = self.X_tensor[test_indices]
+                y_test = self.y_tensor[test_indices]
+                test_predictions = self.predict(X_test, batch_size=batch_size)
 
-                    if not new_train_indices:
-                        print("Achieved 100% accuracy on all data. Training complete.")
-                        self.in_adaptive_fit = False
-                        return {'train_indices': [], 'test_indices': []}
+                new_train_indices = self._select_samples_from_failed_classes(
+                    test_predictions, y_test, test_indices
+                )
 
-                else:
-                    # Training did not achieve 100% accuracy, select new samples
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        test_predictions, y_test, test_indices
-                    )
+                if not new_train_indices:
+                    print("No suitable new samples found. Training complete.")
+                    break
 
-                    if not new_train_indices:
-                        print("No suitable new samples found. Training complete.")
-                        break
-
-                # Update training and test sets with new samples
+                # Update indices for next round
                 train_indices.extend(new_train_indices)
                 test_indices = list(set(test_indices) - set(new_train_indices))
                 print(f"Added {len(new_train_indices)} new samples to training set")
 
-                # Save the current split
+                # Save current split
                 self.save_last_split(train_indices, test_indices)
+                last_results = results
+
+            # Prepare final results
+            final_results = {
+                'train_indices': train_indices,
+                'test_indices': test_indices,
+                'train_accuracy': best_train_accuracy,
+                'test_accuracy': best_test_accuracy,
+                'error_rates': last_results.get('error_rates', []) if last_results else [],
+                'confusion_matrix': last_results.get('confusion_matrix') if last_results else None,
+                'classification_report': last_results.get('classification_report', '') if last_results else '',
+                'training_complete': True
+            }
 
             self.in_adaptive_fit = False
-            return {'train_indices': train_indices, 'test_indices': test_indices}
+            return final_results
 
         except Exception as e:
             DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
             DEBUG.log(" Traceback:", traceback.format_exc())
             self.in_adaptive_fit = False
-            raise
+            return None
     #------------------------------------------Adaptive Learning--------------------------------------
 
 
@@ -3719,13 +3683,19 @@ class DBNN(GPUDBNN):
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None):
         """Print a color-coded confusion matrix with class-wise accuracy."""
 
+        # Convert numeric labels to strings for consistent handling
+        y_true = np.array([str(x) for x in y_true])
+        y_pred = np.array([str(x) for x in y_pred])
+
         # Get unique classes from both true and predicted labels
         unique_true = np.unique(y_true)
         unique_pred = np.unique(y_pred)
 
         # Use provided class labels or get from label encoder
         if class_labels is None:
-            class_labels = self.label_encoder.classes_
+            class_labels = np.array([str(x) for x in self.label_encoder.classes_])
+        else:
+            class_labels = np.array([str(x) for x in class_labels])
 
         # Ensure all classes are represented in confusion matrix
         all_classes = np.unique(np.concatenate([unique_true, unique_pred, class_labels]))
@@ -3756,33 +3726,26 @@ class DBNN(GPUDBNN):
         # Print class labels header
         print(f"{'Actual/Predicted':<15}", end='')
         for label in all_classes:
-            print(f"{str(label):<8}", end='')
+            print(f"{label:<8}", end='')
         print("Accuracy")
         print("-" * (15 + 8 * n_classes + 10))
 
         # Print matrix with colors
         for i in range(n_classes):
             # Print actual class label
-            print(f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
+            print(f"{Colors.BOLD}{all_classes[i]:<15}{Colors.ENDC}", end='')
 
             # Print confusion matrix row
             for j in range(n_classes):
                 if i == j:
-                    # Correct predictions in green
                     color = Colors.GREEN
                 else:
-                    # Incorrect predictions in red
                     color = Colors.RED
                 print(f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
 
-            # Print class accuracy with color based on performance
+            # Print class accuracy
             acc = class_accuracy[i]
-            if acc >= 0.9:
-                color = Colors.GREEN
-            elif acc >= 0.7:
-                color = Colors.YELLOW
-            else:
-                color = Colors.RED
+            color = Colors.GREEN if acc >= 0.9 else Colors.YELLOW if acc >= 0.7 else Colors.RED
             print(f"{color}{acc:>7.2%}{Colors.ENDC}")
 
         # Print overall accuracy
@@ -3794,7 +3757,7 @@ class DBNN(GPUDBNN):
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.RED
             print(f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
 
-        # Save confusion matrix to file
+        # Save confusion matrix plot
         try:
             plt.figure(figsize=(10, 8))
             sns.heatmap(
@@ -3809,7 +3772,6 @@ class DBNN(GPUDBNN):
             plt.ylabel('True Label')
             plt.xlabel('Predicted Label')
 
-            # Save with dataset name
             if hasattr(self, 'dataset_name'):
                 plt.savefig(f'confusion_matrix_{self.dataset_name}.png')
             else:
@@ -4527,12 +4489,12 @@ class DBNN(GPUDBNN):
         return default_value
 
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
-        """Full training and prediction pipeline with all features"""
+        """Full training and prediction pipeline with separated training and testing phases"""
         try:
             self._last_metrics_printed = True
             print("\nStarting fit_predict with configuration check:")
 
-            # Get inverse parameters safely
+            # Get inverse parameters
             invert_DBNN = self._get_config_param('invert_DBNN', False)
             reconstruction_weight = self._get_config_param('reconstruction_weight', 0.5)
             feedback_strength = self._get_config_param('feedback_strength', 0.3)
@@ -4565,138 +4527,189 @@ class DBNN(GPUDBNN):
                 y_tensor = torch.LongTensor(y_encoded).to(self.device)
                 X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
 
-            # First phase: Forward model training
+            # Training Phase
             print("\nPhase 1: Forward model training...")
-            final_W, error_rates = self.train(X_train, y_train, X_test, y_test, batch_size=batch_size)
+            n_samples = len(X_train)
+            n_batches = (n_samples + batch_size - 1) // batch_size
 
+            # Initialize tracking metrics
+            error_rates = []
+            best_train_accuracy = 0.0
+            patience_counter = 0
+            plateau_counter = 0
+            min_improvement = 0.001
+            patience = 5 if self.in_adaptive_fit else 100
+            max_plateau = 5
+            prev_accuracy = 0.0
+
+            # Main training loop
+            with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
+                for epoch in range(self.max_epochs):
+                    failed_cases = []
+                    n_errors = 0
+
+                    # Process all batches
+                    with tqdm(total=n_batches, desc=f"Training batches", leave=False) as batch_pbar:
+                        for i in range(0, n_samples, batch_size):
+                            batch_end = min(i + batch_size, n_samples)
+                            batch_X = X_train[i:batch_end]
+                            batch_y = y_train[i:batch_end]
+
+                            posteriors = self._compute_batch_posterior(batch_X)[0]
+                            predictions = torch.argmax(posteriors, dim=1)
+                            errors = (predictions != batch_y)
+                            n_errors += errors.sum().item()
+
+                            if errors.any():
+                                fail_idx = torch.where(errors)[0]
+                                for idx in fail_idx:
+                                    failed_cases.append((
+                                        batch_X[idx],
+                                        batch_y[idx].item(),
+                                        posteriors[idx].cpu().numpy()
+                                    ))
+                            batch_pbar.update(1)
+
+                    # Update weights after all batches
+                    if failed_cases:
+                        self._update_priors_parallel(failed_cases, batch_size)
+
+                    # Calculate training metrics
+                    train_error_rate = n_errors / n_samples
+                    train_accuracy = 1 - train_error_rate
+                    error_rates.append(train_error_rate)
+
+                    # Update progress bar
+                    epoch_pbar.set_postfix({
+                        'train_acc': f"{train_accuracy:.4f}",
+                        'best_train': f"{best_train_accuracy:.4f}"
+                    })
+                    epoch_pbar.update(1)
+
+                    # Check improvement
+                    accuracy_improvement = train_accuracy - prev_accuracy
+                    if accuracy_improvement <= min_improvement:
+                        plateau_counter += 1
+                    else:
+                        plateau_counter = 0
+
+                    if train_accuracy > best_train_accuracy + min_improvement:
+                        best_train_accuracy = train_accuracy
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+
+                    # Save best model
+                    if train_error_rate <= self.best_error:
+                        self.best_error = train_error_rate
+                        self.best_W = self.current_W.clone()
+                        self._save_best_weights()
+
+                    # Early stopping checks
+                    if train_accuracy == 1.0:
+                        print("\nReached 100% training accuracy")
+                        break
+                    if patience_counter >= patience:
+                        print(f"\nNo improvement for {patience} epochs")
+                        break
+                    if plateau_counter >= max_plateau:
+                        print(f"\nAccuracy plateaued for {max_plateau} epochs")
+                        break
+
+                    prev_accuracy = train_accuracy
+
+            # Save model components after training
             self._save_categorical_encoders()
+            self._save_model_components()
+
+            # Testing Phase
+            print("\nPhase 2: Testing and evaluation...")
+
+            # Use best weights for prediction
+            temp_W = self.current_W
+            self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
+
+            # Compute final training accuracy
             train_predictions = self.predict(X_train, batch_size=batch_size)
-            train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
-            print(f"\nForward model training accuracy: {train_accuracy:.4f}")
+            final_train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
+            print(f"\nFinal training accuracy: {final_train_accuracy:.4f}")
 
-            # Check training accuracy
+            # Initialize results dictionary
+            results = {
+                'error_rates': error_rates,
+                'train_accuracy': final_train_accuracy
+            }
+
+            # Check if we should proceed with testing
             min_training_accuracy = self._get_config_param('minimum_training_accuracy', 0.95)
-            if not self.in_adaptive_fit or train_accuracy >= min_training_accuracy:
-                # Initialize results dictionary
-                results = {
-                    'error_rates': error_rates,
-                    'train_accuracy': train_accuracy
-                }
-
-                # Second phase: Inverse model training
-                inverse_metrics = None
-                reconstructed_features = None
-                if invert_DBNN:
-                    print("\nPhase 2: Inverse model training...")
-                    try:
-                        from invertible_dbnn import InvertibleDBNN
-                        self.inverse_model = InvertibleDBNN(
-                            forward_model=self,
-                            feature_dims=X_train.shape[1],
-                            reconstruction_weight=reconstruction_weight,
-                            feedback_strength=feedback_strength
-                        )
-
-                        inverse_metrics = self.inverse_model.fit(
-                            features=X_train,
-                            labels=y_train,
-                            n_epochs=self._get_config_param('epochs', 1000),
-                            learning_rate=inverse_learning_rate,
-                            batch_size=batch_size
-                        )
-                        print("\nInverse model training completed")
-                    except Exception as e:
-                        print(f"Warning: Error in inverse model training: {str(e)}")
-                        inverse_metrics = {}
-
-                # Third phase: Testing and predictions
-                print("\nPhase 3: Testing and predictions...")
+            if not self.in_adaptive_fit or final_train_accuracy >= min_training_accuracy:
+                # Test predictions
                 y_pred = self.predict(X_test, batch_size=batch_size)
                 test_accuracy = (y_pred == y_test.cpu()).float().mean().item()
                 print(f"\nTest Accuracy: {test_accuracy:.4f}")
 
-                # Handle predictions saving
-                if save_path:
-                    X_test_df = self.data.drop(columns=[self.target_column]).iloc[
-                        self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                    ]
-                    y_test_series = self.data[self.target_column].iloc[
-                        self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                    ]
-                    if invert_DBNN and hasattr(self, 'inverse_model'):
-                        print("\nComputing reconstruction...")
-                        test_probs = self._get_test_probabilities(X_test)
+                # Print test performance metrics
+                print("\nTest Set Performance:")
+                y_test_cpu = y_test.cpu().numpy()
+                y_pred_cpu = y_pred.cpu().numpy()
+                self.print_colored_confusion_matrix(y_test_cpu, y_pred_cpu)
+
+                # Handle inverse DBNN if enabled
+                if invert_DBNN:
+                    print("\nPhase 3: Inverse model processing...")
+                    test_probs = self._get_test_probabilities(X_test)
+
+                    if not hasattr(self, 'inverse_model'):
+                        from invertible_dbnn import InvertibleDBNN
+                        self.inverse_model = InvertibleDBNN(
+                            forward_model=self,
+                            feature_dims=X_test.shape[1],
+                            reconstruction_weight=reconstruction_weight,
+                            feedback_strength=feedback_strength
+                        )
+
+                    if hasattr(self, 'inverse_model'):
                         reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
-                        print(f"Reconstruction shape: {reconstructed_features.shape}")
 
-                        self._save_predictions_with_reconstruction(
-                            X_test_df, y_pred, save_path, y_test_series, reconstructed_features
-                        )
+                        if save_path:
+                            X_test_df = self.data.drop(columns=[self.target_column]).iloc[
+                                self.test_indices if self.in_adaptive_fit else range(len(X_test))
+                            ]
+                            y_test_series = self.data[self.target_column].iloc[
+                                self.test_indices if self.in_adaptive_fit else range(len(X_test))
+                            ]
 
-                        # Add reconstruction metrics to results
-                        reconstruction_metrics = self._compute_reconstruction_metrics(
-                            X_test, reconstructed_features, test_probs, y_test
-                        )
-                        results = self.update_results_with_reconstruction(
-                            results, X_test, reconstructed_features,
-                            test_probs, y_test, save_path
-                        )
-                    else:
-                        self.save_predictions(X_test_df, y_pred, save_path, y_test_series)
+                            self._save_predictions_with_reconstruction(
+                                X_test_df, y_pred, save_path, y_test_series, reconstructed_features
+                            )
 
-                # Update results with metrics
+                            results = self.update_results_with_reconstruction(
+                                results, X_test, reconstructed_features,
+                                test_probs, y_test, save_path
+                            )
+
+                # Update results with final metrics
                 results.update({
                     'test_accuracy': test_accuracy,
                     'classification_report': classification_report(
-                        self.label_encoder.inverse_transform(y_test.cpu().numpy()),
-                        self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+                        self.label_encoder.inverse_transform(y_test_cpu),
+                        self.label_encoder.inverse_transform(y_pred_cpu)
                     ),
                     'confusion_matrix': confusion_matrix(
-                        self.label_encoder.inverse_transform(y_test.cpu().numpy()),
-                        self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+                        self.label_encoder.inverse_transform(y_test_cpu),
+                        self.label_encoder.inverse_transform(y_pred_cpu)
                     ),
-                    'training_complete': train_accuracy >= min_training_accuracy
+                    'training_complete': final_train_accuracy >= min_training_accuracy
                 })
 
-                # Add inverse metrics if available
-                if inverse_metrics:
-                    reconstruction_losses = inverse_metrics.get('reconstruction_losses', [])
-                    results.update({
-                        'inverse_metrics': inverse_metrics,
-                        'reconstruction_metrics': {
-                            'final_reconstruction_error': reconstruction_losses[-1] if reconstruction_losses else None,
-                            'reconstruction_losses': reconstruction_losses,
-                            'total_losses': inverse_metrics.get('total_losses', [])
-                        }
-                    })
-
-                self._save_model_components()
-                # After training/prediction completes
-                if invert_DBNN and hasattr(self, 'inverse_model') and self.inverse_model is not None:
-                    results = self.update_results_with_reconstruction(
-                        results,
-                        X_test,
-                        self.inverse_model.reconstruct_features(test_probs),
-                        test_probs,
-                        y_test,
-                        save_path
-                    )
-
-
-                return results
-            else:
-                return {
-                    'error_rates': error_rates,
-                    'train_accuracy': train_accuracy,
-                    'test_accuracy': 0.0,
-                    'training_complete': False
-                }
+            # Restore original weights
+            self.current_W = temp_W
+            return results
 
         except Exception as e:
             print(f"\nError in fit_predict: {str(e)}")
             print(f"Traceback: {traceback.format_exc()}")
             raise
-
 
     def save_reconstruction_features(self,
                                      reconstructed_features: torch.Tensor,

@@ -44,7 +44,92 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import kornia.filters as KF
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import kornia.filters as KF
 
+class DetailPreservingLoss(nn.Module):
+    """Loss function that preserves fine details and enhances class differences.
+
+    Components:
+    1. Laplacian filtering - Preserves high-frequency details and edges
+    2. Gram matrix analysis - Maintains texture patterns
+    3. Frequency domain loss - Emphasizes high-frequency components
+    """
+    def __init__(self,
+                 detail_weight=1.0,
+                 texture_weight=0.8,
+                 frequency_weight=0.6):
+        super().__init__()
+        self.detail_weight = detail_weight
+        self.texture_weight = texture_weight
+        self.frequency_weight = frequency_weight
+
+        # High-pass filters for detail detection
+        self.laplacian = KF.Laplacian(3)
+        self.sobel = KF.SpatialGradient()
+
+    def forward(self, prediction, target):
+        # Base reconstruction loss
+        recon_loss = F.mse_loss(prediction, target)
+
+        # High-frequency detail preservation
+        pred_lap = self.laplacian(prediction)
+        target_lap = self.laplacian(target)
+        detail_loss = F.l1_loss(pred_lap, target_lap)
+
+        # Texture preservation using Gram matrices
+        pred_gram = self._gram_matrix(prediction)
+        target_gram = self._gram_matrix(target)
+        texture_loss = F.mse_loss(pred_gram, target_gram)
+
+        # Frequency domain loss
+        freq_loss = self._frequency_loss(prediction, target)
+
+        # Combine losses with weights
+        total_loss = recon_loss + \
+                    self.detail_weight * detail_loss + \
+                    self.texture_weight * texture_loss + \
+                    self.frequency_weight * freq_loss
+
+        return total_loss
+
+    def _gram_matrix(self, x):
+        b, c, h, w = x.size()
+        features = x.view(b, c, h * w)
+        gram = torch.bmm(features, features.transpose(1, 2))
+        return gram.div(c * h * w)
+
+    def _frequency_loss(self, prediction, target):
+        # Convert to frequency domain
+        pred_freq = torch.fft.fft2(prediction)
+        target_freq = torch.fft.fft2(target)
+
+        # Compute magnitude spectrum
+        pred_mag = torch.abs(pred_freq)
+        target_mag = torch.abs(target_freq)
+
+        # Focus on high-frequency components
+        high_freq_mask = self._create_high_freq_mask(pred_mag.shape)
+        high_freq_mask = high_freq_mask.to(prediction.device)
+
+        pred_high = pred_mag * high_freq_mask
+        target_high = target_mag * high_freq_mask
+
+        return F.mse_loss(pred_high, target_high)
+
+    def _create_high_freq_mask(self, shape):
+        _, _, h, w = shape
+        mask = torch.ones((h, w))
+        center_h, center_w = h // 2, w // 2
+        radius = min(h, w) // 4
+
+        y, x = torch.meshgrid(torch.arange(h), torch.arange(w))
+        dist_from_center = torch.sqrt((y - center_h)**2 + (x - center_w)**2)
+        mask[dist_from_center < radius] = 0.2
+
+        return mask.unsqueeze(0).unsqueeze(0)
 class StructuralLoss(nn.Module):
     """Loss function to enhance image structures like contours and regions"""
     def __init__(self, edge_weight=1.0, smoothness_weight=0.5):
@@ -315,15 +400,42 @@ class BaseFeatureExtractor(ABC):
         for section in required_sections:
             if section not in config:
                 config[section] = {}
+        # Add output/input configuration
+        if 'output' not in config:
+            config['output'] = {}
+        config['output'].setdefault('image_dir', 'output/images')
+        config['output'].setdefault('mode', 'train')  # 'train' or 'predict'
+        config['output'].setdefault('csv_dir', os.path.join('data', config['dataset']['name']))
+        config['output'].setdefault('input_csv', None)  # Will be set to default if None in predict mode
 
-        # Verify model section
         model = config.setdefault('model', {})
         model.setdefault('feature_dims', 128)
         model.setdefault('learning_rate', 0.001)
         model.setdefault('encoder_type', 'cnn')
         model.setdefault('modelType', 'Histogram')
-        # Add loss functions configuration
+
+
         loss_functions = model.setdefault('loss_functions', {})
+        # Add loss functions configuration
+        loss_functions.setdefault('autoencoder', {
+            'enabled': False,
+            'type': 'AutoencoderLoss',
+            'weight': 1.0,
+            'params': {
+                'reconstruction_weight': 1.0,
+                'feature_weight': 0.1
+            }
+        })
+        loss_functions.setdefault('detail_preserving', {
+            'enabled': True,
+            'type': 'DetailPreservingLoss',
+            'weight': 0.8,
+            'params': {
+                'detail_weight': 1.0,
+                'texture_weight': 0.8,
+                'frequency_weight': 0.6
+            }
+        })
         loss_functions.setdefault('default', {
             'enabled': True,
             'type': 'CrossEntropy',
@@ -1123,11 +1235,11 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
-        checkpoint_dir = self.config['training']['checkpoint_dir']
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+
         if not os.path.exists(checkpoint_dir):
             return None
-
-        dataset_name = self.config['dataset']['name']
 
         # Check for best model first
         best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
@@ -1291,21 +1403,34 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                                             Path(config['dataset']['name']).stem)
         os.makedirs(self.output_image_dir, exist_ok=True)
 
-    def verify_config(self, config: Dict) -> Dict:
-        """Add autoencoder-specific config verification"""
-        config = super().verify_config(config)
 
-        # Verify autoencoder-specific settings
-        if 'autoencoder_config' not in config['model']:
-            config['model']['autoencoder_config'] = {
-                'reconstruction_weight': 1.0,
-                'feature_weight': 0.1,
-                'convergence_threshold': 0.001,
-                'min_epochs': 10,
-                'patience': 5
-            }
+    def predict_from_csv(self, csv_path: str):
+        """Generate images from feature vectors in CSV"""
+        df = pd.read_csv(csv_path)
+        feature_cols = [col for col in df.columns if col.startswith('feature_')]
+        features = torch.tensor(df[feature_cols].values, dtype=torch.float32)
 
-        return config
+        self.feature_extractor.eval()
+        output_dir = self.config['output']['image_dir']
+        os.makedirs(output_dir, exist_ok=True)
+
+        with torch.no_grad():
+            for idx, feature_vec in enumerate(features):
+                feature_vec = feature_vec.to(self.device).unsqueeze(0)
+                reconstruction = self.feature_extractor.decode(feature_vec)
+
+                # Save reconstructed image
+                img_path = os.path.join(output_dir, f'reconstruction_{idx}.png')
+                self.save_reconstructed_image(img_path, reconstruction[0])
+
+    def save_reconstructed_image(self, path: str, reconstruction: torch.Tensor):
+        """Save reconstructed tensor as image"""
+        reconstruction = reconstruction.cpu()
+        if len(reconstruction.shape) == 3:
+            reconstruction = reconstruction.permute(1, 2, 0)
+        reconstruction = (reconstruction * 255).clamp(0, 255).to(torch.uint8)
+        img = Image.fromarray(reconstruction.numpy())
+        img.save(path)
 
     def _load_from_checkpoint(self):
         """Load model and training state from checkpoint"""
@@ -2301,6 +2426,15 @@ class DatasetProcessor:
                             "shape_weight": 0.7,
                             "symmetry_weight": 0.3
                         }
+                    },
+                    "detail_preserving": {
+                        "enabled": True,
+                        "weight": 0.8,
+                        "params": {
+                            "detail_weight": 1.0,
+                            "texture_weight": 0.8,
+                            "frequency_weight": 0.6
+                        }
                     }
                 },
 
@@ -2848,98 +2982,303 @@ def print_usage():
     print("     python cdbnn.py --data_type custom --data path/to/images --encoder_type autoenc")
 
 def parse_arguments():
-    """Parse command line arguments"""
     if len(sys.argv) == 1:
-        return None
+        return get_interactive_args()
 
-    parser = argparse.ArgumentParser(description='CNN/Autoencoder Feature Extractor')
-
-    # Required arguments
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'],
-                      help='type of dataset (torchvision or custom)')
-    parser.add_argument('--data', type=str,
-                      help='dataset name for torchvision or path for custom dataset')
-
-    # Optional arguments
-    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'],
-                      default='cnn', help='type of encoder (default: cnn)')
-    parser.add_argument('--config', type=str,
-                      help='path to configuration file')
-    parser.add_argument('--batch_size', type=int,
-                      help='batch size for training (default: 32)')
-    parser.add_argument('--epochs', type=int,
-                      help='number of training epochs (default: 20)')
-    parser.add_argument('--workers', type=int,
-                      help='number of data loading workers (default: 4)')
-    parser.add_argument('--learning_rate', type=float,
-                      help='learning rate (default: 0.001)')
-    parser.add_argument('--output-dir', type=str, default='data',
-                      help='output directory (default: data)')
-    parser.add_argument('--cpu', action='store_true',
-                      help='force CPU usage')
-    parser.add_argument('--debug', action='store_true',
-                      help='enable debug mode')
+    parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
+    parser.add_argument('--mode', choices=['train', 'predict'], default='train')
+    parser.add_argument('--data', type=str, help='dataset name/path')
+    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
+    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
+    parser.add_argument('--config', type=str, help='path to configuration file')
+    parser.add_argument('--debug', action='store_true', help='enable debug mode')
+    parser.add_argument('--input-csv', type=str, help='input CSV for predict mode')
+    parser.add_argument('--output-dir', type=str, default='data', help='output directory')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+    parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
+    parser.add_argument('--workers', type=int, default=4, help='number of workers')
+    parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
+    parser.add_argument('--cpu', action='store_true', help='force CPU usage')
 
     return parser.parse_args()
 
+
+def save_last_args(args):
+    """Save arguments to JSON file"""
+    args_dict = vars(args)
+    with open('last_run.json', 'w') as f:
+        json.dump(args_dict, f, indent=4)
+
+def load_last_args():
+    """Load arguments from JSON file"""
+    try:
+        with open('last_run.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
 def get_interactive_args():
     """Get arguments interactively"""
+    last_args = load_last_args()
     args = argparse.Namespace()
+    args.mode = 'train'
 
     # Get data type
     while True:
-        data_type = input("\nEnter dataset type (torchvision/custom): ").strip().lower()
+        default = last_args.get('data_type', '') if last_args else ''
+        prompt = f"\nEnter dataset type (torchvision/custom) [{default}]: " if default else "\nEnter dataset type (torchvision/custom): "
+        data_type = input(prompt).strip().lower() or default
         if data_type in ['torchvision', 'custom']:
             args.data_type = data_type
             break
         print("Invalid type. Please enter 'torchvision' or 'custom'")
 
     # Get data path/name
-    args.data = input("Enter dataset name (torchvision) or path (custom): ").strip()
+    default = last_args.get('data', '') if last_args else ''
+    prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
+    args.data = input(prompt).strip() or default
 
     # Get encoder type
     while True:
-        encoder_type = input("Enter encoder type (cnn/autoenc) [default: cnn]: ").strip().lower()
-        if not encoder_type:
-            encoder_type = 'cnn'
+        default = last_args.get('encoder_type', 'cnn') if last_args else 'cnn'
+        prompt = f"Enter encoder type (cnn/autoenc) [{default}]: "
+        encoder_type = input(prompt).strip().lower() or default
         if encoder_type in ['cnn', 'autoenc']:
             args.encoder_type = encoder_type
             break
         print("Invalid encoder type. Please enter 'cnn' or 'autoenc'")
 
-    # Get optional parameters
-    args.batch_size = int(input("Enter batch size (default: 32): ").strip() or "32")
-    args.epochs = int(input("Enter number of epochs (default: 20): ").strip() or "20")
-    args.output_dir = input("Enter output directory (default: data): ").strip() or "data"
+    # Optional parameters
+    default = last_args.get('batch_size', 32) if last_args else 32
+    args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
-    # Set defaults for other arguments
-    args.workers = 4
-    args.learning_rate = 0.01
-    args.cpu = False
-    args.debug = False
-    args.config = None
+    default = last_args.get('epochs', 20) if last_args else 20
+    args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
 
+    default = last_args.get('output_dir', 'data') if last_args else 'data'
+    args.output_dir = input(f"Enter output directory [{default}]: ").strip() or default
+
+    # Set other defaults
+    args.workers = last_args.get('workers', 4) if last_args else 4
+    args.learning_rate = last_args.get('learning_rate', 0.01) if last_args else 0.01
+    args.cpu = last_args.get('cpu', False) if last_args else False
+    args.debug = last_args.get('debug', False) if last_args else False
+    args.config = last_args.get('config', None) if last_args else None
+
+    save_last_args(args)
     return args
+def check_existing_model(dataset_dir, dataset_name):
+    """Check existing model type from checkpoint"""
+    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            return checkpoint.get('config', {}).get('model', {}).get('encoder_type')
+        except:
+            pass
+    return None
 
 def main():
-    """Main execution function"""
     try:
         logger = setup_logging()
         args = parse_arguments()
-        config = None
 
-        if args is None:
-            print("\nEntering interactive mode...")
-            args = get_interactive_args()
+        if args.mode == 'predict':
+            data_name = os.path.splitext(os.path.basename(args.data))[0]
+            checkpoint_dir = os.path.join('data', data_name, 'checkpoints')
+            config_path = os.path.join('data', data_name, f"{data_name}.json")
 
+            # Load existing config if available
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+            else:
+                # Try to load checkpoint first to determine encoder type
+                checkpoint_path = os.path.join(checkpoint_dir, f"{data_name}_best.pth")
+                if os.path.exists(checkpoint_path):
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                    encoder_type = checkpoint.get('config', {}).get('model', {}).get('encoder_type', 'autoenc')
+                else:
+                    encoder_type = 'autoenc'
+
+                config = {
+                    "dataset": {
+                        "name": self.dataset_name,
+                        "type": self.datatype,
+                        "in_channels": in_channels,
+                        "num_classes": num_classes,
+                        "input_size": list(input_size),
+                        "mean": mean,
+                        "std": std,
+                        "train_dir": train_dir,
+                        "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
+                    },
+
+                    "model": {
+                        "encoder_type": "autoenc",  # Default to auto encoder
+                        "feature_dims": feature_dims,
+                        "learning_rate": 0.001,
+
+                    "loss_functions": {
+                        "structural": {
+                            "enabled": True,
+                            "weight": 1.0,
+                            "params": {
+                                "edge_weight": 1.0,
+                                "smoothness_weight": 0.5
+                            }
+                        },
+                        "color_enhancement": {
+                            "enabled": True,
+                            "weight": 0.8,
+                            "params": {
+                                "channel_weight": 0.5,
+                                "contrast_weight": 0.3
+                            }
+                        },
+                        "morphology": {
+                            "enabled": True,
+                            "weight": 0.6,
+                            "params": {
+                                "shape_weight": 0.7,
+                                "symmetry_weight": 0.3
+                            }
+                        },
+                        "detail_preserving": {
+                            "enabled": True,
+                            "weight": 0.8,
+                            "params": {
+                                "detail_weight": 1.0,
+                                "texture_weight": 0.8,
+                                "frequency_weight": 0.6
+                            }
+                        }
+                    },
+
+                        "optimizer": {
+                            "type": "Adam",
+                            "weight_decay": 1e-4,
+                            "momentum": 0.9,
+                            "beta1": 0.9,
+                            "beta2": 0.999,
+                            "epsilon": 1e-8
+                        },
+
+                        "scheduler": {
+                            "type": "ReduceLROnPlateau",
+                            "factor": 0.1,
+                            "patience": 10,
+                            "min_lr": 1e-6,
+                            "verbose": True
+                        },
+
+                        "autoencoder_config": {
+                            "reconstruction_weight": 1.0,
+                            "feature_weight": 0.1,
+                            "convergence_threshold": 0.001,
+                            "min_epochs": 10,
+                            "patience": 5
+                        }
+                    },
+
+                    "training": {
+                        "batch_size": 32,
+                        "epochs": 20,
+                        "num_workers": min(4, os.cpu_count() or 1),
+                        "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
+                        "validation_split": 0.2,
+
+                        "early_stopping": {
+                            "patience": 5,
+                            "min_delta": 0.001
+                        }
+                    },
+
+                    "execution_flags": {
+                        "mode": "train_and_predict",
+                        "use_gpu": torch.cuda.is_available(),
+                        "mixed_precision": True,
+                        "distributed_training": False,
+                        "debug_mode": False,
+                        "use_previous_model": True,
+                        "fresh_start": False
+                    },
+
+                    "augmentation": {
+                        "enabled": True,
+                        "random_crop": {
+                            "enabled": True,
+                            "padding": 4
+                        },
+                        "random_rotation": {
+                            "enabled": True,
+                            "degrees": 10
+                        },
+                        "horizontal_flip": {
+                            "enabled": True,
+                            "probability": 0.5
+                        },
+                        "vertical_flip": {
+                            "enabled": False
+                        },
+                        "color_jitter": {
+                            "enabled": True,
+                            "brightness": 0.2,
+                            "contrast": 0.2,
+                            "saturation": 0.2,
+                            "hue": 0.1
+                        },
+                        "normalize": {
+                            "enabled": True,
+                            "mean": mean,
+                            "std": std
+                        }
+                    },
+
+                    "logging": {
+                        "log_dir": os.path.join(self.dataset_dir, "logs"),
+                        "tensorboard": {
+                            "enabled": True,
+                            "log_dir": os.path.join(self.dataset_dir, "tensorboard")
+                        },
+                        "save_frequency": 5,  # Save every N epochs
+                        "metrics": ["loss", "accuracy", "reconstruction_error"]
+                    },
+
+                    "output": {
+                        "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+                        "model_dir": os.path.join(self.dataset_dir, "models"),
+                        "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+                    }
+                }
+
+
+            input_csv = args.input_csv if hasattr(args, 'input_csv') and args.input_csv else \
+                       os.path.join('data', data_name, f"{data_name}.csv")
+
+            feature_extractor = get_feature_extractor(config)
+            feature_extractor.predict_from_csv(input_csv)
+            logger.info(f"Images generated in {config['output']['image_dir']}")
+            return 0
+
+        if args.mode == 'train':
+            data_name = os.path.splitext(os.path.basename(args.data))[0]
+            checkpoint_dir = os.path.join('data', data_name, 'checkpoints')
+            config_path = os.path.join('data', data_name, f"{data_name}.json")
+
+            # Load existing config if available
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+
+        # Training mode from here onwards
         if args.config:
             with open(args.config, 'r') as f:
                 config = json.load(f)
-
         processor = DatasetProcessor(
             datafile=args.data,
-            datatype=args.data_type.lower(),
-            output_dir=args.output_dir
+            datatype=args.data_type,
+            output_dir=getattr(args, 'output_dir', 'data')
         )
 
         train_dir, test_dir = processor.process()
@@ -2948,7 +3287,11 @@ def main():
         logger.info("Generating configuration...")
         config = processor.generate_default_config(train_dir)
 
-        # Prompt for configuration editing
+        # Check existing model type
+        existing_encoder = check_existing_model(processor.dataset_dir, processor.dataset_name)
+        if existing_encoder:
+            config['model']['encoder_type'] = existing_encoder
+
         print("\nConfiguration files have been created. Would you like to edit them before training?")
         response = input("Edit configuration? (y/n): ").lower()
         if response == 'y':
@@ -2957,7 +3300,6 @@ def main():
             config_manager._open_editor(os.path.join(processor.dataset_dir, f"{processor.dataset_name}.conf"))
             config_manager._open_editor(os.path.join(processor.dataset_dir, "adaptive_dbnn.conf"))
 
-            # Reload configuration after editing
             with open(os.path.join(processor.dataset_dir, f"{processor.dataset_name}.json"), 'r') as f:
                 config = json.load(f)
 
@@ -3006,13 +3348,13 @@ def main():
             features = train_features
             labels = train_labels
 
-        output_path = os.path.join(args.output_dir, config['dataset']['name'],
+        output_path = os.path.join(getattr(args, 'output_dir', 'data'), config['dataset']['name'],
                                 f"{config['dataset']['name']}.csv")
         feature_extractor.save_features(features, labels, output_path)
         logger.info(f"Features saved to {output_path}")
 
         if history:
-            plot_path = os.path.join(args.output_dir, config['dataset']['name'],
+            plot_path = os.path.join(getattr(args, 'output_dir', 'data'), config['dataset']['name'],
                                   'training_history.png')
             feature_extractor.plot_training_history(plot_path)
 
@@ -3021,7 +3363,7 @@ def main():
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
-        if args.debug:
+        if hasattr(args, 'debug') and args.debug:
             traceback.print_exc()
         return 1
 
