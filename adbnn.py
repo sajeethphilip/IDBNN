@@ -3781,7 +3781,7 @@ class DBNN(GPUDBNN):
             print(f"Warning: Could not save confusion matrix plot: {str(e)}")
 
     def train(self, X_train, y_train, X_test, y_test, batch_size=32):
-        """Complete training with progress tracking and confusion matrix"""
+        """Complete training with progress tracking and patience reset"""
         print("\nStarting training...")
         n_samples = len(X_train)
         n_batches = (n_samples + batch_size - 1) // batch_size
@@ -3790,17 +3790,14 @@ class DBNN(GPUDBNN):
         error_rates = []
         best_train_accuracy = 0.0
         best_test_accuracy = 0.0
-        patience_counter = 0
-        plateau_counter = 0
         min_improvement = 0.001
-        patience = 5 if self.in_adaptive_fit else 100
-        max_plateau = 5
         prev_accuracy = 0.0
 
-        # Main training loop with dynamic progress bar
+        # Main training loop
         with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
             for epoch in range(self.max_epochs):
-                # Train on all batches
+                # Reset patience counter at start of each epoch
+                patience_counter = 0
                 failed_cases = []
                 n_errors = 0
 
@@ -3823,6 +3820,10 @@ class DBNN(GPUDBNN):
                                     batch_y[idx].item(),
                                     posteriors[idx].cpu().numpy()
                                 ))
+                            patience_counter += 1
+                        else:
+                            patience_counter = 0  # Reset on successful batch
+
                         batch_pbar.update(1)
 
                 if failed_cases:
@@ -3833,20 +3834,19 @@ class DBNN(GPUDBNN):
                 train_accuracy = 1 - train_error_rate
                 error_rates.append(train_error_rate)
 
-                # Calculate test metrics if test data provided
+                # Calculate test metrics
                 test_accuracy = 0
                 if X_test is not None and y_test is not None:
                     test_predictions = self.predict(X_test, batch_size=batch_size)
                     test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
                     if test_accuracy > best_test_accuracy:
                         best_test_accuracy = test_accuracy
-                        # Print confusion matrix for best test performance
                         print("\nTest Set Performance:")
                         y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
                         test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
                         self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
 
-                # Update progress bar with both accuracies
+                # Update progress bar
                 epoch_pbar.set_postfix({
                     'train_acc': f"{train_accuracy:.4f}",
                     'best_train': f"{best_train_accuracy:.4f}",
@@ -3855,43 +3855,21 @@ class DBNN(GPUDBNN):
                 })
                 epoch_pbar.update(1)
 
-                # Check improvement and update tracking
-                accuracy_improvement = train_accuracy - prev_accuracy
-                if accuracy_improvement <= min_improvement:
-                    plateau_counter += 1
-                else:
-                    plateau_counter = 0
-
-                if train_accuracy > best_train_accuracy + min_improvement:
-                    best_train_accuracy = train_accuracy
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
                 # Save best model
                 if train_error_rate <= self.best_error:
                     self.best_error = train_error_rate
                     self.best_W = self.current_W.clone()
                     self._save_best_weights()
 
-                # Early stopping checks
+                # Early stopping only for perfect accuracy
                 if train_accuracy == 1.0:
                     print("\nReached 100% training accuracy")
                     break
 
-                if patience_counter >= patience:
-                    print(f"\nNo improvement for {patience} epochs")
-                    break
-
-                if plateau_counter >= max_plateau:
-                    print(f"\nAccuracy plateaued for {max_plateau} epochs")
-                    break
-
                 prev_accuracy = train_accuracy
 
-        self._save_model_components()
-        return self.current_W.cpu(), error_rates
-
+            self._save_model_components()
+            return self.current_W.cpu(), error_rates
 
     def plot_training_metrics(self, train_loss, test_loss, train_acc, test_acc, save_path=None):
         """Plot training and testing metrics over epochs"""
