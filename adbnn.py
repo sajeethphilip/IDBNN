@@ -2100,79 +2100,86 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def _compute_batch_posterior(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
-       """Optimized batch posterior with vectorized operations and type checking"""
-       # Safety checks and type conversion
-       if isinstance(features, pd.DataFrame):
-           features = torch.FloatTensor(features.values).to(self.device)
+        """Optimized batch posterior with vectorized operations and type checking"""
+        # Safety checks and type conversion
+        if isinstance(features, pd.DataFrame):
+            features = torch.FloatTensor(features.values).to(self.device)
+        else:
+            features = features.to(self.device)
 
-       if self.weight_updater is None:
-           DEBUG.log(" Weight updater not initialized, initializing now...")
-           self._initialize_bin_weights()
-           if self.weight_updater is None:
-               raise RuntimeError("Failed to initialize weight updater")
+        if self.weight_updater is None:
+            DEBUG.log(" Weight updater not initialized, initializing now...")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
 
-       if self.likelihood_params is None:
-           raise RuntimeError("Likelihood parameters not initialized")
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
 
-       # Ensure input features are contiguous
-       features = features if features.is_contiguous() else features.contiguous()
-       batch_size = features.shape[0]
-       n_classes = len(self.likelihood_params['classes'])
+        # Ensure input features are contiguous
+        features = features if features.is_contiguous() else features.contiguous()
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
 
-       # Pre-allocate tensors
-       log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        # Pre-allocate tensors
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-       # Process all feature pairs at once
-       feature_pairs = self.likelihood_params['feature_pairs'].to(features.device)
-       feature_groups = torch.stack([
-           features[:, pair].contiguous()
-           for pair in feature_pairs
-       ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+        # Process all feature pairs at once
+        feature_pairs = self.likelihood_params['feature_pairs'].to(features.device)
+        feature_groups = torch.stack([
+            features[:, pair].contiguous()
+            for pair in feature_pairs
+        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
 
-       # Compute all bin indices at once
-       bin_indices_dict = {}
-       for group_idx in range(len(self.likelihood_params['feature_pairs'])):
-           bin_edges = self.likelihood_params['bin_edges'][group_idx]
-           edges = torch.stack([edge.contiguous() for edge in bin_edges])
+        # Compute all bin indices at once
+        bin_indices_dict = {}
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            # Ensure bin edges are on the same device
+            edges = torch.stack([
+                edge.to(self.device).contiguous()
+                for edge in bin_edges
+            ])
 
-           # Vectorized binning with contiguous tensors
-           indices = torch.stack([
-               torch.bucketize(
-                   feature_groups[:, group_idx, dim].contiguous(),
-                   edges[dim].contiguous()
-               )
-               for dim in range(2)
-           ])  # [2, batch_size]
-           indices = indices.sub_(1).clamp_(0, self.n_bins_per_dim - 1)
-           bin_indices_dict[group_idx] = indices
+            # Vectorized binning with contiguous tensors
+            indices = torch.stack([
+                torch.bucketize(
+                    feature_groups[:, group_idx, dim].contiguous(),
+                    edges[dim].contiguous()
+                )
+                for dim in range(2)
+            ])  # [2, batch_size]
+            indices = indices.sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+            bin_indices_dict[group_idx] = indices
 
-       # Process all classes simultaneously
-       for group_idx in range(len(self.likelihood_params['feature_pairs'])):
-           bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
-           indices = bin_indices_dict[group_idx]  # [2, batch_size]
+        # Process all classes simultaneously
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)  # [n_classes, n_bins, n_bins]
+            indices = bin_indices_dict[group_idx]  # [2, batch_size]
 
-           # Get all weights at once
-           weights = torch.stack([
-               self.weight_updater.get_histogram_weights(c, group_idx)
-               for c in range(n_classes)
-           ])  # [n_classes, n_bins, n_bins]
+            # Get all weights at once
+            weights = torch.stack([
+                self.weight_updater.get_histogram_weights(c, group_idx)
+                for c in range(n_classes)
+            ]).to(self.device)  # [n_classes, n_bins, n_bins]
 
-           # Ensure weights are contiguous
-           weights = weights if weights.is_contiguous() else weights.contiguous()
+            # Ensure weights are contiguous
+            weights = weights if weights.is_contiguous() else weights.contiguous()
 
-           # Apply weights to probabilities
-           weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
 
-           # Gather probabilities for all samples and classes at once
-           probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
-           log_likelihoods += torch.log(probs.t() + epsilon)
+            # Gather probabilities for all samples and classes at once
+            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+            log_likelihoods += torch.log(probs.t() + epsilon)
 
-       # Compute posteriors efficiently
-       max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
-       posteriors = torch.exp(log_likelihoods - max_log_likelihood)
-       posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+        # Compute posteriors efficiently
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-       return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
+        return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
+
 #----------------------
 
     def set_feature_bounds(self, dataset):
@@ -3034,6 +3041,7 @@ class DBNN(GPUDBNN):
         """Optimized non-parametric likelihood computation with configurable bin sizes"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
         print("\nComputing pairwise likelihoods...")
+
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
         labels = torch.as_tensor(labels, device=self.device).contiguous()
@@ -3091,12 +3099,13 @@ class DBNN(GPUDBNN):
                 edges = torch.linspace(
                     dim_min - padding,
                     dim_max + padding,
-                    group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                    group_bin_sizes[dim] + 1,
                     device=self.device
                 ).contiguous()
                 bin_edges.append(edges)
                 DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
             pair_pbar.update(1)
+
             # Initialize bin counts with appropriate shape for variable bin sizes
             bin_shape = [n_classes] + [size for size in group_bin_sizes]
             bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
@@ -3135,6 +3144,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
             DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
         pair_pbar.close()
+
         return {
             'bin_edges': all_bin_edges,
             'bin_counts': all_bin_counts,
@@ -3142,7 +3152,6 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs,
             'classes': unique_classes.to(self.device)
         }
-
  #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
@@ -3547,14 +3556,15 @@ class DBNN(GPUDBNN):
 
     def predict(self, X: torch.Tensor, batch_size: int = 32):
         """Make predictions in batches using the best model weights"""
-        # Store current weights temporarily
         print("\nMaking predictions...")
         temp_W = self.current_W
         n_batches = (len(X) + batch_size - 1) // batch_size
         pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
+
         # Use best weights for prediction
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
 
+        # Ensure X is on correct device
         X = X.to(self.device)
         predictions = []
 
@@ -3675,26 +3685,22 @@ class DBNN(GPUDBNN):
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None):
         """Print a color-coded confusion matrix with class-wise accuracy."""
 
-        # Convert numeric labels to strings for consistent handling
+        # Convert numeric labels back to original categories if they aren't already
+        if isinstance(y_true[0], (int, np.integer)):
+            y_true = self.label_encoder.inverse_transform(y_true)
+        if isinstance(y_pred[0], (int, np.integer)):
+            y_pred = self.label_encoder.inverse_transform(y_pred)
+
+        # Convert to numpy arrays for consistency
         y_true = np.array([str(x) for x in y_true])
         y_pred = np.array([str(x) for x in y_pred])
 
-        # Get unique classes from both true and predicted labels
-        unique_true = np.unique(y_true)
-        unique_pred = np.unique(y_pred)
-
-        # Use provided class labels or get from label encoder
-        if class_labels is None:
-            class_labels = np.array([str(x) for x in self.label_encoder.classes_])
-        else:
-            class_labels = np.array([str(x) for x in class_labels])
-
-        # Ensure all classes are represented in confusion matrix
-        all_classes = np.unique(np.concatenate([unique_true, unique_pred, class_labels]))
-        n_classes = len(all_classes)
+        # Get unique classes in correct order from label encoder
+        class_labels = np.array([str(x) for x in self.label_encoder.classes_])
+        n_classes = len(class_labels)
 
         # Create class index mapping
-        class_to_idx = {cls: idx for idx, cls in enumerate(all_classes)}
+        class_to_idx = {cls: idx for idx, cls in enumerate(class_labels)}
 
         # Initialize confusion matrix with zeros
         cm = np.zeros((n_classes, n_classes), dtype=int)
@@ -3706,37 +3712,37 @@ class DBNN(GPUDBNN):
 
         # Calculate class-wise accuracy
         class_accuracy = {}
-        for i in range(n_classes):
+        for i, cls in enumerate(class_labels):
             if cm[i].sum() > 0:  # Avoid division by zero
-                class_accuracy[i] = cm[i, i] / cm[i].sum()
+                class_accuracy[cls] = cm[i, i] / cm[i].sum()
             else:
-                class_accuracy[i] = 0.0
+                class_accuracy[cls] = 0.0
 
         # Print header
         print(f"\n{Colors.BOLD}Confusion Matrix and Class-wise Accuracy:{Colors.ENDC}")
 
         # Print class labels header
         print(f"{'Actual/Predicted':<15}", end='')
-        for label in all_classes:
-            print(f"{label:<8}", end='')
+        for label in class_labels:
+            print(f"{label:<15}", end='')
         print("Accuracy")
-        print("-" * (15 + 8 * n_classes + 10))
+        print("-" * (15 + 15 * n_classes + 10))
 
         # Print matrix with colors
-        for i in range(n_classes):
+        for i, true_class in enumerate(class_labels):
             # Print actual class label
-            print(f"{Colors.BOLD}{all_classes[i]:<15}{Colors.ENDC}", end='')
+            print(f"{Colors.BOLD}{true_class:<15}{Colors.ENDC}", end='')
 
             # Print confusion matrix row
-            for j in range(n_classes):
+            for j, pred_class in enumerate(class_labels):
                 if i == j:
                     color = Colors.GREEN
                 else:
                     color = Colors.RED
-                print(f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
+                print(f"{color}{cm[i, j]:<15}{Colors.ENDC}", end='')
 
             # Print class accuracy
-            acc = class_accuracy[i]
+            acc = class_accuracy[true_class]
             color = Colors.GREEN if acc >= 0.9 else Colors.YELLOW if acc >= 0.7 else Colors.RED
             print(f"{color}{acc:>7.2%}{Colors.ENDC}")
 
@@ -3745,7 +3751,7 @@ class DBNN(GPUDBNN):
         total_samples = cm.sum()
         if total_samples > 0:
             overall_acc = total_correct / total_samples
-            print("-" * (15 + 8 * n_classes + 10))
+            print("-" * (15 + 15 * n_classes + 10))
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.RED
             print(f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
 
@@ -3757,8 +3763,8 @@ class DBNN(GPUDBNN):
                 annot=True,
                 fmt='d',
                 cmap='Blues',
-                xticklabels=all_classes,
-                yticklabels=all_classes
+                xticklabels=class_labels,
+                yticklabels=class_labels
             )
             plt.title('Confusion Matrix')
             plt.ylabel('True Label')
@@ -4508,8 +4514,8 @@ class DBNN(GPUDBNN):
             patience_counter = 0
             plateau_counter = 0
             min_improvement = 0.001
-            patience = 5 if self.in_adaptive_fit else 100
-            max_plateau = 5
+            patience = 25 if self.in_adaptive_fit else 100
+            max_plateau = 25
             prev_accuracy = 0.0
 
             # Main training loop
@@ -5125,22 +5131,40 @@ class DBNN(GPUDBNN):
 
 
     def _load_model_components(self):
-        """Load all model components"""
+        """Load all model components with device synchronization"""
         components_file = self._get_model_components_filename()
         if os.path.exists(components_file):
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
+
+                # Load main components
                 self.label_encoder.classes_ = components['target_classes']
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
-                self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
                 self.feature_columns = components.get('feature_columns')
                 self.categorical_encoders = components['categorical_encoders']
                 self.high_cardinality_columns = components.get('high_cardinality_columns', [])
-                print(f"Loaded model components from {components_file}")
+
+                # Load and synchronize likelihood parameters
+                self.likelihood_params = components['likelihood_params']
+                if self.likelihood_params is not None:
+                    for key in ['bin_edges', 'bin_counts', 'bin_probs']:
+                        if key in self.likelihood_params:
+                            self.likelihood_params[key] = [
+                                item.to(self.device) if isinstance(item, torch.Tensor) else item
+                                for item in self.likelihood_params[key]
+                            ]
+                    if 'classes' in self.likelihood_params:
+                        self.likelihood_params['classes'] = self.likelihood_params['classes'].to(self.device)
+                    if 'feature_pairs' in self.likelihood_params:
+                        self.likelihood_params['feature_pairs'] = self.likelihood_params['feature_pairs'].to(self.device)
+
+                # Load weight updater and bins
                 self.weight_updater = components.get('weight_updater')
                 self.n_bins_per_dim = components.get('n_bins_per_dim', 20)
+
+                print(f"Loaded model components from {components_file}")
                 return True
         return False
 
