@@ -2700,30 +2700,26 @@ class DBNN(GPUDBNN):
 
                 # Print training set confusion matrix
                 print(f"\n{Colors.BOLD}Training Set Performance - Round {round_num + 1}:{Colors.ENDC}")
-                X_train = self.X_tensor[train_indices]
-                y_train = self.y_tensor[train_indices]
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
-
-                y_train_labels = self.label_encoder.inverse_transform(y_train.cpu().numpy())
-                train_pred_labels = self.label_encoder.inverse_transform(train_predictions.numpy())
-                self.print_colored_confusion_matrix(y_train_labels, train_pred_labels)
+                train_accuracy = results.get('train_accuracy', 0.0)
+                if 'train_predictions' in results:
+                    # Use predictions from results instead of making new ones
+                    train_predictions = results['train_predictions']
+                    y_train = self.y_tensor[train_indices]
+                    y_train_labels = self.label_encoder.inverse_transform(y_train.cpu().numpy())
+                    train_pred_labels = self.label_encoder.inverse_transform(train_predictions.cpu().numpy())
+                    self.print_colored_confusion_matrix(y_train_labels, train_pred_labels)
 
                 # Print test set confusion matrix
                 if len(test_indices) > 0:
                     print(f"\n{Colors.BOLD}Test Set Performance - Round {round_num + 1}:{Colors.ENDC}")
-                    X_test = self.X_tensor[test_indices]
-                    y_test = self.y_tensor[test_indices]
-                    test_predictions = self.predict(X_test, batch_size=batch_size)
-                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
-
-                    y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
-                    test_pred_labels = self.label_encoder.inverse_transform(test_predictions.numpy())
-                    self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
-                    if test_accuracy > best_test_accuracy:
-                        best_test_accuracy = test_accuracy
-                        print(f"\n{Colors.GREEN}New best test accuracy: {test_accuracy:.4f}{Colors.ENDC}")
-
+                    test_accuracy = results.get('test_accuracy', 0.0)
+                    if 'test_predictions' in results:
+                        # Use predictions from results instead of making new ones
+                        test_predictions = results['test_predictions']
+                        y_test = self.y_tensor[test_indices]
+                        y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+                        test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
+                        self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
                 # Print round summary
                 print(f"\n{Colors.BOLD}Round {round_num + 1} Summary:{Colors.ENDC}")
                 print(f"Training Accuracy: {train_accuracy:.4f}")
@@ -2782,6 +2778,10 @@ class DBNN(GPUDBNN):
                 'test_indices': test_indices,
                 'train_accuracy': best_train_accuracy,
                 'test_accuracy': best_test_accuracy,
+
+                'train_predictions': train_predictions,
+                'test_predictions': test_predictions if 'test_predictions' in locals() else None,
+
                 'error_rates': last_results.get('error_rates', []) if last_results else [],
                 'confusion_matrix': last_results.get('confusion_matrix') if last_results else None,
                 'classification_report': last_results.get('classification_report', '') if last_results else '',
