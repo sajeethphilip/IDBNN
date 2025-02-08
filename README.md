@@ -84,10 +84,20 @@
     "marginal_margin_threshold": 0.1,  // Decrease to add more samples
     "min_divergence": 0.1
 }
+```
+```
+In the configuration, the margin thresholds for selecting samples are controlled by
+these parameters in the "active_learning" section:
 
+marginal_margin_threshold: This parameter controls the threshold for marginal
+failures (cases where the model is less confident but still incorrect).
+Lowe values (e.g., 0.1) will be more permissive and add more samples.
+strong_margin_threshold: This parameter controls the threshold for substantial
+failures (cases where the model is very confident but wrong).
+Lower values  (e.g., 0.3) will include more samples.
 ```
 
-The json file format for cdbnn
+### The json file format for cdbnn
 ```json
 {
   "dataset": {
