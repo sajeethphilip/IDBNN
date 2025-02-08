@@ -206,26 +206,133 @@ class DatasetConfig:
     """Enhanced dataset configuration handling with support for column names and URLs"""
 
     DEFAULT_CONFIG = {
-        "file_path": None,
-        "column_names": None,
-        "target_column": "target",
-        "separator": ",",
-        "has_header": True,
-        "likelihood_config": {
-            "feature_group_size": 2,
-            "max_combinations": 1000,
-            "bin_sizes": [20]
-        },
-        "active_learning": {
-            "tolerance": 1.0,
-            "cardinality_threshold_percentile": 95
-        },
-        "training_params": {
-            "Save_training_epochs": False,  # Save the epochs parameter
-            "training_save_path": "training_data"  # Save epochs path parameter
-        }
-    }
 
+            "file_path":  None,
+            "separator": ",",
+            "has_header": True,
+            "target_column": "target",  # Will be updated when reading CSV
+
+            "modelType": "Histogram",
+
+            "likelihood_config": {
+                "feature_group_size": 2,
+                "max_combinations": 1000,
+                "bin_sizes": [64]
+            },
+
+            "active_learning": {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.3,
+                "marginal_margin_threshold": 0.1,
+                "min_divergence": 0.1
+            },
+
+            "training_params": {
+                "trials": 100,
+                "epochs": 1000,
+                "learning_rate": 0.1,
+                "test_fraction": 0.2,
+                "random_seed": 42,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "n_bins_per_dim": 64,
+                "enable_adaptive": True,
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1,
+                "Save_training_epochs": False,
+                "training_save_path": None
+            },
+
+            "execution_flags": {
+                "train": True,
+                "train_only": False,
+                "predict": True,
+                "fresh_start": False,
+                "use_previous_model": True
+            }
+        }
+
+    @staticmethod
+    def load_config(dataset_name: str) -> Dict:
+        """Load and validate dataset configuration with enhanced error handling."""
+        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+
+        try:
+            if not os.path.exists(config_path):
+                print(f"Configuration file not found at {config_path}")
+                return DatasetConfig.create_default_config(dataset_name)
+
+            # Read and parse configuration
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_text = f.read()
+
+            # Clean config
+            clean_config = DatasetConfig._clean_config_text(config_text)
+
+            try:
+                config = json.loads(clean_config)
+            except json.JSONDecodeError:
+                return DatasetConfig._handle_invalid_config(dataset_name, config_path)
+
+            # Validate and enhance config
+            config = DatasetConfig._validate_config(config, dataset_name)
+
+            # Ensure all default sections exist with proper defaults
+            for key, default_value in DatasetConfig.DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = default_value
+                elif isinstance(default_value, dict):
+                    # For nested dictionaries, ensure all default keys exist
+                    for sub_key, sub_value in default_value.items():
+                        if sub_key not in config[key]:
+                            config[key][sub_key] = sub_value
+
+            # Save validated config
+            try:
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=4)
+            except Exception as e:
+                print(f"Warning: Could not save validated config: {str(e)}")
+
+            return config
+
+        except Exception as e:
+            print(f"Error loading config: {str(e)}")
+            traceback.print_exc()
+            return DatasetConfig.DEFAULT_CONFIG.copy()
+
+    @staticmethod
+    def create_default_config(dataset_name: str) -> Dict:
+        """Create default configuration with proper paths."""
+        config = DatasetConfig.DEFAULT_CONFIG.copy()
+
+        # Update dataset-specific paths
+        config['file_path'] = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        config['training_params']['training_save_path'] = os.path.join("training_data", dataset_name)
+
+        # Try to infer column names if CSV exists
+        csv_path = config['file_path']
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path, nrows=0)
+                config['column_names'] = df.columns.tolist()
+                config['target_column'] = df.columns[-1]
+            except Exception as e:
+                print(f"Warning: Could not read CSV headers: {str(e)}")
+                config['column_names'] = []
+
+        # Save new config
+        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return config
 
     @staticmethod
     def is_url(path: str) -> bool:
@@ -256,105 +363,156 @@ class DatasetConfig:
 
         return True
 
+
     @staticmethod
-    def create_default_config(dataset_name: str) -> Dict:
-        """Create a default configuration file with enhanced defaults"""
-        config = DatasetConfig.DEFAULT_CONFIG.copy()
-        config['file_path'] = f"{dataset_name}.csv"
+    def _clean_config_text(json_str: str) -> str:
+        """Remove comments from JSON string while preserving URLs."""
+        lines = []
+        in_multiline_comment = False
+        for line in json_str.split('\n'):
+            if '_comment' in line:
+                continue
+            if '/*' in line and '*/' in line:
+                line = line[:line.find('/*')] + line[line.find('*/') + 2:]
+            elif '/*' in line:
+                in_multiline_comment = True
+                line = line[:line.find('/*')]
+            elif '*/' in line:
+                in_multiline_comment = False
+                line = line[line.find('*/') + 2:]
+            elif in_multiline_comment:
+                continue
+            if '//' in line and not ('http://' in line or 'https://' in line):
+                line = line.split('//')[0]
+            stripped = line.strip()
+            if stripped and not stripped.startswith('_comment'):
+                lines.append(stripped)
+        return '\n'.join(lines)
 
-        # Try to infer column names from CSV if it exists
-        if os.path.exists(config['file_path']):
-            try:
-                with open(config['file_path'], 'r') as f:
-                    header = f.readline().strip()
-                    config['column_names'] = header.split(config['separator'])
-                    if config['column_names']:
-                        config['target_column'] = config['column_names'][-1]
-            except Exception as e:
-                print(f"Warning: Could not read header from {config['file_path']}: {str(e)}")
-        config[ "separator"]= ","
-        config["has_header"]= "true"
-        config["target_column"]="target"
-        # Add model type configuration
-        config['modelType'] = "Histogram"  # Default to Histogram model
-
-        #Add likelihood parameter estimation config
-        config[    "likelihood_config"]={
-        "feature_group_size": 2,
-        "max_combinations": 1000,
-        "bin_sizes": [20]
-        }
-
-        #Add active Learning Parameters
-        config[    "active_learning"]={
-        "tolerance": 1.0,
-        "cardinality_threshold_percentile": 95,
-        "strong_margin_threshold": 0.3,
-        "marginal_margin_threshold": 0.1,
-        "min_divergence": 0.1
-        }
-        # Add training parameters
-        config['training_params'] = {
-            "trials": 100,
-             "minimum_training_accuracy": 0.95,
-            "cardinality_threshold": 0.9,
-            "cardinality_tolerance": 4,
-            "learning_rate": 0.1,
-            "random_seed": 42,
-            "epochs": 1000,
-            "test_fraction": 0.2,
-            "enable_adaptive": "true",
-            "compute_device": "auto",
-            "n_bins_per_dim": 20,
-            "enable_adaptive": "true",
-            "invert_DBNN": "false",
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.1,
-            "Save_training_epochs":" false",
-            "training_save_path": "training_data"
-        }
-        # Add config execution flags
-        config["execution_flags"]= {
-        "train":" true",
-        "train_only": "false",
-        "predict": "true",
-        "fresh_start": "false",
-        "use_previous_model": "true"
-        }
-
-
-        # Save the configuration
-        config_path = f"data/{dataset_name}/{dataset_name}.conf"
-        try:
+    @staticmethod
+    def _handle_invalid_config(dataset_name: str, config_path: str) -> Dict:
+        """Handle invalid JSON configuration by inferring from CSV."""
+        print(f"Invalid config, attempting to infer from CSV...")
+        csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path, nrows=0)
+            config = DatasetConfig._create_config_from_csv(df, csv_path)
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
-            print(f"Created default configuration file: {config_path}")
-        except Exception as e:
-            print(f"Warning: Could not save configuration file: {str(e)}")
+            print(f"Created new config from CSV")
+            return config
+        return DatasetConfig.create_default_config(dataset_name)
+
+    @staticmethod
+    def _validate_config(config: Dict, dataset_name: str) -> Dict:
+        """Validate and enhance configuration with required sections."""
+        # Ensure required sections exist
+        if 'training_params' not in config:
+            config['training_params'] = {}
+        if 'execution_flags' not in config:
+            config['execution_flags'] = {}
+
+        # Validate and handle file path
+        config = DatasetConfig._validate_file_path(config, dataset_name)
+
+        # Validate column names and target
+        config = DatasetConfig._validate_columns(config)
 
         return config
 
-    def _ensure_complete_config(self, dataset_name: str) -> Dict:
-        """
-        Ensure configuration file is complete with all options and default values.
-        Creates or updates config file in data/<dataset_name>/ folder.
-        """
-        # Define default configuration
-        default_config = {
-            "file_path": f"data/{dataset_name}/{dataset_name}.csv",
+    @staticmethod
+    def _validate_file_path(config: Dict, dataset_name: str) -> Dict:
+        """Validate and handle file path in configuration."""
+        if config.get('file_path'):
+            if not os.path.exists(config['file_path']):
+                alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+                if os.path.exists(alt_path):
+                    config['file_path'] = alt_path
+
+        if not config.get('file_path'):
+            default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+            if os.path.exists(default_path):
+                config['file_path'] = default_path
+
+        return config
+
+    @staticmethod
+    def _validate_columns(config: Dict) -> Dict:
+        """Validate column names and target column in configuration."""
+        if config.get('file_path') and not config.get('column_names'):
+            try:
+                df = pd.read_csv(config['file_path'], nrows=0)
+                config['column_names'] = df.columns.tolist()
+                if not config.get('target_column'):
+                    config['target_column'] = df.columns[-1]
+            except Exception as e:
+                print(f"Warning: Could not infer columns: {str(e)}")
+
+        # Ensure target column exists in column names
+        if 'target_column' in config and 'column_names' in config:
+            if config['target_column'] not in config['column_names']:
+                try:
+                    df = pd.read_csv(config['file_path'], nrows=0)
+                    if config['target_column'] in df.columns:
+                        config['column_names'] = df.columns.tolist()
+                    else:
+                        config['target_column'] = df.columns[-1]
+                        config['column_names'] = df.columns.tolist()
+                except Exception as e:
+                    print(f"Warning: Error validating target column: {str(e)}")
+
+        return config
+
+    @staticmethod
+    def _validate_config(config: Dict, dataset_name: str) -> Dict:
+        """Validate and enhance configuration with required sections."""
+        # Ensure required sections exist
+        if 'training_params' not in config:
+            config['training_params'] = {}
+        if 'execution_flags' not in config:
+            config['execution_flags'] = {}
+
+        # Validate and handle file path
+        config = DatasetConfig._validate_file_path(config, dataset_name)
+
+        # Validate column names and target
+        config = DatasetConfig._validate_columns(config)
+
+        # Verify inverse DBNN settings if enabled
+        if config.get('training_params', {}).get('invert_DBNN'):
+            tp = config['training_params']
+            print(f"invert_DBNN: {tp.get('invert_DBNN')}")
+            print(f"reconstruction_weight: {tp.get('reconstruction_weight')}")
+            print(f"feedback_strength: {tp.get('feedback_strength')}")
+            print(f"inverse_learning_rate: {tp.get('inverse_learning_rate')}")
+
+        return config
+
+    @staticmethod
+    def _create_config_from_csv(df: pd.DataFrame, csv_path: str) -> Dict:
+        """Create comprehensive configuration from CSV file with all required parameters."""
+        dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
+        columns = df.columns.tolist()
+
+        return {
+            # Basic dataset configuration
+            "file_path": csv_path,
+            "column_names": columns,
             "separator": ",",
             "has_header": True,
-            "target_column": "target",  # Will be updated when reading CSV
+            "target_column": columns[-1],
 
+            # Model type and core settings
             "modelType": "Histogram",
 
+            # Feature processing configuration
             "likelihood_config": {
                 "feature_group_size": 2,
                 "max_combinations": 1000,
                 "bin_sizes": [20]
             },
 
+            # Active learning parameters
             "active_learning": {
                 "tolerance": 1.0,
                 "cardinality_threshold_percentile": 95,
@@ -363,25 +521,36 @@ class DatasetConfig:
                 "min_divergence": 0.1
             },
 
+            # Training parameters
             "training_params": {
+                # Core training parameters
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.1,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
+
+                # Cardinality handling
                 "cardinality_threshold": 0.9,
                 "cardinality_tolerance": 4,
+
+                # Model specific parameters
                 "n_bins_per_dim": 20,
                 "enable_adaptive": True,
+
+                # Inverse DBNN parameters
                 "invert_DBNN": False,
                 "reconstruction_weight": 0.5,
                 "feedback_strength": 0.3,
                 "inverse_learning_rate": 0.1,
+
+                # Training data management
                 "Save_training_epochs": False,
-                "training_save_path": f"training_data/{dataset_name}"
+                "training_save_path": os.path.join("training_data", dataset_name)
             },
 
+            # Execution flags
             "execution_flags": {
                 "train": True,
                 "train_only": False,
@@ -391,218 +560,7 @@ class DatasetConfig:
             }
         }
 
-        # Create dataset folder if it doesn't exist
-        dataset_folder = os.path.join('data', dataset_name)
-        os.makedirs(dataset_folder, exist_ok=True)
 
-        config_path = os.path.join(dataset_folder, f"{dataset_name}.conf")
-
-        # Load existing configuration if it exists
-        existing_config = {}
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    existing_config = json.load(f)
-                print(f"Loaded existing configuration from {config_path}")
-            except Exception as e:
-                print(f"Warning: Error loading existing config: {str(e)}")
-
-        # Try to read CSV to get column names if not in existing config
-        csv_path = os.path.join(dataset_folder, f"{dataset_name}.csv")
-        if os.path.exists(csv_path) and "column_names" not in existing_config:
-            try:
-                df = pd.read_csv(csv_path, nrows=0)
-                default_config["column_names"] = df.columns.tolist()
-                default_config["target_column"] = df.columns[-1]
-            except Exception as e:
-                print(f"Warning: Error reading CSV headers: {str(e)}")
-                default_config["column_names"] = []
-
-        # Deep merge existing config with default config
-        def deep_merge(default: Dict, existing: Dict) -> Dict:
-            result = default.copy()
-            for key, value in existing.items():
-                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = deep_merge(result[key], value)
-                else:
-                    result[key] = value
-            return result
-
-        merged_config = deep_merge(default_config, existing_config)
-
-        # Save updated configuration
-        try:
-            with open(config_path, 'w') as f:
-                json.dump(merged_config, f, indent=4)
-            print(f"Saved complete configuration to {config_path}")
-
-            # Also save a documented version with comments
-            documented_path = os.path.join(dataset_folder, f"{dataset_name}_documented.conf")
-            with open(documented_path, 'w') as f:
-                f.write("{\n")
-                f.write("    // Basic dataset configuration\n")
-                f.write(f'    "file_path": "{merged_config["file_path"]}",  // Path to the dataset file\n')
-                f.write('    "column_names": [                    // List of column names in order\n')
-                for col in merged_config["column_names"]:
-                    f.write(f'        "{col}",\n')
-                f.write('    ],\n')
-                # ... Continue with all parameters and their comments
-                f.write("}\n")
-            print(f"Saved documented configuration to {documented_path}")
-
-        except Exception as e:
-            print(f"Warning: Error saving configuration: {str(e)}")
-            return merged_config
-
-        return merged_config
-
-    @staticmethod
-    def load_config(dataset_name: str) -> Dict:
-        """Load and validate dataset configuration with enhanced error handling."""
-        config_path = f"{dataset_name}.conf"
-        # print(f"\nDEBUG: Attempting to load config from: {config_path}")
-
-        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-        # print(f"DEBUG:  Trying alternate path: {config_path}")
-
-        try:
-            if not os.path.exists(config_path):
-                print(f"Configuration file not found at {config_path}")
-                return DatasetConfig.create_default_config(dataset_name)
-
-            # Read and parse configuration
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_text = f.read()
-                #print("\nDEBUGRaw config loaded successfully")
-            # Remove comments from config
-            def remove_comments(json_str):
-                lines = []
-                in_multiline_comment = False
-                for line in json_str.split('\n'):
-                    if '_comment' in line:
-                        continue
-                    if '/*' in line and '*/' in line:
-                        line = line[:line.find('/*')] + line[line.find('*/') + 2:]
-                    elif '/*' in line:
-                        in_multiline_comment = True
-                        line = line[:line.find('/*')]
-                    elif '*/' in line:
-                        in_multiline_comment = False
-                        line = line[line.find('*/') + 2:]
-                    elif in_multiline_comment:
-                        continue
-                    if '//' in line and not ('http://' in line or 'https://' in line):
-                        line = line.split('//')[0]
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith('_comment'):
-                        lines.append(stripped)
-                return '\n'.join(lines)
-
-            clean_config = remove_comments(config_text)
-            try:
-                config = json.loads(clean_config)
-               # print("DEBUG: Config parsed successfully")
-            except json.JSONDecodeError:
-                print(f"Invalid config, attempting to infer from CSV...")
-                csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if os.path.exists(csv_path):
-                    df = pd.read_csv(csv_path, nrows=0)
-                    columns = df.columns.tolist()
-                    config = {
-                        'file_path': csv_path,
-                        'column_names': columns,
-                        'target_column': columns[-1],  # Default to last column as target
-                        'separator': ',',
-                        'has_header': True,
-                        'modelType': 'Histogram',
-                        'likelihood_config': {
-                            'feature_group_size': 2,
-                            'max_combinations': 1000,
-                            'bin_sizes': [20]
-                        },
-                        'active_learning': {
-                            'tolerance': 1.0,
-                            'cardinality_threshold_percentile': 95
-                        },
-                        'training_params': DatasetConfig.DEFAULT_CONFIG['training_params']
-                    }
-                    with open(config_path, 'w') as f:
-                        json.dump(config, f, indent=4)
-                    print(f"Created new config from CSV")
-                else:
-                    return DatasetConfig.create_default_config(dataset_name)
-
-            # Ensure required sections exist
-            if 'training_params' not in config:
-                config['training_params'] = {}
-            if 'execution_flags' not in config:
-                config['execution_flags'] = {}
-
-            # Validate and handle file path
-            if config.get('file_path'):
-                if not os.path.exists(config['file_path']):
-                    alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                    if os.path.exists(alt_path):
-                        config['file_path'] = alt_path
-                        # print(f"DEBUG:  Updated file path to {alt_path}")
-
-            if not config.get('file_path'):
-                default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if os.path.exists(default_path):
-                    config['file_path'] = default_path
-                    # print(f"DEBUG:  Set default file path to {default_path}")
-
-            # Validate column names and target
-            if not config.get('column_names'):
-                try:
-                    df = pd.read_csv(config['file_path'], nrows=0)
-                    config['column_names'] = df.columns.tolist()
-                    if not config.get('target_column'):
-                        config['target_column'] = df.columns[-1]
-                    # print(f"DEBUG:  Inferred columns: {config['column_names']}")
-                    # print(f"DEBUG:  Target column set to: {config['target_column']}")
-                except Exception as e:
-                    print(f"Warning: Could not infer columns: {str(e)}")
-
-            # Ensure target column exists in column names
-            if 'target_column' in config and 'column_names' in config:
-                if config['target_column'] not in config['column_names']:
-                    # Try to find the target column in the actual CSV
-                    try:
-                        df = pd.read_csv(config['file_path'], nrows=0)
-                        if config['target_column'] in df.columns:
-                            config['column_names'] = df.columns.tolist()
-                        else:
-                            # Default to last column
-                            config['target_column'] = df.columns[-1]
-                            config['column_names'] = df.columns.tolist()
-                        # print(f"DEBUG:  Updated target column to: {config['target_column']}")
-                    except Exception as e:
-                        print(f"Warning: Error validating target column: {str(e)}")
-
-            # Verify inverse DBNN settings
-            if config.get('training_params', {}).get('invert_DBNN'):
-                #print("\nDEBUGFound inverse DBNN configuration:")
-                tp = config['training_params']
-                print(f"invert_DBNN: {tp.get('invert_DBNN')}")
-                print(f"reconstruction_weight: {tp.get('reconstruction_weight')}")
-                print(f"feedback_strength: {tp.get('feedback_strength')}")
-                print(f"inverse_learning_rate: {tp.get('inverse_learning_rate')}")
-
-            # Save validated config
-            try:
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=4)
-                # print(f"DEBUG:  Saved validated config to {config_path}")
-            except Exception as e:
-                print(f"Warning: Could not save validated config: {str(e)}")
-
-            return config
-
-        except Exception as e:
-            print(f"Error loading config: {str(e)}")
-            traceback.print_exc()
-            return None
     @staticmethod
     def download_dataset(url: str, local_path: str) -> bool:
         """Download dataset from URL to local path with proper error handling"""
@@ -1653,6 +1611,8 @@ class DBNNConfig:
 
 class DBNN(GPUDBNN):
     def __init__(self, dataset_name: str, config: Optional[Union[GlobalConfig, Dict]] = None):
+        # Store reference to InvertibleDBNN class
+        self.InvertibleDBNNClass = InvertibleDBNN
 
         self.dataset_name = dataset_name
         if isinstance(config, dict):
@@ -1661,32 +1621,50 @@ class DBNN(GPUDBNN):
             self.config = config
         else:
             self.config = GlobalConfig()
-        # Store inversion parameters explicitly - handle both dict and GlobalConfig
-        if isinstance(self.config, dict):
-            training_params = self.config.get('training_params', {})
-            self.invert_DBNN = training_params.get('invert_DBNN', False)
-            self.reconstruction_weight = training_params.get('reconstruction_weight', 0.5)
-            self.feedback_strength = training_params.get('feedback_strength', 0.3)
-            self.inverse_learning_rate = training_params.get('inverse_learning_rate', 0.1)
-        else:
-            # Access GlobalConfig attributes directly
-            self.invert_DBNN = getattr(self.config, 'invert_DBNN', False)
-            self.reconstruction_weight = getattr(self.config, 'reconstruction_weight', 0.5)
-            self.feedback_strength = getattr(self.config, 'feedback_strength', 0.3)
-            self.inverse_learning_rate = getattr(self.config, 'inverse_learning_rate', 0.1)
-        # First load the dataset configuration
-        self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
+        # Then load the dataset configuration
+        self.data_config = DatasetConfig.load_config(dataset_name)
 
+         # Get config values for super initialization
+        if isinstance(config, dict):
+            learning_rate = config.get('training_params', {}).get('learning_rate', 0.1)
+            max_epochs = config.get('training_params', {}).get('epochs', 1000)
+            test_size = config.get('training_params', {}).get('test_fraction', 0.2)
+            random_state = config.get('training_params', {}).get('random_seed', 42)
+            fresh = config.get('execution_flags', {}).get('fresh_start', False)
+            use_previous_model = config.get('execution_flags', {}).get('use_previous_model', True)
+            model_type = config.get('modelType', "Histogram")
+            n_bins_per_dim = config.get('training_params', {}).get('n_bins_per_dim', 20)
+        elif isinstance(config, GlobalConfig):
+            learning_rate = config.learning_rate
+            max_epochs = config.epochs
+            test_size = config.test_fraction
+            random_state = config.random_seed
+            fresh = config.fresh_start
+            use_previous_model = config.use_previous_model
+            model_type = config.model_type
+            n_bins_per_dim = config.n_bins_per_dim
+        else:
+            # Default values if no config provided
+            learning_rate = 0.1
+            max_epochs = 1000
+            test_size = 0.2
+            random_state = 42
+            fresh = False
+            use_previous_model = True
+            model_type = "Histogram"
+            n_bins_per_dim = 20
+
+        # Call super with actual parameters
         super().__init__(
             dataset_name=dataset_name,
-            learning_rate=self._get_config_value('learning_rate', 0.1),
-            max_epochs=self._get_config_value('epochs', 1000),
-            test_size=self._get_config_value('test_fraction', 0.2),
-            random_state=self._get_config_value('random_seed', 42),
-            fresh=self._get_config_value('fresh_start', False),
-            use_previous_model=self._get_config_value('use_previous_model', True),
-            model_type=self._get_config_value('modelType', "Histogram"),
-            n_bins_per_dim=self._get_config_value('n_bins_per_dim', 20)
+            learning_rate=self.config.learning_rate,
+            max_epochs=self.config.epochs,
+            test_size=self.config.test_fraction,
+            random_state=self.config.random_seed,
+            fresh=self.config.fresh_start,
+            use_previous_model=self.config.use_previous_model,
+            model_type=self.config.model_type,
+            n_bins_per_dim=self.config.n_bins_per_dim
         )
 
 
@@ -2077,7 +2055,7 @@ class DBNN(GPUDBNN):
                 df = pd.read_csv(data, **read_params)
 
                 # Filter features if specified in config
-                if '#' in str(self.data_config.get('column_names')):
+                if   '#' or "/" or "//" in str(self.data_config.get('column_names')):
                     df = _filter_features_from_config(df, self.data_config)
 
                 return df
@@ -4668,15 +4646,20 @@ class DBNN(GPUDBNN):
                 if invert_DBNN:
                     print("\nPhase 3: Inverse model processing...")
                     test_probs = self._get_test_probabilities(X_test)
-
                     if not hasattr(self, 'inverse_model'):
-                        from invertible_dbnn import InvertibleDBNN
-                        self.inverse_model = InvertibleDBNN(
+                        # Use the local InvertibleDBNN class that's defined in our code
+                        reconstruction_weight = self._get_config_param('reconstruction_weight', 0.5)
+                        feedback_strength = self._get_config_param('feedback_strength', 0.3)
+
+                        # Create instance from our local class
+                        self.inverse_model = self.InvertibleDBNNClass(
                             forward_model=self,
                             feature_dims=X_test.shape[1],
                             reconstruction_weight=reconstruction_weight,
                             feedback_strength=feedback_strength
                         )
+
+
 
                     if hasattr(self, 'inverse_model'):
                         reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
@@ -6040,20 +6023,43 @@ class DatasetProcessor:
                            'classification_report': getattr(model, 'classification_report', '')
                        }
 
-               if invert_DBNN and hasattr(model, 'inverse_model'):
-                   try:
-                      ## print("DEBUG: Processing inverse model...")
-                       X_test = model.data.drop(columns=[model.target_column])
-                       test_probs = model._get_test_probabilities(X_test)
-                       reconstruction_features = model.inverse_model.reconstruct_features(test_probs)
-                       results = model.update_results_with_reconstruction(
-                           results, X_test, reconstruction_features,
-                           test_probs, model.y_tensor,
-                           f"{dataset_name}_predictions.csv"
-                       )
-                   except Exception as e:
-                       print(f"Error in inverse model processing: {str(e)}")
-                       traceback.print_exc()
+               if invert_DBNN:
+
+                    reconstruction_weight = config_dict.get('training_params', {}).get('reconstruction_weight')
+                    feedback_strength = config_dict.get('training_params', {}).get('feedback_strength')
+                    inverse_learning_rate = config_dict.get('training_params', {}).get('inverse_learning_rate')
+
+                    # Verify all required parameters are present
+                    if any(param is None for param in [reconstruction_weight, feedback_strength, inverse_learning_rate]):
+                        print("Warning: Inverse DBNN enabled but missing required parameters. Disabling inverse DBNN.")
+                        invert_DBNN = False
+                    else:
+                        # Import and initialize inverse DBNN
+                        try:
+                            from invertible_dbnn import InvertibleDBNN
+                            print(f"Inverse DBNN enabled with parameters:")
+                            print(f"- Reconstruction weight: {reconstruction_weight}")
+                            print(f"- Feedback strength: {feedback_strength}")
+                            print(f"- Inverse learning rate: {inverse_learning_rate}")
+                        except ImportError:
+                            print("Warning: Inverse DBNN module not found. Disabling inverse DBNN.")
+                            invert_DBNN = False
+
+                    if hasattr(model, 'inverse_model'):
+                       try:
+                          ## print("DEBUG: Processing inverse model...")
+                           X_test = model.data.drop(columns=[model.target_column])
+                           test_probs = model._get_test_probabilities(X_test)
+                           reconstruction_features = model.inverse_model.reconstruct_features(test_probs)
+                           results = model.update_results_with_reconstruction(
+                               results, X_test, reconstruction_features,
+                               test_probs, model.y_tensor,
+                               f"{dataset_name}_predictions.csv"
+                           )
+                       except Exception as e:
+                           print(f"Error in inverse model processing: {str(e)}")
+                           traceback.print_exc()
+
 
                return model, results
 
@@ -6253,56 +6259,46 @@ class DatasetProcessor:
            merged['execution_flags'] = adaptive_config['execution_flags']
        return merged
 
-    def _create_default_config(self, folder_path: str, dataset_name: str) -> Dict:
-        csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
-        df = pd.read_csv(csv_path, nrows=0)
+    @staticmethod
+    def clean_config_text(config_text: str) -> str:
+        """Clean configuration text by removing all types of comments."""
+        lines = []
+        in_multiline_comment = False
 
-        config = {
-            "file_path": csv_path,
-            "column_names": df.columns.tolist(),
-            "separator": ",",
-            "has_header": True,
-            "target_column": df.columns[-1],
-            "likelihood_config": {
-                "feature_group_size": 2,
-                "max_combinations": 1000,
-                "bin_sizes": [20]
-            },
-            "active_learning": {
-                "tolerance": 1.0,
-                "cardinality_threshold_percentile": 95,
-                "strong_margin_threshold": 0.3,
-                "marginal_margin_threshold": 0.1,
-                "min_divergence": 0.1
-            },
-            "training_params": {
-                "trials": 100,
-                "cardinality_threshold": 0.9,
-                "cardinality_tolerance": 4,
-                "learning_rate": 0.1,
-                "random_seed": 42,
-                "epochs": 1000,
-                "test_fraction": 0.2,
-                "enable_adaptive": True,
-                "Save_training_epochs": True,
-                "training_save_path": f"training_data/{dataset_name}",
-                "modelType": "Histogram",
-                "minimum_training_accuracy": 0.95  # Added default value
-            },
-            "execution_flags": {
-                "train": True,
-                "train_only": False,
-                "predict": True,
-                "fresh_start": False,
-                "use_previous_model": True
-            }
-        }
+        for line in config_text.split('\n'):
+            # Skip _comment lines and empty lines
+            if '_comment' in line or not line.strip():
+                continue
 
-        config_path = os.path.join(folder_path, f"{dataset_name}.conf")
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
+            # Handle inline /* */ comments
+            if '/*' in line and '*/' in line:
+                line = line[:line.find('/*')] + line[line.find('*/') + 2:]
 
-        return config
+            # Handle multiline comment start
+            elif '/*' in line:
+                in_multiline_comment = True
+                line = line[:line.find('/*')]
+
+            # Handle multiline comment end
+            elif '*/' in line:
+                in_multiline_comment = False
+                line = line[line.find('*/') + 2:]
+
+            # Skip lines in multiline comment
+            elif in_multiline_comment:
+                continue
+
+            # Handle single line comments while preserving URLs
+            if '//' in line and not ('http://' in line or 'https://' in line):
+                line = line.split('//')[0]
+
+            stripped = line.strip()
+            # Only add non-empty lines that aren't comment markers
+            if stripped and not stripped.startswith('//') and not stripped.startswith('/*'):
+                lines.append(stripped)
+
+        return '\n'.join(lines)
+
 
     def _validate_and_update_config(self, config: Dict, folder_path: str) -> Dict:
         required_fields = ['file_path', 'column_names', 'target_column']
