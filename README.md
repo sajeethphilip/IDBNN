@@ -73,7 +73,20 @@
     }
 }
 
+
 ```
+## NOTE:
+```json
+"active_learning": {
+    "tolerance": 1.0,
+    "cardinality_threshold_percentile": 95,
+    "strong_margin_threshold": 0.3,    // Decrease to add more samples
+    "marginal_margin_threshold": 0.1,  // Decrease to add more samples
+    "min_divergence": 0.1
+}
+
+```
+
 The json file format for cdbnn
 ```json
 {
