@@ -2705,14 +2705,6 @@ class DBNN(GPUDBNN):
                     improved = True
                     print(f"Improved training accuracy to {train_accuracy:.4f}")
 
-                if not improved:
-                    adaptive_patience_counter += 1
-                    print(f"No significant improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                    if adaptive_patience_counter >= 5:
-                        print(f"No improvement after 5 rounds of adding samples.")
-                        print(f"Best training accuracy: {best_train_accuracy:.4f}")
-                        print(f"Best test accuracy: {best_test_accuracy:.4f}")
-                        break
 
                 # Check if training reached perfection
                 min_training_accuracy = self._get_config_param('minimum_training_accuracy', 0.95)
