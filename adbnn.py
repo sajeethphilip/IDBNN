@@ -2698,12 +2698,39 @@ class DBNN(GPUDBNN):
                     print("Training failed - stopping adaptive process")
                     break
 
-                # Track accuracies
-                train_accuracy = results.get('train_accuracy', 0.0)
-                test_accuracy = results.get('test_accuracy', 0.0)
+                # Print training set confusion matrix
+                print(f"\n{Colors.BOLD}Training Set Performance - Round {round_num + 1}:{Colors.ENDC}")
+                X_train = self.X_tensor[train_indices]
+                y_train = self.y_tensor[train_indices]
+                train_predictions = self.predict(X_train, batch_size=batch_size)
+                train_accuracy = (train_predictions == y_train.cpu()).float().mean().item()
 
-                if test_accuracy > best_test_accuracy:
-                    best_test_accuracy = test_accuracy
+                y_train_labels = self.label_encoder.inverse_transform(y_train.cpu().numpy())
+                train_pred_labels = self.label_encoder.inverse_transform(train_predictions.numpy())
+                self.print_colored_confusion_matrix(y_train_labels, train_pred_labels)
+
+                # Print test set confusion matrix
+                if len(test_indices) > 0:
+                    print(f"\n{Colors.BOLD}Test Set Performance - Round {round_num + 1}:{Colors.ENDC}")
+                    X_test = self.X_tensor[test_indices]
+                    y_test = self.y_tensor[test_indices]
+                    test_predictions = self.predict(X_test, batch_size=batch_size)
+                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
+
+                    y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+                    test_pred_labels = self.label_encoder.inverse_transform(test_predictions.numpy())
+                    self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
+                    if test_accuracy > best_test_accuracy:
+                        best_test_accuracy = test_accuracy
+                        print(f"\n{Colors.GREEN}New best test accuracy: {test_accuracy:.4f}{Colors.ENDC}")
+
+                # Print round summary
+                print(f"\n{Colors.BOLD}Round {round_num + 1} Summary:{Colors.ENDC}")
+                print(f"Training Accuracy: {train_accuracy:.4f}")
+                if len(test_indices) > 0:
+                    print(f"Test Accuracy: {test_accuracy:.4f}")
+                print(f"Best Test Accuracy: {best_test_accuracy:.4f}")
+
 
                 # Check improvement
                 improved = False
@@ -2741,6 +2768,13 @@ class DBNN(GPUDBNN):
                 # Save current split
                 self.save_last_split(train_indices, test_indices)
                 last_results = results
+
+            # Print final summary
+            print(f"\n{Colors.BOLD}Training Complete{Colors.ENDC}")
+            print(f"Final training set size: {len(train_indices)}")
+            print(f"Final test set size: {len(test_indices)}")
+            print(f"Best test accuracy achieved: {best_test_accuracy:.4f}")
+
 
             # Prepare final results
             final_results = {
