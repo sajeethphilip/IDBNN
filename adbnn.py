@@ -217,7 +217,7 @@ class DatasetConfig:
             "likelihood_config": {
                 "feature_group_size": 2,
                 "max_combinations": 1000,
-                "bin_sizes": [64]
+                "bin_sizes": [20]
             },
 
             "active_learning": {
@@ -237,9 +237,9 @@ class DatasetConfig:
                 "minimum_training_accuracy": 0.95,
                 "cardinality_threshold": 0.9,
                 "cardinality_tolerance": 4,
-                "n_bins_per_dim": 64,
+                "n_bins_per_dim": 20,
                 "enable_adaptive": True,
-                "invert_DBNN": True,
+                "invert_DBNN": False,
                 "reconstruction_weight": 0.5,
                 "feedback_strength": 0.3,
                 "inverse_learning_rate": 0.1,
@@ -334,6 +334,7 @@ class DatasetConfig:
 
         return config
 
+
     @staticmethod
     def is_url(path: str) -> bool:
         """Check if the given path is a URL"""
@@ -362,6 +363,7 @@ class DatasetConfig:
                 return False
 
         return True
+
 
 
     @staticmethod
@@ -1184,134 +1186,52 @@ class GPUDBNN:
         self._load_best_weights()
         self._load_categorical_encoders()
 
-#----------------------
-    def _save_predictions_with_reconstruction(self,
-                                            X_test_df: pd.DataFrame,
+    def _save_predictions_with_reconstruction(self, X_test_df: pd.DataFrame,
                                             predictions: torch.Tensor,
                                             save_path: str,
                                             true_labels: pd.Series = None,
                                             reconstructed_features: torch.Tensor = None):
-        """Save predictions with reconstruction analysis.
+        """Save predictions with reconstruction analysis."""
+        try:
+            # Convert all features to numeric, handling categorical columns
+            numeric_df = X_test_df.apply(pd.to_numeric, errors='coerce')
 
-        Args:
-            X_test_df: DataFrame containing test features
-            predictions: Predicted class labels tensor
-            save_path: Path to save results
-            true_labels: True class labels (optional)
-            reconstructed_features: Reconstructed features tensor (optional)
-        """
-        # Create the base directory for the dataset
-        dataset_name = os.path.splitext(os.path.basename(save_path))[0]
-        reconstruction_dir = os.path.join('data', dataset_name, 'reconstruction')
-
-        # Ensure the reconstruction directory exists
-        os.makedirs(reconstruction_dir, exist_ok=True)
-
-        # Create the result DataFrame
-        result_df = X_test_df.copy()
-
-        # Convert predictions to labels
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
-        result_df['predicted_class'] = pred_labels
-
-        if true_labels is not None:
-            result_df['true_class'] = true_labels
-
-        # Add reconstructed features and analysis
-        if reconstructed_features is not None:
-            # Convert to numpy for processing
-            X_test_np = X_test_df.values
+            # Get numeric features only
+            feature_cols = [col for col in numeric_df.columns
+                           if not col.startswith(('prob_', 'predicted_', 'true_'))]
+            X_test_np = numeric_df[feature_cols].values
             recon_features = reconstructed_features.cpu().numpy()
 
-            # Add reconstructed features
-            for i in range(recon_features.shape[1]):
-                result_df[f'reconstructed_feature_{i}'] = recon_features[:, i]
+            # Create results DataFrame
+            results_df = X_test_df.copy()
+            pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+            results_df['predicted_class'] = pred_labels
 
-            # Add reconstruction error
-            feature_errors = np.mean((X_test_np - recon_features) ** 2, axis=1)
-            result_df['reconstruction_error'] = feature_errors
+            if true_labels is not None:
+                results_df['true_class'] = true_labels
 
-            # Save to reconstruction directory
-            recon_path = os.path.join(reconstruction_dir, f'{dataset_name}_reconstruction.csv')
-            result_df.to_csv(recon_path, index=False)
+            # Add reconstructed features and error analysis
+            if reconstructed_features is not None:
+                # Add reconstructed features
+                for i in range(recon_features.shape[1]):
+                    results_df[f'reconstructed_feature_{i}'] = recon_features[:, i]
 
-            # Generate reconstruction report
-            self._generate_reconstruction_report(
-                original_features=X_test_np,
-                reconstructed_features=recon_features,
-                true_labels=true_labels,
-                predictions=pred_labels,
-                save_path=os.path.join(reconstruction_dir, f'{dataset_name}_reconstruction_report')
-            )
+                # Calculate reconstruction error on numeric features only
+                feature_errors = np.mean((X_test_np - recon_features) ** 2, axis=1)
+                results_df['reconstruction_error'] = feature_errors
 
-            print(f"Reconstruction data saved to {recon_path}")
+            # Save to CSV
+            base_path = os.path.splitext(save_path)[0]
+            results_df.to_csv(f"{base_path}_predictions.csv", index=False)
+            print(f"\nSaved predictions to {base_path}_predictions.csv")
 
-        # Save original predictions file
-        base_path = os.path.splitext(save_path)[0]
-        result_df.to_csv(f"{base_path}_predictions.csv", index=False)
+            return results_df
 
+        except Exception as e:
+            print(f"Error in _save_predictions_with_reconstruction: {str(e)}")
+            traceback.print_exc()
+            return None
 
-    def _save_predictions_with_reconstruction_old(self,
-                                        X_test_df: pd.DataFrame,
-                                        predictions: torch.Tensor,
-                                        save_path: str,
-                                        true_labels: pd.Series = None,
-                                        reconstructed_features: torch.Tensor = None):
-        """Save predictions with reconstruction analysis.
-
-        Args:
-            X_test_df: DataFrame containing test features
-            predictions: Predicted class labels tensor
-            save_path: Path to save results
-            true_labels: True class labels (optional)
-            reconstructed_features: Reconstructed features tensor (optional)
-        """
-        result_df = X_test_df.copy()
-
-        # Convert predictions to labels
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
-        result_df['predicted_class'] = pred_labels
-
-        if true_labels is not None:
-            result_df['true_class'] = true_labels
-
-        # Add reconstructed features and analysis
-        if reconstructed_features is not None:
-            # Convert to numpy for processing
-            X_test_np = X_test_df.values
-            recon_features = reconstructed_features.cpu().numpy()
-
-            # Add reconstructed features
-            for i in range(recon_features.shape[1]):
-                result_df[f'reconstructed_feature_{i}'] = recon_features[:, i]
-
-            # Add reconstruction error
-            feature_errors = np.mean((X_test_np - recon_features) ** 2, axis=1)
-            result_df['reconstruction_error'] = feature_errors
-
-            # Create output directory structure
-            dataset_name = os.path.splitext(os.path.basename(save_path))[0]
-            recon_dir = os.path.join('data', dataset_name, 'reconstruction')
-            os.makedirs(recon_dir, exist_ok=True)
-
-            # Save to reconstruction directory
-            recon_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction.csv')
-            result_df.to_csv(recon_path, index=False)
-
-            # Generate reconstruction report
-            self._generate_reconstruction_report(
-                original_features=X_test_np,
-                reconstructed_features=recon_features,
-                true_labels=true_labels,
-                predictions=pred_labels,
-                save_path=os.path.join(recon_dir, f'{dataset_name}_reconstruction_report')
-            )
-
-            print(f"Reconstruction data saved to {recon_dir}")
-
-        # Save original predictions file
-        base_path = os.path.splitext(save_path)[0]
-        result_df.to_csv(f"{base_path}_predictions.csv", index=False)
 
     def _generate_reconstruction_report(self, original_features: np.ndarray,
                                      reconstructed_features: np.ndarray,
@@ -2511,6 +2431,25 @@ class DBNN(GPUDBNN):
         print(f"\nTotal samples selected: {len(final_selected_indices)}")
         return final_selected_indices
 
+    def _prepare_final_results(self, train_indices, test_indices,
+                             train_accuracy, test_accuracy,
+                             best_test_accuracy, last_results):
+        """Helper to ensure consistent final results structure"""
+        return {
+            'train_indices': train_indices,
+            'test_indices': test_indices,
+            'train_accuracy': train_accuracy,
+            'test_accuracy': test_accuracy,
+            'best_test_accuracy': best_test_accuracy,
+            'train_predictions': last_results.get('train_predictions'),
+            'test_predictions': last_results.get('test_predictions'),
+            'error_rates': last_results.get('error_rates', []),
+            'confusion_matrix': last_results.get('confusion_matrix'),
+            'classification_report': last_results.get('classification_report', ''),
+            'training_complete': True
+        }
+
+
     def adaptive_fit_predict(self, max_rounds: int = None,
                              improvement_threshold: float = 0.001,
                              load_epoch: int = None,
@@ -2535,7 +2474,8 @@ class DBNN(GPUDBNN):
         self.in_adaptive_fit = True
         train_indices = []
         test_indices = None
-        best_test_accuracy = 0.0
+        # Make best_test_accuracy a class attribute to persist across rounds
+        self.best_test_accuracy = getattr(self, 'best_test_accuracy', 0.0)
 
         try:
             # Get initial data
@@ -2691,6 +2631,8 @@ class DBNN(GPUDBNN):
                 if len(test_indices) > 0:
                     print(f"\n{Colors.BOLD}Test Set Performance - Round {round_num + 1}:{Colors.ENDC}")
                     test_accuracy = results.get('test_accuracy', 0.0)
+                    if test_accuracy > self.best_test_accuracy:
+                        self.best_test_accuracy = test_accuracy
                     if 'test_predictions' in results:
                         # Use predictions from results instead of making new ones
                         test_predictions = results['test_predictions']
@@ -2719,8 +2661,12 @@ class DBNN(GPUDBNN):
                 if train_accuracy == 1.0:
                     if len(test_indices) == 0:
                         print("No more test samples available. Training complete.")
-                        break
-
+                        return self._prepare_final_results(
+                            train_indices, test_indices,
+                            train_accuracy, test_accuracy,
+                            self.best_test_accuracy,
+                            results
+                        )
                 # Select new training samples
                 X_test = self.X_tensor[test_indices]
                 y_test = self.y_tensor[test_indices]
@@ -2732,7 +2678,12 @@ class DBNN(GPUDBNN):
 
                 if not new_train_indices:
                     print("No suitable new samples found. Training complete.")
-                    break
+                    return self._prepare_final_results(
+                        train_indices, test_indices,
+                        train_accuracy, test_accuracy,
+                        self.best_test_accuracy,
+                        results
+                    )
 
                 # Update indices for next round
                 train_indices.extend(new_train_indices)
