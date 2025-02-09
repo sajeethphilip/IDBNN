@@ -776,6 +776,38 @@ class BinWeightUpdater:
         self.update_values = torch.zeros(1000, dtype=torch.float32)
         self.update_count = 0
 
+    def _calculate_adaptive_adjustment(self, true_prob: float, pred_prob: float,
+                                    base_learning_rate: float = 0.1) -> float:
+        """
+        Calculate adaptive weight adjustment.
+
+        Args:
+            true_prob: Probability of true class
+            pred_prob: Probability of predicted (wrong) class
+            base_learning_rate: Base learning rate
+
+        Returns:
+            float: Adaptive weight adjustment
+        """
+        # Calculate probability difference
+        prob_diff = pred_prob - true_prob
+
+        # Calculate confidence factor
+        confidence_factor = pred_prob / (true_prob + 1e-10)
+
+        # Calculate error magnitude
+        error_magnitude = abs(prob_diff) / (true_prob + pred_prob)
+
+        # Adaptive learning rate
+        adaptive_rate = base_learning_rate * (1.0 + error_magnitude) * confidence_factor
+
+        # Scale adjustment
+        adjustment = adaptive_rate * (1.0 - (true_prob / (pred_prob + 1e-10)))
+
+        # Add stability bounds
+        adjustment = max(min(adjustment, 2.0), -2.0)
+
+        return float(adjustment)  # Ensure we return a float
 
     def batch_update_weights(self, class_indices, pair_indices, bin_indices, adjustments):
             """Batch update with compatibility and proper shape handling"""
@@ -898,8 +930,15 @@ class BinWeightUpdater:
             true_posterior = float(posteriors[true_class])
             pred_posterior = float(posteriors[pred_class])
 
-            # Calculate weight adjustment
-            adjustment = learning_rate * (1.0 - (true_posterior / pred_posterior))
+            # Calculate simple weight adjustment
+            #adjustment = learning_rate * (1.0 - (true_posterior / pred_posterior))
+
+            # Calculate adaptive adjustment
+            adjustment = self._calculate_adaptive_adjustment(
+                true_prob=true_posterior,
+                pred_prob=pred_posterior,
+                base_learning_rate=learning_rate
+            )
 
             for pair_idx, (bin_i, bin_j) in bin_indices.items():
                 # Ensure integer indices
@@ -4971,6 +5010,8 @@ class DBNN(GPUDBNN):
 
         return self.device
 
+
+
     def train_with_mixed_precision(self, train_loader, batch_size):
         """Training with support for both classical and vectorized modes"""
         # Check vectorization mode
@@ -5015,6 +5056,8 @@ class DBNN(GPUDBNN):
 
                                     posteriors, bin_indices = self._compute_batch_posterior(x_sample)
                                     pred_class = torch.argmax(posteriors[0])
+
+
 
                                     if pred_class != y_true:
                                         total_failed += 1
