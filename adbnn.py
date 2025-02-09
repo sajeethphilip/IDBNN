@@ -45,7 +45,10 @@ from typing import Dict, List, Union, Optional
 from collections import defaultdict
 import requests
 from io import StringIO
-
+#-----------------------------------Optimised  Adaptive Learning--------------------------------------
+from torch.utils.data import DataLoader, TensorDataset
+from torch.cuda.amp import autocast, GradScaler
+import torch.amp
 
 import logging
 
@@ -339,11 +342,8 @@ class DatasetConfig:
         return config
 
     def _ensure_complete_config(self, dataset_name: str) -> Dict:
-        """
-        Ensure configuration file is complete with all options and default values.
-        Creates or updates config file in data/<dataset_name>/ folder.
-        """
-        # Define default configuration
+        """Ensure configuration file is complete with all options and default values."""
+        # Define default configuration including vectorization settings
         default_config = {
             "file_path": f"data/{dataset_name}/{dataset_name}.csv",
             "separator": ",",
@@ -382,7 +382,10 @@ class DatasetConfig:
                 "feedback_strength": 0.3,
                 "inverse_learning_rate": 0.1,
                 "Save_training_epochs": False,
-                "training_save_path": f"training_data/{dataset_name}"
+                "training_save_path": f"training_data/{dataset_name}",
+                # Add vectorization parameters with classical defaults
+                "enable_vectorized": False,
+                "vectorization_warning_acknowledged": False
             },
 
             "execution_flags": {
@@ -406,20 +409,9 @@ class DatasetConfig:
             try:
                 with open(config_path, 'r') as f:
                     existing_config = json.load(f)
-                print(f"Loaded existing configuration from {config_path}")
+                    print(f"Loaded existing configuration from {config_path}")
             except Exception as e:
                 print(f"Warning: Error loading existing config: {str(e)}")
-
-        # Try to read CSV to get column names if not in existing config
-        csv_path = os.path.join(dataset_folder, f"{dataset_name}.csv")
-        if os.path.exists(csv_path) and "column_names" not in existing_config:
-            try:
-                df = pd.read_csv(csv_path, nrows=0)
-                default_config["column_names"] = df.columns.tolist()
-                default_config["target_column"] = df.columns[-1]
-            except Exception as e:
-                print(f"Warning: Error reading CSV headers: {str(e)}")
-                default_config["column_names"] = []
 
         # Deep merge existing config with default config
         def deep_merge(default: Dict, existing: Dict) -> Dict:
@@ -439,19 +431,20 @@ class DatasetConfig:
                 json.dump(merged_config, f, indent=4)
             print(f"Saved complete configuration to {config_path}")
 
-            # Also save a documented version with comments
+            # Also save a documented version
             documented_path = os.path.join(dataset_folder, f"{dataset_name}_documented.conf")
             with open(documented_path, 'w') as f:
                 f.write("{\n")
                 f.write("    // Basic dataset configuration\n")
                 f.write(f'    "file_path": "{merged_config["file_path"]}",  // Path to the dataset file\n')
-                f.write('    "column_names": [                    // List of column names in order\n')
-                for col in merged_config["column_names"]:
-                    f.write(f'        "{col}",\n')
-                f.write('    ],\n')
-                # ... Continue with all parameters and their comments
+                # ... (other documentation)
+                f.write("    // Training mode configuration\n")
+                f.write('    "training_params": {\n')
+                f.write('        // ... other training parameters ...\n')
+                f.write('        "enable_vectorized": false,  // Set to true to enable vectorized (parallel) training\n')
+                f.write('        "vectorization_warning_acknowledged": false  // Set to true to acknowledge vectorization warning\n')
+                f.write('    },\n')
                 f.write("}\n")
-            print(f"Saved documented configuration to {documented_path}")
 
         except Exception as e:
             print(f"Warning: Error saving configuration: {str(e)}")
@@ -469,15 +462,19 @@ class DatasetConfig:
         # print(f"DEBUG:  Trying alternate path: {config_path}")
 
         try:
+            # Create DatasetConfig instance to use instance methods
+            config_handler = DatasetConfig()
+
+            # If config doesn't exist, create default
             if not os.path.exists(config_path):
                 print(f"Configuration file not found at {config_path}")
-                return DatasetConfig.create_default_config(dataset_name)
+                return config_handler._ensure_complete_config(dataset_name)
 
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-                #print("\nDEBUGRaw config loaded successfully")
-            # Remove comments from config
+
+            # Remove comments and parse
             def remove_comments(json_str):
                 lines = []
                 in_multiline_comment = False
@@ -504,7 +501,6 @@ class DatasetConfig:
             clean_config = remove_comments(config_text)
             try:
                 config = json.loads(clean_config)
-               # print("DEBUG: Config parsed successfully")
             except json.JSONDecodeError:
                 print(f"Invalid config, attempting to infer from CSV...")
                 csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
@@ -514,7 +510,7 @@ class DatasetConfig:
                     config = {
                         'file_path': csv_path,
                         'column_names': columns,
-                        'target_column': columns[-1],  # Default to last column as target
+                        'target_column': columns[-1],
                         'separator': ',',
                         'has_header': True,
                         'modelType': 'Histogram',
@@ -529,76 +525,9 @@ class DatasetConfig:
                         },
                         'training_params': DatasetConfig.DEFAULT_CONFIG['training_params']
                     }
-                    with open(config_path, 'w') as f:
-                        json.dump(config, f, indent=4)
-                    print(f"Created new config from CSV")
-                else:
-                    return DatasetConfig.create_default_config(dataset_name)
 
-            # Ensure required sections exist
-            if 'training_params' not in config:
-                config['training_params'] = {}
-            if 'execution_flags' not in config:
-                config['execution_flags'] = {}
-
-            # Validate and handle file path
-            if config.get('file_path'):
-                if not os.path.exists(config['file_path']):
-                    alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                    if os.path.exists(alt_path):
-                        config['file_path'] = alt_path
-                        # print(f"DEBUG:  Updated file path to {alt_path}")
-
-            if not config.get('file_path'):
-                default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if os.path.exists(default_path):
-                    config['file_path'] = default_path
-                    # print(f"DEBUG:  Set default file path to {default_path}")
-
-            # Validate column names and target
-            if not config.get('column_names'):
-                try:
-                    df = pd.read_csv(config['file_path'], nrows=0)
-                    config['column_names'] = df.columns.tolist()
-                    if not config.get('target_column'):
-                        config['target_column'] = df.columns[-1]
-                    # print(f"DEBUG:  Inferred columns: {config['column_names']}")
-                    # print(f"DEBUG:  Target column set to: {config['target_column']}")
-                except Exception as e:
-                    print(f"Warning: Could not infer columns: {str(e)}")
-
-            # Ensure target column exists in column names
-            if 'target_column' in config and 'column_names' in config:
-                if config['target_column'] not in config['column_names']:
-                    # Try to find the target column in the actual CSV
-                    try:
-                        df = pd.read_csv(config['file_path'], nrows=0)
-                        if config['target_column'] in df.columns:
-                            config['column_names'] = df.columns.tolist()
-                        else:
-                            # Default to last column
-                            config['target_column'] = df.columns[-1]
-                            config['column_names'] = df.columns.tolist()
-                        # print(f"DEBUG:  Updated target column to: {config['target_column']}")
-                    except Exception as e:
-                        print(f"Warning: Error validating target column: {str(e)}")
-
-            # Verify inverse DBNN settings
-            if config.get('training_params', {}).get('invert_DBNN'):
-                #print("\nDEBUGFound inverse DBNN configuration:")
-                tp = config['training_params']
-                print(f"invert_DBNN: {tp.get('invert_DBNN')}")
-                print(f"reconstruction_weight: {tp.get('reconstruction_weight')}")
-                print(f"feedback_strength: {tp.get('feedback_strength')}")
-                print(f"inverse_learning_rate: {tp.get('inverse_learning_rate')}")
-
-            # Save validated config
-            try:
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=4)
-                # print(f"DEBUG:  Saved validated config to {config_path}")
-            except Exception as e:
-                print(f"Warning: Could not save validated config: {str(e)}")
+            # Ensure all required parameters are present
+            config = config_handler._ensure_complete_config(dataset_name)
 
             return config
 
@@ -606,6 +535,8 @@ class DatasetConfig:
             print(f"Error loading config: {str(e)}")
             traceback.print_exc()
             return None
+
+
     @staticmethod
     def download_dataset(url: str, local_path: str) -> bool:
         """Download dataset from URL to local path with proper error handling"""
@@ -1103,6 +1034,7 @@ class BinWeightUpdater:
             log_likelihoods.add_(group_log_likelihoods)
 
         return log_likelihoods
+
 
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
@@ -1656,15 +1588,18 @@ class DBNNConfig:
 
 class DBNN(GPUDBNN):
     def __init__(self, dataset_name: str, config: Optional[Union[GlobalConfig, Dict]] = None):
-
+        """Initialize DBNN with enhanced device handling while maintaining GPUDBNN inheritance"""
         self.dataset_name = dataset_name
+
+        # Configure settings before super init
         if isinstance(config, dict):
             self.config = GlobalConfig.from_dict(config)
         elif isinstance(config, GlobalConfig):
             self.config = config
         else:
             self.config = GlobalConfig()
-        # Store inversion parameters explicitly - handle both dict and GlobalConfig
+
+        # Store inversion parameters
         if isinstance(self.config, dict):
             training_params = self.config.get('training_params', {})
             self.invert_DBNN = training_params.get('invert_DBNN', False)
@@ -1672,14 +1607,18 @@ class DBNN(GPUDBNN):
             self.feedback_strength = training_params.get('feedback_strength', 0.3)
             self.inverse_learning_rate = training_params.get('inverse_learning_rate', 0.1)
         else:
-            # Access GlobalConfig attributes directly
             self.invert_DBNN = getattr(self.config, 'invert_DBNN', False)
             self.reconstruction_weight = getattr(self.config, 'reconstruction_weight', 0.5)
             self.feedback_strength = getattr(self.config, 'feedback_strength', 0.3)
             self.inverse_learning_rate = getattr(self.config, 'inverse_learning_rate', 0.1)
-        # First load the dataset configuration
+
+        # Load dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
 
+        # Initialize device settings before super init
+        self._setup_device_and_precision()
+
+        # Call GPUDBNN's init with proper parameters
         super().__init__(
             dataset_name=dataset_name,
             learning_rate=self._get_config_value('learning_rate', 0.1),
@@ -1692,10 +1631,30 @@ class DBNN(GPUDBNN):
             n_bins_per_dim=self._get_config_value('n_bins_per_dim', 20)
         )
 
-
-        # Store model configuration
+        # Store additional configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
+
+        # Initialize optimization settings if not already set by super().__init__
+        if not hasattr(self, 'autocast_fn'):
+            if torch.cuda.is_available():
+                self.scaler = torch.cuda.amp.GradScaler('cuda')
+                self.autocast_fn = lambda: torch.cuda.amp.autocast('cuda')
+            else:
+                self.scaler = None
+                self.autocast_fn = torch.no_grad
+
+        # Ensure computation cache is initialized with correct device
+        if not hasattr(self, 'computation_cache'):
+            self.computation_cache = ComputationCache(self.device)
+
+        # Initialize batch size if not set
+        if not hasattr(self, 'optimal_batch_size'):
+            if torch.cuda.is_available():
+                gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                self.optimal_batch_size = min(int(gpu_mem * 1024 / 4), 512)
+            else:
+                self.optimal_batch_size = 32
 
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
        """Verify if reconstructed features maintain predictive accuracy"""
@@ -2736,6 +2695,257 @@ class DBNN(GPUDBNN):
                     except Exception as e:
                         print(f"Warning: Error evaluating inverse model: {str(e)}")
 
+           # Final cleanup and result preparation
+            self.in_adaptive_fit = False
+
+            # Add final indices to results
+            cumulative_results['final_indices'] = {
+                'train_indices': train_indices,
+                'test_indices': test_indices
+            }
+
+            # Add model state information
+            cumulative_results['model_state'] = {
+                'best_train_accuracy': best_train_accuracy,
+                'best_test_accuracy': best_test_accuracy,
+                'final_model_type': self.model_type,
+                'feature_pairs': self.feature_pairs.cpu().numpy() if hasattr(self.feature_pairs, 'cpu') else self.feature_pairs,
+                'adaptive_rounds_completed': len(cumulative_results['adaptive_rounds'])
+            }
+
+            # Add likelihood parameters based on model type
+            if self.model_type == "Histogram":
+                cumulative_results['model_state']['bin_edges'] = [
+                    edge.cpu().numpy() if isinstance(edge, torch.Tensor) else edge
+                    for edge in self.likelihood_params['bin_edges']
+                ]
+            else:  # Gaussian model
+                cumulative_results['model_state']['gaussian_params'] = {
+                    'means': self.likelihood_params['means'].cpu().numpy(),
+                    'covs': self.likelihood_params['covs'].cpu().numpy()
+                }
+
+            # Save final model state
+            self._save_model_components()
+            self._save_best_weights()
+
+            print("\nAdaptive training completed:")
+            print(f"Total rounds: {len(cumulative_results['adaptive_rounds'])}")
+            print(f"Final training set size: {len(train_indices)}")
+            print(f"Final test set size: {len(test_indices)}")
+            print(f"Best test accuracy achieved: {best_test_accuracy:.4f}")
+
+            return cumulative_results
+
+        except Exception as e:
+            DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
+            DEBUG.log(" Traceback:", traceback.format_exc())
+            self.in_adaptive_fit = False
+            raise
+
+    def adaptive_fit_predict_old(self, max_rounds: int = None,
+                            improvement_threshold: float = 0.001,
+                            load_epoch: int = None,
+                            batch_size: int = 32):
+        """Enhanced adaptive training with complete model support and result handling"""
+        DEBUG.log(" Starting enhanced adaptive_fit_predict")
+        if max_rounds is None:
+            max_rounds = self.config.epochs
+
+        # Check adaptive learning configuration
+        if hasattr(self.config, 'to_dict'):
+            enable_adaptive = self.config.enable_adaptive
+        elif isinstance(self.config, dict):
+            enable_adaptive = self.config.get('training_params', {}).get('enable_adaptive', True)
+        else:
+            enable_adaptive = True
+
+        if not enable_adaptive:
+            print("Adaptive learning is disabled. Using standard training.")
+            return self.fit_predict(batch_size=batch_size)
+
+        self.in_adaptive_fit = True
+        train_indices = []
+        test_indices = None
+        best_train_accuracy = 0.0
+        best_test_accuracy = 0.0
+        adaptive_patience_counter = 0
+        cumulative_results = {}
+
+        try:
+            # Initialize data
+            X = self.data.drop(columns=[self.target_column])
+            y = self.data[self.target_column]
+
+            # Initialize label encoder if needed
+            if not hasattr(self.label_encoder, 'classes_'):
+                self.label_encoder.fit(y)
+            y_encoded = self.label_encoder.transform(y)
+
+            # Process features
+            X_processed = self._preprocess_data(X, is_training=True)
+            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
+            self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
+
+            # Initialize or load model state
+            model_loaded = False
+            if self.use_previous_model:
+                print("Loading previous model state")
+                if self._load_model_components():
+                    self._load_best_weights()
+                    self._load_categorical_encoders()
+                    model_loaded = True
+
+                    if not self.fresh_start:
+                        print("Loading previous training data...")
+                        train_indices, test_indices = self.load_last_known_split()
+
+            if not model_loaded:
+                print("Initializing fresh model")
+                self._clean_existing_model()
+                train_indices = []
+                test_indices = list(range(len(X)))
+
+                # Initialize model components
+                self.feature_pairs = self._generate_feature_combinations(
+                    self.X_tensor.shape[1],
+                    self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                    self.config.get('likelihood_config', {}).get('max_combinations', None)
+                )
+
+            # Initialize test indices if needed
+            if test_indices is None:
+                test_indices = list(range(len(X)))
+
+            # Initialize likelihood parameters
+            if self.likelihood_params is None:
+                DEBUG.log(f" Computing likelihood parameters for {self.model_type} model")
+                if self.model_type == "Histogram":
+                    self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                    )
+                else:  # Gaussian model
+                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                    )
+
+            # Initialize weights if needed
+            if self.weight_updater is None:
+                self._initialize_bin_weights()
+
+            if self.current_W is None:
+                n_classes = len(self.label_encoder.classes_)
+                n_pairs = len(self.feature_pairs)
+                self.current_W = torch.full(
+                    (n_classes, n_pairs),
+                    0.1,
+                    device=self.device,
+                    dtype=torch.float32
+                )
+                if self.best_W is None:
+                    self.best_W = self.current_W.clone()
+
+            # Initialize training set if empty
+            if len(train_indices) == 0:
+                print("Initializing new training set with minimum samples")
+                unique_classes = self.label_encoder.classes_
+                for class_label in unique_classes:
+                    class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
+                    if len(class_indices) < 2:
+                        selected_indices = class_indices
+                    else:
+                        selected_indices = class_indices[:2]
+                    train_indices.extend(selected_indices)
+
+                test_indices = list(set(range(len(X))) - set(train_indices))
+
+            # Adaptive training loop
+            for round_num in range(max_rounds):
+                print(f"\nAdaptive Round {round_num + 1}/{max_rounds}")
+                print(f"Training set size: {len(train_indices)}")
+                print(f"Test set size: {len(test_indices)}")
+
+                # Save current split
+                self.save_epoch_data(round_num, train_indices, test_indices)
+
+                # Train on current training set
+                X_train = self.X_tensor[train_indices]
+                y_train = self.y_tensor[train_indices]
+
+                # Complete training phase
+                self.train_indices = train_indices
+                self.test_indices = test_indices
+                round_results = self.fit_predict(batch_size=batch_size)
+
+                # Extract metrics
+                train_accuracy = round_results['train_accuracy']
+                test_accuracy = round_results['test_accuracy']
+
+                print(f"Training accuracy: {train_accuracy:.4f}")
+                print(f"Test accuracy: {test_accuracy:.4f}")
+
+                # Update cumulative results
+                if not cumulative_results:
+                    cumulative_results = round_results
+                    cumulative_results['adaptive_rounds'] = []
+
+                cumulative_results['adaptive_rounds'].append({
+                    'round': round_num + 1,
+                    'train_accuracy': train_accuracy,
+                    'test_accuracy': test_accuracy,
+                    'train_size': len(train_indices),
+                    'test_size': len(test_indices),
+                    'error_rates': round_results['error_rates']
+                })
+
+                # Check improvement
+                if test_accuracy > best_test_accuracy + improvement_threshold:
+                    best_test_accuracy = test_accuracy
+                    adaptive_patience_counter = 0
+                    print(f"New best test accuracy: {test_accuracy:.4f}")
+                else:
+                    adaptive_patience_counter += 1
+                    print(f"No significant improvement. Patience: {adaptive_patience_counter}/5")
+                    if adaptive_patience_counter >= 5:
+                        print("No improvement after 5 rounds. Stopping adaptive training.")
+                        break
+
+                # Select new training samples
+                if test_indices:
+                    new_train_indices = self._select_samples_from_failed_classes(
+                        round_results['test_predictions'],
+                        self.y_tensor[test_indices],
+                        test_indices
+                    )
+
+                    if not new_train_indices:
+                        print("No suitable new samples found. Training complete.")
+                        cumulative_results['early_stop_reason'] = 'no_new_samples'
+                        break
+
+                    # Update training and test sets
+                    train_indices.extend(new_train_indices)
+                    test_indices = list(set(test_indices) - set(new_train_indices))
+                    print(f"Added {len(new_train_indices)} new samples to training set")
+
+                    # Save the current split
+                    self.save_last_split(train_indices, test_indices)
+                else:
+                    print("No more test samples available. Training complete.")
+                    cumulative_results['early_stop_reason'] = 'no_test_samples'
+                    break
+
+                # Update inverse DBNN if enabled
+                if round_results.get('inverse_enabled', False) and hasattr(self, 'inverse_model'):
+                    try:
+                        inverse_metrics = self.inverse_model.evaluate(
+                            self.X_tensor[test_indices],
+                            self.y_tensor[test_indices]
+                        )
+                        cumulative_results['adaptive_rounds'][-1]['inverse_metrics'] = inverse_metrics
+                    except Exception as e:
+                        print(f"Warning: Error evaluating inverse model: {str(e)}")
+
             # Final cleanup and result preparation
             self.in_adaptive_fit = False
 
@@ -2783,8 +2993,10 @@ class DBNN(GPUDBNN):
             DEBUG.log(" Traceback:", traceback.format_exc())
             self.in_adaptive_fit = False
             raise
-    #------------------------------------------Adaptive Learning--------------------------------------
 
+
+
+    #------------------------------------Adaptive Learning------------------------------------------------------------
 
     def _calculate_cardinality_threshold(self):
             """Calculate appropriate cardinality threshold based on dataset characteristics"""
@@ -4510,7 +4722,536 @@ class DBNN(GPUDBNN):
         # print(f"DEBUG:  Using default value: {default_value}")
         return default_value
 
+
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
+        try:
+            self._last_metrics_printed = True
+            print("\nStarting fit_predict...")
+
+            # Get configuration parameters
+            invert_DBNN = self._get_config_param('invert_DBNN', False)
+            reconstruction_weight = self._get_config_param('reconstruction_weight', 0.5)
+            feedback_strength = self._get_config_param('feedback_strength', 0.3)
+            inverse_learning_rate = self._get_config_param('inverse_learning_rate', 0.1)
+
+            # Prepare data
+            if self.in_adaptive_fit:
+                if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
+                    raise ValueError("train_indices or test_indices not found")
+                X_train = self.X_tensor[self.train_indices]
+                X_test = self.X_tensor[self.test_indices]
+                y_train = self.y_tensor[self.train_indices]
+                y_test = self.y_tensor[self.test_indices]
+            else:
+                X = self.data.drop(columns=[self.target_column])
+                y = self.data[self.target_column]
+
+                if not hasattr(self.label_encoder, 'classes_'):
+                    y_encoded = self.label_encoder.fit_transform(y)
+                else:
+                    y_encoded = self.label_encoder.transform(y)
+
+                X_processed = self._preprocess_data(X, is_training=True)
+                X_tensor = torch.FloatTensor(X_processed).to(self.device)
+                y_tensor = torch.LongTensor(y_encoded).to(self.device)
+                X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
+
+            # Create DataLoader for efficient batching
+            train_dataset = TensorDataset(X_train, y_train)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+            # Phase 1: Training with mixed precision
+            print("\nPhase 1: Training on training data...")
+            final_W, error_rates = self.train_with_mixed_precision(train_loader, batch_size)
+
+            self._save_categorical_encoders()
+            train_predictions = self.predict(X_train, batch_size=batch_size)
+
+            # Move tensors to same device for comparison
+            train_predictions = train_predictions.to(self.device)
+            train_accuracy = (train_predictions == y_train).float().mean().item()
+            print(f"\nTraining accuracy: {train_accuracy:.4f}")
+
+            # Initialize results
+            results = {
+                'error_rates': error_rates,
+                'train_accuracy': train_accuracy,
+                'train_predictions': train_predictions
+            }
+
+            # Phase 2: Compute test probabilities and predictions
+            print("\nPhase 2: Computing test predictions and probabilities...")
+            if self.model_type == "Histogram":
+                test_probs, test_bins = self._compute_batch_posterior(X_test)
+            else:  # Gaussian model
+                test_probs, test_components = self._compute_batch_posterior_std(X_test)
+
+            y_pred = torch.argmax(test_probs, dim=1).to(self.device)
+            test_accuracy = (y_pred == y_test).float().mean().item()
+            print(f"\nTest Accuracy: {test_accuracy:.4f}")
+
+            # Phase 3: Inverse DBNN (if enabled)
+            reconstructed_features = None
+            if invert_DBNN:
+                print("\nPhase 3: Inverse DBNN computation...")
+                try:
+                    if not hasattr(self, 'inverse_model'):
+                        from invertible_dbnn import InvertibleDBNN
+                        self.inverse_model = InvertibleDBNN(
+                            forward_model=self,
+                            feature_dims=X_train.shape[1],
+                            reconstruction_weight=reconstruction_weight,
+                            feedback_strength=feedback_strength
+                        )
+
+                    inverse_metrics = self.inverse_model.fit(
+                        features=X_train,
+                        labels=y_train,
+                        n_epochs=self._get_config_param('epochs', 1000),
+                        learning_rate=inverse_learning_rate,
+                        batch_size=batch_size
+                    )
+
+                    reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
+
+                    results['inverse_metrics'] = inverse_metrics
+                    results['reconstructed_features'] = reconstructed_features
+
+                except Exception as e:
+                    print(f"Warning: Error in inverse computation: {str(e)}")
+                    traceback.print_exc()
+
+            # Save predictions and results
+            if save_path:
+                X_test_df = self.data.drop(columns=[self.target_column]).iloc[
+                    self.test_indices if self.in_adaptive_fit else range(len(X_test))
+                ]
+                y_test_series = self.data[self.target_column].iloc[
+                    self.test_indices if self.in_adaptive_fit else range(len(X_test))
+                ]
+
+                if reconstructed_features is not None:
+                    self._save_predictions_with_reconstruction(
+                        X_test_df, y_pred.cpu(), save_path, y_test_series, reconstructed_features
+                    )
+
+                    reconstruction_metrics = self._compute_reconstruction_metrics(
+                        X_test, reconstructed_features, test_probs, y_test
+                    )
+                    results = self.update_results_with_reconstruction(
+                        results, X_test, reconstructed_features,
+                        test_probs, y_test, save_path
+                    )
+                else:
+                    self.save_predictions(X_test_df, y_pred.cpu(), save_path, y_test_series)
+
+            # Compute final metrics
+            y_test_np = y_test.cpu().numpy()
+            y_pred_np = y_pred.cpu().numpy()
+            test_pred_labels = self.label_encoder.inverse_transform(y_pred_np)
+            y_test_labels = self.label_encoder.inverse_transform(y_test_np)
+
+            # Update results with all metrics
+            results.update({
+                'test_accuracy': test_accuracy,
+                'test_predictions': y_pred,
+                'test_probabilities': test_probs,
+                'classification_report': classification_report(y_test_labels, test_pred_labels),
+                'confusion_matrix': confusion_matrix(y_test_labels, test_pred_labels),
+                'training_complete': True,
+                'model_type': self.model_type,
+                'inverse_enabled': invert_DBNN,
+                'feature_pairs': self.feature_pairs,
+                'model_components': {
+                    'best_W': self.best_W.cpu().numpy() if self.best_W is not None else None,
+                    'current_W': self.current_W.cpu().numpy(),
+                    'likelihood_params': self.likelihood_params
+                }
+            })
+
+            if self.model_type == "Histogram":
+                results['bin_indices'] = test_bins
+            else:
+                results['component_responsibilities'] = test_components
+
+            # Print performance metrics
+            print("\nTest Set Performance:")
+            self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
+
+            self._save_model_components()
+            return results
+
+        except Exception as e:
+            print(f"\nError in fit_predict: {str(e)}")
+            traceback.print_exc()
+            raise
+
+#----------------------------------------------------------------------
+    def _check_vectorization_mode(self) -> bool:
+        """Check and confirm vectorization mode if enabled"""
+        vectorized = self._get_config_param('enable_vectorized', False)
+        acknowledged = self._get_config_param('vectorization_warning_acknowledged', False)
+
+        if vectorized and not acknowledged:
+            print("\nWARNING: Vectorized training mode is enabled!")
+            print("This mode may produce different results from the classical training due to:")
+            print("1. Batched weight updates instead of immediate updates")
+            print("2. Changed update timing and accumulation effects")
+            print("3. Modified sequential dependencies within batches")
+            print("\nWhile vectorized mode may be faster, it might affect model accuracy.")
+
+            response = input("\nDo you want to proceed with vectorized training? (yes/no): ").lower()
+            if response in ['yes', 'y']:
+                # Update config to remember acknowledgment
+                if isinstance(self.config, dict):
+                    if 'training_params' not in self.config:
+                        self.config['training_params'] = {}
+                    self.config['training_params']['vectorization_warning_acknowledged'] = True
+                else:
+                    setattr(self.config, 'vectorization_warning_acknowledged', True)
+                return True
+            else:
+                print("\nSwitching to classical training mode")
+                if isinstance(self.config, dict):
+                    self.config['training_params']['enable_vectorized'] = False
+                else:
+                    setattr(self.config, 'enable_vectorized', False)
+                return False
+
+        return vectorized
+
+
+    def _setup_device_and_precision(self):
+        """Configure device and precision settings with proper GPU handling"""
+        if torch.cuda.is_available():
+            device_props = torch.cuda.get_device_properties(0)
+            cuda_capability = float(f"{device_props.major}.{device_props.minor}")
+            total_memory = device_props.total_memory / 1024**3
+
+            print(f"\nGPU Device: {device_props.name}")
+            print(f"CUDA Capability: {cuda_capability}")
+            print(f"Total Memory: {total_memory:.2f} GB")
+
+            self.device = torch.device('cuda')
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.enabled = True
+
+            # Configure precision settings
+            if cuda_capability >= 7.0:  # Volta or newer
+                print("Enabling mixed precision training")
+                self.mixed_precision = True
+                self.autocast_ctx = lambda: torch.cuda.amp.autocast(enabled=True)
+                self.scaler = torch.cuda.amp.GradScaler()
+            else:
+                print("Using full precision (FP32)")
+                self.mixed_precision = False
+                self.autocast_ctx = torch.no_grad
+                self.scaler = None
+
+            # Set memory format
+            self.memory_format = torch.channels_last if cuda_capability >= 7.5 else torch.contiguous_format
+
+            # Set optimal batch size
+            self.optimal_batch_size = min(
+                int(total_memory * 1024 / 4),  # Rough estimate
+                512  # Maximum reasonable batch size
+            )
+        else:
+            print("\nRunning on CPU")
+            self.device = torch.device('cpu')
+            self.mixed_precision = False
+            self.autocast_ctx = torch.no_grad
+            self.scaler = None
+            self.memory_format = torch.contiguous_format
+            self.optimal_batch_size = 32
+
+            if hasattr(torch, 'set_num_threads'):
+                import multiprocessing
+                torch.set_num_threads(multiprocessing.cpu_count())
+
+        return self.device
+
+    def train_with_mixed_precision(self, train_loader, batch_size):
+        """Training with support for both classical and vectorized modes"""
+        # Check vectorization mode
+        use_vectorized = self._check_vectorization_mode()
+
+        if use_vectorized:
+            return self._train_vectorized_mixed_precision(train_loader, batch_size)
+        else:
+            return self._train_classical_mixed_precision(train_loader, batch_size)
+
+    def _train_vectorized_mixed_precision(self, train_loader, batch_size):
+        """Vectorized training implementation with proper bin indices handling"""
+        final_W = None
+        error_rates = []
+        best_error = float('inf')
+        patience = 5
+        min_improvement = 0.001
+        plateau_counter = 0
+
+        if not hasattr(self, 'device'):
+            self._setup_device_and_precision()
+
+        max_epochs = self._get_config_param('epochs', 1000)
+        with tqdm(total=max_epochs, desc="Training epochs (Vectorized)", position=0) as epoch_pbar:
+            for epoch in range(max_epochs):
+                total_failed = 0
+                total_samples = 0
+
+                with tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, position=1) as batch_pbar:
+                    for X_batch, y_batch in batch_pbar:
+                        X_batch = X_batch.to(self.device, non_blocking=True)
+                        y_batch = y_batch.to(self.device, non_blocking=True)
+                        batch_size = len(X_batch)
+                        total_samples += batch_size
+
+                        with self.autocast_ctx():
+                            if self.model_type == "Histogram":
+                                # Process each sample in batch to maintain bin indices structure
+                                for i in range(batch_size):
+                                    x_sample = X_batch[i:i+1]
+                                    y_true = y_batch[i]
+
+                                    posteriors, bin_indices = self._compute_batch_posterior(x_sample)
+                                    pred_class = torch.argmax(posteriors[0])
+
+                                    if pred_class != y_true:
+                                        total_failed += 1
+
+                                        # Prepare bin indices dictionary
+                                        bin_dict = {}
+                                        for pair_idx in range(len(self.feature_pairs)):
+                                            if isinstance(bin_indices, dict):
+                                                bin_dict[pair_idx] = bin_indices[pair_idx]
+                                            else:
+                                                bin_i = bin_indices[0][pair_idx][0].item()
+                                                bin_j = bin_indices[0][pair_idx][1].item()
+                                                bin_dict[pair_idx] = (bin_i, bin_j)
+
+                                        # Calculate adjustment
+                                        true_prob = posteriors[0, y_true].item()
+                                        pred_prob = posteriors[0, pred_class].item()
+                                        adjustment = self.learning_rate * (1.0 - (true_prob / pred_prob))
+
+                                        # Update weights using existing method
+                                        self.weight_updater.batch_update_weights(
+                                            class_indices=[y_true.item()],
+                                            pair_indices=list(range(len(self.feature_pairs))),
+                                            bin_indices=bin_dict,
+                                            adjustments=[adjustment] * len(self.feature_pairs)
+                                        )
+
+                        # Update progress
+                        current_accuracy = 1 - (total_failed / total_samples)
+                        batch_pbar.set_postfix({
+                            'accuracy': f'{current_accuracy:.4f}',
+                            'failed': total_failed
+                        })
+
+                # Calculate epoch metrics
+                epoch_error = total_failed / total_samples
+                error_rates.append(epoch_error)
+                current_accuracy = 1 - epoch_error
+
+                epoch_pbar.set_postfix({
+                    'accuracy': f'{current_accuracy:.4f}',
+                    'error': f'{epoch_error:.4f}'
+                })
+                epoch_pbar.update(1)
+
+                # Check exit conditions
+                if current_accuracy == 1.0:
+                    print("\nReached 100% training accuracy - stopping training")
+                    break
+
+                if epoch_error == 0.0:
+                    print("\nReached zero training error - stopping training")
+                    break
+
+                if len(error_rates) > 1:
+                    improvement = error_rates[-2] - error_rates[-1]
+                    if improvement < min_improvement:
+                        plateau_counter += 1
+                        if plateau_counter >= patience:
+                            print(f"\nTraining plateaued for {patience} epochs with minimal improvement")
+                            break
+                    else:
+                        plateau_counter = 0
+
+                # Save best weights
+                if len(error_rates) == 1 or error_rates[-1] < best_error:
+                    best_error = error_rates[-1]
+                    self.best_W = self.current_W.clone()
+                    final_W = self.best_W
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        return final_W, error_rates
+
+    def _train_classical_mixed_precision(self, train_loader, batch_size):
+        """Optimized training with fixed GPU handling"""
+        if not hasattr(self, 'device') or not hasattr(self, 'mixed_precision'):
+            self._setup_device_and_precision()
+
+        final_W = None
+        error_rates = []
+        best_error = float('inf')
+        patience = 5
+        min_improvement = 0.001
+        plateau_counter = 0
+
+        # Adjust batch size if needed
+        actual_batch_size = min(batch_size, self.optimal_batch_size)
+        if actual_batch_size != batch_size:
+            print(f"\nAdjusting batch size from {batch_size} to {actual_batch_size}")
+            dataset = train_loader.dataset
+            train_loader = DataLoader(
+                dataset,
+                batch_size=actual_batch_size,
+                shuffle=True,
+                pin_memory=torch.cuda.is_available()
+            )
+
+        max_epochs = self._get_config_param('epochs', 1000)
+        with tqdm(total=max_epochs, desc="Training epochs", position=0) as epoch_pbar:
+            for epoch in range(max_epochs):
+                n_failed = 0
+                total_samples = 0
+
+                with tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, position=1) as batch_pbar:
+                    for X_batch, y_batch in batch_pbar:
+                        batch_failed_cases = []
+                        X_batch = X_batch.to(self.device, non_blocking=True)
+                        y_batch = y_batch.to(self.device, non_blocking=True)
+                        batch_size = len(X_batch)
+                        total_samples += batch_size
+
+                        for i in range(batch_size):
+                            x_sample = X_batch[i:i+1]
+                            y_true = y_batch[i]
+
+                            with self.autocast_ctx():
+                                if self.model_type == "Histogram":
+                                    posteriors, bin_indices = self._compute_batch_posterior(x_sample)
+                                    pred_class = torch.argmax(posteriors[0])
+
+                                    if pred_class != y_true:
+                                        n_failed += 1
+                                        bin_dict = {}
+                                        for pair_idx in range(len(self.feature_pairs)):
+                                            if isinstance(bin_indices, dict):
+                                                bin_dict[pair_idx] = bin_indices[pair_idx]
+                                            else:
+                                                bin_i = bin_indices[0][pair_idx][0].item()
+                                                bin_j = bin_indices[0][pair_idx][1].item()
+                                                bin_dict[pair_idx] = (bin_i, bin_j)
+
+                                        batch_failed_cases.append((
+                                            x_sample[0],
+                                            y_true.item(),
+                                            pred_class.item(),
+                                            bin_dict,
+                                            posteriors[0].cpu().numpy()
+                                        ))
+                                else:  # Gaussian model
+                                    posteriors, component_resp = self._compute_batch_posterior_std(x_sample)
+                                    pred_class = torch.argmax(posteriors[0])
+
+                                    if pred_class != y_true:
+                                        n_failed += 1
+                                        batch_failed_cases.append((
+                                            x_sample[0],
+                                            y_true.item(),
+                                            pred_class.item(),
+                                            component_resp[0],
+                                            posteriors[0].cpu().numpy()
+                                        ))
+
+                        if batch_failed_cases:
+                            if self.model_type == "Histogram":
+                                for case in batch_failed_cases:
+                                    self.weight_updater.update_histogram_weights(
+                                        failed_case=case[0],
+                                        true_class=case[1],
+                                        pred_class=case[2],
+                                        bin_indices=case[3],
+                                        posteriors=case[4],
+                                        learning_rate=self.learning_rate
+                                    )
+                            else:
+                                for case in batch_failed_cases:
+                                    self.weight_updater.update_gaussian_weights(
+                                        failed_case=case[0],
+                                        true_class=case[1],
+                                        pred_class=case[2],
+                                        component_responsibilities=case[3],
+                                        posteriors=case[4],
+                                        learning_rate=self.learning_rate
+                                    )
+
+                        current_accuracy = 1 - (n_failed / total_samples)
+                        batch_pbar.set_postfix({
+                            'accuracy': f'{current_accuracy:.4f}',
+                            'failed': n_failed
+                        })
+
+                epoch_error = n_failed / total_samples
+                error_rates.append(epoch_error)
+                current_accuracy = 1 - epoch_error
+
+                epoch_pbar.set_postfix({
+                    'accuracy': f'{current_accuracy:.4f}',
+                    'error': f'{epoch_error:.4f}'
+                })
+                epoch_pbar.update(1)
+
+                # Exit conditions
+                if current_accuracy == 1.0 or epoch_error == 0.0:
+                    print(f"\nReached {'perfect accuracy' if current_accuracy == 1.0 else 'zero error'}!")
+                    break
+
+                if len(error_rates) > 1:
+                    improvement = error_rates[-2] - error_rates[-1]
+                    if improvement < min_improvement:
+                        plateau_counter += 1
+                        if plateau_counter >= patience:
+                            print(f"\nTraining plateaued for {patience} epochs")
+                            break
+                    else:
+                        plateau_counter = 0
+
+                if len(error_rates) == 1 or error_rates[-1] < best_error:
+                    best_error = error_rates[-1]
+                    self.best_W = self.current_W.clone()
+                    final_W = self.best_W
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        return final_W, error_rates
+
+    def prepare_batch(self, features, labels=None):
+        """Prepare batch data with optimal memory format"""
+        features = features.to(
+            device=self.device,
+            memory_format=self.memory_format,
+            non_blocking=True
+        )
+
+        if labels is not None:
+            labels = labels.to(
+                device=self.device,
+                non_blocking=True
+            )
+            return features, labels
+
+        return features
+
+#---------------------------------------------------------------------
+
+    def fit_predict_old(self, batch_size: int = 32, save_path: str = None):
         """Enhanced training and prediction pipeline with proper device handling"""
         try:
             self._last_metrics_printed = True
@@ -6218,7 +6959,9 @@ class DatasetProcessor:
                 "Save_training_epochs": True,
                 "training_save_path": f"training_data/{dataset_name}",
                 "modelType": "Histogram",
-                "minimum_training_accuracy": 0.95  # Added default value
+                "minimum_training_accuracy": 0.95,  # Added default value
+                "enable_vectorized": False,  # Default to classic training
+                "vectorization_warning_acknowledged": False  # Track if user has acknowledged
             },
             "execution_flags": {
                 "train": True,
