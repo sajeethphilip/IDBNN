@@ -1,75 +1,136 @@
 ``` json
 
+// 1. Main Configuration (dataset_name.json)
 {
-    // Basic dataset configuration
-    "file_path": "data/dataset_name/dataset_name.csv",  // Path to the dataset file
-    "column_names": [                    // List of column names in order
-        "feature1",
-        "feature2",
-        "#feature3",                     // Prefix with # to exclude a feature
-        "target"
-    ],
-    "separator": ",",                    // CSV separator character
-    "has_header": true,                  // Whether CSV has header row
-    "target_column": "target",           // Name of the target column
-
-    // Model type and core settings
-    "modelType": "Histogram",            // Options: "Histogram" or "Gaussian"
-
-    // Feature processing configuration
-    "likelihood_config": {
-        "feature_group_size": 2,         // Size of feature groups (usually 2)
-        "max_combinations": 1000,        // Maximum number of feature combinations
-        "bin_sizes": [20]               // Bin sizes for histogram model. Single value applies to all dimensions
+    "dataset": {
+        "name": "cifar100",                    // Dataset name, e.g., mnist, cifar10, custom_dataset
+        "type": "torchvision",                 // "torchvision" or "custom"
+        "in_channels": 3,                      // Number of input channels (3 for RGB, 1 for grayscale)
+        "num_classes": 100,                    // Number of classes in dataset
+        "input_size": [32, 32],               // Input image dimensions [height, width]
+        "mean": [0.485, 0.456, 0.406],        // Normalization mean per channel
+        "std": [0.229, 0.224, 0.225],         // Normalization std per channel
+        "train_dir": "data/cifar100/train",   // Path to training data
+        "test_dir": "data/cifar100/test"      // Path to test data
     },
 
-    // Active learning parameters
+    "model": {
+        "encoder_type": "autoenc",             // Type of encoder: "autoenc" or "cnn"
+        "feature_dims": 128,                   // Dimension of extracted features
+        "learning_rate": 0.001,                // Base learning rate
+        
+        "loss_functions": {
+            "structural": {
+                "enabled": true,               // Enable/disable this loss component
+                "weight": 1.0,                 // Weight for this loss component
+                "params": {
+                    "edge_weight": 1.0,        // Weight for edge preservation
+                    "smoothness_weight": 0.5    // Weight for smoothness preservation
+                }
+            },
+            "color_enhancement": {             // Similar structure for other loss components
+                "enabled": true,
+                "weight": 0.8,
+                "params": {
+                    "channel_weight": 0.5,
+                    "contrast_weight": 0.3
+                }
+            }
+        },
+
+        "optimizer": {
+            "type": "Adam",                    // Optimizer type: "Adam", "SGD", "AdamW"
+            "weight_decay": 1e-4,
+            "momentum": 0.9,                   // Used for SGD
+            "beta1": 0.9,                      // Used for Adam/AdamW
+            "beta2": 0.999,
+            "epsilon": 1e-8
+        },
+
+        "scheduler": {
+            "type": "ReduceLROnPlateau",       // "ReduceLROnPlateau", "StepLR", "CosineAnnealingLR"
+            "factor": 0.1,
+            "patience": 10,
+            "min_lr": 1e-6,
+            "verbose": true
+        }
+    },
+
+    "training": {
+        "batch_size": 32,
+        "epochs": 20,
+        "num_workers": 4,                      // Number of data loading workers
+        "checkpoint_dir": "data/cifar100/checkpoints",
+        "validation_split": 0.2,
+        "invert_DBNN": true,                   // Whether to use inverse DBNN mode
+        "early_stopping": {
+            "patience": 5,
+            "min_delta": 0.001
+        }
+    },
+
+    "augmentation": {
+        "enabled": true,
+        "random_crop": {"enabled": true, "padding": 4},
+        "random_rotation": {"enabled": true, "degrees": 10},
+        "horizontal_flip": {"enabled": true, "probability": 0.5},
+        "vertical_flip": {"enabled": false},
+        "color_jitter": {
+            "enabled": true,
+            "brightness": 0.2,
+            "contrast": 0.2,
+            "saturation": 0.2,
+            "hue": 0.1
+        }
+    }
+}
+
+// 2. Dataset Configuration (dataset_name.conf)
+{
+    "file_path": "data/cifar100/cifar100.csv",   // Path to save extracted features
+    "column_names": ["feature_0", ..., "target"], // Column names in CSV
+    "separator": ",",
+    "has_header": true,
+    "target_column": "target",
+    "modelType": "Histogram",                     // Type of model for DBNN
+
+    "feature_group_size": 2,                      // Size of feature groups for analysis
+    "max_combinations": 1000,                     // Maximum feature combinations to consider
+    "bin_sizes": [21],                           // Bin sizes for histogram analysis
+
     "active_learning": {
-        "tolerance": 1.0,                // Learning tolerance for active learning
-        "cardinality_threshold_percentile": 95,  // Percentile for cardinality threshold
-        "strong_margin_threshold": 0.3,   // Threshold for strong classification margins
-        "marginal_margin_threshold": 0.1, // Threshold for marginal classification margins
-        "min_divergence": 0.1            // Minimum divergence for sample selection
-    },
+        "tolerance": 1.0,                         // Tolerance for active learning
+        "cardinality_threshold_percentile": 95,   // Percentile for cardinality threshold
+        "strong_margin_threshold": 0.3,           // Threshold for strong margin
+        "marginal_margin_threshold": 0.1,         // Threshold for marginal cases
+        "min_divergence": 0.1                     // Minimum divergence threshold
+    }
+}
 
-    // Training parameters
+// 3. DBNN Configuration (adaptive_dbnn.conf)
+{
     "training_params": {
-        // Core training parameters
-        "trials": 100,                   // Number of training trials
-        "epochs": 1000,                  // Maximum number of epochs
-        "learning_rate": 0.1,            // Base learning rate
-        "test_fraction": 0.2,            // Fraction of data for testing
-        "random_seed": 42,               // Random seed for reproducibility
-        "minimum_training_accuracy": 0.95, // Minimum accuracy before stopping training
-
-        // Cardinality handling
-        "cardinality_threshold": 0.9,    // Threshold for feature cardinality
-        "cardinality_tolerance": 4,      // Decimal places for rounding features
-
-        // Model specific parameters
-        "n_bins_per_dim": 20,           // Number of bins per dimension for histogram
-        "enable_adaptive": true,         // Enable adaptive learning
-
-        // Inverse DBNN parameters (all default to false/0 if not specified)
-
-        "epochs": 1000,
-        "invert_DBNN": false,           // Enable inverse model functionality
-        "reconstruction_weight": 0.5,    // Weight for reconstruction loss (0-1)
-        "feedback_strength": 0.3,        // Strength of feedback between models (0-1)
-        "inverse_learning_rate": 0.1,    // Learning rate for inverse model
-
-        // Training data management
-        "Save_training_epochs": false,   // Save data for each training epoch
-        "training_save_path": "training_data"  // Path for saving training data
+        "trials": 100,                            // Number of training trials
+        "epochs": 1000,                           // Maximum epochs per trial
+        "learning_rate": 0.1,                     // Learning rate for DBNN
+        "test_fraction": 0.2,                     // Fraction of data for testing
+        "random_seed": 42,
+        "minimum_training_accuracy": 0.95,        // Minimum accuracy to accept training
+        "cardinality_threshold": 0.9,             // Threshold for cardinality checks
+        "cardinality_tolerance": 4,               // Tolerance for cardinality variations
+        "n_bins_per_dim": 20,                     // Number of bins per dimension
+        "enable_adaptive": true,                  // Enable adaptive binning
+        "modelType": "Histogram",                 // Type of DBNN model
+        "compute_device": "auto"                  // "auto", "cpu", or "cuda"
     },
 
-    // Execution flags
     "execution_flags": {
-        "train": true,                   // Enable model training
-        "train_only": false,            // Only train, no prediction
-        "predict": true,                // Enable prediction
-        "fresh_start": false,           // Start training from scratch
-        "use_previous_model": true      // Use previously saved model if available
+        "train": true,                           // Enable training phase
+        "train_only": false,                     // Run only training phase
+        "predict": true,                         // Enable prediction phase
+        "fresh_start": false,                    // Start fresh or use existing model
+        "use_previous_model": true,              // Use previously trained model if available
+        "gen_samples": false                     // Generate samples during training
     }
 }
 
@@ -103,190 +164,7 @@ failures (cases where the model is very confident but wrong).
 Lower values  (e.g., 0.3) will include more samples.
 ```
 
-### The json file format for cdbnn
-```json
-{
-  "dataset": {
-    "_comment": "Dataset configuration section",
-    "name": "dataset_name",
-    "type": "custom",                    // Options: "torchvision" or "custom"
-    "in_channels": 3,                    // Number of input channels (3 for RGB, 1 for grayscale)
-    "input_size": [224, 224],           // Input image dimensions [height, width]
-    "num_classes": 10,                   // Number of classes in the dataset
-    "mean": [0.485, 0.456, 0.406],      // Normalization mean values
-    "std": [0.229, 0.224, 0.225],       // Normalization standard deviation values
-    "train_dir": "path/to/train",       // Training data directory
-    "test_dir": "path/to/test"          // Test data directory
-  },
 
-  "model": {
-    "_comment": "Model architecture and training configuration",
-    "encoder_type": "autoenc",          // Options: "cnn" or "autoenc"
-    "feature_dims": 128,                // Dimension of extracted features
-    "learning_rate": 0.001,             // Base learning rate
-
-    "architecture": {
-      "_comment": "Enhanced architecture components configuration",
-      "use_global_convolution": true,   // Enable Global Convolution Network modules
-      "use_boundary_refinement": true,  // Enable Boundary Refinement modules
-      "gcn_kernel_size": 7,            // Kernel size for global convolution (odd numbers only)
-      "feature_enhancement": {
-        "enabled": true,               // Enable feature enhancement blocks
-        "initial_channels": 32,        // Initial number of channels
-        "growth_rate": 32             // Channel growth rate in dense blocks
-      }
-    },
-
-    "loss_functions": {
-      "_comment": "Loss function configuration section",
-      "perceptual": {
-        "enabled": true,
-        "type": "PerceptualLoss",
-        "weight": 1.0,
-        "params": {
-          "l1_weight": 1.0,           // Weight for L1 loss component
-          "ms_ssim_weight": 1.0,      // Weight for MS-SSIM loss component
-          "edge_weight": 0.5          // Weight for edge-awareness loss component
-        }
-      },
-      "structural": {
-        "enabled": true,
-        "type": "StructuralLoss",
-        "weight": 0.7,
-        "params": {
-          "edge_weight": 1.0,         // Weight for edge detection loss
-          "smoothness_weight": 0.5,   // Weight for smoothness preservation
-          "boundary_weight": 0.3      // Weight for boundary enhancement
-        }
-      },
-      "color_enhancement": {
-        "enabled": true,
-        "type": "ColorEnhancementLoss",
-        "weight": 0.5,
-        "params": {
-          "channel_weight": 0.5,      // Weight for channel correlation
-          "contrast_weight": 0.3      // Weight for contrast preservation
-        }
-      },
-      "morphology": {
-        "enabled": true,
-        "type": "MorphologyLoss",
-        "weight": 0.3,
-        "params": {
-          "shape_weight": 0.7,        // Weight for shape preservation
-          "symmetry_weight": 0.3      // Weight for symmetry preservation
-        }
-      }
-    },
-
-    "optimizer": {
-      "_comment": "Optimizer configuration",
-      "type": "Adam",                 // Options: "Adam", "SGD"
-      "weight_decay": 1e-4,           // L2 regularization factor
-      "momentum": 0.9,                // Momentum for SGD
-      "beta1": 0.9,                   // Adam beta1 parameter
-      "beta2": 0.999,                 // Adam beta2 parameter
-      "epsilon": 1e-8                 // Adam epsilon parameter
-    },
-
-    "scheduler": {
-      "_comment": "Learning rate scheduler configuration",
-      "type": "ReduceLROnPlateau",    // Options: "StepLR", "ReduceLROnPlateau", "CosineAnnealingLR"
-      "factor": 0.1,                  // Factor to reduce learning rate
-      "patience": 10,                 // Epochs to wait before reducing LR
-      "min_lr": 1e-6,                // Minimum learning rate
-      "verbose": true                 // Print learning rate updates
-    }
-  },
-
-  "training": {
-    "_comment": "Training process configuration",
-    "batch_size": 32,                // Batch size for training
-    "epochs": 20,                    // Number of training epochs
-    "num_workers": 4,                // Number of data loading workers
-    "checkpoint_dir": "checkpoints", // Directory to save checkpoints
-    "validation_split": 0.2,         // Fraction of data used for validation
-
-    "early_stopping": {
-      "patience": 5,                 // Epochs to wait before early stopping
-      "min_delta": 0.001            // Minimum improvement required
-    },
-
-    "loss_weights": {
-      "_comment": "Weights for combining different losses",
-      "perceptual": 1.0,
-      "structural": 0.7,
-      "reconstruction": 0.5
-    }
-  },
-
-  "augmentation": {
-    "_comment": "Data augmentation configuration",
-    "enabled": true,
-    "random_crop": {
-      "enabled": true,
-      "padding": 4
-    },
-    "random_rotation": {
-      "enabled": true,
-      "degrees": 10
-    },
-    "horizontal_flip": {
-      "enabled": true,
-      "probability": 0.5
-    },
-    "vertical_flip": {
-      "enabled": false
-    },
-    "color_jitter": {
-      "enabled": true,
-      "brightness": 0.2,
-      "contrast": 0.2,
-      "saturation": 0.2,
-      "hue": 0.1
-    },
-    "normalize": {
-      "enabled": true,
-      "mean": [0.485, 0.456, 0.406],
-      "std": [0.229, 0.224, 0.225]
-    }
-  },
-
-  "execution_flags": {
-    "_comment": "Execution control flags",
-    "mode": "train_and_predict",     // Options: "train_only", "predict_only", "train_and_predict"
-    "use_gpu": true,                 // Use GPU if available
-    "mixed_precision": true,         // Use mixed precision training
-    "distributed_training": false,   // Enable distributed training
-    "debug_mode": false,            // Enable debug logging
-    "use_previous_model": true,     // Load previous checkpoint if available
-    "fresh_start": false           // Ignore existing checkpoints
-  },
-
-  "logging": {
-    "_comment": "Logging configuration",
-    "log_dir": "logs",             // Directory for log files
-    "tensorboard": {
-      "enabled": true,
-      "log_dir": "runs"           // Directory for tensorboard logs
-    },
-    "save_frequency": 5,           // Save checkpoint every N epochs
-    "metrics": [                   // Metrics to track
-      "loss",
-      "accuracy",
-      "reconstruction_error"
-    ]
-  },
-
-  "output": {
-    "_comment": "Output configuration",
-    "features_file": "features.csv",  // Path to save extracted features
-    "model_dir": "models",           // Directory to save trained models
-    "visualization_dir": "viz"       // Directory for visualizations
-  }
-}
-
-```
 ```
 The reconstruction process involves two key mappings:
 
