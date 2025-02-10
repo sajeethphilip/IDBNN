@@ -76,6 +76,12 @@
 
 ```
 ## NOTE:
+## For inverse mode:
+# Interactive mode:
+python cdbnn.py
+
+# Command line predict mode:
+python cdbnn.py --mode predict --data car --data_type custom --invert-dbnn
 ```json
 "active_learning": {
     "tolerance": 1.0,
