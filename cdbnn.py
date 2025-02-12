@@ -3285,7 +3285,8 @@ def main():
                 labels = train_labels
 
             # Save features
-            output_name = "reconstructed_input.csv" if config['training'].get('invert_DBNN', False) else f"{data_name}.csv"
+            #output_name = "reconstructed_input.csv" if config['training'].get('invert_DBNN', False) else f"{data_name}.csv"
+            output_name =f"{data_name}.csv"
             output_path = os.path.join(data_dir, output_name)
             feature_extractor.save_features(features, labels, output_path)
             logger.info(f"Features saved to {output_path}")

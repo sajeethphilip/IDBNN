@@ -161,6 +161,186 @@ class GlobalConfig:
             }
         }
 
+class BinningHandler:
+    """Handles binning, scaling, and outlier detection for histogram-based DBNN"""
+
+    def __init__(self, n_bins_per_dim: int = 20, padding_factor: float = 0.01, device=None):
+        self.n_bins = n_bins_per_dim
+        self.padding_factor = padding_factor
+        self.feature_bounds = {}
+        self.bin_edges = {}
+        self.outliers = []
+        self.categorical_features = {}
+        self.categorical_mappings = {}
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def to(self, device):
+        """Move handler to specified device"""
+        self.device = device
+        # Move bin edges to device
+        for name in self.bin_edges:
+            self.bin_edges[name] = self.bin_edges[name].to(device)
+        return self
+
+    def setup_categorical_features(self, categorical_encoders: Dict):
+        """Setup categorical feature information from DBNN encoders"""
+        self.categorical_mappings = {}
+        for column, mapping in categorical_encoders.items():
+            # Create reverse mapping
+            reverse_mapping = {v: k for k, v in mapping.items()}
+            self.categorical_mappings[column] = {
+                'forward': mapping,
+                'reverse': reverse_mapping
+            }
+            self.categorical_features[column] = {
+                'unique_values': list(mapping.values()),
+                'original_labels': list(mapping.keys())
+            }
+
+
+    def fit(self, data: torch.Tensor, feature_names: List[str], categorical_encoders: Dict = None):
+        """Fit binning parameters with device handling"""
+        # Ensure input tensor is on correct device
+        data = data.to(self.device).contiguous()
+
+        if feature_names is None:
+            feature_names = [f'feature_{i}' for i in range(data.shape[1])]
+
+        if categorical_encoders:
+            self.setup_categorical_features(categorical_encoders)
+
+        for i, name in enumerate(feature_names):
+            if name in self.categorical_features:
+                continue
+
+            feature_data = data[:, i]
+            min_val = float(feature_data.min().item())
+            max_val = float(feature_data.max().item())
+
+            padding = (max_val - min_val) * self.padding_factor
+            min_val -= padding
+            max_val += padding
+
+            self.feature_bounds[name] = {
+                'min': min_val,
+                'max': max_val,
+                'original_min': float(feature_data.min().item()),
+                'original_max': float(feature_data.max().item())
+            }
+
+            # Create bin edges on correct device
+            self.bin_edges[name] = torch.linspace(
+                min_val, max_val, self.n_bins + 1,
+                device=self.device
+            ).contiguous()
+
+    def transform(self, data: torch.Tensor, feature_names: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Transform data with contiguous tensors and optimized operations"""
+        # Ensure input tensor is on correct device and contiguous
+        data = data.to(self.device).contiguous()
+
+        # Pre-allocate output tensors
+        binned_data = torch.zeros_like(data, device=self.device)
+        outlier_mask = torch.zeros(data.shape[0], dtype=torch.bool, device=self.device)
+
+        for i, name in enumerate(feature_names):
+            feature_data = data[:, i].contiguous()
+
+            if name in self.categorical_features:
+                # Handle categorical features
+                binned_data[:, i] = feature_data
+                valid_values = set(self.categorical_features[name]['unique_values'])
+                feature_outliers = torch.tensor(
+                    [v.item() not in valid_values for v in feature_data],
+                    dtype=torch.bool,
+                    device=self.device
+                )
+            else:
+                # Ensure edges are contiguous
+                edges = self.bin_edges[name].contiguous()
+
+                # Check for outliers
+                below_min = feature_data < edges[0]
+                above_max = feature_data > edges[-1]
+                feature_outliers = below_min | above_max
+
+                # Clip values to bin range
+                feature_data = torch.clamp(feature_data, edges[0], edges[-1])
+
+                # Use bucketize with contiguous tensors
+                bin_indices = torch.bucketize(feature_data, edges).sub_(1)
+                bin_indices = bin_indices.clamp_(0, self.n_bins - 1)
+                binned_data[:, i] = bin_indices
+
+            # Update outlier mask
+            outlier_mask |= feature_outliers
+
+        return binned_data, outlier_mask
+
+
+    def inverse_transform(self, binned_data: torch.Tensor, feature_names: List[str]) -> Tuple[torch.Tensor, pd.DataFrame]:
+        """Inverse transform with optimized DataFrame construction"""
+        # Ensure input tensor is on correct device and contiguous
+        binned_data = binned_data.to(self.device).contiguous()
+        # Initialize tensors for original scale
+        original_scale = torch.zeros_like(binned_data, dtype=torch.float32, device=self.device)
+        # Prepare data for DataFrame construction
+        data_dict = {}
+        # Process all features at once
+        for i, name in enumerate(feature_names):
+            if name in self.categorical_features:
+                # Handle categorical features
+                numeric_values = binned_data[:, i].cpu().numpy()
+                categorical_labels = [
+                    self.categorical_mappings[name]['reverse'].get(val, 'UNKNOWN')
+                    for val in numeric_values
+                ]
+                data_dict[name] = categorical_labels
+                original_scale[:, i] = binned_data[:, i]
+            else:
+                # Handle numerical features
+                edges = self.bin_edges[name].contiguous()
+                bin_indices = binned_data[:, i].long()
+                bin_centers = (edges[:-1] + edges[1:]) / 2
+                numeric_values = bin_centers[bin_indices]
+                data_dict[name] = numeric_values.cpu().numpy()
+                original_scale[:, i] = numeric_values
+        # Create DataFrame all at once
+        results_df = pd.DataFrame(data_dict)
+        # Ensure DataFrame is defragmented
+        results_df = results_df.copy()
+        return original_scale, results_df
+
+    # Modify DBNN class to use BinningHandler
+    def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Compute pairwise likelihood with proper binning and scaling"""
+        dataset = dataset.to(self.device)
+        labels = labels.to(self.device)
+
+        # Initialize binning handler if not exists
+        if not hasattr(self, 'binning_handler'):
+            self.binning_handler = BinningHandler(
+                n_bins_per_dim=self.n_bins_per_dim,
+                padding_factor=0.01
+            )
+            self.binning_handler.fit(dataset, self.feature_columns)
+
+        # Transform data to bin indices and get outlier mask
+        binned_data, outlier_mask = self.binning_handler.transform(dataset, self.feature_columns)
+
+        # Store outlier information
+        self.outlier_indices = torch.where(outlier_mask)[0].cpu().numpy()
+
+        # Continue with your existing likelihood computation using binned_data
+        unique_classes = torch.unique(labels)
+        n_classes = len(unique_classes)
+
+        # Rest of your existing likelihood computation code...
+
+        return likelihood_params
+
+
+
 
 
 class Colors:
@@ -273,8 +453,18 @@ class DatasetConfig:
             try:
                 with open(config['file_path'], 'r') as f:
                     header = f.readline().strip()
-                    config['column_names'] = header.split(config['separator'])
-                    if config['column_names']:
+
+                    # Check if the first line looks like a header
+                    first_row = pd.read_csv(config['file_path'], nrows=1)
+                    if first_row.iloc[0].astype(str).str.match(r'^-?\d*\.?\d+$').all():
+                        # First row looks like data, not a header
+                        config['has_header'] = False
+                        config['column_names'] = [f'col_{i}' for i in range(len(first_row.columns))]
+                        config['target_column'] =[ -1]  # Default to last column
+                    else:
+                        # First row looks like a header
+                        config['has_header'] = True
+                        config['column_names'] = header.split(config['separator'])
                         config['target_column'] = config['column_names'][-1]
             except Exception as e:
                 print(f"Warning: Could not read header from {config['file_path']}: {str(e)}")
@@ -858,26 +1048,7 @@ class BinWeightUpdater:
 
         return weights
 
-    def update_weight_old(self, class_id: int, pair_idx: int, bin_i: int, bin_j: int, adjustment: float):
-        """Update a single weight value with proper indexing"""
-        try:
-            weights = self.get_histogram_weights(class_id, pair_idx)
 
-            # Ensure indices are within bounds
-            bin_i = min(max(0, bin_i), self.n_bins_per_dim - 1)
-            bin_j = min(max(0, bin_j), self.n_bins_per_dim - 1)
-
-            # Update single value
-            current_weight = weights[bin_i, bin_j].item()
-            weights[bin_i, bin_j] = current_weight + adjustment
-
-        except Exception as e:
-            DEBUG.log(f"Error updating weight:")
-            DEBUG.log(f"class_id: {class_id}, pair_idx: {pair_idx}")
-            DEBUG.log(f"bin_i: {bin_i}, bin_j: {bin_j}")
-            DEBUG.log(f"adjustment: {adjustment}")
-            DEBUG.log(f"Error: {str(e)}")
-            raise
 
     def _ensure_buffers(self, batch_size):
         """Ensure buffers exist and are the right size"""
@@ -1267,67 +1438,7 @@ class GPUDBNN:
         result_df.to_csv(f"{base_path}_predictions.csv", index=False)
 
 
-    def _save_predictions_with_reconstruction_old(self,
-                                        X_test_df: pd.DataFrame,
-                                        predictions: torch.Tensor,
-                                        save_path: str,
-                                        true_labels: pd.Series = None,
-                                        reconstructed_features: torch.Tensor = None):
-        """Save predictions with reconstruction analysis.
 
-        Args:
-            X_test_df: DataFrame containing test features
-            predictions: Predicted class labels tensor
-            save_path: Path to save results
-            true_labels: True class labels (optional)
-            reconstructed_features: Reconstructed features tensor (optional)
-        """
-        result_df = X_test_df.copy()
-
-        # Convert predictions to labels
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
-        result_df['predicted_class'] = pred_labels
-
-        if true_labels is not None:
-            result_df['true_class'] = true_labels
-
-        # Add reconstructed features and analysis
-        if reconstructed_features is not None:
-            # Convert to numpy for processing
-            X_test_np = X_test_df.values
-            recon_features = reconstructed_features.cpu().numpy()
-
-            # Add reconstructed features
-            for i in range(recon_features.shape[1]):
-                result_df[f'reconstructed_feature_{i}'] = recon_features[:, i]
-
-            # Add reconstruction error
-            feature_errors = np.mean((X_test_np - recon_features) ** 2, axis=1)
-            result_df['reconstruction_error'] = feature_errors
-
-            # Create output directory structure
-            dataset_name = os.path.splitext(os.path.basename(save_path))[0]
-            recon_dir = os.path.join('data', dataset_name, 'reconstruction')
-            os.makedirs(recon_dir, exist_ok=True)
-
-            # Save to reconstruction directory
-            recon_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction.csv')
-            result_df.to_csv(recon_path, index=False)
-
-            # Generate reconstruction report
-            self._generate_reconstruction_report(
-                original_features=X_test_np,
-                reconstructed_features=recon_features,
-                true_labels=true_labels,
-                predictions=pred_labels,
-                save_path=os.path.join(recon_dir, f'{dataset_name}_reconstruction_report')
-            )
-
-            print(f"Reconstruction data saved to {recon_dir}")
-
-        # Save original predictions file
-        base_path = os.path.splitext(save_path)[0]
-        result_df.to_csv(f"{base_path}_predictions.csv", index=False)
 
     def _generate_reconstruction_report(self, original_features: np.ndarray,
                                      reconstructed_features: np.ndarray,
@@ -1608,6 +1719,13 @@ class DBNNConfig:
         self.feedback_strength = kwargs.get('feedback_strength', 0.3)
         self.inverse_learning_rate = kwargs.get('inverse_learning_rate', 0.1)
 
+        # Initialize binning handler
+        self.binning_handler = BinningHandler(
+            n_bins_per_dim=self.n_bins_per_dim,
+            padding_factor=0.01
+        )
+
+
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'DBNNConfig':
         return cls(**config_dict)
@@ -1694,6 +1812,133 @@ class DBNN(GPUDBNN):
                 self.optimal_batch_size = min(int(gpu_mem * 1024 / 4), 512)
             else:
                 self.optimal_batch_size = 32
+
+    def _setup_binning_handler(self, X: pd.DataFrame):
+        """Initialize and setup binning handler with proper device handling"""
+        DEBUG.log(" Setting up binning handler")
+
+        try:
+            # Initialize binning handler with correct device
+            if not hasattr(self, 'binning_handler'):
+                DEBUG.log(" Creating new binning handler")
+                self.binning_handler = BinningHandler(
+                    n_bins_per_dim=self.n_bins_per_dim,
+                    padding_factor=0.01,
+                    device=self.device
+                )
+            else:
+                # Ensure existing handler is on correct device
+                self.binning_handler.to(self.device)
+
+            # Ensure categorical encoders are loaded
+            if hasattr(self, 'categorical_encoders') and self.categorical_encoders:
+                DEBUG.log(f" Setting up categorical features: {list(self.categorical_encoders.keys())}")
+                self.binning_handler.setup_categorical_features(self.categorical_encoders)
+            else:
+                DEBUG.log(" No categorical features found")
+
+            # Preprocess data for binning
+            DEBUG.log(" Preprocessing data for binning")
+            X_processed = self._preprocess_data(X, is_training=True)
+            X_tensor = torch.FloatTensor(X_processed).to(self.device)
+
+            # Fit binning handler
+            DEBUG.log(" Fitting binning handler")
+            self.binning_handler.fit(
+                X_tensor,
+                self.feature_columns,
+                self.categorical_encoders if hasattr(self, 'categorical_encoders') else None
+            )
+
+            # Log setup completion
+            DEBUG.log(" Binning handler setup complete")
+            DEBUG.log(f" - Number of features: {len(self.feature_columns)}")
+            if hasattr(self, 'categorical_encoders'):
+                DEBUG.log(f" - Categorical features: {list(self.categorical_encoders.keys())}")
+            DEBUG.log(f" - Number of bins per dimension: {self.n_bins_per_dim}")
+
+        except Exception as e:
+            print(f"\nError setting up binning handler:")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            traceback.print_exc()
+            raise
+
+    def _get_feature_bounds(self, X: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+        """Calculate feature bounds with outlier detection"""
+        bounds = {}
+        for col in X.columns:
+            if col in self.categorical_encoders:
+                continue
+
+            col_data = X[col]
+            q1 = col_data.quantile(0.25)
+            q3 = col_data.quantile(0.75)
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+
+            bounds[col] = {
+                'min': float(col_data.min()),
+                'max': float(col_data.max()),
+                'lower_bound': float(lower_bound),
+                'upper_bound': float(upper_bound)
+            }
+        return bounds
+
+    def _initialize_training_indices(self, y: pd.Series) -> Tuple[List[int], List[int]]:
+        """Initialize training indices with fallback to random selection"""
+        DEBUG.log(" Starting training indices initialization")
+
+        # Always start with empty list
+        train_indices = []
+
+        # Try loading previous split if requested
+        if self.use_previous_model and not self.fresh_start:
+            DEBUG.log(" Attempting to load previous split")
+            try:
+                loaded_train, loaded_test = self.load_last_known_split()
+                if loaded_train and loaded_test and len(loaded_train) > 0:
+                    DEBUG.log(f" Successfully loaded previous split - Training: {len(loaded_train)}, Testing: {len(loaded_test)}")
+                    return loaded_train, loaded_test
+                else:
+                    DEBUG.log(" No valid previous split found, falling back to random selection")
+            except Exception as e:
+                DEBUG.log(f" Error loading previous split: {str(e)}")
+                DEBUG.log(" Falling back to random selection")
+
+        # Random selection initialization
+        DEBUG.log(" Performing random selection initialization")
+
+        # Ensure label encoder is properly initialized
+        if not hasattr(self.label_encoder, 'classes_'):
+            DEBUG.log(" Fitting label encoder")
+            self.label_encoder.fit(y)
+
+        # Select one sample from each class
+        for class_label in self.label_encoder.classes_:
+            DEBUG.log(f" Processing class: {class_label}")
+            class_mask = y == class_label
+            class_indices = np.where(class_mask)[0]
+
+            if len(class_indices) > 0:
+                selected_idx = np.random.choice(class_indices)
+                train_indices.append(selected_idx)
+                DEBUG.log(f" Selected index {selected_idx} for class {class_label}")
+            else:
+                DEBUG.log(f" Warning: No samples found for class {class_label}")
+
+        # Generate test indices from remaining samples
+        all_indices = set(range(len(y)))
+        train_indices_set = set(train_indices)
+        test_indices = list(all_indices - train_indices_set)
+
+        DEBUG.log(f" Initialization complete:")
+        DEBUG.log(f" - Training samples: {len(train_indices)}")
+        DEBUG.log(f" - Testing samples: {len(test_indices)}")
+
+        return train_indices, test_indices
+
 
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
        """Verify if reconstructed features maintain predictive accuracy"""
@@ -1794,32 +2039,6 @@ class DBNN(GPUDBNN):
         return results
 
 
-    def update_results_with_reconstruction_old(self, results: Dict,
-                                        original_features: torch.Tensor,
-                                        reconstructed_features: torch.Tensor,
-                                        class_probs: torch.Tensor,
-                                        true_labels: torch.Tensor,
-                                        save_path: Optional[str] = None) -> Dict:
-        """Update results with reconstruction metrics and handle serialization"""
-        # Compute metrics with type conversion
-        reconstruction_metrics = self._compute_reconstruction_metrics(
-            original_features,
-            reconstructed_features,
-            class_probs,
-            true_labels
-        )
-
-        # Update results dictionary
-        results['reconstruction'] = reconstruction_metrics
-
-        # Save analysis if path provided
-        if save_path:
-            self.save_reconstruction_analysis(reconstruction_metrics, save_path)
-
-        # Print summary
-        print(self._format_reconstruction_results(reconstruction_metrics))
-
-        return results
 
 
     def process_dataset(self, config_path: str) -> Dict:
@@ -2068,18 +2287,54 @@ class DBNN(GPUDBNN):
                     data = file_path
 
                 # Read CSV with appropriate parameters from dataset config
+                # Get header configuration
+                has_header = self.data_config.get('has_header', True)
+
+                # Read CSV with appropriate parameters
                 read_params = {
                     'sep': self.data_config.get('separator', ','),
-                    'header': 0 if self.data_config.get('has_header', True) else None,
-                    'names': self.data_config.get('column_names'),
+                    'header': 0 if has_header else None,
                 }
-                DEBUG.log(f" Reading CSV with parameters: {read_params}")
 
+                # If column names are provided and no header, use them
+                if not has_header and self.data_config.get('column_names'):
+                    read_params['names'] = self.data_config.get('column_names')
+
+                DEBUG.log(f" Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
+
+                # If no header and no column names provided, generate default names
+                if not has_header and 'names' not in read_params:
+                    df.columns = [f'col_{i}' for i in range(df.shape[1])]
+
+                # Handle target column specification
+                target_col = self.data_config.get('target_column', -1)
+                if isinstance(target_col, int):
+                    # Convert negative index to positive
+                    if target_col < 0:
+                        target_col = df.shape[1] + target_col
+                    # Validate target column index
+                    if target_col >= df.shape[1] or target_col < 0:
+                        print(f"Warning: Invalid target column index {target_col}. Using last column.")
+                        target_col = df.shape[1] - 1
+                    # Set target column name
+                    self.target_column = df.columns[target_col]
+                else:
+                    # Target column specified by name
+                    if target_col not in df.columns:
+                        print(f"Warning: Target column '{target_col}' not found. Using last column.")
+                        self.target_column = df.columns[-1]
+                    else:
+                        self.target_column = target_col
 
                 # Filter features if specified in config
                 if '#' in str(self.data_config.get('column_names')):
                     df = _filter_features_from_config(df, self.data_config)
+
+                DEBUG.log(f" Dataset loaded successfully:")
+                DEBUG.log(f" - Shape: {df.shape}")
+                DEBUG.log(f" - Columns: {df.columns.tolist()}")
+                DEBUG.log(f" - Target column: {self.target_column}")
 
                 return df
 
@@ -2402,252 +2657,240 @@ class DBNN(GPUDBNN):
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """
-        Memory-efficient implementation of sample selection using batched processing
+        Select failed samples based on relative thresholds and divergence criteria.
+
+        Args:
+            test_predictions: Predicted class labels
+            y_test: True class labels
+            test_indices: Indices of test samples
+
+        Returns:
+            List of selected sample indices for training
         """
-        # Configuration parameters
+        # Get configuration parameters and convert to relative thresholds
         active_learning_config = self.config.get('active_learning', {})
-        tolerance = active_learning_config.get('tolerance', 1.0) / 100.0
-        min_divergence = active_learning_config.get('min_divergence', 0.1)
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3) / 100.0
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1) / 100.0
+        min_divergence = active_learning_config.get('min_divergence', 0.1) / 100.0
 
-        # Calculate optimal batch size based on sample size
-        sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
-        batch_size = self._calculate_optimal_batch_size(sample_size)
-        DEBUG.log(f"\nUsing dynamic batch size: {batch_size}")
-
+        # Convert inputs to tensors on correct device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
 
+        # Identify misclassified samples
         misclassified_mask = (test_predictions != y_test)
         misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
 
-        if  misclassified_indices.dim() == 0:
+        if misclassified_indices.dim() == 0:
             return []
 
-        final_selected_indices = []
+        selected_indices = []
         unique_classes = torch.unique(y_test[misclassified_indices])
 
         for class_id in unique_classes:
+            # Get samples from this class
             class_mask = y_test[misclassified_indices] == class_id
             class_indices = misclassified_indices[class_mask]
 
             if len(class_indices) == 0:
                 continue
 
-            # Process class samples in batches
-            for batch_start in range(0, len(class_indices), batch_size):
-                batch_end = min(batch_start + batch_size, len(class_indices))
-                batch_indices = class_indices[batch_start:batch_end]
+            # Get features and compute probabilities
+            class_samples = self.X_tensor[test_indices[class_indices]]
 
-                # Get batch data
-                batch_samples = self.X_tensor[test_indices[batch_indices]]
+            # Compute posteriors
+            if self.model_type == "Histogram":
+                probs, _ = self._compute_batch_posterior(class_samples)
+            else:
+                probs, _ = self._compute_batch_posterior_std(class_samples)
 
-                # Compute probabilities for batch
-                if self.model_type == "Histogram":
-                    probs, _ = self._compute_batch_posterior(batch_samples)
+            # Compute error margins
+            true_probs = probs[torch.arange(len(probs)), class_id]
+            pred_classes = torch.argmax(probs, dim=1)
+            pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
+            error_margins = pred_probs - true_probs
+
+            # Find maximum error margin for relative thresholds
+            max_error_margin = error_margins.max()
+
+            # First, always select the example with maximum error margin
+            max_error_idx = torch.argmax(error_margins)
+            selected_indices.append(test_indices[class_indices[max_error_idx]].item())
+
+            # Compute relative thresholds
+            relative_strong_threshold = max_error_margin * strong_margin_threshold
+            relative_marginal_threshold = max_error_margin * marginal_margin_threshold
+
+            # Identify strong and marginal failures
+            strong_failures = error_margins >= relative_strong_threshold
+            marginal_failures = (error_margins > 0) & (error_margins < relative_marginal_threshold)
+
+            for failure_mask in [strong_failures, marginal_failures]:
+                if not failure_mask.any():
+                    continue
+
+                # Get samples for this failure type
+                failure_samples = class_samples[failure_mask]
+                failure_margins = error_margins[failure_mask]
+                failure_indices = test_indices[class_indices[failure_mask]]
+
+                # Compute cardinalities
+                cardinalities = self._compute_feature_cardinalities(failure_samples)
+
+                # Use dynamic threshold based on distribution
+                cardinality_threshold = torch.median(cardinalities)
+                low_card_mask = cardinalities <= cardinality_threshold
+
+                if not low_card_mask.any():
+                    continue
+
+                # Process samples meeting cardinality criteria
+                low_card_samples = failure_samples[low_card_mask]
+                low_card_margins = failure_margins[low_card_mask]
+                low_card_indices = failure_indices[low_card_mask]
+
+                # Compute divergences
+                divergences = self._compute_sample_divergence(low_card_samples, self.feature_pairs)
+
+                # Find maximum divergence for relative threshold
+                max_divergence = divergences.max()
+                relative_min_divergence = max_divergence * min_divergence
+
+                # Select diverse samples
+                selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
+
+                # Process failures based on type
+                if failure_mask is strong_failures:
+                    # For strong failures, prioritize high margins
+                    margin_order = torch.argsort(low_card_margins, descending=True)
                 else:
-                    probs, _ = self._compute_batch_posterior_std(batch_samples)
+                    # For marginal failures, prioritize low margins
+                    margin_order = torch.argsort(low_card_margins)
 
-                # Compute error margins for batch
-                true_probs = probs[:, class_id]
-                pred_classes = torch.argmax(probs, dim=1)
-                pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
-                error_margins = pred_probs - true_probs
-
-                # Split into strong and marginal failures
-                strong_failures = error_margins >= strong_margin_threshold
-                marginal_failures = (error_margins > 0) & (error_margins < marginal_margin_threshold)
-
-                # Process each failure type
-                for failure_type, failure_mask in [("strong", strong_failures), ("marginal", marginal_failures)]:
-                    if not failure_mask.any():
+                for idx in margin_order:
+                    if selected_mask.sum() == 0:
+                        selected_mask[idx] = True
                         continue
 
-                    # Get failure samples for this batch
-                    failure_samples = batch_samples[failure_mask]
-                    failure_margins = error_margins[failure_mask]
-                    failure_indices = test_indices[batch_indices[failure_mask]]
+                    # Check divergence against already selected samples
+                    min_div = divergences[idx, selected_mask].min()
+                    if min_div >= relative_min_divergence:
+                        selected_mask[idx] = True
 
-                    # Compute cardinalities for these samples
-                    cardinalities = self._compute_feature_cardinalities(failure_samples)
+                # Add selected indices
+                selected_indices.extend(low_card_indices[selected_mask].tolist())
 
-                    # Use dynamic threshold based on distribution
-                    cardinality_threshold = torch.median(cardinalities)
-                    low_card_mask = cardinalities <= cardinality_threshold
+                DEBUG.log(f"Class {class_id}:")
+                DEBUG.log(f"- Selected {selected_mask.sum().item()} samples")
+                DEBUG.log(f"- Strong threshold: {relative_strong_threshold:.6f}")
+                DEBUG.log(f"- Marginal threshold: {relative_marginal_threshold:.6f}")
+                DEBUG.log(f"- Divergence threshold: {relative_min_divergence:.6f}")
 
-                    if not low_card_mask.any():
-                        continue
+        return selected_indices
 
-                    # Process samples meeting cardinality criteria
-                    low_card_samples = failure_samples[low_card_mask]
-                    low_card_margins = failure_margins[low_card_mask]
-                    low_card_indices = failure_indices[low_card_mask]
+    def adaptive_fit_predict(
+        self,
+        max_rounds: int = None,
+        improvement_threshold: float = 0.001,
+        load_epoch: int = None,
+        batch_size: int = 32,
+        save_path: str = None
+    ) -> Dict:
+        """
+        Enhanced adaptive training with proper initialization and separation of phases.
 
-                    # Compute divergences only for low cardinality samples
-                    divergences = self._compute_sample_divergence(low_card_samples, self.feature_pairs)
+        Args:
+            max_rounds: Maximum number of adaptive rounds. Defaults to self.config.epochs if None
+            improvement_threshold: Minimum improvement required to continue. Defaults to 0.001
+            load_epoch: Specific epoch to load from saved state. Defaults to None
+            batch_size: Size of batches for training. Defaults to 32
+            save_path: Path to save results. Defaults to None
 
-                    # Select diverse samples efficiently
-                    selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
-
-                    # Initialize with best margin sample
-                    if failure_type == "strong":
-                        best_idx = torch.argmax(low_card_margins)
-                    else:
-                        best_idx = torch.argmin(low_card_margins)
-                    selected_mask[best_idx] = True
-
-                    # Add diverse samples meeting divergence criterion
-                    while True:
-                        # Compute minimum divergence to selected samples
-                        min_divs = divergences[:, selected_mask].min(dim=1)[0]
-                        candidate_mask = (~selected_mask) & (min_divs >= min_divergence)
-
-                        if not candidate_mask.any():
-                            break
-
-                        # Select next sample based on margin type
-                        candidate_margins = low_card_margins.clone()
-                        candidate_margins[~candidate_mask] = float('inf') if failure_type == "marginal" else float('-inf')
-
-                        best_idx = torch.argmin(candidate_margins) if failure_type == "marginal" else torch.argmax(candidate_margins)
-                        selected_mask[best_idx] = True
-
-                    # Add selected indices
-                    selected_indices = low_card_indices[selected_mask]
-                    final_selected_indices.extend(selected_indices.cpu().tolist())
-
-                    # Print selection info
-                    true_class_name = self.label_encoder.inverse_transform([class_id.item()])[0]
-                    n_selected = selected_mask.sum().item()
-                    DEBUG.log(f" Selected {n_selected} {failure_type} failure samples from class {true_class_name}")
-                    DEBUG.log(f" - Cardinality threshold: {cardinality_threshold:.3f}")
-                    DEBUG.log(f" - Average margin: {low_card_margins[selected_mask].mean().item():.3f}")
-
-                # Clear cache after processing each batch
-                torch.cuda.empty_cache()
-
-        print(f"\nTotal samples selected: {len(final_selected_indices)}")
-        return final_selected_indices
-
-    def adaptive_fit_predict(self, max_rounds: int = None,
-                            improvement_threshold: float = 0.001,
-                            load_epoch: int = None,
-                            batch_size: int = 32):
-        """Enhanced adaptive training with complete model support and result handling"""
-        DEBUG.log(" Starting enhanced adaptive_fit_predict")
+        Returns:
+            Dictionary containing training results and metrics
+        """
         if max_rounds is None:
             max_rounds = self.config.epochs
 
-        # Check adaptive learning configuration
-        if hasattr(self.config, 'to_dict'):
-            enable_adaptive = self.config.enable_adaptive
-        elif isinstance(self.config, dict):
-            enable_adaptive = self.config.get('training_params', {}).get('enable_adaptive', True)
-        else:
-            enable_adaptive = True
-
-        if not enable_adaptive:
-            print("Adaptive learning is disabled. Using standard training.")
-            return self.fit_predict(batch_size=batch_size)
-
-        self.in_adaptive_fit = True
-        train_indices = []
-        test_indices = None
-        best_train_accuracy = 0.0
-        best_test_accuracy = 0.0
-        adaptive_patience_counter = 0
-        cumulative_results = {}
+        DEBUG.log(" Starting adaptive training")
 
         try:
+            # Ensure device and precision settings are initialized
+            if not hasattr(self, 'device') or not hasattr(self, 'mixed_precision'):
+                self._setup_device_and_precision()
+
             # Initialize data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
 
-            # Initialize label encoder if needed
+            # Setup binning handler before processing data
+            self._setup_binning_handler(X)
+
+            # Encode labels if not already done
             if not hasattr(self.label_encoder, 'classes_'):
-                self.label_encoder.fit(y)
-            y_encoded = self.label_encoder.transform(y)
+                y_encoded = self.label_encoder.fit_transform(y)
+            else:
+                y_encoded = self.label_encoder.transform(y)
 
-            # Process features
-            X_processed = self._preprocess_data(X, is_training=True)
-            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
-            self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
+            # Initialize or load training indices
+            train_indices = []
+            if self.use_previous_model and not self.fresh_start:
+                # Initialize training indices with fallback
+                train_indices, test_indices = self._initialize_training_indices(y)
+                DEBUG.log(f" Loaded previous split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
 
-            # Initialize or load model state
-            model_loaded = False
-            if self.use_previous_model:
-                print("Loading previous model state")
-                if self._load_model_components():
-                    self._load_best_weights()
-                    self._load_categorical_encoders()
-                    model_loaded = True
+            # Convert data to tensors with proper device placement
+            with torch.cuda.amp.autocast() if self.mixed_precision else torch.no_grad():
+                X_tensor = torch.FloatTensor(self._preprocess_data(X, is_training=True))
+                y_tensor = torch.LongTensor(y_encoded)
 
-                    if not self.fresh_start:
-                        print("Loading previous training data...")
-                        train_indices, test_indices = self.load_last_known_split()
+                # Move tensors to appropriate device
+                X_tensor = X_tensor.to(self.device, non_blocking=True)
+                y_tensor = y_tensor.to(self.device, non_blocking=True)
 
-            if not model_loaded:
-                print("Initializing fresh model")
-                self._clean_existing_model()
-                train_indices = []
-                test_indices = list(range(len(X)))
+                # Store for later use
+                self.X_tensor = X_tensor
+                self.y_tensor = y_tensor
 
-                # Initialize model components
-                self.feature_pairs = self._generate_feature_combinations(
-                    self.X_tensor.shape[1],
-                    self.config.get('likelihood_config', {}).get('feature_group_size', 2),
-                    self.config.get('likelihood_config', {}).get('max_combinations', None)
-                )
+            # Initialize model components if needed
+            if not train_indices:
+                # Start with one random example from each class
+                DEBUG.log(" Initializing with one sample per class")
+                for class_label in self.label_encoder.classes_:
+                    class_mask = y == class_label
+                    class_indices = np.where(class_mask)[0]
+                    if len(class_indices) > 0:
+                        train_indices.append(np.random.choice(class_indices))
 
-            # Initialize test indices if needed
-            if test_indices is None:
-                test_indices = list(range(len(X)))
+            test_indices = list(set(range(len(X))) - set(train_indices))
 
-            # Initialize likelihood parameters
+            # Initialize likelihood parameters if not already done
             if self.likelihood_params is None:
-                DEBUG.log(f" Computing likelihood parameters for {self.model_type} model")
+                DEBUG.log(" Computing likelihood parameters")
                 if self.model_type == "Histogram":
                     self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                        self.X_tensor,
+                        self.y_tensor,
+                        self.X_tensor.shape[1]
                     )
                 else:  # Gaussian model
                     self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                        self.X_tensor,
+                        self.y_tensor,
+                        self.X_tensor.shape[1]
                     )
 
-            # Initialize weights if needed
+            # Initialize weight updater if needed
             if self.weight_updater is None:
+                DEBUG.log(" Initializing weight updater")
                 self._initialize_bin_weights()
 
-            if self.current_W is None:
-                n_classes = len(self.label_encoder.classes_)
-                n_pairs = len(self.feature_pairs)
-                self.current_W = torch.full(
-                    (n_classes, n_pairs),
-                    0.1,
-                    device=self.device,
-                    dtype=torch.float32
-                )
-                if self.best_W is None:
-                    self.best_W = self.current_W.clone()
+            best_test_accuracy = 0.0
+            best_train_accuracy = 0.0
+            improvement_patience = 0
+            cumulative_results = {}
 
-            # Initialize training set if empty
-            if len(train_indices) == 0:
-                print("Initializing new training set with minimum samples")
-                unique_classes = self.label_encoder.classes_
-                for class_label in unique_classes:
-                    class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
-                    if len(class_indices) < 2:
-                        selected_indices = class_indices
-                    else:
-                        selected_indices = class_indices[:2]
-                    train_indices.extend(selected_indices)
-
-                test_indices = list(set(range(len(X))) - set(train_indices))
-
-            # Adaptive training loop
             for round_num in range(max_rounds):
                 print(f"\nAdaptive Round {round_num + 1}/{max_rounds}")
                 print(f"Training set size: {len(train_indices)}")
@@ -2656,53 +2899,84 @@ class DBNN(GPUDBNN):
                 # Save current split
                 self.save_epoch_data(round_num, train_indices, test_indices)
 
-                # Train on current training set
-                X_train = self.X_tensor[train_indices]
-                y_train = self.y_tensor[train_indices]
+                # Training phase - only on training data
+                # Training phase with proper device handling
+                X_train = self.X_tensor[train_indices].to(self.device, non_blocking=True)
+                y_train = self.y_tensor[train_indices].to(self.device, non_blocking=True)
 
                 # Complete training phase
-                self.train_indices = train_indices
-                self.test_indices = test_indices
-                round_results = self.fit_predict(batch_size=batch_size)
+                train_results = self.train(X_train, y_train, None, None, batch_size=batch_size)
+                self._save_categorical_encoders()
 
-                # Extract metrics
-                train_accuracy = round_results['train_accuracy']
-                test_accuracy = round_results['test_accuracy']
-
+                # Get training predictions with proper device handling
+                with torch.cuda.amp.autocast() if self.mixed_precision else torch.no_grad():
+                    train_predictions,_ = self.predict(X_train, batch_size=batch_size)
+                    train_predictions = train_predictions.to(self.device)
+                    train_accuracy = (train_predictions == y_train).float().mean().item()
                 print(f"Training accuracy: {train_accuracy:.4f}")
+
+                # Testing phase - only on test data
+                # Testing phase with proper device handling
+                X_test = self.X_tensor[test_indices].to(self.device, non_blocking=True)
+                y_test = self.y_tensor[test_indices].to(self.device, non_blocking=True)
+
+                with torch.cuda.amp.autocast() if self.mixed_precision else torch.no_grad():
+                    test_predictions,_ = self.predict(X_test, batch_size=batch_size)
+                    test_predictions = test_predictions.to(self.device)
+                    test_accuracy = (test_predictions == y_test).float().mean().item()
+
                 print(f"Test accuracy: {test_accuracy:.4f}")
 
                 # Update cumulative results
-                if not cumulative_results:
-                    cumulative_results = round_results
-                    cumulative_results['adaptive_rounds'] = []
-
-                cumulative_results['adaptive_rounds'].append({
+                round_results = {
                     'round': round_num + 1,
                     'train_accuracy': train_accuracy,
                     'test_accuracy': test_accuracy,
                     'train_size': len(train_indices),
-                    'test_size': len(test_indices),
-                    'error_rates': round_results['error_rates']
-                })
+                    'test_size': len(test_indices)
+                }
+
+                # Initialize cumulative results if first round
+                if not cumulative_results:
+                    cumulative_results = {
+                        'adaptive_rounds': [],
+                        'final_model_type': self.model_type,
+                        'feature_pairs': self.feature_pairs.cpu().numpy() if hasattr(self.feature_pairs, 'cpu') else self.feature_pairs
+                    }
+
+                cumulative_results['adaptive_rounds'].append(round_results)
 
                 # Check improvement
                 if test_accuracy > best_test_accuracy + improvement_threshold:
                     best_test_accuracy = test_accuracy
-                    adaptive_patience_counter = 0
+                    improvement_patience = 0
                     print(f"New best test accuracy: {test_accuracy:.4f}")
+
+                    # Save current model and split
+                    self._save_best_weights()
+                    self.save_last_split(train_indices, test_indices)
+
+                    # Print detailed metrics
+                    y_test_np = y_test.cpu().numpy()
+                    y_pred_np = test_predictions.cpu().numpy()
+                    test_pred_labels = self.label_encoder.inverse_transform(y_pred_np)
+                    y_test_labels = self.label_encoder.inverse_transform(y_test_np)
+
+                    print("\nTest Set Performance:")
+                    self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
                 else:
-                    adaptive_patience_counter += 1
-                    print(f"No significant improvement. Patience: {adaptive_patience_counter}/5")
-                    if adaptive_patience_counter >= 5:
+                    improvement_patience += 1
+                    print(f"No significant improvement. Patience: {improvement_patience}/5")
+                    if improvement_patience >= 5:
                         print("No improvement after 5 rounds. Stopping adaptive training.")
+                        cumulative_results['early_stop_reason'] = 'no_improvement'
                         break
 
                 # Select new training samples
                 if test_indices:
                     new_train_indices = self._select_samples_from_failed_classes(
-                        round_results['test_predictions'],
-                        self.y_tensor[test_indices],
+                        test_predictions,
+                        y_test,
                         test_indices
                     )
 
@@ -2712,47 +2986,48 @@ class DBNN(GPUDBNN):
                         break
 
                     # Update training and test sets
+                    old_train_size = len(train_indices)
                     train_indices.extend(new_train_indices)
                     test_indices = list(set(test_indices) - set(new_train_indices))
-                    print(f"Added {len(new_train_indices)} new samples to training set")
 
-                    # Save the current split
+                    print(f"Added {len(train_indices) - old_train_size} new samples to training set")
+
+                    # Save updated split
                     self.save_last_split(train_indices, test_indices)
                 else:
                     print("No more test samples available. Training complete.")
                     cumulative_results['early_stop_reason'] = 'no_test_samples'
                     break
 
-                # Update inverse DBNN if enabled
-                if round_results.get('inverse_enabled', False) and hasattr(self, 'inverse_model'):
+                # Optional: Update inverse DBNN if enabled
+                if getattr(self, 'inverse_model', None) is not None:
                     try:
                         inverse_metrics = self.inverse_model.evaluate(
-                            self.X_tensor[test_indices],
-                            self.y_tensor[test_indices]
+                            X_test,
+                            y_test
                         )
                         cumulative_results['adaptive_rounds'][-1]['inverse_metrics'] = inverse_metrics
                     except Exception as e:
                         print(f"Warning: Error evaluating inverse model: {str(e)}")
 
-           # Final cleanup and result preparation
-            self.in_adaptive_fit = False
+            # Prepare final results
+            cumulative_results.update({
+                'final_indices': {
+                    'train_indices': train_indices,
+                    'test_indices': test_indices
+                },
+                'best_accuracy': best_test_accuracy,
+                'completed_rounds': round_num + 1,
+                'model_state': {
+                    'best_train_accuracy': best_train_accuracy,
+                    'best_test_accuracy': best_test_accuracy,
+                    'final_model_type': self.model_type,
+                    'feature_pairs': self.feature_pairs.cpu().numpy() if hasattr(self.feature_pairs, 'cpu') else self.feature_pairs,
+                    'adaptive_rounds_completed': len(cumulative_results['adaptive_rounds'])
+                }
+            })
 
-            # Add final indices to results
-            cumulative_results['final_indices'] = {
-                'train_indices': train_indices,
-                'test_indices': test_indices
-            }
-
-            # Add model state information
-            cumulative_results['model_state'] = {
-                'best_train_accuracy': best_train_accuracy,
-                'best_test_accuracy': best_test_accuracy,
-                'final_model_type': self.model_type,
-                'feature_pairs': self.feature_pairs.cpu().numpy() if hasattr(self.feature_pairs, 'cpu') else self.feature_pairs,
-                'adaptive_rounds_completed': len(cumulative_results['adaptive_rounds'])
-            }
-
-            # Add likelihood parameters based on model type
+            # Add model parameters based on type
             if self.model_type == "Histogram":
                 cumulative_results['model_state']['bin_edges'] = [
                     edge.cpu().numpy() if isinstance(edge, torch.Tensor) else edge
@@ -2764,9 +3039,8 @@ class DBNN(GPUDBNN):
                     'covs': self.likelihood_params['covs'].cpu().numpy()
                 }
 
-            # Save final model state
+            # Final model save
             self._save_model_components()
-            self._save_best_weights()
 
             print("\nAdaptive training completed:")
             print(f"Total rounds: {len(cumulative_results['adaptive_rounds'])}")
@@ -2777,262 +3051,11 @@ class DBNN(GPUDBNN):
             return cumulative_results
 
         except Exception as e:
-            DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
-            DEBUG.log(" Traceback:", traceback.format_exc())
-            self.in_adaptive_fit = False
+            print("\nError in adaptive training:")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            traceback.print_exc()
             raise
-
-    def adaptive_fit_predict_old(self, max_rounds: int = None,
-                            improvement_threshold: float = 0.001,
-                            load_epoch: int = None,
-                            batch_size: int = 32):
-        """Enhanced adaptive training with complete model support and result handling"""
-        DEBUG.log(" Starting enhanced adaptive_fit_predict")
-        if max_rounds is None:
-            max_rounds = self.config.epochs
-
-        # Check adaptive learning configuration
-        if hasattr(self.config, 'to_dict'):
-            enable_adaptive = self.config.enable_adaptive
-        elif isinstance(self.config, dict):
-            enable_adaptive = self.config.get('training_params', {}).get('enable_adaptive', True)
-        else:
-            enable_adaptive = True
-
-        if not enable_adaptive:
-            print("Adaptive learning is disabled. Using standard training.")
-            return self.fit_predict(batch_size=batch_size)
-
-        self.in_adaptive_fit = True
-        train_indices = []
-        test_indices = None
-        best_train_accuracy = 0.0
-        best_test_accuracy = 0.0
-        adaptive_patience_counter = 0
-        cumulative_results = {}
-
-        try:
-            # Initialize data
-            X = self.data.drop(columns=[self.target_column])
-            y = self.data[self.target_column]
-
-            # Initialize label encoder if needed
-            if not hasattr(self.label_encoder, 'classes_'):
-                self.label_encoder.fit(y)
-            y_encoded = self.label_encoder.transform(y)
-
-            # Process features
-            X_processed = self._preprocess_data(X, is_training=True)
-            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
-            self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
-
-            # Initialize or load model state
-            model_loaded = False
-            if self.use_previous_model:
-                print("Loading previous model state")
-                if self._load_model_components():
-                    self._load_best_weights()
-                    self._load_categorical_encoders()
-                    model_loaded = True
-
-                    if not self.fresh_start:
-                        print("Loading previous training data...")
-                        train_indices, test_indices = self.load_last_known_split()
-
-            if not model_loaded:
-                print("Initializing fresh model")
-                self._clean_existing_model()
-                train_indices = []
-                test_indices = list(range(len(X)))
-
-                # Initialize model components
-                self.feature_pairs = self._generate_feature_combinations(
-                    self.X_tensor.shape[1],
-                    self.config.get('likelihood_config', {}).get('feature_group_size', 2),
-                    self.config.get('likelihood_config', {}).get('max_combinations', None)
-                )
-
-            # Initialize test indices if needed
-            if test_indices is None:
-                test_indices = list(range(len(X)))
-
-            # Initialize likelihood parameters
-            if self.likelihood_params is None:
-                DEBUG.log(f" Computing likelihood parameters for {self.model_type} model")
-                if self.model_type == "Histogram":
-                    self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-                    )
-                else:  # Gaussian model
-                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-                    )
-
-            # Initialize weights if needed
-            if self.weight_updater is None:
-                self._initialize_bin_weights()
-
-            if self.current_W is None:
-                n_classes = len(self.label_encoder.classes_)
-                n_pairs = len(self.feature_pairs)
-                self.current_W = torch.full(
-                    (n_classes, n_pairs),
-                    0.1,
-                    device=self.device,
-                    dtype=torch.float32
-                )
-                if self.best_W is None:
-                    self.best_W = self.current_W.clone()
-
-            # Initialize training set if empty
-            if len(train_indices) == 0:
-                print("Initializing new training set with minimum samples")
-                unique_classes = self.label_encoder.classes_
-                for class_label in unique_classes:
-                    class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
-                    if len(class_indices) < 2:
-                        selected_indices = class_indices
-                    else:
-                        selected_indices = class_indices[:2]
-                    train_indices.extend(selected_indices)
-
-                test_indices = list(set(range(len(X))) - set(train_indices))
-
-            # Adaptive training loop
-            for round_num in range(max_rounds):
-                print(f"\nAdaptive Round {round_num + 1}/{max_rounds}")
-                print(f"Training set size: {len(train_indices)}")
-                print(f"Test set size: {len(test_indices)}")
-
-                # Save current split
-                self.save_epoch_data(round_num, train_indices, test_indices)
-
-                # Train on current training set
-                X_train = self.X_tensor[train_indices]
-                y_train = self.y_tensor[train_indices]
-
-                # Complete training phase
-                self.train_indices = train_indices
-                self.test_indices = test_indices
-                round_results = self.fit_predict(batch_size=batch_size)
-
-                # Extract metrics
-                train_accuracy = round_results['train_accuracy']
-                test_accuracy = round_results['test_accuracy']
-
-                print(f"Training accuracy: {train_accuracy:.4f}")
-                print(f"Test accuracy: {test_accuracy:.4f}")
-
-                # Update cumulative results
-                if not cumulative_results:
-                    cumulative_results = round_results
-                    cumulative_results['adaptive_rounds'] = []
-
-                cumulative_results['adaptive_rounds'].append({
-                    'round': round_num + 1,
-                    'train_accuracy': train_accuracy,
-                    'test_accuracy': test_accuracy,
-                    'train_size': len(train_indices),
-                    'test_size': len(test_indices),
-                    'error_rates': round_results['error_rates']
-                })
-
-                # Check improvement
-                if test_accuracy > best_test_accuracy + improvement_threshold:
-                    best_test_accuracy = test_accuracy
-                    adaptive_patience_counter = 0
-                    print(f"New best test accuracy: {test_accuracy:.4f}")
-                else:
-                    adaptive_patience_counter += 1
-                    print(f"No significant improvement. Patience: {adaptive_patience_counter}/5")
-                    if adaptive_patience_counter >= 5:
-                        print("No improvement after 5 rounds. Stopping adaptive training.")
-                        break
-
-                # Select new training samples
-                if test_indices:
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        round_results['test_predictions'],
-                        self.y_tensor[test_indices],
-                        test_indices
-                    )
-
-                    if not new_train_indices:
-                        print("No suitable new samples found. Training complete.")
-                        cumulative_results['early_stop_reason'] = 'no_new_samples'
-                        break
-
-                    # Update training and test sets
-                    train_indices.extend(new_train_indices)
-                    test_indices = list(set(test_indices) - set(new_train_indices))
-                    print(f"Added {len(new_train_indices)} new samples to training set")
-
-                    # Save the current split
-                    self.save_last_split(train_indices, test_indices)
-                else:
-                    print("No more test samples available. Training complete.")
-                    cumulative_results['early_stop_reason'] = 'no_test_samples'
-                    break
-
-                # Update inverse DBNN if enabled
-                if round_results.get('inverse_enabled', False) and hasattr(self, 'inverse_model'):
-                    try:
-                        inverse_metrics = self.inverse_model.evaluate(
-                            self.X_tensor[test_indices],
-                            self.y_tensor[test_indices]
-                        )
-                        cumulative_results['adaptive_rounds'][-1]['inverse_metrics'] = inverse_metrics
-                    except Exception as e:
-                        print(f"Warning: Error evaluating inverse model: {str(e)}")
-
-            # Final cleanup and result preparation
-            self.in_adaptive_fit = False
-
-            # Add final indices to results
-            cumulative_results['final_indices'] = {
-                'train_indices': train_indices,
-                'test_indices': test_indices
-            }
-
-            # Add model state information
-            cumulative_results['model_state'] = {
-                'best_train_accuracy': best_train_accuracy,
-                'best_test_accuracy': best_test_accuracy,
-                'final_model_type': self.model_type,
-                'feature_pairs': self.feature_pairs.cpu().numpy() if hasattr(self.feature_pairs, 'cpu') else self.feature_pairs,
-                'adaptive_rounds_completed': len(cumulative_results['adaptive_rounds'])
-            }
-
-            # Add likelihood parameters based on model type
-            if self.model_type == "Histogram":
-                cumulative_results['model_state']['bin_edges'] = [
-                    edge.cpu().numpy() if isinstance(edge, torch.Tensor) else edge
-                    for edge in self.likelihood_params['bin_edges']
-                ]
-            else:  # Gaussian model
-                cumulative_results['model_state']['gaussian_params'] = {
-                    'means': self.likelihood_params['means'].cpu().numpy(),
-                    'covs': self.likelihood_params['covs'].cpu().numpy()
-                }
-
-            # Save final model state
-            self._save_model_components()
-            self._save_best_weights()
-
-            print("\nAdaptive training completed:")
-            print(f"Total rounds: {len(cumulative_results['adaptive_rounds'])}")
-            print(f"Final training set size: {len(train_indices)}")
-            print(f"Final test set size: {len(test_indices)}")
-            print(f"Best test accuracy achieved: {best_test_accuracy:.4f}")
-
-            return cumulative_results
-
-        except Exception as e:
-            DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
-            DEBUG.log(" Traceback:", traceback.format_exc())
-            self.in_adaptive_fit = False
-            raise
-
 
 
     #------------------------------------Adaptive Learning------------------------------------------------------------
@@ -3310,118 +3333,168 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized non-parametric likelihood computation with configurable bin sizes"""
-        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
-        print("\nComputing pairwise likelihoods...")
+        """
+        Compute pairwise likelihood with optimized batch counting and single likelihood computation.
+
+        Args:
+            dataset: Input tensor of shape [n_samples, n_features]
+            labels: Target labels tensor of shape [n_samples]
+            feature_dims: Number of input features
+
+        Returns:
+            Dictionary containing:
+            - bin_edges: List of bin edges for each feature pair
+            - bin_counts: Raw histogram counts after smoothing
+            - bin_probs: Normalized probabilities (likelihoods)
+            - feature_pairs: Tensor of feature pair indices
+            - classes: Tensor of unique class labels
+        """
+        DEBUG.log(" Starting pairwise likelihood computation")
+
+        # Ensure binning handler is initialized
+        if not hasattr(self, 'binning_handler'):
+            self._setup_binning_handler(self.data.drop(columns=[self.target_column]))
+
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
         labels = torch.as_tensor(labels, device=self.device).contiguous()
 
-        # Initialize progress tracking
-        n_pairs = len(self.feature_pairs)
-        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
-
-        # Pre-compute unique classes once
-        unique_classes, class_counts = torch.unique(labels, return_counts=True)
+        # Get unique classes and counts with contiguous tensors
+        unique_classes, class_counts = torch.unique(labels.contiguous(), return_counts=True)
+        unique_classes = unique_classes.contiguous()
+        class_counts = class_counts.contiguous()
         n_classes = len(unique_classes)
         n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [5])
-        if len(bin_sizes) == 1:
-            # If single bin size provided, use it for all dimensions
-            n_bins = bin_sizes[0]
-            self.n_bins_per_dim = n_bins  # Store for reference
-            DEBUG.log(f" Using uniform {n_bins} bins per dimension")
-        else:
-            DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
+        n_bins = bin_sizes[0] if len(bin_sizes) >= 1 else 20
+        self.n_bins_per_dim = n_bins
 
-        # Generate feature combinations
-        self.feature_pairs = self._generate_feature_combinations(
-            feature_dims,
-            self.config.get('likelihood_config', {}).get('feature_group_size', 2),
-            self.config.get('likelihood_config', {}).get('max_combinations', None)
-        ).to(self.device)
+        # Generate or validate feature combinations
+        if self.feature_pairs is None:
+            self.feature_pairs = self._generate_feature_combinations(
+                feature_dims,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            ).to(self.device).contiguous()
 
-        # Pre-allocate storage arrays
+        # Pre-allocate storage
         all_bin_edges = []
         all_bin_counts = []
         all_bin_probs = []
 
-        # Process each feature group
-        for feature_group in self.feature_pairs:
-            feature_group = [int(x) for x in feature_group]
-            DEBUG.log(f" Processing feature group: {feature_group}")
+        # Process each feature pair
+        for pair_idx, feature_pair in enumerate(tqdm(self.feature_pairs, desc="Processing feature pairs")):
+            # Ensure feature pair is contiguous
+            feature_pair = feature_pair.contiguous()
+            DEBUG.log(f" Processing feature pair {pair_idx}: {feature_pair}")
 
-            # Extract group data
-            group_data = dataset[:, feature_group].contiguous()
-            n_dims = len(feature_group)
+            # Extract data for this pair
+            pair_data = dataset[:, feature_pair].contiguous()
+            pair_edges = []
 
-            # Get appropriate bin sizes for this group
-            group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
-
-            # Compute bin edges for all dimensions
-            bin_edges = []
-            for dim in range(n_dims):
-                dim_data = group_data[:, dim].contiguous()
+            # Compute bin edges for each dimension
+            for dim in range(2):
+                dim_data = pair_data[:, dim].contiguous()
                 dim_min, dim_max = dim_data.min(), dim_data.max()
                 padding = (dim_max - dim_min) * 0.01
 
                 edges = torch.linspace(
                     dim_min - padding,
                     dim_max + padding,
-                    group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                    n_bins + 1,
                     device=self.device
                 ).contiguous()
-                bin_edges.append(edges)
+                pair_edges.append(edges)
                 DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
-            pair_pbar.update(1)
-            # Initialize bin counts with appropriate shape for variable bin sizes
-            bin_shape = [n_classes] + [size for size in group_bin_sizes]
-            bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
 
-            # Process each class
-            for class_idx, class_label in enumerate(unique_classes):
-                class_mask = labels == class_label
-                if class_mask.any():
-                    class_data = group_data[class_mask].contiguous()
+            # Initialize histogram counts
+            pair_counts = torch.zeros(
+                (n_classes, n_bins, n_bins),
+                device=self.device,
+                dtype=torch.float32
+            ).contiguous()
 
-                    if n_dims == 2:  # Optimized path for pairs
-                        # Compute bin indices for both dimensions
-                        bin_indices = torch.stack([
-                            torch.bucketize(
-                                class_data[:, dim].contiguous(),
-                                bin_edges[dim].contiguous()
-                            ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                            for dim in range(2)
-                        ])
+            # Process data in batches
+            batch_size = min(10000, n_samples)
+            for batch_start in range(0, n_samples, batch_size):
+                batch_end = min(batch_start + batch_size, n_samples)
+                batch_data = pair_data[batch_start:batch_end].contiguous()
+                batch_labels = labels[batch_start:batch_end].contiguous()
 
-                        # Use scatter_add_ for efficient counting
-                        counts = torch.zeros(group_bin_sizes[0] * group_bin_sizes[1], device=self.device)
-                        flat_indices = bin_indices[0] * group_bin_sizes[1] + bin_indices[1]
-                        counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
-                        bin_counts[class_idx] = counts.reshape(group_bin_sizes[0], group_bin_sizes[1])
+                # Ensure bin edges are contiguous before bucketize
+                edges_0 = pair_edges[0].contiguous()
+                edges_1 = pair_edges[1].contiguous()
 
-            # Apply Laplace smoothing and compute probabilities
-            smoothed_counts = bin_counts + 1.0
-            bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
+                # Compute bin indices with contiguous tensors
+                indices_0 = torch.bucketize(
+                    batch_data[:, 0].contiguous(),
+                    edges_0
+                ).sub_(1).clamp_(0, n_bins - 1).contiguous()
 
-            # Store results
-            all_bin_edges.append(bin_edges)
-            all_bin_counts.append(smoothed_counts)
-            all_bin_probs.append(bin_probs)
+                indices_1 = torch.bucketize(
+                    batch_data[:, 1].contiguous(),
+                    edges_1
+                ).sub_(1).clamp_(0, n_bins - 1).contiguous()
 
+                # Process each class
+                for class_idx, class_label in enumerate(unique_classes):
+                    class_mask = (batch_labels == class_label).contiguous()
+                    if class_mask.any():
+                        class_indices_0 = indices_0[class_mask].contiguous()
+                        class_indices_1 = indices_1[class_mask].contiguous()
+
+                        # Create flat indices
+                        flat_indices = (class_indices_0 * n_bins + class_indices_1).contiguous()
+                        counts = torch.zeros(n_bins * n_bins, device=self.device).contiguous()
+
+                        # Use ones tensor with same device and dtype
+                        ones = torch.ones_like(flat_indices, dtype=torch.float32, device=self.device).contiguous()
+
+                        counts.scatter_add_(
+                            0,
+                            flat_indices,
+                            ones
+                        )
+
+                        # Update counts maintaining contiguity
+                        pair_counts[class_idx] += counts.reshape(n_bins, n_bins).contiguous()
+
+                # Optional cleanup after each batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Compute likelihood
+            smoothed_counts = (pair_counts + 1.0).contiguous()
+            total_counts = smoothed_counts.sum(dim=0, keepdim=True).contiguous()
+            bin_probs = (smoothed_counts / (total_counts + 1e-10)).contiguous()
+
+            # Validate probabilities
+            if torch.isnan(bin_probs).any():
+                raise ValueError(f"NaN values detected in bin probabilities for pair {pair_idx}")
+
+            # Store results ensuring contiguity
+            all_bin_edges.append([edge.clone().contiguous() for edge in pair_edges])
+            all_bin_counts.append(smoothed_counts.clone().contiguous())
+            all_bin_probs.append(bin_probs.clone().contiguous())
+
+            DEBUG.log(f" Completed pair {pair_idx} processing")
             DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
             DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
-        pair_pbar.close()
+
+        # Final validation
+        if not all_bin_probs:
+            raise ValueError("No bin probabilities computed")
+
+        # Return results with explicitly contiguous tensors
         return {
             'bin_edges': all_bin_edges,
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
-            'feature_pairs': self.feature_pairs,
-            'classes': unique_classes.to(self.device)
+            'feature_pairs': self.feature_pairs.contiguous(),
+            'classes': unique_classes.contiguous()
         }
-
  #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
@@ -3480,61 +3553,99 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs
         }
 
-    def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Gaussian posterior computation focusing on relative class probabilities"""
+    def _compute_batch_posterior(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
+        """
+        Compute posterior probabilities for batches using pre-computed likelihoods.
+
+        Args:
+            features: Input features as tensor or DataFrame
+            epsilon: Small value for numerical stability
+
+        Returns:
+            Tuple of (posteriors, bin_indices):
+            - posteriors: Tensor of shape [batch_size, n_classes]
+            - bin_indices: Dictionary mapping pair indices to bin indices
+        """
+        # Type and device conversion
+        if isinstance(features, pd.DataFrame):
+            features = torch.FloatTensor(features.values)
         features = features.to(self.device)
-        batch_size = len(features)
+
+        # Ensure weight updater is initialized
+        if self.weight_updater is None:
+            DEBUG.log(" Initializing weight updater")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
+
+        # Validate likelihood parameters
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
+
+        # Make features contiguous and get dimensions
+        features = features if features.is_contiguous() else features.contiguous()
+        batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
 
         # Initialize log likelihoods
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        log_likelihoods = torch.zeros(
+            (batch_size, n_classes),
+            device=self.device,
+            dtype=torch.float32
+        )
+
+        # Storage for bin indices
+        bin_indices_dict = {}
 
         # Process each feature pair
-        for pair_idx, pair in enumerate(self.feature_pairs):
-            pair_data = features[:, pair]
+        for group_idx, feature_pair in enumerate(self.likelihood_params['feature_pairs']):
+            # Get feature group data
+            group_data = features[:, feature_pair].contiguous()
 
-            # Get weights for this pair (same as histogram mode)
-            pair_weights = [
-                self.weight_updater.get_gaussian_weights(class_idx, pair_idx)
+            # Get bin edges for this group
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            bin_edges = [edge.to(self.device) for edge in bin_edges]
+
+            # Compute bin indices for both dimensions
+            bin_indices = torch.stack([
+                torch.bucketize(
+                    group_data[:, dim],
+                    bin_edges[dim]
+                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+                for dim in range(2)
+            ])  # [2, batch_size]
+
+            # Store bin indices
+            bin_indices_dict[group_idx] = bin_indices
+
+            # Get pre-computed bin probabilities
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
+
+            # Get weights for all classes
+            weights = torch.stack([
+                self.weight_updater.get_histogram_weights(class_idx, group_idx).to(self.device)
                 for class_idx in range(n_classes)
-            ]
+            ])  # [n_classes, n_bins, n_bins]
 
-            # Compute class contributions for this pair
-            for class_idx in range(n_classes):
-                mean = self.likelihood_params['means'][class_idx, pair_idx]
-                cov = self.likelihood_params['covs'][class_idx, pair_idx]
-                weight = pair_weights[class_idx]
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
 
-                # Center the data
-                centered = pair_data - mean.unsqueeze(0)
+            # Gather probabilities for all samples and classes
+            probs = weighted_probs[:, bin_indices[0], bin_indices[1]]  # [n_classes, batch_size]
 
-                # Compute class likelihood
-                try:
-                    # Add minimal regularization
-                    reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-                    prec = torch.inverse(reg_cov)
+            # Add to log likelihoods
+            log_likelihoods += torch.log(probs.t() + epsilon)
 
-                    # Quadratic term
-                    quad = torch.sum(
-                        torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
-                        dim=1
-                    )
+        # Compute posteriors with numerical stability
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-                    # Log likelihood (excluding constant terms that are same for all classes)
-                    class_ll = -0.5 * quad + torch.log(weight + epsilon)
+        # Validate outputs
+        if torch.isnan(posteriors).any():
+            raise ValueError("NaN values detected in posterior probabilities")
 
-                except RuntimeError:
-                    # Handle numerical issues by setting very low likelihood
-                    class_ll = torch.full_like(quad, -1e10)
-
-                log_likelihoods[:, class_idx] += class_ll
-
-        # Convert to probabilities using softmax
-        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
-        exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + epsilon)
-
-        return posteriors, None
+        return posteriors, bin_indices_dict
 
     def _initialize_bin_weights(self):
         """Initialize weights for either histogram bins or Gaussian components"""
@@ -3773,92 +3884,60 @@ class DBNN(GPUDBNN):
         print(f"Last testing data is saved to {dataset_name}_Last_testing.csv")
         print(f"Last training data is saved to {dataset_name}_Last_training.csv")
 
-    def load_last_known_split(self):
-        """Load the last known good training/testing split with proper column alignment"""
-        dataset_name = self.dataset_name
-        train_file = f'{dataset_name}_Last_training.csv'
-        test_file = f'{dataset_name}_Last_testing.csv'
+    def load_last_known_split(self) -> Tuple[List[int], List[int]]:
+        """Load previous split with improved error handling"""
+        DEBUG.log(" Attempting to load last known split")
 
-        if os.path.exists(train_file) and os.path.exists(test_file):
-            try:
-                # Load the saved splits
-                train_data = pd.read_csv(train_file)
-                test_data = pd.read_csv(test_file)
+        paths = self._get_dataset_paths()
+        dataset_name = os.path.basename(paths['base'])
 
-                # Get current feature columns excluding target
-                X = self.data.drop(columns=[self.target_column])
-                current_columns = X.columns
+        train_path = os.path.join(paths['training'], f'{dataset_name}_Last_training.csv')
+        test_path = os.path.join(paths['training'], f'{dataset_name}_Last_testing.csv')
 
-                # Ensure train_data has same columns as current data
-                train_features = train_data.drop(columns=[self.target_column])
-                train_features = train_features[current_columns]
-
-                # Initialize indices lists
-                train_indices = []
-                test_indices = []
-
-                # Match rows using selected columns
-                for idx, row in X.iterrows():
-                    # Align the row with train_features columns
-                    row = row[current_columns]
-
-                    # Compare with train data first
-                    match_mask = (train_features == row).all(axis=1)
-                    if match_mask.any():
-                        train_indices.append(idx)
-                    else:
-                        test_indices.append(idx)
-
-                if train_indices or test_indices:
-                    print(f"Loaded previous split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
-                    return train_indices, test_indices
-                else:
-                    print("No valid indices found in previous split")
-                    return None, None
-
-            except Exception as e:
-                print(f"Error loading previous split: {str(e)}")
-                return None, None
-
-        return None, None
-
-#---------------------------------------------------------------------------------------------------------
-
-    def predict(self, X: torch.Tensor, batch_size: int = 32):
-        """Make predictions in batches using the best model weights"""
-        # Store current weights temporarily
-        print("\nMaking predictions...")
-        temp_W = self.current_W
-        n_batches = (len(X) + batch_size - 1) // batch_size
-        pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
-        # Use best weights for prediction
-        self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
-
-        X = X.to(self.device)
-        predictions = []
+        if not (os.path.exists(train_path) and os.path.exists(test_path)):
+            DEBUG.log(" Previous split files not found")
+            return [], []
 
         try:
-            for i in range(0, len(X), batch_size):
-                batch_X = X[i:min(i + batch_size, len(X))]
-                if self.model_type=="Histogram":
-                    # Get posteriors only, ignore bin indices
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type=="Gaussian":
-                    # Get posteriors only, ignore component responsibilities
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+            # Load saved splits
+            train_data = pd.read_csv(train_path)
+            test_data = pd.read_csv(test_path)
+
+            # Get current feature columns
+            current_columns = self.data.drop(columns=[self.target_column]).columns
+
+            # Initialize indices lists
+            train_indices = []
+            test_indices = []
+
+            # Match rows using features
+            for idx, row in self.data.iterrows():
+                # Align row with features
+                row_features = row[current_columns]
+
+                # Check training data
+                train_match = (train_data[current_columns] == row_features).all(axis=1)
+                if train_match.any():
+                    train_indices.append(idx)
                 else:
-                    print(f"{self.model_type} is invalid. Please edit configuration file")
+                    # Check testing data
+                    test_match = (test_data[current_columns] == row_features).all(axis=1)
+                    if test_match.any():
+                        test_indices.append(idx)
 
-                batch_predictions = torch.argmax(posteriors, dim=1)
-                predictions.append(batch_predictions)
-                pred_pbar.update(1)
+            if len(train_indices) > 0 and len(test_indices) > 0:
+                DEBUG.log(f" Successfully loaded split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
+                return train_indices, test_indices
+            else:
+                DEBUG.log(" No valid indices found in loaded split")
+                return [], []
 
-        finally:
-            # Restore current weights
-            self.current_W = temp_W
+        except Exception as e:
+            DEBUG.log(f" Error loading split: {str(e)}")
+            return [], []
 
-        pred_pbar.close()
-        return torch.cat(predictions).cpu()
+
+#---------------------------------------------------------------------------------------------------------
 
 
     def _save_best_weights(self):
@@ -4053,11 +4132,51 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"Warning: Could not save confusion matrix plot: {str(e)}")
 
-    def train(self, X_train, y_train, X_test, y_test, batch_size=32):
-        """Complete training with progress tracking and confusion matrix"""
+    def train(self, X_train, y_train, X_test=None, y_test=None, batch_size=32):
+        """
+        Complete training implementation with proper weight initialization.
+        """
         print("\nStarting training...")
         n_samples = len(X_train)
         n_batches = (n_samples + batch_size - 1) // batch_size
+
+        # Initialize weights if not already done
+        if self.current_W is None:
+            n_classes = len(self.label_encoder.classes_)
+            n_pairs = len(self.feature_pairs)
+            self.current_W = torch.full(
+                (n_classes, n_pairs),
+                0.1,
+                device=self.device,
+                dtype=torch.float32
+            )
+            DEBUG.log(f" Initialized weights with shape: {self.current_W.shape}")
+
+        # Initialize best_W if not already done
+        if self.best_W is None:
+            self.best_W = self.current_W.clone()
+            self.best_error = float('inf')
+
+        # Verify likelihood parameters are initialized
+        if self.likelihood_params is None:
+            DEBUG.log(" Computing likelihood parameters")
+            if self.model_type == "Histogram":
+                self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                    self.X_tensor,
+                    self.y_tensor,
+                    self.X_tensor.shape[1]
+                )
+            else:  # Gaussian model
+                self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                    self.X_tensor,
+                    self.y_tensor,
+                    self.X_tensor.shape[1]
+                )
+
+        # Verify weight updater is initialized
+        if self.weight_updater is None:
+            DEBUG.log(" Initializing weight updater")
+            self._initialize_bin_weights()
 
         # Initialize tracking
         error_rates = []
@@ -4076,14 +4195,22 @@ class DBNN(GPUDBNN):
                 # Train on all batches
                 failed_cases = []
                 n_errors = 0
+                total_samples = 0
 
-                with tqdm(total=n_batches, desc=f"Training batches", leave=False) as batch_pbar:
+                with tqdm(total=n_batches, desc=f"Epoch {epoch+1}", leave=False) as batch_pbar:
                     for i in range(0, n_samples, batch_size):
                         batch_end = min(i + batch_size, n_samples)
                         batch_X = X_train[i:batch_end]
                         batch_y = y_train[i:batch_end]
+                        batch_size_actual = len(batch_X)
+                        total_samples += batch_size_actual
 
-                        posteriors = self._compute_batch_posterior(batch_X)[0]
+                        if self.model_type == "Histogram":
+                            # Compute posteriors and bin indices for the entire batch
+                            posteriors, bin_indices = self._compute_batch_posterior(batch_X)
+                        else:  # Gaussian model
+                            posteriors, component_resp = self._compute_batch_posterior_std(batch_X)
+
                         predictions = torch.argmax(posteriors, dim=1)
                         errors = (predictions != batch_y)
                         n_errors += errors.sum().item()
@@ -4091,20 +4218,68 @@ class DBNN(GPUDBNN):
                         if errors.any():
                             fail_idx = torch.where(errors)[0]
                             for idx in fail_idx:
-                                failed_cases.append((
-                                    batch_X[idx],
-                                    batch_y[idx].item(),
-                                    posteriors[idx].cpu().numpy()
-                                ))
+                                if self.model_type == "Histogram":
+                                    # Create bin indices dictionary for this failed case
+                                    bin_dict = {}
+                                    for pair_idx in range(len(self.feature_pairs)):
+                                        bin_dict[pair_idx] = (
+                                            bin_indices[pair_idx][0, idx].item(),
+                                            bin_indices[pair_idx][1, idx].item()
+                                        )
+                                    failed_cases.append((
+                                        batch_X[idx],
+                                        batch_y[idx].item(),
+                                        predictions[idx].item(),
+                                        bin_dict,
+                                        posteriors[idx].cpu().numpy()
+                                    ))
+                                else:  # Gaussian model
+                                    component_dict = {}
+                                    for pair_idx in range(len(self.feature_pairs)):
+                                        component_dict[pair_idx] = component_resp[pair_idx][idx]
+                                    failed_cases.append((
+                                        batch_X[idx],
+                                        batch_y[idx].item(),
+                                        predictions[idx].item(),
+                                        component_dict,
+                                        posteriors[idx].cpu().numpy()
+                                    ))
+
+                        # Update progress
+                        current_accuracy = 1 - (n_errors / total_samples)
+                        batch_pbar.set_postfix({
+                            'accuracy': f'{current_accuracy:.4f}',
+                            'failed': n_errors
+                        })
                         batch_pbar.update(1)
 
+                # Update weights for failed cases
                 if failed_cases:
-                    self._update_priors_parallel(failed_cases, batch_size)
+                    if self.model_type == "Histogram":
+                        for case in failed_cases:
+                            self.weight_updater.update_histogram_weights(
+                                failed_case=case[0],
+                                true_class=case[1],
+                                pred_class=case[2],
+                                bin_indices=case[3],
+                                posteriors=case[4],
+                                learning_rate=self.learning_rate
+                            )
+                    else:  # Gaussian model
+                        for case in failed_cases:
+                            self.weight_updater.update_gaussian_weights(
+                                failed_case=case[0],
+                                true_class=case[1],
+                                pred_class=case[2],
+                                component_responsibilities=case[3],
+                                posteriors=case[4],
+                                learning_rate=self.learning_rate
+                            )
 
-                # Calculate training metrics
-                train_error_rate = n_errors / n_samples
-                train_accuracy = 1 - train_error_rate
-                error_rates.append(train_error_rate)
+                # Calculate epoch metrics
+                epoch_error = n_errors / total_samples
+                error_rates.append(epoch_error)
+                current_accuracy = 1 - epoch_error
 
                 # Calculate test metrics if test data provided
                 test_accuracy = 0
@@ -4121,7 +4296,7 @@ class DBNN(GPUDBNN):
 
                 # Update progress bar with both accuracies
                 epoch_pbar.set_postfix({
-                    'train_acc': f"{train_accuracy:.4f}",
+                    'train_acc': f"{current_accuracy:.4f}",
                     'best_train': f"{best_train_accuracy:.4f}",
                     'test_acc': f"{test_accuracy:.4f}",
                     'best_test': f"{best_test_accuracy:.4f}"
@@ -4129,26 +4304,26 @@ class DBNN(GPUDBNN):
                 epoch_pbar.update(1)
 
                 # Check improvement and update tracking
-                accuracy_improvement = train_accuracy - prev_accuracy
+                accuracy_improvement = current_accuracy - prev_accuracy
                 if accuracy_improvement <= min_improvement:
                     plateau_counter += 1
                 else:
                     plateau_counter = 0
 
-                if train_accuracy > best_train_accuracy + min_improvement:
-                    best_train_accuracy = train_accuracy
+                if current_accuracy > best_train_accuracy + min_improvement:
+                    best_train_accuracy = current_accuracy
                     patience_counter = 0
                 else:
                     patience_counter += 1
 
                 # Save best model
-                if train_error_rate <= self.best_error:
-                    self.best_error = train_error_rate
+                if epoch_error <= self.best_error:
+                    self.best_error = epoch_error
                     self.best_W = self.current_W.clone()
                     self._save_best_weights()
 
                 # Early stopping checks
-                if train_accuracy == 1.0:
+                if current_accuracy == 1.0:
                     print("\nReached 100% training accuracy")
                     break
 
@@ -4160,7 +4335,11 @@ class DBNN(GPUDBNN):
                     print(f"\nAccuracy plateaued for {max_plateau} epochs")
                     break
 
-                prev_accuracy = train_accuracy
+                prev_accuracy = current_accuracy
+
+                # Optional memory cleanup
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         self._save_model_components()
         return self.current_W.cpu(), error_rates
@@ -5023,115 +5202,155 @@ class DBNN(GPUDBNN):
             return self._train_classical_mixed_precision(train_loader, batch_size)
 
     def _train_vectorized_mixed_precision(self, train_loader, batch_size):
-        """Vectorized training implementation with proper bin indices handling"""
-        final_W = None
-        error_rates = []
-        best_error = float('inf')
-        patience = 5
-        min_improvement = 0.001
-        plateau_counter = 0
+        """
+        Memory-efficient vectorized training with proper histogram binning and normalization.
+        """
+        # First pass: determine feature ranges
+        feature_mins = np.inf * np.ones(self.n_features)
+        feature_maxs = -np.inf * np.ones(self.n_features)
 
-        if not hasattr(self, 'device'):
-            self._setup_device_and_precision()
+        print("Computing feature ranges...")
+        for data, _ in train_loader:
+            data_np = data.cpu().numpy()
+            feature_mins = np.minimum(feature_mins, data_np.min(axis=0))
+            feature_maxs = np.maximum(feature_maxs, data_np.max(axis=0))
 
-        max_epochs = self._get_config_param('epochs', 1000)
-        with tqdm(total=max_epochs, desc="Training epochs (Vectorized)", position=0) as epoch_pbar:
-            for epoch in range(max_epochs):
-                total_failed = 0
-                total_samples = 0
+        # Add small margin to ranges
+        margin = 1e-6
+        feature_mins -= margin
+        feature_maxs += margin
 
-                with tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, position=1) as batch_pbar:
-                    for X_batch, y_batch in batch_pbar:
-                        X_batch = X_batch.to(self.device, non_blocking=True)
-                        y_batch = y_batch.to(self.device, non_blocking=True)
-                        batch_size = len(X_batch)
-                        total_samples += batch_size
+        # Initialize settings
+        n_bins = self.config['training_params']['n_bins_per_dim']
+        feature_group_size = 2  # Process pairs of features
 
-                        with self.autocast_ctx():
-                            if self.model_type == "Histogram":
-                                # Process each sample in batch to maintain bin indices structure
-                                for i in range(batch_size):
-                                    x_sample = X_batch[i:i+1]
-                                    y_true = y_batch[i]
+        # Create bin edges for each feature
+        bin_edges = [
+            np.linspace(feature_mins[i], feature_maxs[i], n_bins + 1)
+            for i in range(self.n_features)
+        ]
 
-                                    posteriors, bin_indices = self._compute_batch_posterior(x_sample)
-                                    pred_class = torch.argmax(posteriors[0])
+        # Generate feature pairs
+        feature_pairs = []
+        for i in range(0, self.n_features-1, feature_group_size):
+            for j in range(i+1, min(i+feature_group_size, self.n_features)):
+                feature_pairs.append((i, j))
 
+        # Initialize histograms for feature pairs
+        pair_histograms = {
+            label: {
+                pair: np.zeros((n_bins, n_bins), dtype=np.float32)
+                for pair in feature_pairs
+            }
+            for label in range(self.n_classes)
+        }
 
+        # Training parameters
+        max_epochs = self.config['training_params']['epochs']
+        learning_rate = self.config['training_params']['learning_rate']
 
-                                    if pred_class != y_true:
-                                        total_failed += 1
+        pbar = tqdm(range(max_epochs), desc='Training Vectorized')
 
-                                        # Prepare bin indices dictionary
-                                        bin_dict = {}
-                                        for pair_idx in range(len(self.feature_pairs)):
-                                            if isinstance(bin_indices, dict):
-                                                bin_dict[pair_idx] = bin_indices[pair_idx]
-                                            else:
-                                                bin_i = bin_indices[0][pair_idx][0].item()
-                                                bin_j = bin_indices[0][pair_idx][1].item()
-                                                bin_dict[pair_idx] = (bin_i, bin_j)
+        try:
+            for epoch in pbar:
+                # Reset epoch histograms
+                epoch_histograms = {
+                    label: {
+                        pair: np.zeros((n_bins, n_bins), dtype=np.float32)
+                        for pair in feature_pairs
+                    }
+                    for label in range(self.n_classes)
+                }
 
-                                        # Calculate adjustment
-                                        true_prob = posteriors[0, y_true].item()
-                                        pred_prob = posteriors[0, pred_class].item()
-                                        adjustment = self.learning_rate * (1.0 - (true_prob / pred_prob))
+                # First pass: accumulate counts from all batches
+                print("Accumulating histogram counts...")
+                for data, labels in train_loader:
+                    data_np = data.cpu().numpy()
+                    labels_np = labels.cpu().numpy()
 
-                                        # Update weights using existing method
-                                        self.weight_updater.batch_update_weights(
-                                            class_indices=[y_true.item()],
-                                            pair_indices=list(range(len(self.feature_pairs))),
-                                            bin_indices=bin_dict,
-                                            adjustments=[adjustment] * len(self.feature_pairs)
-                                        )
+                    # Process each feature pair
+                    for pair in feature_pairs:
+                        # Get pair values
+                        pair_data = data_np[:, list(pair)]
 
-                        # Update progress
-                        current_accuracy = 1 - (total_failed / total_samples)
-                        batch_pbar.set_postfix({
-                            'accuracy': f'{current_accuracy:.4f}',
-                            'failed': total_failed
-                        })
+                        # Get bin indices for each sample
+                        indices_0 = np.digitize(pair_data[:, 0], bin_edges[pair[0]]) - 1
+                        indices_1 = np.digitize(pair_data[:, 1], bin_edges[pair[1]]) - 1
 
-                # Calculate epoch metrics
-                epoch_error = total_failed / total_samples
-                error_rates.append(epoch_error)
-                current_accuracy = 1 - epoch_error
+                        # Update counts for each class
+                        for label in range(self.n_classes):
+                            mask = labels_np == label
+                            if mask.any():
+                                # Use numpy's histogram2d for efficient counting
+                                hist, _, _ = np.histogram2d(
+                                    pair_data[mask, 0],
+                                    pair_data[mask, 1],
+                                    bins=[bin_edges[pair[0]], bin_edges[pair[1]]]
+                                )
+                                epoch_histograms[label][pair] += hist
 
-                epoch_pbar.set_postfix({
-                    'accuracy': f'{current_accuracy:.4f}',
-                    'error': f'{epoch_error:.4f}'
-                })
-                epoch_pbar.update(1)
+                # Normalize histograms to get likelihoods
+                print("Computing likelihoods...")
+                for pair in feature_pairs:
+                    # Get total counts for each bin across all classes
+                    total_counts = np.sum([
+                        epoch_histograms[label][pair]
+                        for label in range(self.n_classes)
+                    ], axis=0)
 
-                # Check exit conditions
-                if current_accuracy == 1.0:
-                    print("\nReached 100% training accuracy - stopping training")
+                    # Normalize to get likelihoods
+                    for label in range(self.n_classes):
+                        pair_histograms[label][pair] = (
+                            epoch_histograms[label][pair] / (total_counts + 1e-10)
+                        )
+
+                # Make predictions using normalized likelihoods
+                all_predictions = []
+                all_labels = []
+
+                print("Making predictions...")
+                for data, labels in train_loader:
+                    data_np = data.cpu().numpy()
+                    labels_np = labels.cpu().numpy()
+
+                    batch_predictions = []
+                    for sample in data_np:
+                        # Compute log-likelihoods for each class
+                        class_log_likelihoods = np.zeros(self.n_classes)
+
+                        for pair in feature_pairs:
+                            pair_values = sample[list(pair)]
+                            # Get bin indices
+                            idx_0 = np.digitize(pair_values[0], bin_edges[pair[0]]) - 1
+                            idx_1 = np.digitize(pair_values[1], bin_edges[pair[1]]) - 1
+
+                            # Accumulate log-likelihoods
+                            for label in range(self.n_classes):
+                                likelihood = pair_histograms[label][pair][idx_0, idx_1]
+                                class_log_likelihoods[label] += np.log(likelihood + 1e-10)
+
+                        # Predict class with highest likelihood
+                        pred = np.argmax(class_log_likelihoods)
+                        batch_predictions.append(pred)
+
+                    all_predictions.extend(batch_predictions)
+                    all_labels.extend(labels_np)
+
+                # Calculate accuracy
+                accuracy = np.mean(np.array(all_predictions) == np.array(all_labels))
+                pbar.set_postfix({'accuracy': f'{accuracy:.4f}'})
+
+                if accuracy == 1.0:
+                    print("Achieved perfect accuracy")
                     break
 
-                if epoch_error == 0.0:
-                    print("\nReached zero training error - stopping training")
-                    break
+            return 0.0, epoch + 1
 
-                if len(error_rates) > 1:
-                    improvement = error_rates[-2] - error_rates[-1]
-                    if improvement < min_improvement:
-                        plateau_counter += 1
-                        if plateau_counter >= patience:
-                            print(f"\nTraining plateaued for {patience} epochs with minimal improvement")
-                            break
-                    else:
-                        plateau_counter = 0
+        except Exception as e:
+            print(f"Error during vectorized training: {str(e)}")
+            raise
+#------------------------
 
-                # Save best weights
-                if len(error_rates) == 1 or error_rates[-1] < best_error:
-                    best_error = error_rates[-1]
-                    self.best_W = self.current_W.clone()
-                    final_W = self.best_W
-
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-        return final_W, error_rates
 
     def _train_classical_mixed_precision(self, train_loader, batch_size):
         """Optimized training with fixed GPU handling"""
@@ -5294,165 +5513,7 @@ class DBNN(GPUDBNN):
 
 #---------------------------------------------------------------------
 
-    def fit_predict_old(self, batch_size: int = 32, save_path: str = None):
-        """Enhanced training and prediction pipeline with proper device handling"""
-        try:
-            self._last_metrics_printed = True
-            print("\nStarting fit_predict...")
 
-            # Get configuration parameters
-            invert_DBNN = self._get_config_param('invert_DBNN', False)
-            reconstruction_weight = self._get_config_param('reconstruction_weight', 0.5)
-            feedback_strength = self._get_config_param('feedback_strength', 0.3)
-            inverse_learning_rate = self._get_config_param('inverse_learning_rate', 0.1)
-
-            # Prepare data
-            if self.in_adaptive_fit:
-                if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
-                    raise ValueError("train_indices or test_indices not found")
-                X_train = self.X_tensor[self.train_indices]
-                X_test = self.X_tensor[self.test_indices]
-                y_train = self.y_tensor[self.train_indices]
-                y_test = self.y_tensor[self.test_indices]
-            else:
-                X = self.data.drop(columns=[self.target_column])
-                y = self.data[self.target_column]
-
-                if not hasattr(self.label_encoder, 'classes_'):
-                    y_encoded = self.label_encoder.fit_transform(y)
-                else:
-                    y_encoded = self.label_encoder.transform(y)
-
-                X_processed = self._preprocess_data(X, is_training=True)
-                X_tensor = torch.FloatTensor(X_processed).to(self.device)
-                y_tensor = torch.LongTensor(y_encoded).to(self.device)
-                X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
-
-            # Phase 1: Training
-            print("\nPhase 1: Training on training data...")
-            final_W, error_rates = self.train(X_train, y_train, None, None, batch_size=batch_size)
-
-            self._save_categorical_encoders()
-            train_predictions = self.predict(X_train, batch_size=batch_size)
-
-            # Move tensors to same device for comparison
-            train_predictions = train_predictions.to(self.device)
-            train_accuracy = (train_predictions == y_train).float().mean().item()
-            print(f"\nTraining accuracy: {train_accuracy:.4f}")
-
-            # Initialize results
-            results = {
-                'error_rates': error_rates,
-                'train_accuracy': train_accuracy,
-                'train_predictions': train_predictions
-            }
-
-            # Phase 2: Compute test probabilities and predictions
-            print("\nPhase 2: Computing test predictions and probabilities...")
-            if self.model_type == "Histogram":
-                test_probs, test_bins = self._compute_batch_posterior(X_test)
-            else:  # Gaussian model
-                test_probs, test_components = self._compute_batch_posterior_std(X_test)
-
-            y_pred = torch.argmax(test_probs, dim=1).to(self.device)
-            test_accuracy = (y_pred == y_test).float().mean().item()
-            print(f"\nTest Accuracy: {test_accuracy:.4f}")
-
-            # Phase 3: Inverse DBNN (if enabled)
-            reconstructed_features = None
-            if invert_DBNN:
-                print("\nPhase 3: Inverse DBNN computation...")
-                try:
-                    if not hasattr(self, 'inverse_model'):
-                        from invertible_dbnn import InvertibleDBNN
-                        self.inverse_model = InvertibleDBNN(
-                            forward_model=self,
-                            feature_dims=X_train.shape[1],
-                            reconstruction_weight=reconstruction_weight,
-                            feedback_strength=feedback_strength
-                        )
-
-                    inverse_metrics = self.inverse_model.fit(
-                        features=X_train,
-                        labels=y_train,
-                        n_epochs=self._get_config_param('epochs', 1000),
-                        learning_rate=inverse_learning_rate,
-                        batch_size=batch_size
-                    )
-
-                    reconstructed_features = self.inverse_model.reconstruct_features(test_probs)
-
-                    results['inverse_metrics'] = inverse_metrics
-                    results['reconstructed_features'] = reconstructed_features
-
-                except Exception as e:
-                    print(f"Warning: Error in inverse computation: {str(e)}")
-                    traceback.print_exc()
-
-            # Save predictions and results
-            if save_path:
-                X_test_df = self.data.drop(columns=[self.target_column]).iloc[
-                    self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                ]
-                y_test_series = self.data[self.target_column].iloc[
-                    self.test_indices if self.in_adaptive_fit else range(len(X_test))
-                ]
-
-                if reconstructed_features is not None:
-                    self._save_predictions_with_reconstruction(
-                        X_test_df, y_pred.cpu(), save_path, y_test_series, reconstructed_features
-                    )
-
-                    reconstruction_metrics = self._compute_reconstruction_metrics(
-                        X_test, reconstructed_features, test_probs, y_test
-                    )
-                    results = self.update_results_with_reconstruction(
-                        results, X_test, reconstructed_features,
-                        test_probs, y_test, save_path
-                    )
-                else:
-                    self.save_predictions(X_test_df, y_pred.cpu(), save_path, y_test_series)
-
-            # Compute final metrics
-            y_test_np = y_test.cpu().numpy()
-            y_pred_np = y_pred.cpu().numpy()
-            test_pred_labels = self.label_encoder.inverse_transform(y_pred_np)
-            y_test_labels = self.label_encoder.inverse_transform(y_test_np)
-
-            # Update results with all metrics
-            results.update({
-                'test_accuracy': test_accuracy,
-                'test_predictions': y_pred,
-                'test_probabilities': test_probs,
-                'classification_report': classification_report(y_test_labels, test_pred_labels),
-                'confusion_matrix': confusion_matrix(y_test_labels, test_pred_labels),
-                'training_complete': True,
-                'model_type': self.model_type,
-                'inverse_enabled': invert_DBNN,
-                'feature_pairs': self.feature_pairs,
-                'model_components': {
-                    'best_W': self.best_W.cpu().numpy() if self.best_W is not None else None,
-                    'current_W': self.current_W.cpu().numpy(),
-                    'likelihood_params': self.likelihood_params
-                }
-            })
-
-            if self.model_type == "Histogram":
-                results['bin_indices'] = test_bins
-            else:
-                results['component_responsibilities'] = test_components
-
-            # Print performance metrics
-            print("\nTest Set Performance:")
-            self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
-
-            self._save_model_components()
-            return results
-
-        except Exception as e:
-            print(f"\nError in fit_predict: {str(e)}")
-            traceback.print_exc()
-            raise
 
     def save_reconstruction_features(self,
                                      reconstructed_features: torch.Tensor,
@@ -5796,68 +5857,100 @@ class DBNN(GPUDBNN):
            traceback.print_exc()
            return False
 
-    def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, save_path: str, true_labels: pd.Series = None):
-        """Save predictions with proper class handling and directory setup"""
-        # Create data subdirectory
+    def predict(self, X: torch.Tensor, batch_size: int = 32) -> Tuple[torch.Tensor, pd.DataFrame]:
+        """Make predictions with optimized DataFrame construction"""
+        print("\nMaking predictions...")
+
+        # Transform input data and detect outliers
+        binned_data, outlier_mask = self.binning_handler.transform(X, self.feature_columns)
+
+        # Make predictions
+        predictions = []
+        n_batches = (len(binned_data) + batch_size - 1) // batch_size
+
+        with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
+            for i in range(0, len(binned_data), batch_size):
+                batch_end = min(i + batch_size, len(binned_data))
+                batch_X = binned_data[i:batch_end]
+
+                if self.model_type == "Histogram":
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                else:
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+
+                batch_predictions = torch.argmax(posteriors, dim=1)
+                predictions.append(batch_predictions)
+                pred_pbar.update(1)
+
+        predictions = torch.cat(predictions)
+
+        # Get original scale features with categorical labels
+        _, feature_df = self.binning_handler.inverse_transform(X, self.feature_columns)
+
+        # Get probability information
+        class_probs = self._get_test_probabilities(X)
+        # Create all DataFrames at once
+        # 1. Feature DataFrame (already created)
+        # 2. Predictions DataFrame
+        pred_df = pd.DataFrame({
+            'predicted_class': self.label_encoder.inverse_transform(predictions.cpu().numpy()),
+            'is_outlier': outlier_mask.cpu().numpy()
+        })
+        # 3. Probabilities DataFrame
+        prob_dict = {
+            f'prob_{class_name}': class_probs[:, i].cpu().numpy()
+            for i, class_name in enumerate(self.label_encoder.classes_)
+        }
+        prob_df = pd.DataFrame(prob_dict)
+        # Combine all DataFrames at once
+        results_df = pd.concat([feature_df, pred_df, prob_df], axis=1)
+        # Create a clean copy to defragment
+        results_df = results_df.copy()
+        return predictions, results_df
+
+
+    def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, save_path: str,
+                        true_labels: pd.Series = None):
+        """Save predictions with optimized DataFrame construction"""
         dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
         data_dir = os.path.join('data', dataset_name)
         os.makedirs(data_dir, exist_ok=True)
 
-        # Update save path
         save_path = os.path.join(data_dir, os.path.basename(save_path))
 
-        # Create DataFrame
-        results_df = X.copy()
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
-        results_df['predicted_class'] = pred_labels
+        # Get predictions with optimized DataFrame construction
+        predictions, results_df = self.predict(X)
 
+        # Add true labels if provided
         if true_labels is not None:
-            results_df['true_class'] = true_labels
+            results_df = pd.concat([
+                results_df,
+                pd.DataFrame({'true_class': true_labels})
+            ], axis=1)
 
-        # Get preprocessed features for probability computation
-        X_processed = self._preprocess_data(X, is_training=False)
-        X_tensor = torch.FloatTensor(X_processed).to(self.device)
+        # Save defragmented DataFrame
+        results_df = results_df.copy()  # Create a clean copy
+        results_df.to_csv(save_path, index=False)
 
-        # Compute probabilities in batches
-        batch_size = 32
-        all_probabilities = []
+        # Print summary
+        print(f"\nSaved predictions to {save_path}")
 
-        for i in range(0, len(X_tensor), batch_size):
-            batch_end = min(i + batch_size, len(X_tensor))
-            batch_X = X_tensor[i:batch_end]
+        n_outliers = results_df['is_outlier'].sum()
+        if n_outliers > 0:
+            print(f"\nFound {n_outliers} outliers in the data")
+            print("These samples were handled by clipping to the nearest bin")
+            print("Check 'is_outlier' column in the output for affected samples")
 
-            try:
-                if self.model_type == "Histogram":
-                    batch_probs, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    batch_probs, _ = self._compute_batch_posterior_std(batch_X)
-                else:
-                    raise ValueError(f"{self.model_type} is invalid")
+        # Print categorical feature summary
+        categorical_features = [col for col in self.feature_columns
+                              if col in self.binning_handler.categorical_features]
+        if categorical_features:
+            print("\nCategorical features processed:")
+            for col in categorical_features:
+                unique_vals = results_df[col].nunique()
+                print(f"- {col}: {unique_vals} unique values")
 
-                all_probabilities.append(batch_probs.cpu().numpy())
-
-            except Exception as e:
-                print(f"Error computing probabilities for batch {i}: {str(e)}")
-                return None
-
-        if all_probabilities:
-            all_probabilities = np.vstack(all_probabilities)
-
-            # Add probability columns for actual classes
-            for i, class_name in enumerate(self.label_encoder.classes_):
-                results_df[f'prob_{class_name}'] = all_probabilities[:, i]
-
-            # Add original features for reconstruction
-            for i in range(X_tensor.shape[1]):
-                results_df[f'original_feature_{i}'] = X_tensor[:, i].cpu().numpy()
-
-            # Save predictions
-            results_df.to_csv(save_path, index=False)
-            print(f"\nSaved predictions to {save_path}")
-
-            return results_df
-
-        return None
+        return results_df
 #--------------------------------------------------------------------------------------------------------------
     def _save_model_components(self):
         """Save all model components to a pickle file"""
