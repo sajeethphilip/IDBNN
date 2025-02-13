@@ -1887,57 +1887,160 @@ class DBNN(GPUDBNN):
         return bounds
 
     def _initialize_training_indices(self, y: pd.Series) -> Tuple[List[int], List[int]]:
-        """Initialize training indices with fallback to random selection"""
-        DEBUG.log(" Starting training indices initialization")
+        """Initialize training indices with proper feature preprocessing."""
+        DEBUG.log(" Starting training initialization")
 
-        # Always start with empty list
-        train_indices = []
-
-        # Try loading previous split if requested
-        if self.use_previous_model and not self.fresh_start:
-            DEBUG.log(" Attempting to load previous split")
+        # First check if we should use previous training data
+        if not self.fresh_start and self.use_previous_model:
             try:
-                loaded_train, loaded_test = self.load_last_known_split()
-                if loaded_train and loaded_test and len(loaded_train) > 0:
-                    DEBUG.log(f" Successfully loaded previous split - Training: {len(loaded_train)}, Testing: {len(loaded_test)}")
-                    return loaded_train, loaded_test
+                train_indices, test_indices = self.load_last_known_split()
+                if train_indices and test_indices:
+                    DEBUG.log(f" Loaded previous split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
+                    return train_indices, test_indices
                 else:
-                    DEBUG.log(" No valid previous split found, falling back to random selection")
+                    DEBUG.log(" No valid previous split found")
             except Exception as e:
                 DEBUG.log(f" Error loading previous split: {str(e)}")
-                DEBUG.log(" Falling back to random selection")
 
-        # Random selection initialization
-        DEBUG.log(" Performing random selection initialization")
+        DEBUG.log(" Creating new training split")
 
-        # Ensure label encoder is properly initialized
-        if not hasattr(self.label_encoder, 'classes_'):
-            DEBUG.log(" Fitting label encoder")
-            self.label_encoder.fit(y)
+        # Initialize data if not already done
+        if not hasattr(self, 'X_tensor'):
+            DEBUG.log(" Processing input data")
+            X = self.data.drop(columns=[self.target_column])
+            X_processed = self._preprocess_data(X, is_training=True)
+            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
 
-        # Select one sample from each class
+            # Generate feature pairs if not already done
+            if self.feature_pairs is None:
+                DEBUG.log(" Generating feature pairs")
+                n_features = X_processed.shape[1]
+                self.feature_pairs = self._generate_feature_combinations(
+                    n_features,
+                    self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                    self.config.get('likelihood_config', {}).get('max_combinations', None)
+                )
+                DEBUG.log(f" Generated {len(self.feature_pairs)} feature pairs")
+
+        # Get active learning parameters
+        active_learning_config = self.config.get('active_learning', {})
+        cardinality_threshold_percentile = active_learning_config.get('cardinality_threshold_percentile', 95)
+
+        # Initialize storage for selected indices
+        train_indices = []
+        selected_per_class = defaultdict(list)
+        n_classes = len(self.label_encoder.classes_)
+        target_per_class = max(2 * n_classes, 4)
+
+        # Process each class
         for class_label in self.label_encoder.classes_:
             DEBUG.log(f" Processing class: {class_label}")
             class_mask = y == class_label
             class_indices = np.where(class_mask)[0]
 
-            if len(class_indices) > 0:
-                selected_idx = np.random.choice(class_indices)
-                train_indices.append(selected_idx)
-                DEBUG.log(f" Selected index {selected_idx} for class {class_label}")
-            else:
-                DEBUG.log(f" Warning: No samples found for class {class_label}")
+            if len(class_indices) == 0:
+                continue
 
-        # Generate test indices from remaining samples
+            # Start with one random sample per class
+            initial_idx = np.random.choice(class_indices)
+            selected_per_class[class_label].append(initial_idx)
+            train_indices.append(initial_idx)
+
+            # Process remaining samples in batches
+            remaining_indices = set(class_indices) - {initial_idx}
+            batch_size = min(1000, len(remaining_indices))
+
+            while len(selected_per_class[class_label]) < target_per_class and remaining_indices:
+                current_batch = list(remaining_indices)[:batch_size]
+                batch_cardinalities = []
+
+                for idx in current_batch:
+                    if len(selected_per_class[class_label]) > 0:  # Only compute if we have previous samples
+                        candidate_features = self.X_tensor[idx]
+                        selected_features = self.X_tensor[selected_per_class[class_label]]
+
+                        cardinality = self._compute_batch_cardinality(
+                            candidate_features,
+                            selected_features
+                        )
+                        batch_cardinalities.append((idx, cardinality))
+                    else:
+                        # For first sample, use high cardinality to ensure selection
+                        batch_cardinalities.append((idx, float('inf')))
+
+                # Sort and select samples
+                if batch_cardinalities:
+                    batch_cardinalities.sort(key=lambda x: x[1], reverse=True)
+                    cardinality_values = [c[1] for c in batch_cardinalities]
+                    threshold = np.percentile(cardinality_values, cardinality_threshold_percentile)
+
+                    for idx, card in batch_cardinalities:
+                        if (card >= threshold and
+                            len(selected_per_class[class_label]) < target_per_class):
+                            selected_per_class[class_label].append(idx)
+                            train_indices.append(idx)
+                            remaining_indices.remove(idx)
+                            DEBUG.log(f"  Added sample with cardinality {card:.4f}")
+
+                # Remove processed indices
+                remaining_indices -= set(current_batch)
+
+        # Generate test indices
         all_indices = set(range(len(y)))
-        train_indices_set = set(train_indices)
-        test_indices = list(all_indices - train_indices_set)
+        test_indices = list(all_indices - set(train_indices))
 
-        DEBUG.log(f" Initialization complete:")
-        DEBUG.log(f" - Training samples: {len(train_indices)}")
-        DEBUG.log(f" - Testing samples: {len(test_indices)}")
+        # Log results
+        DEBUG.log("\nInitialization Results:")
+        for class_label, indices in selected_per_class.items():
+            DEBUG.log(f" Class {class_label}: {len(indices)} samples")
+        DEBUG.log(f" Total training samples: {len(train_indices)}")
+        DEBUG.log(f" Total test samples: {len(test_indices)}")
+
+        # Save split for future use
+        self.save_last_split(train_indices, test_indices)
 
         return train_indices, test_indices
+
+    def _compute_batch_cardinality(self, candidate_features: torch.Tensor,
+                                 selected_features: torch.Tensor,
+                                 batch_size: int = 100) -> float:
+        """Compute cardinality score with null checks."""
+        if self.feature_pairs is None:
+            raise ValueError("Feature pairs not initialized")
+
+        if len(selected_features) == 0:
+            return float('inf')
+
+        total_cardinality = 0.0
+        n_pairs = len(self.feature_pairs)
+
+        # Process feature pairs in batches
+        for start_idx in range(0, n_pairs, batch_size):
+            end_idx = min(start_idx + batch_size, n_pairs)
+            batch_pairs = self.feature_pairs[start_idx:end_idx]
+
+            # Extract features for current batch of pairs
+            candidate_batch = torch.stack([
+                candidate_features[pair]
+                for pair in batch_pairs
+            ]).to(self.device)
+
+            selected_batch = torch.stack([
+                selected_features[:, pair]
+                for pair in batch_pairs
+            ]).to(self.device)
+
+            # Compute distances efficiently
+            distances = torch.cdist(
+                candidate_batch.unsqueeze(1),
+                selected_batch.transpose(0, 1),
+                p=2
+            )
+
+            # Add minimum distances
+            total_cardinality += distances.min(dim=1)[0].sum().item()
+
+        return total_cardinality / n_pairs
 
 
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
@@ -2558,6 +2661,210 @@ class DBNN(GPUDBNN):
 
         return threshold
 
+    def _compute_sample_divergence_batched(self, sample_data: torch.Tensor, feature_pairs: List[Tuple],
+                                       batch_size: int = 1000) -> torch.Tensor:
+        """
+        Vectorized computation of pairwise feature divergence with memory-efficient batching.
+
+        Args:
+            sample_data: Input tensor of shape [n_samples, n_features]
+            feature_pairs: List of feature pair indices
+            batch_size: Size of batches for processing
+
+        Returns:
+            Tensor of pairwise distances between samples
+        """
+        n_samples = sample_data.shape[0]
+        n_pairs = len(feature_pairs)
+
+        # Initialize result tensor for final distances
+        distances = torch.zeros((n_samples, n_samples), device=self.device)
+
+        # Process samples in batches
+        for i in range(0, n_samples, batch_size):
+            batch_end_i = min(i + batch_size, n_samples)
+            batch_i = sample_data[i:batch_end_i]
+
+            # Process second dimension in batches
+            for j in range(0, n_samples, batch_size):
+                batch_end_j = min(j + batch_size, n_samples)
+                batch_j = sample_data[j:batch_end_j]
+
+                # Initialize batch distances
+                batch_distances = torch.zeros(
+                    (batch_end_i - i, batch_end_j - j),
+                    device=self.device
+                )
+
+                # Process feature pairs in batches
+                pair_batch_size = max(1, 1000 // (batch_distances.shape[0] * batch_distances.shape[1]))
+                for p in range(0, n_pairs, pair_batch_size):
+                    pair_end = min(p + pair_batch_size, n_pairs)
+                    curr_pairs = feature_pairs[p:pair_end]
+
+                    # Compute distances for current batch of pairs
+                    for pair in curr_pairs:
+                        pair_i = batch_i[:, pair]
+                        pair_j = batch_j[:, pair]
+
+                        # Compute pairwise differences efficiently
+                        diff = pair_i.unsqueeze(1) - pair_j.unsqueeze(0)
+                        pair_dist = torch.norm(diff, dim=2)
+                        batch_distances += pair_dist
+
+                # Update the full distance matrix
+                distances[i:batch_end_i, j:batch_end_j] = batch_distances
+
+                # Free memory explicitly
+                del batch_distances
+                torch.cuda.empty_cache()
+
+        # Normalize distances
+        distances /= n_pairs
+        max_dist = distances.max()
+        if max_dist > 0:
+            distances /= max_dist
+
+        return distances
+
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+        """
+        Select failed samples with memory-efficient batch processing.
+
+        Args:
+            test_predictions: Predicted class labels
+            y_test: True class labels
+            test_indices: Indices of test samples
+
+        Returns:
+            List of selected sample indices for training
+        """
+        # Initial configuration
+        active_learning_config = self.config.get('active_learning', {})
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3) / 100.0
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1) / 100.0
+        min_divergence = active_learning_config.get('min_divergence', 0.1) / 100.0
+
+        # Convert inputs to tensors
+        test_predictions = torch.as_tensor(test_predictions, device=self.device)
+        y_test = torch.as_tensor(y_test, device=self.device)
+        test_indices = torch.as_tensor(test_indices, device=self.device)
+
+        # Find misclassified samples
+        misclassified_mask = (test_predictions != y_test)
+        misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
+
+        if misclassified_indices.dim() == 0:
+            return []
+
+        selected_indices = []
+        unique_classes = torch.unique(y_test[misclassified_indices])
+
+        # Process each class
+        for class_id in unique_classes:
+            # Get samples from this class
+            class_mask = y_test[misclassified_indices] == class_id
+            class_indices = misclassified_indices[class_mask]
+
+            if len(class_indices) == 0:
+                continue
+
+            # Get features and compute probabilities
+            class_samples = self.X_tensor[test_indices[class_indices]]
+
+            # Compute posteriors based on model type
+            if self.model_type == "Histogram":
+                probs, _ = self._compute_batch_posterior(class_samples)
+            else:
+                probs, _ = self._compute_batch_posterior_std(class_samples)
+
+            # Compute error margins
+            true_probs = probs[torch.arange(len(probs)), class_id]
+            pred_classes = torch.argmax(probs, dim=1)
+            pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
+            error_margins = pred_probs - true_probs
+
+            # Find maximum error margin for relative thresholds
+            max_error_margin = error_margins.max()
+
+            # First, select the example with maximum error margin
+            max_error_idx = torch.argmax(error_margins)
+            selected_indices.append(test_indices[class_indices[max_error_idx]].item())
+
+            # Compute relative thresholds
+            relative_strong_threshold = max_error_margin * strong_margin_threshold
+            relative_marginal_threshold = max_error_margin * marginal_margin_threshold
+
+            # Process strong and marginal failures
+            for failure_type, threshold in [
+                ("strong", relative_strong_threshold),
+                ("marginal", relative_marginal_threshold)
+            ]:
+                # Get samples for this failure type
+                if failure_type == "strong":
+                    failure_mask = error_margins >= threshold
+                else:
+                    failure_mask = (error_margins > 0) & (error_margins < threshold)
+
+                if not failure_mask.any():
+                    continue
+
+                # Get samples and process in batches
+                failure_samples = class_samples[failure_mask]
+                failure_margins = error_margins[failure_mask]
+                failure_indices = test_indices[class_indices[failure_mask]]
+
+                # Compute cardinalities
+                cardinalities = self._compute_feature_cardinalities(failure_samples)
+                cardinality_threshold = torch.median(cardinalities)
+                low_card_mask = cardinalities <= cardinality_threshold
+
+                if not low_card_mask.any():
+                    continue
+
+                # Process samples meeting cardinality criteria
+                low_card_samples = failure_samples[low_card_mask]
+                low_card_margins = failure_margins[low_card_mask]
+                low_card_indices = failure_indices[low_card_mask]
+
+                # Compute divergences with batching
+                divergences = self._compute_sample_divergence_batched(
+                    low_card_samples,
+                    self.feature_pairs,
+                    batch_size=1000  # Adjust based on GPU memory
+                )
+
+                # Find maximum divergence for relative threshold
+                max_divergence = divergences.max()
+                relative_min_divergence = max_divergence * min_divergence
+
+                # Select diverse samples
+                selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
+
+                # Order samples based on failure type
+                if failure_type == "strong":
+                    margin_order = torch.argsort(low_card_margins, descending=True)
+                else:
+                    margin_order = torch.argsort(low_card_margins)
+
+                for idx in margin_order:
+                    if selected_mask.sum() == 0:
+                        selected_mask[idx] = True
+                        continue
+
+                    min_div = divergences[idx, selected_mask].min()
+                    if min_div >= relative_min_divergence:
+                        selected_mask[idx] = True
+
+                # Add selected indices
+                selected_indices.extend(low_card_indices[selected_mask].tolist())
+
+                # Free memory
+                del divergences
+                torch.cuda.empty_cache()
+
+        return selected_indices
+
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
         """
         Vectorized computation of pairwise feature divergence.
@@ -2655,7 +2962,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Error calculating batch size: {str(e)}")
             return 128  # Default fallback
 
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """
         Select failed samples based on relative thresholds and divergence criteria.
 
