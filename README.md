@@ -1,7 +1,36 @@
 
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
 
-
+adbnn Algorithm
+```
+For each adaptive round:
+    # Inner Training Loop
+    While not (converged OR max_epochs reached):
+        - Train only on training data
+        - Update weights based on failed examples in training data:
+            weight_update = learning_rate * (1 - P1/P2)
+            where P1 = posterior prob for true class
+                  P2 = posterior prob for wrongly predicted class
+        - Check convergence criteria:
+            * All training examples correct OR
+            * Training accuracy plateaus for patience iterations OR
+            * Max epochs reached
+    
+    # Testing Phase
+    - Test on all non-training data
+    - For each class in failed test examples:
+        a) Find example with max wrong posterior (P2):
+           if P2 margin > strong_margin_threshold:
+              Add if cardinality low and divergence > min_divergence
+        b) Find example with min wrong posterior:
+           if P2 margin < marginal_margin_threshold:
+              Add if cardinality low and divergence > min_divergence
+    
+    # Save Split if Improved
+    If test_accuracy > best_test_accuracy:
+        - Save current training data (before adding new samples)
+        - Save current test data (before removing new train examples)
+```
 <svg fill="none" viewBox="0 0 800 400" width="800" height="400" xmlns="http://www.w3.org/2000/svg">
   <foreignObject width="100%" height="100%">
     <div xmlns="http://www.w3.org/2000/svg">
