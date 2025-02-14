@@ -407,8 +407,9 @@ class DatasetConfig:
             "cardinality_threshold_percentile": 95
         },
         "training_params": {
-            "Save_training_epochs": False,  # Save the epochs parameter
-            "training_save_path": "training_data"  # Save epochs path parameter
+            "Save_training_epochs": False,
+            "training_save_path": "training_data"
+            # Remove hardcoded values here
         }
     }
 
@@ -533,13 +534,12 @@ class DatasetConfig:
 
     def _ensure_complete_config(self, dataset_name: str) -> Dict:
         """Ensure configuration file is complete with all options and default values."""
-        # Define default configuration including vectorization settings
+        # Define default configuration with minimal defaults
         default_config = {
             "file_path": f"data/{dataset_name}/{dataset_name}.csv",
             "separator": ",",
             "has_header": True,
             "target_column": "target",  # Will be updated when reading CSV
-
             "modelType": "Histogram",
 
             "likelihood_config": {
@@ -557,23 +557,8 @@ class DatasetConfig:
             },
 
             "training_params": {
-                "trials": 100,
-                "epochs": 1000,
-                "learning_rate": 0.1,
-                "test_fraction": 0.2,
-                "random_seed": 42,
-                "minimum_training_accuracy": 0.95,
-                "cardinality_threshold": 0.9,
-                "cardinality_tolerance": 4,
-                "n_bins_per_dim": 20,
-                "enable_adaptive": True,
-                "invert_DBNN": False,
-                "reconstruction_weight": 0.5,
-                "feedback_strength": 0.3,
-                "inverse_learning_rate": 0.1,
                 "Save_training_epochs": False,
                 "training_save_path": f"training_data/{dataset_name}",
-                # Add vectorization parameters with classical defaults
                 "enable_vectorized": False,
                 "vectorization_warning_acknowledged": False
             },
@@ -593,47 +578,128 @@ class DatasetConfig:
 
         config_path = os.path.join(dataset_folder, f"{dataset_name}.conf")
 
-        # Load existing configuration if it exists
+        # Load and validate existing configuration
         existing_config = {}
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
-                    existing_config = json.load(f)
-                    print(f"Loaded existing configuration from {config_path}")
+                    config_data = f.read()
+                    try:
+                        existing_config = json.loads(config_data)
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Invalid JSON in config file: {str(e)}")
+                        print("Creating new configuration with defaults")
+                    else:
+                        print(f"Loaded existing configuration from {config_path}")
             except Exception as e:
                 print(f"Warning: Error loading existing config: {str(e)}")
 
-        # Deep merge existing config with default config
+        # Deep merge with validation
         def deep_merge(default: Dict, existing: Dict) -> Dict:
             result = default.copy()
             for key, value in existing.items():
-                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = deep_merge(result[key], value)
+                if key in result:
+                    if isinstance(result[key], dict) and isinstance(value, dict):
+                        result[key] = deep_merge(result[key], value)
+                    else:
+                        # Type validation for known parameters
+                        try:
+                            if key == "epochs" or key == "trials":
+                                if not isinstance(value, int) or value < 1:
+                                    print(f"Warning: Invalid {key} value: {value}. Must be positive integer.")
+                                    continue
+                            elif key == "learning_rate":
+                                if not isinstance(value, (int, float)) or value <= 0:
+                                    print(f"Warning: Invalid {key} value: {value}. Must be positive number.")
+                                    continue
+                        except TypeError as e:
+                            print(f"Warning: Type error for {key}: {str(e)}")
+                            continue
+                        result[key] = value
                 else:
                     result[key] = value
             return result
 
+        # Merge with existing config taking precedence
         merged_config = deep_merge(default_config, existing_config)
 
-        # Save updated configuration
+        # Add missing training parameters with validation
+        if 'training_params' in merged_config:
+            default_training = {
+                "trials": 5,
+                "epochs": 10,
+                "learning_rate": 0.1,
+                "test_fraction": 0.2,
+                "random_seed": 42,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "n_bins_per_dim": 20,
+                "enable_adaptive": True,
+                "invert_DBNN": False,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1
+            }
+
+            for key, value in default_training.items():
+                if key not in merged_config['training_params']:
+                    merged_config['training_params'][key] = value
+
+        # Save merged configuration
         try:
             with open(config_path, 'w') as f:
                 json.dump(merged_config, f, indent=4)
             print(f"Saved complete configuration to {config_path}")
 
-            # Also save a documented version
+            # Save documented version with complete parameter documentation
             documented_path = os.path.join(dataset_folder, f"{dataset_name}_documented.conf")
             with open(documented_path, 'w') as f:
                 f.write("{\n")
                 f.write("    // Basic dataset configuration\n")
                 f.write(f'    "file_path": "{merged_config["file_path"]}",  // Path to the dataset file\n')
-                # ... (other documentation)
-                f.write("    // Training mode configuration\n")
+                f.write(f'    "separator": "{merged_config["separator"]}",  // CSV separator character\n')
+                f.write(f'    "has_header": {str(merged_config["has_header"]).lower()},  // Whether CSV has header row\n')
+                f.write(f'    "target_column": "{merged_config["target_column"]}",  // Target/label column name\n')
+                f.write(f'    "modelType": "{merged_config["modelType"]}",  // Model type (Histogram/Gaussian)\n\n')
+
+                f.write("    // Likelihood computation configuration\n")
+                f.write('    "likelihood_config": {\n')
+                f.write('        "feature_group_size": 2,  // Number of features to group\n')
+                f.write('        "max_combinations": 1000,  // Maximum feature combinations\n')
+                f.write('        "bin_sizes": [20]  // Bin sizes for histogram\n')
+                f.write('    },\n\n')
+
+                f.write("    // Active learning parameters\n")
+                f.write('    "active_learning": {\n')
+                f.write('        "tolerance": 1.0,  // Learning tolerance\n')
+                f.write('        "cardinality_threshold_percentile": 95,  // Percentile for cardinality threshold\n')
+                f.write('        "strong_margin_threshold": 0.3,  // Threshold for strong classification margin\n')
+                f.write('        "marginal_margin_threshold": 0.1,  // Threshold for marginal classification\n')
+                f.write('        "min_divergence": 0.1  // Minimum divergence threshold\n')
+                f.write('    },\n\n')
+
+                f.write("    // Training parameters\n")
                 f.write('    "training_params": {\n')
-                f.write('        // ... other training parameters ...\n')
-                f.write('        "enable_vectorized": false,  // Set to true to enable vectorized (parallel) training\n')
-                f.write('        "vectorization_warning_acknowledged": false  // Set to true to acknowledge vectorization warning\n')
-                f.write('    },\n')
+                f.write(f'        "trials": {merged_config["training_params"]["trials"]},  // Maximum training trials\n')
+                f.write(f'        "epochs": {merged_config["training_params"]["epochs"]},  // Maximum training epochs\n')
+                f.write('        "learning_rate": 0.1,  // Initial learning rate\n')
+                f.write('        "test_fraction": 0.2,  // Fraction of data for testing\n')
+                f.write('        "random_seed": 42,  // Random seed for reproducibility\n')
+                f.write('        "minimum_training_accuracy": 0.95,  // Minimum required training accuracy\n')
+                f.write('        "enable_adaptive": true,  // Enable adaptive learning\n')
+                f.write('        "enable_vectorized": false,  // Enable vectorized training\n')
+                f.write('        "vectorization_warning_acknowledged": false  // Vectorization warning flag\n')
+                f.write('    },\n\n')
+
+                f.write("    // Execution flags\n")
+                f.write('    "execution_flags": {\n')
+                f.write('        "train": true,  // Enable training\n')
+                f.write('        "train_only": false,  // Only perform training\n')
+                f.write('        "predict": true,  // Enable prediction\n')
+                f.write('        "fresh_start": false,  // Start fresh training\n')
+                f.write('        "use_previous_model": true  // Use previously trained model\n')
+                f.write('    }\n')
                 f.write("}\n")
 
         except Exception as e:
@@ -1272,6 +1338,14 @@ class GPUDBNN:
 
         # Load configuration before potential cleanup
         self.config = DatasetConfig.load_config(self.dataset_name)
+        training_params = self.config.get('training_params', {})
+
+        # Use config values with fallbacks to defaults
+        self.learning_rate = learning_rate or training_params.get('learning_rate', 0.1)
+        self.max_epochs = max_epochs or training_params.get('epochs', 1000)  # Use config epochs
+        self.test_size = test_size or training_params.get('test_fraction', 0.2)
+        self.n_bins_per_dim = n_bins_per_dim or training_params.get('n_bins_per_dim', 20)
+
         self.feature_bounds = None  # Store global min/max for each
 
         # Initialize other attributes
@@ -2729,141 +2803,212 @@ class DBNN(GPUDBNN):
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """
-        Select failed samples with memory-efficient batch processing.
-
-        Args:
-            test_predictions: Predicted class labels
-            y_test: True class labels
-            test_indices: Indices of test samples
-
-        Returns:
-            List of selected sample indices for training
+        Memory-efficient implementation of sample selection using batched processing
+        with sorted margin selection and class-wise ceiling
         """
-        # Initial configuration
+        # Configuration parameters
         active_learning_config = self.config.get('active_learning', {})
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3) / 100.0
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1) / 100.0
-        min_divergence = active_learning_config.get('min_divergence', 0.1) / 100.0
+        tolerance = active_learning_config.get('tolerance', 1.0) / 100.0
+        min_divergence = active_learning_config.get('min_divergence', 0.1)
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
 
-        # Convert inputs to tensors
+        # Calculate optimal batch size based on sample size
+        sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
+        batch_size = self._calculate_optimal_batch_size(sample_size)
+        DEBUG.log(f"\nUsing dynamic batch size: {batch_size}")
+
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
 
-        # Find misclassified samples
         misclassified_mask = (test_predictions != y_test)
         misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
 
         if misclassified_indices.dim() == 0:
             return []
 
-        selected_indices = []
+        final_selected_indices = []
         unique_classes = torch.unique(y_test[misclassified_indices])
 
-        # Process each class
         for class_id in unique_classes:
-            # Get samples from this class
+            # Calculate 5% ceiling for this class
+            total_class_samples = (y_test == class_id).sum().item()
+            max_samples_allowed = max(1, int(0.05 * total_class_samples))
+
             class_mask = y_test[misclassified_indices] == class_id
             class_indices = misclassified_indices[class_mask]
 
             if len(class_indices) == 0:
                 continue
 
-            # Get features and compute probabilities
-            class_samples = self.X_tensor[test_indices[class_indices]]
+            # Collectors for all samples in this class
+            all_strong_samples = []
+            all_marginal_samples = []
 
-            # Compute posteriors based on model type
-            if self.model_type == "Histogram":
-                probs, _ = self._compute_batch_posterior(class_samples)
-            else:
-                probs, _ = self._compute_batch_posterior_std(class_samples)
+            # Process class samples in batches
+            for batch_start in range(0, len(class_indices), batch_size):
+                batch_end = min(batch_start + batch_size, len(class_indices))
+                batch_indices = class_indices[batch_start:batch_end]
 
-            # Compute error margins
-            true_probs = probs[torch.arange(len(probs)), class_id]
-            pred_classes = torch.argmax(probs, dim=1)
-            pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
-            error_margins = pred_probs - true_probs
+                # Get batch data
+                batch_samples = self.X_tensor[test_indices[batch_indices]]
 
-            # Find maximum error margin for relative thresholds
-            max_error_margin = error_margins.max()
-
-            # First, select the example with maximum error margin
-            max_error_idx = torch.argmax(error_margins)
-            selected_indices.append(test_indices[class_indices[max_error_idx]].item())
-
-            # Compute relative thresholds
-            relative_strong_threshold = max_error_margin * strong_margin_threshold
-            relative_marginal_threshold = max_error_margin * marginal_margin_threshold
-
-            # Process strong and marginal failures
-            for failure_type, threshold in [
-                ("strong", relative_strong_threshold),
-                ("marginal", relative_marginal_threshold)
-            ]:
-                # Get samples for this failure type
-                if failure_type == "strong":
-                    failure_mask = error_margins >= threshold
+                # Compute probabilities for batch
+                if self.model_type == "Histogram":
+                    probs, _ = self._compute_batch_posterior(batch_samples)
                 else:
-                    failure_mask = (error_margins > 0) & (error_margins < threshold)
+                    probs, _ = self._compute_batch_posterior_std(batch_samples)
 
-                if not failure_mask.any():
-                    continue
+                # Compute error margins for batch
+                true_probs = probs[:, class_id]
+                pred_classes = torch.argmax(probs, dim=1)
+                pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
+                max_prob = pred_probs.max()
+                error_margins = pred_probs - true_probs
 
-                # Get samples and process in batches
-                failure_samples = class_samples[failure_mask]
-                failure_margins = error_margins[failure_mask]
-                failure_indices = test_indices[class_indices[failure_mask]]
+                # Split into strong and marginal failures
+                strong_failures = error_margins >= strong_margin_threshold * max_prob
+                marginal_failures = (error_margins >= 0) & (error_margins < marginal_margin_threshold * max_prob)
 
-                # Compute cardinalities
-                cardinalities = self._compute_feature_cardinalities(failure_samples)
-                cardinality_threshold = torch.median(cardinalities)
-                low_card_mask = cardinalities <= cardinality_threshold
+                # Process strong failures
+                if strong_failures.any():
+                    strong_samples = batch_samples[strong_failures]
+                    strong_margins = error_margins[strong_failures]
+                    strong_indices = test_indices[batch_indices[strong_failures]]
 
-                if not low_card_mask.any():
-                    continue
+                    # Compute cardinalities
+                    cardinalities = self._compute_feature_cardinalities(strong_samples)
+                    cardinality_threshold = torch.median(cardinalities)
+                    low_card_mask = cardinalities <= cardinality_threshold
 
-                # Process samples meeting cardinality criteria
-                low_card_samples = failure_samples[low_card_mask]
-                low_card_margins = failure_margins[low_card_mask]
-                low_card_indices = failure_indices[low_card_mask]
+                    if low_card_mask.any():
+                        all_strong_samples.append({
+                            'samples': strong_samples[low_card_mask],
+                            'margins': strong_margins[low_card_mask],
+                            'indices': strong_indices[low_card_mask]
+                        })
 
-                # Compute divergences with batching
-                divergences = self._compute_sample_divergence_batched(
-                    low_card_samples,
-                    self.feature_pairs,
-                    batch_size=1000  # Adjust based on GPU memory
-                )
+                # Process marginal failures
+                if marginal_failures.any():
+                    marginal_samples = batch_samples[marginal_failures]
+                    marginal_margins = error_margins[marginal_failures]
+                    marginal_indices = test_indices[batch_indices[marginal_failures]]
 
-                # Find maximum divergence for relative threshold
-                max_divergence = divergences.max()
-                relative_min_divergence = max_divergence * min_divergence
+                    # Compute cardinalities
+                    cardinalities = self._compute_feature_cardinalities(marginal_samples)
+                    cardinality_threshold = torch.median(cardinalities)
+                    low_card_mask = cardinalities <= cardinality_threshold
 
-                # Select diverse samples
-                selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
+                    if low_card_mask.any():
+                        all_marginal_samples.append({
+                            'samples': marginal_samples[low_card_mask],
+                            'margins': marginal_margins[low_card_mask],
+                            'indices': marginal_indices[low_card_mask]
+                        })
 
-                # Order samples based on failure type
-                if failure_type == "strong":
-                    margin_order = torch.argsort(low_card_margins, descending=True)
-                else:
-                    margin_order = torch.argsort(low_card_margins)
-
-                for idx in margin_order:
-                    if selected_mask.sum() == 0:
-                        selected_mask[idx] = True
-                        continue
-
-                    min_div = divergences[idx, selected_mask].min()
-                    if min_div >= relative_min_divergence:
-                        selected_mask[idx] = True
-
-                # Add selected indices
-                selected_indices.extend(low_card_indices[selected_mask].tolist())
-
-                # Free memory
-                del divergences
+                # Clear batch memory
+                del batch_samples, probs, error_margins
                 torch.cuda.empty_cache()
 
-        return selected_indices
+            # Combine and sort all samples
+            if all_strong_samples or all_marginal_samples:
+                # Process strong samples
+                if all_strong_samples:
+                    strong_samples = torch.cat([d['samples'] for d in all_strong_samples])
+                    strong_margins = torch.cat([d['margins'] for d in all_strong_samples])
+                    strong_indices = torch.cat([d['indices'] for d in all_strong_samples])
+
+                    # Sort by margin (descending for strong failures)
+                    strong_sorted_idx = torch.argsort(strong_margins, descending=True)
+                    strong_samples = strong_samples[strong_sorted_idx]
+                    strong_indices = strong_indices[strong_sorted_idx]
+                else:
+                    strong_samples = torch.tensor([], device=self.device)
+                    strong_indices = torch.tensor([], device=self.device)
+
+                # Process marginal samples
+                if all_marginal_samples:
+                    marginal_samples = torch.cat([d['samples'] for d in all_marginal_samples])
+                    marginal_margins = torch.cat([d['margins'] for d in all_marginal_samples])
+                    marginal_indices = torch.cat([d['indices'] for d in all_marginal_samples])
+
+                    # Sort by margin (ascending for marginal failures)
+                    marginal_sorted_idx = torch.argsort(marginal_margins)
+                    marginal_samples = marginal_samples[marginal_sorted_idx]
+                    marginal_indices = marginal_indices[marginal_sorted_idx]
+                else:
+                    marginal_samples = torch.tensor([], device=self.device)
+                    marginal_indices = torch.tensor([], device=self.device)
+
+                # Select samples maintaining diversity
+                selected_indices = []
+
+                # Allocate slots proportionally between strong and marginal
+                total_samples = len(strong_samples) + len(marginal_samples)
+                if total_samples > 0:
+                    strong_ratio = len(strong_samples) / total_samples
+                    strong_slots = min(int(max_samples_allowed * strong_ratio), len(strong_samples))
+                    marginal_slots = min(max_samples_allowed - strong_slots, len(marginal_samples))
+
+                    if len(strong_samples) > 0:
+                        strong_selected = self._select_diverse_samples(
+                            strong_samples[:strong_slots],
+                            strong_indices[:strong_slots],
+                            min_divergence
+                        )
+                        selected_indices.extend(strong_selected)
+
+                    if len(marginal_samples) > 0:
+                        marginal_selected = self._select_diverse_samples(
+                            marginal_samples[:marginal_slots],
+                            marginal_indices[:marginal_slots],
+                            min_divergence
+                        )
+                        selected_indices.extend(marginal_selected)
+
+                # Add selected indices for this class
+                final_selected_indices.extend(selected_indices)
+
+                # Print selection info
+                true_class_name = self.label_encoder.inverse_transform([class_id.item()])[0]
+                DEBUG.log(f"\nClass {true_class_name}:")
+                DEBUG.log(f" - Total selected: {len(selected_indices)} (max allowed: {max_samples_allowed})")
+                DEBUG.log(f" - Strong failures: {len(strong_samples)}")
+                DEBUG.log(f" - Marginal failures: {len(marginal_samples)}")
+
+            # Clear class-level memory
+            del all_strong_samples, all_marginal_samples
+            torch.cuda.empty_cache()
+
+        print(f"\nTotal samples selected: {len(final_selected_indices)}")
+        return final_selected_indices
+
+    def _select_diverse_samples(self, samples, indices, min_divergence):
+        """
+        Helper function to select diverse samples from a sorted set
+        """
+        if len(samples) == 0:
+            return []
+
+        divergences = self._compute_sample_divergence(samples, self.feature_pairs)
+        selected_mask = torch.zeros(len(samples), dtype=torch.bool, device=self.device)
+        selected_mask[0] = True  # Select the first sample (best margin)
+
+        # Add diverse samples meeting divergence criterion
+        while True:
+            min_divs = divergences[:, selected_mask].min(dim=1)[0]
+            candidate_mask = (~selected_mask) & (min_divs >= min_divergence)
+
+            if not candidate_mask.any():
+                break
+
+            # Select the next sample in order (they're already sorted by margin)
+            next_idx = torch.nonzero(candidate_mask)[0][0]
+            selected_mask[next_idx] = True
+
+        return indices[selected_mask].cpu().tolist()
+
 
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
         """
@@ -3020,14 +3165,14 @@ class DBNN(GPUDBNN):
 
             # Find maximum error margin for relative thresholds
             max_error_margin = error_margins.max()
-
+            min_error_margin = error_margins.min()
             # First, always select the example with maximum error margin
             max_error_idx = torch.argmax(error_margins)
             selected_indices.append(test_indices[class_indices[max_error_idx]].item())
 
             # Compute relative thresholds
             relative_strong_threshold = max_error_margin * strong_margin_threshold
-            relative_marginal_threshold = max_error_margin * marginal_margin_threshold
+            relative_marginal_threshold = min_error_margin * marginal_margin_threshold
 
             # Identify strong and marginal failures
             strong_failures = error_margins >= relative_strong_threshold
