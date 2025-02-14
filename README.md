@@ -71,84 +71,106 @@ For each adaptive round:
 // 1. Main Configuration (dataset_name.json)
 {
     "dataset": {
-        "name": "cifar100",                    // Dataset name, e.g., mnist, cifar10, custom_dataset
-        "type": "torchvision",                 // "torchvision" or "custom"
-        "in_channels": 3,                      // Number of input channels (3 for RGB, 1 for grayscale)
-        "num_classes": 100,                    // Number of classes in dataset
-        "input_size": [32, 32],               // Input image dimensions [height, width]
-        "mean": [0.485, 0.456, 0.406],        // Normalization mean per channel
-        "std": [0.229, 0.224, 0.225],         // Normalization std per channel
-        "train_dir": "data/cifar100/train",   // Path to training data
-        "test_dir": "data/cifar100/test"      // Path to test data
+        "name": "sample_dataset",
+        "type": "custom",
+        "in_channels": 3,
+        "input_size": [224, 224],
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225],
+        "image_type": "general"  // Options: "general", "astronomical", "medical", "agricultural"
     },
-
     "model": {
-        "encoder_type": "autoenc",             // Type of encoder: "autoenc" or "cnn"
-        "feature_dims": 128,                   // Dimension of extracted features
-        "learning_rate": 0.001,                // Base learning rate
-        
-        "loss_functions": {
-            "structural": {
-                "enabled": true,               // Enable/disable this loss component
-                "weight": 1.0,                 // Weight for this loss component
-                "params": {
-                    "edge_weight": 1.0,        // Weight for edge preservation
-                    "smoothness_weight": 0.5    // Weight for smoothness preservation
+        "encoder_type": "enhanced",
+        "feature_dims": 128,
+        "learning_rate": 0.001,
+        "enhancement_modules": {
+            "astronomical": {
+                "enabled": false,
+                "components": {
+                    "structure_preservation": true,
+                    "detail_preservation": true,
+                    "star_detection": true,
+                    "galaxy_features": true,
+                    "kl_divergence": true
+                },
+                "weights": {
+                    "detail_weight": 1.0,
+                    "structure_weight": 0.8,
+                    "edge_weight": 0.7
                 }
             },
-            "color_enhancement": {             // Similar structure for other loss components
-                "enabled": true,
-                "weight": 0.8,
-                "params": {
-                    "channel_weight": 0.5,
-                    "contrast_weight": 0.3
+            "medical": {
+                "enabled": false,
+                "components": {
+                    "tissue_boundary": true,
+                    "lesion_detection": true,
+                    "contrast_enhancement": true,
+                    "subtle_feature_preservation": true
+                },
+                "weights": {
+                    "boundary_weight": 1.0,
+                    "lesion_weight": 0.8,
+                    "contrast_weight": 0.6
+                }
+            },
+            "agricultural": {
+                "enabled": false,
+                "components": {
+                    "texture_analysis": true,
+                    "damage_detection": true,
+                    "color_anomaly": true,
+                    "pattern_enhancement": true,
+                    "morphological_features": true
+                },
+                "weights": {
+                    "texture_weight": 1.0,
+                    "damage_weight": 0.8,
+                    "pattern_weight": 0.7
                 }
             }
         },
-
-        "optimizer": {
-            "type": "Adam",                    // Optimizer type: "Adam", "SGD", "AdamW"
-            "weight_decay": 1e-4,
-            "momentum": 0.9,                   // Used for SGD
-            "beta1": 0.9,                      // Used for Adam/AdamW
-            "beta2": 0.999,
-            "epsilon": 1e-8
-        },
-
-        "scheduler": {
-            "type": "ReduceLROnPlateau",       // "ReduceLROnPlateau", "StepLR", "CosineAnnealingLR"
-            "factor": 0.1,
-            "patience": 10,
-            "min_lr": 1e-6,
-            "verbose": true
+        "loss_functions": {
+            "base_autoencoder": {
+                "enabled": true,
+                "weight": 1.0
+            },
+            "astronomical_structure": {
+                "enabled": false,
+                "weight": 1.0,
+                "components": {
+                    "edge_preservation": true,
+                    "peak_preservation": true,
+                    "detail_preservation": true
+                }
+            },
+            "medical_structure": {
+                "enabled": false,
+                "weight": 1.0,
+                "components": {
+                    "boundary_preservation": true,
+                    "tissue_contrast": true,
+                    "local_structure": true
+                }
+            },
+            "agricultural_pattern": {
+                "enabled": false,
+                "weight": 1.0,
+                "components": {
+                    "texture_preservation": true,
+                    "damage_pattern": true,
+                    "color_consistency": true
+                }
+            }
         }
     },
-
     "training": {
         "batch_size": 32,
         "epochs": 20,
-        "num_workers": 4,                      // Number of data loading workers
-        "checkpoint_dir": "data/cifar100/checkpoints",
-        "validation_split": 0.2,
-        "invert_DBNN": true,                   // Whether to use inverse DBNN mode
-        "early_stopping": {
-            "patience": 5,
-            "min_delta": 0.001
-        }
-    },
-
-    "augmentation": {
-        "enabled": true,
-        "random_crop": {"enabled": true, "padding": 4},
-        "random_rotation": {"enabled": true, "degrees": 10},
-        "horizontal_flip": {"enabled": true, "probability": 0.5},
-        "vertical_flip": {"enabled": false},
-        "color_jitter": {
-            "enabled": true,
-            "brightness": 0.2,
-            "contrast": 0.2,
-            "saturation": 0.2,
-            "hue": 0.1
+        "num_workers": 4,
+        "enhancement_specific": {
+            "feature_extraction_frequency": 5,
+            "pattern_validation_steps": 100,
+            "adaptive_weight_adjustment": true
         }
     }
 }
