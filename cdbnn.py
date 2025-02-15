@@ -35,7 +35,7 @@ import glob
 from tqdm import tqdm
 import random
 import pandas as pd
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any
 from collections import defaultdict
 from pathlib import Path
 import torch.multiprocessing
@@ -52,7 +52,2282 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import logging
+from typing import Dict, List, Tuple, Optional, Union
+from scipy.special import softmax
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import os
 
+class BaseEnhancementConfig:
+    """Base class for enhancement configuration management"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.initialize_base_config()
+
+    def initialize_base_config(self) -> None:
+        """Initialize base configuration structures"""
+        if 'model' not in self.config:
+            self.config['model'] = {}
+
+        # Initialize autoencoder config
+        if 'autoencoder_config' not in self.config['model']:
+            self.config['model']['autoencoder_config'] = {
+                'phase1_learning_rate': 0.001,
+                'phase2_learning_rate': 0.005,
+                'reconstruction_weight': 1.0,
+                'feature_weight': 0.1,
+                'enable_phase2': True,
+                'enhancements': {
+                    'use_kl_divergence': True,
+                    'use_class_encoding': True,
+                    'kl_divergence_weight': 0.1,
+                    'classification_weight': 0.1,
+                    'clustering_temperature': 1.0,
+                    'min_cluster_confidence': 0.7
+                }
+            }
+
+        # Initialize enhancement modules
+        if 'enhancement_modules' not in self.config['model']:
+            self.config['model']['enhancement_modules'] = {}
+
+        # Initialize loss functions
+        if 'loss_functions' not in self.config['model']:
+            self.config['model']['loss_functions'] = {}
+
+    def _adjust_learning_rates(self, num_enhancements: int) -> None:
+        """Adjust learning rates based on number of enabled enhancements"""
+        complexity_factor = max(1, num_enhancements * 0.5)
+        self.config['model']['autoencoder_config']['phase1_learning_rate'] = 0.001 / complexity_factor
+        self.config['model']['autoencoder_config']['phase2_learning_rate'] = 0.0005 / complexity_factor
+
+    def _normalize_weights(self, enabled_enhancements: List[str]) -> None:
+        """Normalize weights for enabled enhancements"""
+        num_enabled = len(enabled_enhancements)
+        if num_enabled > 0:
+            base_reconstruction_weight = 1.0
+            enhancement_weight = 1.0 / (num_enabled + 1)
+
+            self.config['model']['autoencoder_config']['reconstruction_weight'] = base_reconstruction_weight
+
+            for loss_name, loss_config in self.config['model']['loss_functions'].items():
+                if loss_config['enabled']:
+                    loss_config['weight'] = enhancement_weight
+
+    def get_config(self) -> Dict:
+        """Get the current configuration"""
+        return self.config
+
+
+class GeneralEnhancementConfig(BaseEnhancementConfig):
+    """Configuration manager for general (flexible) enhancement mode"""
+
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.enhancement_configs = self._get_enhancement_configs()
+
+    def _get_enhancement_configs(self) -> Dict:
+        """Get available enhancement configurations"""
+        return {
+            'astronomical': {
+                'name': "Astronomical",
+                'desc': "star detection, galaxy structure preservation",
+                'components': {
+                    'structure_preservation': True,
+                    'detail_preservation': True,
+                    'star_detection': True,
+                    'galaxy_features': True,
+                    'kl_divergence': True
+                },
+                'weights': {
+                    'detail_weight': 1.0,
+                    'structure_weight': 0.8,
+                    'edge_weight': 0.7
+                },
+                'loss_components': {
+                    'edge_preservation': True,
+                    'peak_preservation': True,
+                    'detail_preservation': True
+                }
+            },
+            'medical': {
+                'name': "Medical",
+                'desc': "tissue boundary, lesion detection",
+                'components': {
+                    'tissue_boundary': True,
+                    'lesion_detection': True,
+                    'contrast_enhancement': True,
+                    'subtle_feature_preservation': True
+                },
+                'weights': {
+                    'boundary_weight': 1.0,
+                    'lesion_weight': 0.8,
+                    'contrast_weight': 0.6
+                },
+                'loss_components': {
+                    'boundary_preservation': True,
+                    'tissue_contrast': True,
+                    'local_structure': True
+                }
+            },
+            'agricultural': {
+                'name': "Agricultural",
+                'desc': "texture analysis, damage detection",
+                'components': {
+                    'texture_analysis': True,
+                    'damage_detection': True,
+                    'color_anomaly': True,
+                    'pattern_enhancement': True,
+                    'morphological_features': True
+                },
+                'weights': {
+                    'texture_weight': 1.0,
+                    'damage_weight': 0.8,
+                    'pattern_weight': 0.7
+                },
+                'loss_components': {
+                    'texture_preservation': True,
+                    'damage_pattern': True,
+                    'color_consistency': True
+                }
+            }
+        }
+
+    def configure_general_parameters(self) -> None:
+        """Configure general enhancement parameters"""
+        enhancements = self.config['model']['autoencoder_config']['enhancements']
+
+        print("\nConfiguring General Enhancement Parameters:")
+
+        # KL Divergence configuration
+        if input("Enable KL divergence clustering? (y/n) [y]: ").lower() != 'n':
+            enhancements['use_kl_divergence'] = True
+            weight = input("Enter KL divergence weight (0-1) [0.1]: ").strip()
+            enhancements['kl_divergence_weight'] = float(weight) if weight else 0.1
+        else:
+            enhancements['use_kl_divergence'] = False
+            enhancements['kl_divergence_weight'] = 0.0
+
+        # Class encoding configuration
+        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+            enhancements['use_class_encoding'] = True
+            weight = input("Enter classification weight (0-1) [0.1]: ").strip()
+            enhancements['classification_weight'] = float(weight) if weight else 0.1
+        else:
+            enhancements['use_class_encoding'] = False
+            enhancements['classification_weight'] = 0.0
+
+        # Configure additional parameters if KL divergence is enabled
+        if enhancements['use_kl_divergence']:
+            self._configure_clustering_parameters(enhancements)
+
+        # Phase 2 configuration
+        if input("Enable phase 2 training (clustering and fine-tuning)? (y/n) [y]: ").lower() != 'n':
+            self.config['model']['autoencoder_config']['enable_phase2'] = True
+        else:
+            self.config['model']['autoencoder_config']['enable_phase2'] = False
+
+    def _configure_clustering_parameters(self, enhancements: Dict) -> None:
+        """Configure clustering-specific parameters"""
+        temp = input("Enter clustering temperature (0.1-2.0) [1.0]: ").strip()
+        enhancements['clustering_temperature'] = float(temp) if temp else 1.0
+
+        conf = input("Enter minimum cluster confidence (0-1) [0.7]: ").strip()
+        enhancements['min_cluster_confidence'] = float(conf) if conf else 0.7
+
+    def configure_enhancements(self) -> None:
+        """Configure enhancement features with flexible combinations"""
+        enabled_enhancements = []
+
+        print("\nConfiguring Enhancement Features for General Mode:")
+        print("You can enable any combination of features\n")
+
+        # Let user choose enhancements
+        for key, enhancement in self.enhancement_configs.items():
+            prompt = f"Enable {enhancement['name']} features ({enhancement['desc']})? (y/n) [n]: "
+            if input(prompt).lower() == 'y':
+                enabled_enhancements.append(key)
+                self._add_enhancement(key, enhancement)
+                print(f"{enhancement['name']} features added.")
+
+        # Normalize weights and adjust learning rates
+        self._normalize_weights(enabled_enhancements)
+        self._adjust_learning_rates(len(enabled_enhancements))
+
+        # Print configuration summary
+        self._print_configuration_summary(enabled_enhancements)
+
+    def _add_enhancement(self, key: str, enhancement: Dict) -> None:
+        """Add specific enhancement configuration"""
+        self.config['model']['enhancement_modules'][key] = {
+            'enabled': True,
+            'components': enhancement['components'],
+            'weights': enhancement['weights']
+        }
+
+        self.config['model']['loss_functions'][f'{key}_structure'] = {
+            'enabled': True,
+            'weight': 1.0,  # Will be normalized later
+            'components': enhancement['loss_components']
+        }
+
+    def _print_configuration_summary(self, enabled_enhancements: List[str]) -> None:
+        """Print current configuration summary"""
+        print("\nCurrent Enhancement Configuration:")
+        if enabled_enhancements:
+            for key in enabled_enhancements:
+                enhancement = self.enhancement_configs[key]
+                print(f"\n{enhancement['name']} Features:")
+                print("- Components:", ', '.join(self.config['model']['enhancement_modules'][key]['components'].keys()))
+                print("- Weights:", ', '.join(f"{k}: {v}" for k, v in self.config['model']['enhancement_modules'][key]['weights'].items()))
+        else:
+            print("\nNo enhancements enabled. Using basic autoencoder configuration.")
+
+        print(f"\nLearning Rates:")
+        print(f"- Phase 1: {self.config['model']['autoencoder_config']['phase1_learning_rate']}")
+        print(f"- Phase 2: {self.config['model']['autoencoder_config']['phase2_learning_rate']}")
+
+
+class SpecificEnhancementConfig(BaseEnhancementConfig):
+    """Configuration manager for specific enhancement types"""
+
+    def __init__(self, config: Dict, enhancement_type: str):
+        super().__init__(config)
+        self.enhancement_type = enhancement_type
+
+    def configure(self) -> None:
+        """Configure specific enhancement type"""
+        print(f"\nConfiguring {self.enhancement_type.title()} Enhancement:")
+
+        # Enable specific enhancement
+        self.config['model']['enhancement_modules'][self.enhancement_type] = {
+            'enabled': True
+        }
+
+        # Configure general parameters
+        self.configure_general_parameters()
+
+        # Adjust learning rates
+        self._adjust_learning_rates(1)  # Single enhancement type
+
+        print(f"\n{self.enhancement_type.title()} enhancement configured successfully.")
+
+    def configure_general_parameters(self) -> None:
+        """Configure general parameters for specific enhancement type"""
+        enhancements = self.config['model']['autoencoder_config']['enhancements']
+
+        # Configure basic parameters
+        enhancements['use_kl_divergence'] = True
+        enhancements['use_class_encoding'] = True
+        enhancements['kl_divergence_weight'] = 0.1
+        enhancements['classification_weight'] = 0.1
+        enhancements['clustering_temperature'] = 1.0
+        enhancements['min_cluster_confidence'] = 0.7
+
+        # Enable phase 2 by default for specific enhancements
+        self.config['model']['autoencoder_config']['enable_phase2'] = True
+
+class BaseAutoencoder(nn.Module):
+    """Base autoencoder class with all foundational methods"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        super().__init__()
+        self.input_shape = input_shape
+        self.in_channels = input_shape[0]
+        self.feature_dims = feature_dims
+        self.config = config
+        self.train_dataset = None
+
+        # Set device
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                                 and torch.cuda.is_available() else 'cpu')
+
+        # Initialize dimensions
+        self.spatial_dims = []
+        current_size = input_shape[1]
+        self.layer_sizes = self._calculate_layer_sizes()
+
+        for _ in self.layer_sizes:
+            self.spatial_dims.append(current_size)
+            current_size = current_size // 2
+
+        self.final_spatial_dim = current_size
+        self.flattened_size = self.layer_sizes[-1] * (self.final_spatial_dim ** 2)
+
+        # Create basic layers
+        self.encoder_layers = self._create_encoder_layers()
+        self.embedder = self._create_embedder()
+        self.unembedder = self._create_unembedder()
+        self.decoder_layers = self._create_decoder_layers()
+        # Add latent space organization components
+        self.use_kl_divergence = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_kl_divergence', True)
+        self.use_class_encoding = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_class_encoding', True)
+
+        if self.use_class_encoding:
+            num_classes = config['dataset'].get('num_classes', 10)
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dims, feature_dims // 2),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(feature_dims // 2, num_classes)
+            )
+
+        # Initialize clustering components if KL divergence is enabled
+        if self.use_kl_divergence:
+            self.cluster_centers = nn.Parameter(torch.randn(config['dataset'].get('num_classes', 10), feature_dims))
+            self.clustering_temperature = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
+
+        # Training phase tracking
+        self.training_phase = 1  # Start with phase 1
+        self.config = config
+
+        # Initialize components but don't use them in phase 1
+        self._initialize_latent_organization()
+
+        # Move model to appropriate device
+        self.to(self.device)
+
+    def set_dataset(self, dataset: Dataset):
+        """Store dataset reference"""
+        self.train_dataset = dataset
+
+    def _initialize_latent_organization(self):
+        """Initialize latent space organization components"""
+        self.use_kl_divergence = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_kl_divergence', True)
+        self.use_class_encoding = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_class_encoding', True)
+
+        if self.use_class_encoding:
+            num_classes = self.config['dataset'].get('num_classes', 10)
+            self.classifier = nn.Sequential(
+                nn.Linear(self.feature_dims, self.feature_dims // 2),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(self.feature_dims // 2, num_classes)
+            )
+
+        if self.use_kl_divergence:
+            num_clusters = self.config['dataset'].get('num_classes', 10)
+            self.cluster_centers = nn.Parameter(torch.randn(num_clusters, self.feature_dims))
+            self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
+
+    def set_training_phase(self, phase: int):
+        """Set the training phase (1 or 2)"""
+        self.training_phase = phase
+        if phase == 2:
+            # Initialize cluster centers if in phase 2
+            if self.use_kl_divergence:
+                # ERROR HERE: Trying to access config['dataset']['train_dataset']
+                self._initialize_cluster_centers()
+
+    def _initialize_cluster_centers(self):
+        """Initialize cluster centers using k-means"""
+        self.eval()
+        with torch.no_grad():
+            if self.train_dataset is None:
+                raise ValueError("Dataset not set. Call set_dataset() before training.")
+
+            # Use stored dataset reference
+            dataloader = DataLoader(
+                self.train_dataset,
+                batch_size=1000,
+                shuffle=True
+            )
+            batch_data, _ = next(iter(dataloader))
+            embeddings = self.encode(batch_data.to(self.device))
+            if isinstance(embeddings, tuple):
+                embeddings = embeddings[0]
+
+            # Use k-means to initialize cluster centers
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=self.cluster_centers.size(0), n_init=20)
+            kmeans.fit(embeddings.cpu().numpy())
+            self.cluster_centers.data = torch.tensor(
+                kmeans.cluster_centers_,
+                device=self.device
+            )
+
+    def _calculate_layer_sizes(self) -> List[int]:
+        """Calculate progressive channel sizes for encoder/decoder"""
+        base_channels = 32
+        sizes = []
+        current_size = base_channels
+
+        min_dim = min(self.input_shape[1:])
+        max_layers = int(np.log2(min_dim)) - 2
+
+        for _ in range(max_layers):
+            sizes.append(current_size)
+            if current_size < 256:
+                current_size *= 2
+
+        logging.info(f"Layer sizes: {sizes}")
+        return sizes
+
+    def _create_encoder_layers(self) -> nn.ModuleList:
+        """Create encoder layers"""
+        layers = nn.ModuleList()
+        in_channels = self.in_channels
+
+        for size in self.layer_sizes:
+            layers.append(nn.Sequential(
+                nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(size),
+                nn.LeakyReLU(0.2)
+            ))
+            in_channels = size
+
+        return layers
+
+    def _create_embedder(self) -> nn.Sequential:
+        """Create embedder layers"""
+        return nn.Sequential(
+            nn.Linear(self.flattened_size, self.feature_dims),
+            nn.BatchNorm1d(self.feature_dims),
+            nn.LeakyReLU(0.2)
+        )
+
+    def _create_unembedder(self) -> nn.Sequential:
+        """Create unembedder layers"""
+        return nn.Sequential(
+            nn.Linear(self.feature_dims, self.flattened_size),
+            nn.BatchNorm1d(self.flattened_size),
+            nn.LeakyReLU(0.2)
+        )
+
+    def _create_decoder_layers(self) -> nn.ModuleList:
+        """Create decoder layers"""
+        layers = nn.ModuleList()
+        in_channels = self.layer_sizes[-1]
+
+        for i in range(len(self.layer_sizes)-1, -1, -1):
+            out_channels = self.in_channels if i == 0 else self.layer_sizes[i-1]
+            layers.append(nn.Sequential(
+                nn.ConvTranspose2d(
+                    in_channels, out_channels,
+                    kernel_size=3, stride=2, padding=1, output_padding=1
+                ),
+                nn.BatchNorm2d(out_channels) if i > 0 else nn.Identity(),
+                nn.LeakyReLU(0.2) if i > 0 else nn.Tanh()
+            ))
+            in_channels = out_channels
+
+        return layers
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Basic encoding process"""
+        for layer in self.encoder_layers:
+            x = layer(x)
+        x = x.view(x.size(0), -1)
+        return self.embedder(x)
+
+    def decode(self, x: torch.Tensor) -> torch.Tensor:
+        """Basic decoding process"""
+        x = self.unembedder(x)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim, self.final_spatial_dim)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass with flexible output format"""
+        embedding = self.encode(x)
+        if isinstance(embedding, tuple):
+            embedding = embedding[0]
+        reconstruction = self.decode(embedding)
+
+        if self.training_phase == 2:
+            # Return dictionary format in phase 2
+            output = {
+                'embedding': embedding,
+                'reconstruction': reconstruction
+            }
+
+            if self.use_class_encoding and hasattr(self, 'classifier'):
+                class_logits = self.classifier(embedding)
+                output['class_logits'] = class_logits
+                output['class_predictions'] = class_logits.argmax(dim=1)
+
+            if self.use_kl_divergence:
+                latent_info = self.organize_latent_space(embedding)
+                output.update(latent_info)
+
+            return output
+        else:
+            # Return tuple format in phase 1
+            return embedding, reconstruction
+
+    def get_encoding_shape(self) -> Tuple[int, ...]:
+        """Get the shape of the encoding at each layer"""
+        return tuple([size for size in self.layer_sizes])
+
+    def get_spatial_dims(self) -> List[List[int]]:
+        """Get the spatial dimensions at each layer"""
+        return self.spatial_dims.copy()
+
+    def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
+        """Convert tensor to image array with proper normalization"""
+        tensor = tensor.detach().cpu()
+        if len(tensor.shape) == 3:
+            tensor = tensor.permute(1, 2, 0)
+
+        mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
+        std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
+        tensor = tensor * std + mean
+
+        return (tensor.clamp(0, 1) * 255).numpy().astype(np.uint8)
+
+    def save_image(self, tensor: torch.Tensor, path: str):
+        """Save tensor as image with proper normalization"""
+        img_array = self._tensor_to_image(tensor)
+        img = Image.fromarray(img_array)
+
+        # Ensure target size
+        target_size = tuple(self.config['dataset']['input_size'])
+        if img.size != target_size:
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+
+        img.save(path, quality=95, optimize=True)
+        logging.debug(f"Saved image to {path} with size {img.size}")
+
+    def plot_reconstruction_samples(self, inputs: torch.Tensor,
+                                 save_path: Optional[str] = None) -> None:
+        """Visualize original and reconstructed images"""
+        self.eval()
+        with torch.no_grad():
+            embedding = self.encode(inputs)
+            reconstructions = self.decode(embedding)
+
+        num_samples = min(inputs.size(0), 8)
+        fig, axes = plt.subplots(2, num_samples, figsize=(2*num_samples, 4))
+
+        for i in range(num_samples):
+            # Original
+            axes[0, i].imshow(self._tensor_to_image(inputs[i]))
+            axes[0, i].axis('off')
+            if i == 0:
+                axes[0, i].set_title('Original')
+
+            # Reconstruction
+            axes[1, i].imshow(self._tensor_to_image(reconstructions[i]))
+            axes[1, i].axis('off')
+            if i == 0:
+                axes[1, i].set_title('Reconstructed')
+
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path)
+            logging.info(f"Reconstruction samples saved to {save_path}")
+        plt.close()
+
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """
+        Universal feature extraction method for all autoencoder variants.
+        Handles both basic and enhanced feature extraction with proper device management.
+        """
+        self.eval()
+        all_embeddings = []
+        all_labels = []
+
+        try:
+            with torch.no_grad():
+                for inputs, labels in tqdm(loader, desc="Extracting features"):
+                    # Move data to correct device
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
+
+                    # Get embeddings
+                    if self.training_phase == 2 and hasattr(self, 'forward'):
+                        # Use full forward pass in phase 2 to get all enhancement features
+                        outputs = self(inputs)
+                        if isinstance(outputs, dict):
+                            embeddings = outputs['embedding']
+                        else:
+                            embeddings = outputs[0]
+                    else:
+                        # Basic embedding extraction
+                        embeddings = self.encode(inputs)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+
+                    # Store results (keeping on device for now)
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+
+                # Concatenate all results while still on device
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
+
+                # Initialize base feature dictionary
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels
+                }
+
+                # Add enhancement features if in phase 2
+                if self.training_phase == 2:
+                    # Add clustering information if enabled
+                    if self.use_kl_divergence:
+                        cluster_info = self.organize_latent_space(embeddings, labels)
+                        feature_dict.update(cluster_info)
+
+                    # Add classification information if enabled
+                    if self.use_class_encoding and hasattr(self, 'classifier'):
+                        class_logits = self.classifier(embeddings)
+                        feature_dict.update({
+                            'class_logits': class_logits,
+                            'class_predictions': class_logits.argmax(dim=1),
+                            'class_probabilities': F.softmax(class_logits, dim=1)
+                        })
+
+                    # Add specialized features for enhanced models
+                    if hasattr(self, 'get_enhancement_features'):
+                        enhancement_features = self.get_enhancement_features(embeddings)
+                        feature_dict.update(enhancement_features)
+
+                # Move all tensors to CPU for final output
+                for key in feature_dict:
+                    if isinstance(feature_dict[key], torch.Tensor):
+                        feature_dict[key] = feature_dict[key].cpu()
+
+                return feature_dict
+
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
+
+    def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Hook method for enhanced models to add specialized features.
+        Override this in derived classes to add model-specific features.
+        """
+        return {}
+
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
+        """
+        Universal feature saving method for all autoencoder variants.
+
+        Args:
+            feature_dict: Dictionary containing features and related information
+            output_path: Path to save the CSV file
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            # Determine which features to save
+            feature_columns = []
+            data_dict = {}
+
+            # Process embeddings
+            if 'embeddings' in feature_dict:
+                embeddings = feature_dict['embeddings'].cpu().numpy()
+                for i in range(embeddings.shape[1]):
+                    col_name = f'feature_{i}'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = embeddings[:, i]
+
+            # Process labels/targets
+            if 'labels' in feature_dict:
+                data_dict['target'] = feature_dict['labels'].cpu().numpy()
+                feature_columns.append('target')
+
+            # Process enhancement features if present
+            enhancement_features = self._get_enhancement_columns(feature_dict)
+            data_dict.update(enhancement_features)
+            feature_columns.extend(enhancement_features.keys())
+
+            # Save in chunks to manage memory
+            chunk_size = 1000
+            total_samples = len(next(iter(data_dict.values())))
+
+            for start_idx in range(0, total_samples, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_samples)
+
+                # Create chunk dictionary
+                chunk_dict = {
+                    col: data_dict[col][start_idx:end_idx]
+                    for col in feature_columns
+                }
+
+                # Save chunk to CSV
+                df = pd.DataFrame(chunk_dict)
+                mode = 'w' if start_idx == 0 else 'a'
+                header = start_idx == 0
+                df.to_csv(output_path, mode=mode, index=False, header=header)
+
+                # Clean up
+                del df, chunk_dict
+                gc.collect()
+
+            # Save metadata
+            self._save_feature_metadata(output_path, feature_columns)
+
+            logger.info(f"Features saved to {output_path}")
+            logger.info(f"Total features saved: {len(feature_columns)}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
+
+    def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
+        """Extract enhancement-specific features for saving"""
+        enhancement_dict = {}
+
+        # Handle class probabilities
+        if 'class_probabilities' in feature_dict:
+            probs = feature_dict['class_probabilities'].cpu().numpy()
+            for i in range(probs.shape[1]):
+                enhancement_dict[f'class_{i}_probability'] = probs[:, i]
+
+        # Handle cluster assignments
+        if 'cluster_assignments' in feature_dict:
+            enhancement_dict['cluster_assignment'] = feature_dict['cluster_assignments'].cpu().numpy()
+
+        # Handle cluster probabilities
+        if 'cluster_probabilities' in feature_dict:
+            cluster_probs = feature_dict['cluster_probabilities'].cpu().numpy()
+            for i in range(cluster_probs.shape[1]):
+                enhancement_dict[f'cluster_{i}_probability'] = cluster_probs[:, i]
+
+        # Add confidence scores if available
+        if 'class_logits' in feature_dict:
+            logits = feature_dict['class_logits'].cpu().numpy()
+            enhancement_dict['prediction_confidence'] = softmax(logits, axis=1).max(axis=1)
+
+        return enhancement_dict
+
+    def _save_feature_metadata(self, output_path: str, feature_columns: List[str]):
+        """Save metadata about the saved features"""
+        metadata = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_features': len(feature_columns),
+            'feature_columns': feature_columns,
+            'model_config': {
+                'type': self.__class__.__name__,
+                'feature_dims': self.feature_dims,
+                'training_phase': self.training_phase,
+                'enhancements': {
+                    'use_kl_divergence': self.use_kl_divergence,
+                    'use_class_encoding': self.use_class_encoding
+                }
+            }
+        }
+
+        metadata_path = os.path.join(
+            os.path.dirname(output_path),
+            'feature_extraction_metadata.json'
+        )
+
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=4)
+
+    def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Organize latent space using KL divergence and class labels"""
+        output = {'embeddings': embeddings}  # Keep on same device as input
+
+        if self.use_kl_divergence:
+            # Ensure cluster centers are on same device
+            cluster_centers = self.cluster_centers.to(embeddings.device)
+
+            # Calculate distances to cluster centers
+            distances = torch.cdist(embeddings, cluster_centers)
+
+            # Convert distances to probabilities (soft assignments)
+            q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
+            q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
+
+            if labels is not None:
+                # Create target distribution if labels are provided
+                p_dist = torch.zeros_like(q_dist)
+                for i in range(self.cluster_centers.size(0)):
+                    mask = (labels == i)
+                    if mask.any():
+                        p_dist[mask, i] = 1.0
+            else:
+                # Self-supervised target distribution
+                p_dist = (q_dist ** 2) / q_dist.sum(dim=0, keepdim=True)
+                p_dist = p_dist / p_dist.sum(dim=1, keepdim=True)
+
+            output.update({
+                'cluster_probabilities': q_dist,
+                'target_distribution': p_dist,
+                'cluster_assignments': q_dist.argmax(dim=1)
+            })
+
+        if self.use_class_encoding and hasattr(self, 'classifier'):
+            # Move classifier to same device if needed
+            self.classifier = self.classifier.to(embeddings.device)
+            class_logits = self.classifier(embeddings)
+            output.update({
+                'class_logits': class_logits,
+                'class_predictions': class_logits.argmax(dim=1),
+                'class_probabilities': F.softmax(class_logits, dim=1)
+            })
+
+        return output
+
+
+class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for astronomical imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        super().__init__(input_shape, feature_dims, config)
+
+        # Get enhancement configurations
+        self.enhancement_config = config['model']['enhancement_modules']['astronomical']
+
+        # Initial channel transformation layer
+        self.initial_transform = nn.Sequential(
+            nn.Conv2d(self.in_channels, self.layer_sizes[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.layer_sizes[0]),
+            nn.LeakyReLU(0.2)
+        )
+
+        # Detail preservation module with multiple scales
+        self.detail_preserving = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.layer_sizes[0], self.layer_sizes[0], kernel_size=k, padding=k//2),
+                nn.BatchNorm2d(self.layer_sizes[0]),
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(self.layer_sizes[0], self.layer_sizes[0], kernel_size=1)
+            ) for k in [3, 5, 7]
+        ])
+
+        # Star detection module
+        self.star_detector = nn.Sequential(
+            nn.Conv2d(self.layer_sizes[0], self.layer_sizes[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.layer_sizes[0]),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(self.layer_sizes[0], self.layer_sizes[0], kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Galaxy feature enhancement
+        self.galaxy_enhancer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(size, size, kernel_size=3, padding=d, dilation=d),
+                nn.BatchNorm2d(size),
+                nn.LeakyReLU(0.2)
+            ) for size, d in zip(self.layer_sizes, [1, 2, 4])
+        ])
+
+        # Initialize loss function
+        self.structure_loss = AstronomicalStructureLoss() if self.enhancement_config['enabled'] else None
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Enhanced encoding with astronomical feature preservation"""
+        features = {}
+
+        # Initial channel transformation
+        x = self.initial_transform(x)
+
+        if self.enhancement_config['components']['detail_preservation']:
+            # Multi-scale detail extraction
+            detail_features = [module(x) for module in self.detail_preserving]
+            features['details'] = sum(detail_features) / len(detail_features)
+            x = x + 0.1 * features['details']
+
+        if self.enhancement_config['components']['star_detection']:
+            # Star detection
+            features['stars'] = self.star_detector(x)
+            x = x * (1 + 0.1 * features['stars'])
+
+        # Regular encoding path with galaxy enhancement
+        for idx, layer in enumerate(self.encoder_layers):
+            x = layer(x)
+            if self.enhancement_config['components']['galaxy_features']:
+                if idx < len(self.galaxy_enhancer):
+                    galaxy_features = self.galaxy_enhancer[idx](x)
+                    x = x + 0.1 * galaxy_features
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        return embedding, features
+
+    def decode(self, embedding: torch.Tensor, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Enhanced decoding with structure preservation"""
+        x = self.unembedder(embedding)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim, self.final_spatial_dim)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Final channel transformation back to input channels
+        x = nn.Conv2d(self.layer_sizes[0], self.in_channels, kernel_size=1)(x)
+
+        # Add preserved features if available
+        if self.enhancement_config['components']['detail_preservation']:
+            if 'details' in features:
+                x = x + 0.1 * features['details']
+
+        if self.enhancement_config['components']['star_detection']:
+            if 'stars' in features:
+                x = x * (1 + 0.1 * features['stars'])
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Forward pass with enhanced feature preservation"""
+        embedding, features = self.encode(x)
+        reconstruction = self.decode(embedding, features)
+
+        output = {
+            'embedding': embedding,
+            'reconstruction': reconstruction
+        }
+
+        if self.training and self.enhancement_config['enabled']:
+            loss = self.structure_loss(reconstruction, x)
+            output['loss'] = loss
+
+        return output
+
+class MedicalStructurePreservingAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for medical imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        super().__init__(input_shape, feature_dims, config)
+
+        # Get enhancement configurations
+        self.enhancement_config = config['model']['enhancement_modules']['medical']
+
+        # Tissue boundary detection
+        self.boundary_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=4),
+            nn.PReLU(),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Lesion detection module
+        self.lesion_detector = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=3, padding=d, dilation=d),
+                nn.InstanceNorm2d(32),
+                nn.PReLU()
+            ) for d in [1, 2, 4]
+        ])
+
+        # Contrast enhancement module
+        self.contrast_enhancer = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=5, padding=2),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=1)
+        )
+
+        # Initialize loss function
+        self.structure_loss = MedicalStructureLoss() if self.enhancement_config['enabled'] else None
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Enhanced encoding with medical feature preservation"""
+        features = {}
+
+        if self.enhancement_config['components']['tissue_boundary']:
+            features['boundaries'] = self.boundary_detector(x)
+            x = x * (1 + 0.1 * features['boundaries'])
+
+        # Regular encoding path with lesion detection
+        for idx, layer in enumerate(self.encoder_layers):
+            x = layer(x)
+            if self.enhancement_config['components']['lesion_detection']:
+                if idx < len(self.lesion_detector):
+                    lesion_features = self.lesion_detector[idx](x)
+                    x = x + 0.1 * lesion_features
+
+        if self.enhancement_config['components']['contrast_enhancement']:
+            features['contrast'] = self.contrast_enhancer(x)
+            x = x + 0.1 * features['contrast']
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        return embedding, features
+
+    def decode(self, embedding: torch.Tensor, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Enhanced decoding with structure preservation"""
+        x = self.unembedder(embedding)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim, self.final_spatial_dim)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Add preserved features
+        if self.enhancement_config['components']['tissue_boundary']:
+            x = x * (1 + 0.1 * features.get('boundaries', 0))
+
+        if self.enhancement_config['components']['contrast_enhancement']:
+            x = x + 0.1 * features.get('contrast', 0)
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Forward pass with enhanced feature preservation"""
+        embedding, features = self.encode(x)
+        reconstruction = self.decode(embedding, features)
+
+        output = {
+            'embedding': embedding,
+            'reconstruction': reconstruction
+        }
+
+        if self.training and self.enhancement_config['enabled']:
+            loss = self.structure_loss(reconstruction, x)
+            output['loss'] = loss
+
+        return output
+
+class AgriculturalPatternAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for agricultural imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        super().__init__(input_shape, feature_dims, config)
+
+        # Get enhancement configurations
+        self.enhancement_config = config['model']['enhancement_modules']['agricultural']
+
+        # Ensure channel numbers are compatible with groups
+        texture_groups = min(4, self.in_channels)  # Adjust groups based on input channels
+        intermediate_channels = 32 - (32 % texture_groups)  # Ensure divisible by groups
+
+        self.texture_analyzer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.in_channels, intermediate_channels, kernel_size=k, padding=k//2, groups=texture_groups),
+                nn.InstanceNorm2d(intermediate_channels),
+                nn.PReLU(),
+                nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=k, padding=k//2, groups=texture_groups)
+            ) for k in [3, 5, 7]
+        ])
+
+        # Damage pattern detector
+        damage_intermediate_channels = 32 - (32 % self.in_channels)  # Ensure divisible
+        self.damage_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, damage_intermediate_channels, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(damage_intermediate_channels, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Color anomaly detection
+        self.color_analyzer = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=1),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=1)
+        )
+
+        # Initialize loss function
+        self.pattern_loss = AgriculturalPatternLoss() if self.enhancement_config['enabled'] else None
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Enhanced encoding with pattern preservation"""
+        features = {}
+
+        if self.enhancement_config['components']['texture_analysis']:
+            texture_features = [module(x) for module in self.texture_analyzer]
+            features['texture'] = sum(texture_features) / len(texture_features)
+            x = x + 0.1 * features['texture']
+
+        if self.enhancement_config['components']['damage_detection']:
+            features['damage'] = self.damage_detector(x)
+
+        if self.enhancement_config['components']['color_anomaly']:
+            features['color'] = self.color_analyzer(x)
+            x = x + 0.1 * features['color']
+
+        # Regular encoding path
+        for layer in self.encoder_layers:
+            x = layer(x)
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        return embedding, features
+
+    def decode(self, embedding: torch.Tensor, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Enhanced decoding with pattern preservation"""
+        x = self.unembedder(embedding)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim, self.final_spatial_dim)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Add preserved features
+        if self.enhancement_config['components']['texture_analysis']:
+            x = x + 0.1 * features.get('texture', 0)
+
+        if self.enhancement_config['components']['damage_detection']:
+            damage_mask = features.get('damage', torch.zeros_like(x))
+            x = x * (1 + 0.2 * damage_mask)
+
+        if self.enhancement_config['components']['color_anomaly']:
+            x = x + 0.1 * features.get('color', 0)
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Forward pass with enhanced pattern preservation"""
+        embedding, features = self.encode(x)
+        reconstruction = self.decode(embedding, features)
+
+        output = {
+            'embedding': embedding,
+            'reconstruction': reconstruction
+        }
+
+        if self.training and self.enhancement_config['enabled']:
+            loss = self.pattern_loss(reconstruction, x)
+            output['loss'] = loss
+
+        return output
+
+class AstronomicalStructureLoss(nn.Module):
+    """Loss function specialized for astronomical imaging features"""
+    def __init__(self):
+        super().__init__()
+
+        # Edge detection filters
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Point source detection filter (for stars)
+        self.point_filter = torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]],
+                                       dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Multi-scale structure filters
+        self.structure_filters = [
+            self._create_gaussian_kernel(sigma) for sigma in [0.5, 1.0, 2.0]
+        ]
+
+        # Scale-space filters for galaxy features
+        self.scale_filters = [
+            self._create_log_kernel(sigma) for sigma in [1.0, 2.0, 4.0]
+        ]
+
+    def _create_gaussian_kernel(self, sigma: float, kernel_size: int = 7) -> torch.Tensor:
+        """Create Gaussian kernel for smoothing"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        gaussian = torch.exp(-(x**2 + y**2)/(2*sigma**2))
+        return (gaussian / gaussian.sum()).view(1, 1, kernel_size, kernel_size)
+
+    def _create_log_kernel(self, sigma: float, kernel_size: int = 7) -> torch.Tensor:
+        """Create Laplacian of Gaussian kernel for blob detection"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        r2 = x**2 + y**2
+        log = (1 - r2/(2*sigma**2)) * torch.exp(-r2/(2*sigma**2))
+        return (log / log.abs().sum()).view(1, 1, kernel_size, kernel_size)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate loss with astronomical feature preservation"""
+        device = reconstruction.device
+        self.sobel_x = self.sobel_x.to(device)
+        self.sobel_y = self.sobel_y.to(device)
+        self.point_filter = self.point_filter.to(device)
+        self.structure_filters = [f.to(device) for f in self.structure_filters]
+        self.scale_filters = [f.to(device) for f in self.scale_filters]
+
+        # Basic reconstruction loss with intensity weighting
+        intensity_weights = (target > target.mean()).float() * 2 + 1
+        recon_loss = F.mse_loss(reconstruction * intensity_weights,
+                               target * intensity_weights)
+
+        # Edge and gradient preservation
+        rec_grad_x = F.conv2d(reconstruction, self.sobel_x, padding=1)
+        rec_grad_y = F.conv2d(reconstruction, self.sobel_y, padding=1)
+        target_grad_x = F.conv2d(target, self.sobel_x, padding=1)
+        target_grad_y = F.conv2d(target, self.sobel_y, padding=1)
+
+        gradient_loss = F.mse_loss(rec_grad_x, target_grad_x) + \
+                       F.mse_loss(rec_grad_y, target_grad_y)
+
+        # Point source (star) preservation
+        rec_points = F.conv2d(reconstruction, self.point_filter, padding=1)
+        target_points = F.conv2d(target, self.point_filter, padding=1)
+        point_loss = F.mse_loss(rec_points, target_points)
+
+        # Multi-scale structure preservation
+        structure_loss = 0
+        for filter in self.structure_filters:
+            rec_struct = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_struct = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            structure_loss += F.mse_loss(rec_struct, target_struct)
+
+        # Scale-space feature preservation
+        scale_loss = 0
+        for filter in self.scale_filters:
+            rec_scale = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_scale = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            scale_loss += F.mse_loss(rec_scale, target_scale)
+
+        # Peak intensity preservation (for bright stars)
+        peak_loss = F.l1_loss(
+            torch.max_pool2d(reconstruction, kernel_size=3, stride=1, padding=1),
+            torch.max_pool2d(target, kernel_size=3, stride=1, padding=1)
+        )
+
+        # Combine losses with weights
+        total_loss = (recon_loss +
+                     2.0 * gradient_loss +
+                     1.5 * point_loss +
+                     1.0 * structure_loss +
+                     1.0 * scale_loss +
+                     2.0 * peak_loss)
+
+        return total_loss
+
+
+class MedicalStructureLoss(nn.Module):
+    """Loss function specialized for medical imaging features"""
+    def __init__(self):
+        super().__init__()
+
+        # Edge detection filters
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Multi-scale analysis filters
+        self.feature_filters = [
+            self._create_gaussian_kernel(sigma) for sigma in [0.5, 1.0, 2.0]
+        ]
+
+        # Structure filters for tissue boundaries
+        self.boundary_filters = [
+            self._create_dog_kernel(sigma) for sigma in [1.0, 2.0, 4.0]
+        ]
+
+    def _create_gaussian_kernel(self, sigma: float, kernel_size: int = 7) -> torch.Tensor:
+        """Create Gaussian kernel for smoothing"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        gaussian = torch.exp(-(x**2 + y**2)/(2*sigma**2))
+        return (gaussian / gaussian.sum()).view(1, 1, kernel_size, kernel_size)
+
+    def _create_dog_kernel(self, sigma: float, k: float = 1.6,
+                          kernel_size: int = 7) -> torch.Tensor:
+        """Create Difference of Gaussians kernel for edge detection"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        r2 = x**2 + y**2
+        g1 = torch.exp(-r2/(2*sigma**2))
+        g2 = torch.exp(-r2/(2*(k*sigma)**2))
+        dog = g1/sigma**2 - g2/(k*sigma)**2
+        return (dog / dog.abs().sum()).view(1, 1, kernel_size, kernel_size)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate loss with medical feature preservation"""
+        device = reconstruction.device
+        self.sobel_x = self.sobel_x.to(device)
+        self.sobel_y = self.sobel_y.to(device)
+        self.feature_filters = [f.to(device) for f in self.feature_filters]
+        self.boundary_filters = [f.to(device) for f in self.boundary_filters]
+
+        # Reconstruction loss with tissue weighting
+        tissue_weights = (target > target.mean()).float() * 2 + 1
+        recon_loss = F.mse_loss(reconstruction * tissue_weights,
+                               target * tissue_weights)
+
+        # Gradient preservation for tissue boundaries
+        rec_grad_x = F.conv2d(reconstruction, self.sobel_x, padding=1)
+        rec_grad_y = F.conv2d(reconstruction, self.sobel_y, padding=1)
+        target_grad_x = F.conv2d(target, self.sobel_x, padding=1)
+        target_grad_y = F.conv2d(target, self.sobel_y, padding=1)
+
+        gradient_loss = F.mse_loss(rec_grad_x, target_grad_x) + \
+                       F.mse_loss(rec_grad_y, target_grad_y)
+
+        # Multi-scale feature preservation
+        feature_loss = 0
+        for filter in self.feature_filters:
+            rec_features = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_features = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            feature_loss += F.mse_loss(rec_features, target_features)
+
+        # Boundary preservation
+        boundary_loss = 0
+        for filter in self.boundary_filters:
+            rec_bound = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_bound = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            boundary_loss += F.mse_loss(rec_bound, target_bound)
+
+        # Local contrast preservation for lesion detection
+        rec_std = torch.std(F.unfold(reconstruction, kernel_size=5), dim=1)
+        target_std = torch.std(F.unfold(target, kernel_size=5), dim=1)
+        contrast_loss = F.mse_loss(rec_std, target_std)
+
+        # Combine losses with weights
+        total_loss = (recon_loss +
+                     1.5 * gradient_loss +
+                     1.0 * feature_loss +
+                     2.0 * boundary_loss +
+                     1.0 * contrast_loss)
+
+        return total_loss
+
+
+class AgriculturalPatternLoss(nn.Module):
+    """Loss function optimized for agricultural pest and disease detection"""
+    def __init__(self):
+        super().__init__()
+        self.texture_filters = None  # Will be initialized on first use
+        self.pattern_filters = None  # Will be initialized on first use
+
+        # Color analysis filters
+        self.color_filters = [
+            torch.eye(3, dtype=torch.float32).view(3, 3, 1, 1),
+            torch.tensor([[0.299, 0.587, 0.114]], dtype=torch.float32).view(1, 3, 1, 1)
+        ]
+
+    def _create_gabor_kernel(self, frequency: float, angle: float,
+                           sigma: float = 3.0, size: int = 7) -> torch.Tensor:
+        """Create Gabor filter for texture analysis"""
+        # Convert angle to radians and create as tensor
+        angle_rad = torch.tensor(angle * np.pi / 180)
+
+        # Create coordinate grids
+        y_grid, x_grid = torch.meshgrid(
+            torch.linspace(-size//2, size//2, size),
+            torch.linspace(-size//2, size//2, size),
+            indexing='ij'
+        )
+
+        # Compute rotated coordinates
+        cos_angle = torch.cos(angle_rad)
+        sin_angle = torch.sin(angle_rad)
+        x_rot = x_grid * cos_angle + y_grid * sin_angle
+        y_rot = -x_grid * sin_angle + y_grid * cos_angle
+
+        # Create Gabor filter components
+        gaussian = torch.exp(-(x_rot**2 + y_rot**2)/(2*sigma**2))
+        sinusoid = torch.cos(2 * np.pi * frequency * x_rot)
+
+        # Combine and normalize
+        kernel = (gaussian * sinusoid).view(1, 1, size, size)
+        return kernel / kernel.abs().sum()
+
+    def _create_pattern_kernel(self, size: int) -> torch.Tensor:
+        """Create kernel for local pattern analysis"""
+        kernel = torch.ones(size, size, dtype=torch.float32)
+        center = size // 2
+        kernel[center, center] = -size**2 + 1
+        return (kernel / kernel.abs().sum()).view(1, 1, size, size)
+
+    def _initialize_filters(self, device: torch.device):
+        """Initialize filters if not already done"""
+        if self.texture_filters is None:
+            self.texture_filters = [
+                self._create_gabor_kernel(frequency=f, angle=a).to(device)
+                for f in [0.1, 0.2, 0.3] for a in [0, 45, 90, 135]
+            ]
+
+        if self.pattern_filters is None:
+            self.pattern_filters = [
+                self._create_pattern_kernel(size=s).to(device)
+                for s in [3, 5, 7]
+            ]
+
+        self.color_filters = [f.to(device) for f in self.color_filters]
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate loss with agricultural pattern preservation"""
+        device = reconstruction.device
+        self._initialize_filters(device)
+
+        # Basic reconstruction loss
+        recon_loss = F.mse_loss(reconstruction, target)
+
+        # Texture preservation loss
+        texture_loss = 0
+        for filter in self.texture_filters:
+            rec_texture = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_texture = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            texture_loss += F.mse_loss(rec_texture, target_texture)
+        texture_loss = texture_loss / len(self.texture_filters)
+
+        # Pattern preservation loss
+        pattern_loss = 0
+        for filter in self.pattern_filters:
+            rec_pattern = F.conv2d(reconstruction, filter, padding=filter.size(-1)//2)
+            target_pattern = F.conv2d(target, filter, padding=filter.size(-1)//2)
+            pattern_loss += F.mse_loss(rec_pattern, target_pattern)
+        pattern_loss = pattern_loss / len(self.pattern_filters)
+
+        # Color preservation loss
+        color_loss = 0
+        for filter in self.color_filters:
+            rec_color = F.conv2d(reconstruction, filter)
+            target_color = F.conv2d(target, filter)
+            color_loss += F.mse_loss(rec_color, target_color)
+        color_loss = color_loss / len(self.color_filters)
+
+        # Local contrast preservation
+        contrast_loss = F.mse_loss(
+            torch.std(reconstruction, dim=[2, 3]),
+            torch.std(target, dim=[2, 3])
+        )
+
+        # Combine losses with weights
+        total_loss = (recon_loss +
+                     2.0 * texture_loss +
+                     1.5 * pattern_loss +
+                     1.0 * color_loss +
+                     0.5 * contrast_loss)
+
+        return total_loss
+
+    def _analyze_texture_statistics(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Analyze texture statistics for pattern detection"""
+        stats = {}
+
+        # Calculate local statistics using texture filters
+        texture_responses = []
+        for filter in self.texture_filters:
+            response = F.conv2d(x, filter.to(x.device), padding=filter.size(-1)//2)
+            texture_responses.append(response)
+
+        # Compute texture energy
+        stats['energy'] = torch.mean(torch.stack([r.pow(2).mean() for r in texture_responses]))
+
+        # Compute texture contrast
+        stats['contrast'] = torch.mean(torch.stack([r.std() for r in texture_responses]))
+
+        return stats
+
+    def _analyze_pattern_distribution(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Analyze pattern distribution for anomaly detection"""
+        stats = {}
+
+        # Calculate pattern responses at different scales
+        pattern_responses = []
+        for filter in self.pattern_filters:
+            response = F.conv2d(x, filter.to(x.device), padding=filter.size(-1)//2)
+            pattern_responses.append(response)
+
+        # Compute pattern density
+        stats['density'] = torch.mean(torch.stack([r.abs().mean() for r in pattern_responses]))
+
+        # Compute pattern variability
+        stats['variability'] = torch.mean(torch.stack([r.var() for r in pattern_responses]))
+
+        return stats
+
+class EnhancedLossManager:
+    """Manager for handling specialized loss functions"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.loss_functions = {}
+        self.initialize_loss_functions()
+
+    def initialize_loss_functions(self):
+        """Initialize appropriate loss functions based on configuration"""
+        enhancement_modules = self.config['model']['enhancement_modules']
+
+        # Initialize astronomical loss if enabled
+        if enhancement_modules['astronomical']['enabled']:
+            self.loss_functions['astronomical'] = AstronomicalStructureLoss()
+
+        # Initialize medical loss if enabled
+        if enhancement_modules['medical']['enabled']:
+            self.loss_functions['medical'] = MedicalStructureLoss()
+
+        # Initialize agricultural loss if enabled
+        if enhancement_modules['agricultural']['enabled']:
+            self.loss_functions['agricultural'] = AgriculturalPatternLoss()
+
+    def get_loss_function(self, image_type: str) -> Optional[nn.Module]:
+        """Get appropriate loss function for image type"""
+        return self.loss_functions.get(image_type)
+
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor,
+                      image_type: str) -> Dict[str, torch.Tensor]:
+        """Calculate loss with appropriate enhancements"""
+        loss_fn = self.get_loss_function(image_type)
+        if loss_fn is None:
+            return {'loss': F.mse_loss(reconstruction, target)}
+
+        loss = loss_fn(reconstruction, target)
+
+        # Get additional statistics if available
+        stats = {}
+        if isinstance(loss_fn, AgriculturalPatternLoss):
+            texture_stats = loss_fn._analyze_texture_statistics(reconstruction)
+            pattern_stats = loss_fn._analyze_pattern_distribution(reconstruction)
+            stats.update({
+                'texture_stats': texture_stats,
+                'pattern_stats': pattern_stats
+            })
+
+        return {
+            'loss': loss,
+            'stats': stats
+        }
+
+
+class DualDeviceManager:
+    def __init__(self, primary_device='cuda', backup_device='cpu'):
+        self.primary_device = torch.device(primary_device if torch.cuda.is_available() else 'cpu')
+        self.backup_device = torch.device(backup_device)
+        self.buffer_size = 1000  # Adjustable buffer size
+        self.data_buffer = {}
+
+    def load_data(self, data, key):
+        """Load data with backup on CPU"""
+        # Store backup on CPU
+        self.data_buffer[key] = data.to(self.backup_device)
+        # Return compute version on primary device
+        return data.to(self.primary_device)
+
+    def retrieve_backup(self, key):
+        """Retrieve backup data and move to primary device"""
+        if key in self.data_buffer:
+            return self.data_buffer[key].to(self.primary_device)
+        return None
+
+    def clear_buffer(self):
+        """Clear the backup buffer"""
+        self.data_buffer.clear()
+        torch.cuda.empty_cache()
+
+class DualDeviceDataLoader:
+    def __init__(self, dataloader, device_manager):
+        self.dataloader = dataloader
+        self.device_manager = device_manager
+
+    def __iter__(self):
+        for batch_idx, (data, target) in enumerate(self.dataloader):
+            # Load to both devices
+            data_gpu = self.device_manager.load_data(data, f'batch_{batch_idx}')
+            target_gpu = self.device_manager.load_data(target, f'target_{batch_idx}')
+
+            yield data_gpu, target_gpu
+
+            # Clear old batches periodically
+            if batch_idx % 10 == 0:
+                self.device_manager.clear_buffer()
+
+class UnifiedCheckpoint:
+    """Manages a unified checkpoint file containing multiple model states"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.checkpoint_dir = config['training']['checkpoint_dir']
+        self.dataset_name = config['dataset']['name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
+        self.current_state = None
+
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # Load or initialize checkpoint
+        self.load_checkpoint()
+
+    def load_checkpoint(self):
+        """Load existing checkpoint or initialize new one"""
+        if os.path.exists(self.checkpoint_path):
+            self.current_state = torch.load(self.checkpoint_path)
+            logger.info(f"Loaded unified checkpoint from {self.checkpoint_path}")
+        else:
+            self.current_state = {
+                'model_states': {},
+                'metadata': {
+                    'created_at': datetime.now().isoformat(),
+                    'last_updated': datetime.now().isoformat(),
+                    'config': self.config
+                }
+            }
+            logger.info("Initialized new unified checkpoint")
+
+    def get_state_key(self, phase: int, model: nn.Module) -> str:
+        """Generate unique key for current model state"""
+        components = [f"phase{phase}"]
+
+        if phase == 2:
+            if model.use_kl_divergence:
+                components.append("kld")
+            if model.use_class_encoding:
+                components.append("cls")
+
+            image_type = self.config['dataset'].get('image_type', 'general')
+            if image_type != 'general':
+                components.append(image_type)
+
+        return "_".join(components)
+
+    def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
+                        phase: int, epoch: int, loss: float, is_best: bool = False):
+        """Save current model state to unified checkpoint"""
+        state_key = self.get_state_key(phase, model)
+
+        # Get existing state or create new one
+        if state_key not in self.current_state['model_states']:
+            self.current_state['model_states'][state_key] = {
+                'current': None,
+                'best': None,
+                'history': []
+            }
+
+        # Prepare state dictionary
+        state_dict = {
+            'state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'epoch': epoch,
+            'phase': phase,
+            'loss': loss,
+            'timestamp': datetime.now().isoformat(),
+            'config': {
+                'kl_divergence': model.use_kl_divergence,
+                'class_encoding': model.use_class_encoding,
+                'image_type': self.config['dataset'].get('image_type', 'general')
+            }
+        }
+
+        # Update current state
+        self.current_state['model_states'][state_key]['current'] = state_dict
+
+        # Update best state if applicable
+        if is_best:
+            self.current_state['model_states'][state_key]['best'] = state_dict
+
+        # Add to history (keeping last 5 states)
+        self.current_state['model_states'][state_key]['history'].append({
+            'epoch': epoch,
+            'loss': loss,
+            'timestamp': datetime.now().isoformat()
+        })
+        self.current_state['model_states'][state_key]['history'] = \
+            self.current_state['model_states'][state_key]['history'][-5:]
+
+        # Update metadata
+        self.current_state['metadata']['last_updated'] = datetime.now().isoformat()
+
+        # Save checkpoint
+        torch.save(self.current_state, self.checkpoint_path)
+        logger.info(f"Saved state {state_key} to unified checkpoint")
+
+        if is_best:
+            logger.info(f"New best model for {state_key} with loss: {loss:.4f}")
+
+    def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
+                        phase: int, load_best: bool = False) -> Optional[Dict]:
+        """Load model state from unified checkpoint"""
+        state_key = self.get_state_key(phase, model)
+
+        if state_key not in self.current_state['model_states']:
+            logger.info(f"No existing state found for {state_key}")
+            return None
+
+        # Get appropriate state
+        state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
+        if state_dict is None:
+            return None
+
+        # Load state
+        model.load_state_dict(state_dict['state_dict'])
+        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+
+        logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
+        return state_dict
+
+    def get_best_loss(self, phase: int, model: nn.Module) -> float:
+        """Get best loss for current configuration"""
+        state_key = self.get_state_key(phase, model)
+        if state_key in self.current_state['model_states']:
+            best_state = self.current_state['model_states'][state_key]['best']
+            if best_state is not None:
+                return best_state['loss']
+        return float('inf')
+
+    def print_checkpoint_summary(self):
+        """Print summary of checkpoint contents"""
+        print("\nUnified Checkpoint Summary:")
+        print("-" * 50)
+        print(f"Dataset: {self.dataset_name}")
+        print(f"Last Updated: {self.current_state['metadata']['last_updated']}")
+        print("\nModel States:")
+
+        for state_key, state in self.current_state['model_states'].items():
+            print(f"\n{state_key}:")
+            if state['current'] is not None:
+                print(f"  Current - Epoch: {state['current']['epoch']}, "
+                      f"Loss: {state['current']['loss']:.4f}")
+            if state['best'] is not None:
+                print(f"  Best    - Epoch: {state['best']['epoch']}, "
+                      f"Loss: {state['best']['loss']:.4f}")
+            print(f"  History - {len(state['history'])} entries")
+
+
+class ModelFactory:
+    """Factory for creating appropriate model based on configuration"""
+
+    @staticmethod
+    def create_model(config: Dict) -> nn.Module:
+        """Create appropriate model based on configuration"""
+
+        # Create input shape tuple properly
+        input_shape = (
+            config['dataset']['in_channels'],
+            config['dataset']['input_size'][0],
+            config['dataset']['input_size'][1]
+        )
+        feature_dims = config['model']['feature_dims']
+
+
+        # Determine device
+        device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                            and torch.cuda.is_available() else 'cpu')
+
+
+        # Get enabled enhancements
+        enhancements = []
+        if 'enhancement_modules' in config['model']:
+            for module_type, module_config in config['model']['enhancement_modules'].items():
+                if module_config.get('enabled', False):
+                    enhancements.append(module_type)
+
+        if enhancements:
+            logger.info(f"Creating model with enhancements: {', '.join(enhancements)}")
+
+        # Create appropriate model based on image type and enhancements
+        image_type = config['dataset'].get('image_type', 'general')
+        model = None
+
+        try:
+            if image_type == 'astronomical':
+                model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif image_type == 'medical':
+                model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif image_type == 'agricultural':
+                model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
+            else:
+                # For 'general' type, use enhanced base autoencoder if enhancements are enabled
+                if enhancements:
+                    model = BaseAutoencoder(input_shape, feature_dims, config)
+                else:
+                    model = BaseAutoencoder(input_shape, feature_dims, config)
+
+            return model.to(device)
+
+        except Exception as e:
+            logger.error(f"Error creating model: {str(e)}")
+            raise
+
+
+# Update the training loop to handle the new feature dictionary format
+def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
+
+    history = defaultdict(list)
+
+    # Initialize starting epoch and phase
+    start_epoch = getattr(model, 'current_epoch', 0)
+    current_phase = getattr(model, 'training_phase', 1)
+
+    # Phase 1: Pure reconstruction (if not already completed)
+    if current_phase == 1:
+        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
+        model.set_training_phase(1)
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+
+        phase1_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch
+        )
+        history.update(phase1_history)
+
+        # Reset start_epoch for phase 2
+        start_epoch = 0
+    else:
+        logger.info("Phase 1 already completed, skipping")
+
+    # Phase 2: Latent space organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        if current_phase < 2:
+            logger.info("Starting Phase 2: Latent space organization")
+            model.set_training_phase(2)
+        else:
+            logger.info("Resuming Phase 2: Latent space organization")
+
+        # Lower learning rate for fine-tuning
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
+
+        phase2_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch if current_phase == 2 else 0
+        )
+
+        # Merge histories
+        for key, value in phase2_history.items():
+            history[f"phase2_{key}"] = value
+
+    return history
+
+
+def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
+    """
+    Generate unique identifier for checkpoint based on phase and active enhancements.
+    """
+    # Start with phase identifier
+    identifier = f"phase{phase}"
+
+    # Add active enhancements
+    if phase == 2:
+        active_enhancements = []
+        if model.use_kl_divergence:
+            active_enhancements.append("kld")
+        if model.use_class_encoding:
+            active_enhancements.append("cls")
+
+        # Add specialized enhancements
+        if config['dataset'].get('image_type') != 'general':
+            image_type = config['dataset']['image_type']
+            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', False):
+                active_enhancements.append(image_type)
+
+        if active_enhancements:
+            identifier += "_" + "_".join(sorted(active_enhancements))
+
+    return identifier
+
+def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
+                    epoch: int, phase: int, loss: float, config: Dict,
+                    is_best: bool = False):
+    """
+    Save training checkpoint with phase and enhancement-specific handling.
+    """
+    checkpoint_dir = config['training']['checkpoint_dir']
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Get unique identifier for this configuration
+    identifier = _get_checkpoint_identifier(model, phase, config)
+    dataset_name = config['dataset']['name']
+
+    checkpoint = {
+        'state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'epoch': epoch,
+        'phase': phase,
+        'training_phase': model.training_phase,
+        'loss': loss,
+        'identifier': identifier,
+        'config': config,
+        'active_enhancements': {
+            'kl_divergence': model.use_kl_divergence,
+            'class_encoding': model.use_class_encoding,
+            'image_type': config['dataset'].get('image_type', 'general')
+        }
+    }
+
+    # Always save latest checkpoint
+    latest_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_latest.pth")
+    torch.save(checkpoint, latest_path)
+
+    # Save phase-specific best model if applicable
+    if is_best:
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+        torch.save(checkpoint, best_path)
+        logger.info(f"Saved best model for {identifier} with loss: {loss:.4f}")
+
+    logger.info(f"Saved checkpoint for {identifier} at epoch {epoch + 1}")
+
+def load_best_checkpoint(model: nn.Module, phase: int, config: Dict) -> Optional[Dict]:
+    """
+    Load the best checkpoint for the given phase and enhancement combination.
+    """
+    checkpoint_dir = config['training']['checkpoint_dir']
+    identifier = _get_checkpoint_identifier(model, phase, config)
+    dataset_name = config['dataset']['name']
+    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+
+    if os.path.exists(best_path):
+        logger.info(f"Loading best checkpoint for {identifier}")
+        return torch.load(best_path, map_location=model.device)
+    return None
+
+def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) -> Dict[str, Any]:
+    """
+    Track and return phase-specific metrics and best values.
+    """
+    metrics = {}
+    identifier = _get_checkpoint_identifier(model, phase, config)
+
+    # Try to load existing best metrics
+    checkpoint = load_best_checkpoint(model, phase, config)
+    if checkpoint:
+        metrics['best_loss'] = checkpoint.get('loss', float('inf'))
+        metrics['best_epoch'] = checkpoint.get('epoch', 0)
+    else:
+        metrics['best_loss'] = float('inf')
+        metrics['best_epoch'] = 0
+
+    return metrics
+
+def _train_phase(model: nn.Module, train_loader: DataLoader,
+                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for each phase with enhanced checkpoint handling"""
+    history = defaultdict(list)
+    device = next(model.parameters()).device
+
+    # Get phase-specific metrics
+    # Initialize unified checkpoint
+    checkpoint_manager = UnifiedCheckpoint(config)
+
+    # Load best loss from checkpoint
+    best_loss = checkpoint_manager.get_best_loss(phase, model)
+    patience_counter = 0
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            running_loss = 0.0
+            num_batches = len(train_loader)  # Get total number of batches
+
+            # Training loop
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            for batch_idx, (data, labels) in enumerate(pbar):
+                try:
+                    # Move data to correct device
+                    if isinstance(data, (list, tuple)):
+                        data = data[0]
+                    data = data.to(device)
+                    labels = labels.to(device)
+
+                    # Zero gradients
+                    optimizer.zero_grad()
+
+                    # Forward pass based on phase
+                    if phase == 1:
+                        # Phase 1: Only reconstruction
+                        embeddings = model.encode(data)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+                        reconstruction = model.decode(embeddings)
+                        loss = F.mse_loss(reconstruction, data)
+                    else:
+                        # Phase 2: Include clustering and classification
+                        output = model(data)
+                        if isinstance(output, dict):
+                            reconstruction = output['reconstruction']
+                            embedding = output['embedding']
+                        else:
+                            embedding, reconstruction = output
+
+                        # Calculate base loss
+                        loss = loss_manager.calculate_loss(
+                            reconstruction, data,
+                            config['dataset'].get('image_type', 'general')
+                        )['loss']
+
+                        # Add KL divergence loss if enabled
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(embedding, labels)
+                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
+                                kl_loss = F.kl_div(
+                                    latent_info['cluster_probabilities'].log(),
+                                    latent_info['target_distribution'],
+                                    reduction='batchmean'
+                                )
+                                loss += kl_weight * kl_loss
+
+                        # Add classification loss if enabled
+                        if model.use_class_encoding and hasattr(model, 'classifier'):
+                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+                            class_logits = model.classifier(embedding)
+                            class_loss = F.cross_entropy(class_logits, labels)
+                            loss += class_weight * class_loss
+
+                    # Backward pass and optimization
+                    loss.backward()
+                    optimizer.step()
+
+                    # Update running loss - handle possible NaN or inf
+                    current_loss = loss.item()
+                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
+                        running_loss += current_loss
+
+                    # Calculate current average loss safely
+                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
+
+                    # Update progress bar with safe values
+                    pbar.set_postfix({
+                        'loss': f'{current_avg_loss:.4f}',
+                        'best': f'{best_loss:.4f}'
+                    })
+
+                    # Memory cleanup
+                    del data, loss
+                    if phase == 2:
+                        del output
+                    torch.cuda.empty_cache()
+
+                except Exception as e:
+                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    continue
+
+            # Safely calculate epoch average loss
+            if num_batches > 0:
+                avg_loss = running_loss / num_batches
+            else:
+                avg_loss = float('inf')
+                logger.warning("No valid batches in epoch!")
+
+            # Record history
+            history[f'phase{phase}_loss'].append(avg_loss)
+
+            # Save checkpoint and check for best model
+            is_best = avg_loss < best_loss
+            if is_best:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            checkpoint_manager.save_model_state(
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                epoch=epoch,
+                loss=avg_loss,
+                is_best=is_best
+            )
+            # Early stopping check
+            patience = config['training'].get('early_stopping', {}).get('patience', 5)
+            if patience_counter >= patience:
+                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
+                break
+
+            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+
+            # Clean up at end of epoch
+            pbar.close()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    except Exception as e:
+        logger.error(f"Error in training phase {phase}: {str(e)}")
+        raise
+
+    return history
+
+class PredictionManager:
+    """Manages model prediction with unified checkpoint loading"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.checkpoint_manager = UnifiedCheckpoint(config)
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                                 and torch.cuda.is_available() else 'cpu')
+
+    def load_model_for_prediction(self) -> Tuple[nn.Module, Dict]:
+        """Load appropriate model configuration based on user input"""
+        # Get available configurations from checkpoint
+        available_configs = self._get_available_configurations()
+
+        if not available_configs:
+            raise ValueError("No trained models found in checkpoint")
+
+        # Show available configurations
+        print("\nAvailable Model Configurations:")
+        for idx, (key, config) in enumerate(available_configs.items(), 1):
+            print(f"{idx}. {key}")
+            if config.get('best') and config['best'].get('loss'):
+                print(f"   Best Loss: {config['best']['loss']:.4f}")
+            print(f"   Features: {self._get_config_description(config)}")
+
+        # Get user selection
+        while True:
+            try:
+                choice = int(input("\nSelect configuration (number): ")) - 1
+                if 0 <= choice < len(available_configs):
+                    selected_key = list(available_configs.keys())[choice]
+                    selected_config = available_configs[selected_key]
+                    break
+                print("Invalid selection. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
+
+        # Create and load model
+        model = self._create_model_from_config(selected_config)
+        state_dict = selected_config['best'] if selected_config.get('best') else selected_config['current']
+        model.load_state_dict(state_dict['state_dict'])
+        model.eval()
+
+        return model, selected_config
+
+    def _get_available_configurations(self) -> Dict:
+        """Get available model configurations from checkpoint"""
+        return self.checkpoint_manager.current_state['model_states']
+
+    def _get_config_description(self, config: Dict) -> str:
+        """Generate human-readable description of model configuration"""
+        features = []
+
+        if config['current']['config'].get('kl_divergence'):
+            features.append("KL Divergence")
+        if config['current']['config'].get('class_encoding'):
+            features.append("Class Encoding")
+
+        image_type = config['current']['config'].get('image_type')
+        if image_type and image_type != 'general':
+            features.append(f"{image_type.capitalize()} Enhancement")
+
+        return ", ".join(features) if features else "Basic Autoencoder"
+
+    def _create_model_from_config(self, config: Dict) -> nn.Module:
+        """Create model instance based on configuration"""
+        input_shape = (
+            self.config['dataset']['in_channels'],
+            self.config['dataset']['input_size'][0],
+            self.config['dataset']['input_size'][1]
+        )
+        feature_dims = self.config['model']['feature_dims']
+
+        # Set model configuration based on saved state
+        self.config['model']['autoencoder_config']['enhancements'].update({
+            'use_kl_divergence': config['current']['config']['kl_divergence'],
+            'use_class_encoding': config['current']['config']['class_encoding']
+        })
+
+        # Create appropriate model
+        image_type = config['current']['config']['image_type']
+        if image_type == 'astronomical':
+            model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, self.config)
+        elif image_type == 'medical':
+            model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, self.config)
+        elif image_type == 'agricultural':
+            model = AgriculturalPatternAutoencoder(input_shape, feature_dims, self.config)
+        else:
+            model = BaseAutoencoder(input_shape, feature_dims, self.config)
+
+        return model.to(self.device)
+
+    def predict_from_csv(self, csv_path: str, output_dir: str):
+        """Generate predictions from CSV using selected model configuration"""
+        # Load model
+        model, config = self.load_model_for_prediction()
+
+        # Load and process CSV
+        df = pd.read_csv(csv_path)
+        feature_cols = [col for col in df.columns if col.startswith('feature_')]
+        features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(self.device)
+
+        # Generate predictions
+        outputs = []
+        batch_size = self.config['training'].get('batch_size', 32)
+
+        with torch.no_grad():
+            for i in tqdm(range(0, len(features), batch_size), desc="Generating predictions"):
+                batch = features[i:i+batch_size]
+                if config['current']['phase'] == 1:
+                    # Phase 1: Simple reconstruction
+                    reconstruction = model.decode(batch)
+                    output = {'reconstruction': reconstruction}
+                else:
+                    # Phase 2: Full forward pass with enhancements
+                    output = model(batch)
+
+                outputs.append(self._process_output(output))
+
+        # Combine and save results
+        combined_output = self._combine_outputs(outputs)
+        self._save_predictions(combined_output, output_dir, config)
+
+    def _process_output(self, output: Union[Dict[str, torch.Tensor], torch.Tensor]) -> Dict[str, np.ndarray]:
+        """Process model output into numpy arrays"""
+        processed = {}
+
+        if isinstance(output, dict):
+            for key, value in output.items():
+                if isinstance(value, torch.Tensor):
+                    processed[key] = value.cpu().numpy()
+        else:
+            processed['reconstruction'] = output.cpu().numpy()
+
+        return processed
+
+    def _combine_outputs(self, outputs: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+        """Combine batched outputs"""
+        combined = {}
+        for key in outputs[0].keys():
+            combined[key] = np.concatenate([out[key] for out in outputs])
+        return combined
+
+    def _save_predictions(self, predictions: Dict[str, np.ndarray], output_dir: str, config: Dict):
+        """Save predictions with appropriate format based on configuration"""
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save reconstructions as images
+        if 'reconstruction' in predictions:
+            recon_dir = os.path.join(output_dir, 'reconstructions')
+            os.makedirs(recon_dir, exist_ok=True)
+
+            for idx, recon in enumerate(predictions['reconstruction']):
+                img = self._tensor_to_image(torch.tensor(recon))
+                img_path = os.path.join(recon_dir, f'reconstruction_{idx}.png')
+                Image.fromarray(img).save(img_path)
+
+        # Save other predictions to CSV
+        pred_path = os.path.join(output_dir, 'predictions.csv')
+        pred_dict = {}
+
+        if 'class_predictions' in predictions:
+            pred_dict['predicted_class'] = predictions['class_predictions']
+        if 'class_probabilities' in predictions:
+            for i in range(predictions['class_probabilities'].shape[1]):
+                pred_dict[f'class_{i}_probability'] = predictions['class_probabilities'][:, i]
+        if 'cluster_assignments' in predictions:
+            pred_dict['cluster'] = predictions['cluster_assignments']
+
+        if pred_dict:
+            pd.DataFrame(pred_dict).to_csv(pred_path, index=False)
+
+        logger.info(f"Predictions saved to {output_dir}")
+
+    def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
+        """Convert tensor to image array"""
+        if len(tensor.shape) == 3:
+            tensor = tensor.permute(1, 2, 0)
+
+        # Denormalize
+        mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
+        std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
+        tensor = tensor * std + mean
+
+        return (tensor.clamp(0, 1) * 255).numpy().astype(np.uint8)
+
+  #----------------------------------------------
 class ClusteringLoss(nn.Module):
     """Loss function for clustering in latent space using KL divergence"""
     def __init__(self, num_clusters: int, feature_dims: int, temperature: float = 1.0):
@@ -832,150 +3107,7 @@ class BaseFeatureExtractor(ABC):
         """Extract features from data loader"""
         pass
 
-    def save_features(self, features: torch.Tensor, labels: torch.Tensor, output_path: str):
-        """Save extracted features to CSV with user oversight"""
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            headers = [f'feature_{i}' for i in range(features.shape[1])] + ['target']
-            config_path = os.path.join(os.path.dirname(output_path), "config.json")
 
-            # Create complete configuration if none exists
-            if not os.path.exists(config_path):
-                complete_config = {
-                    "file_path": output_path,
-                    "column_names": headers,
-                    "separator": ",",
-                    "has_header": True,
-                    "target_column": "target",
-                    "modelType": "Histogram",
-
-                    "model": {
-                        "feature_dims": features.shape[1],
-                        "learning_rate": 0.001,
-                        "encoder_type": "cnn",
-                        "loss_functions": {
-                            "default": {
-                                "enabled": True,
-                                "type": "CrossEntropy",
-                                "weight": 1.0
-                            },
-                            "structural": {
-                                "enabled": True,
-                                "type": "StructuralLoss",
-                                "weight": 0.7,
-                                "params": {
-                                    "edge_weight": 1.0,
-                                    "smoothness_weight": 0.5
-                                }
-                            },
-                            "color_enhancement": {
-                                "enabled": True,
-                                "type": "ColorEnhancementLoss",
-                                "weight": 0.5,
-                                "params": {
-                                    "channel_weight": 0.5,
-                                    "contrast_weight": 0.3
-                                }
-                            },
-                            "morphology": {
-                                "enabled": True,
-                                "type": "MorphologyLoss",
-                                "weight": 0.3,
-                                "params": {
-                                    "shape_weight": 0.7,
-                                    "symmetry_weight": 0.3
-                                }
-                            },
-                            "autoencoder": {
-                                "enabled": False,
-                                "type": "AutoencoderLoss",
-                                "weight": 1.0,
-                                "params": {
-                                    "reconstruction_weight": 1.0,
-                                    "feature_weight": 0.1
-                                }
-                            }
-                        }
-                    },
-
-                    "likelihood_config": {
-                        "feature_group_size": 2,
-                        "max_combinations": min(1000, features.shape[1] * (features.shape[1] - 1) // 2),
-                        "bin_sizes": [20]
-                    },
-
-                    "active_learning": {
-                        "tolerance": 1.0,
-                        "cardinality_threshold_percentile": 95,
-                        "strong_margin_threshold": 0.3,
-                        "marginal_margin_threshold": 0.1,
-                        "min_divergence": 0.1
-                    },
-
-                    "training_params": {
-                        "trials": 100,
-                        "epochs": 1000,
-                        "learning_rate": 0.1,
-                        "test_fraction": 0.2,
-                        "random_seed": 42,
-                        "minimum_training_accuracy": 0.95,
-                        "cardinality_threshold": 0.9,
-                        "cardinality_tolerance": 4,
-                        "n_bins_per_dim": 20,
-                        "enable_adaptive": True,
-                        "invert_DBNN": False,
-                        "reconstruction_weight": 0.5,
-                        "feedback_strength": 0.3,
-                        "inverse_learning_rate": 0.1,
-                        "Save_training_epochs": False,
-                        "training_save_path": "training_data"
-                    },
-
-                    "execution_flags": {
-                        "train": True,
-                        "train_only": False,
-                        "predict": True,
-                        "fresh_start": False,
-                        "use_previous_model": True
-                    }
-                }
-                with open(config_path, 'w') as f:
-                    json.dump(complete_config, f, indent=4)
-
-            # Prompt user for editing
-            print("\nConfiguration file created. Would you like to edit it before training?")
-            response = input("Edit configuration? (y/n): ").lower()
-            if response == 'y':
-                config_manager = ConfigManager(os.path.dirname(output_path))
-                config_manager._open_editor(config_path)
-
-            config_manager = ConfigManager(os.path.dirname(output_path))
-            if config_manager.manage_csv(output_path, headers):
-                chunk_size = 1000
-                total_samples = features.shape[0]
-
-                for start_idx in range(0, total_samples, chunk_size):
-                    end_idx = min(start_idx + chunk_size, total_samples)
-                    feature_dict = {
-                        f'feature_{i}': features[start_idx:end_idx, i].numpy()
-                        for i in range(features.shape[1])
-                    }
-                    feature_dict['target'] = labels[start_idx:end_idx].numpy()
-
-                    df = pd.DataFrame(feature_dict)
-                    mode = 'w' if start_idx == 0 else 'a'
-                    header = start_idx == 0
-
-                    df.to_csv(output_path, mode=mode, index=False, header=header)
-
-                    del feature_dict, df
-                    gc.collect()
-
-                logger.info(f"Features saved to {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error saving features: {str(e)}")
-            raise
 
 class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
     def __init__(self, config: Dict, device: str = None):
@@ -1081,22 +3213,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         return (running_loss / len(val_loader),
                 (reconstruction_accuracy / len(val_loader)) * 100)
 
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract features using encoder"""
-        self.feature_extractor.eval()
-        features = []
-        labels = []
 
-        with torch.no_grad():
-            for inputs, targets in tqdm(loader, desc="Extracting features"):
-                inputs = inputs.to(self.device)
-                embedding = self.feature_extractor.encode(inputs)
-                features.append(embedding.cpu())
-                labels.append(targets)
-
-                del inputs, embedding
-
-        return torch.cat(features), torch.cat(labels)
 
     def _save_training_batch(self, inputs: torch.Tensor, reconstructions: torch.Tensor,
                            batch_idx: int, output_dir: str):
@@ -1197,7 +3314,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                                       f"expected {self.config['dataset']['in_channels']}")
 
                     # Save reconstructed image
-                    img_path = os.path.join(output_dir, f"reconstruction_{idx}.png")
+                    img_path = os.path.join('data', self.config['dataset']['name'],output_dir, f"reconstruction_{idx}.png")
                     self.save_reconstructed_image(reconstruction[0], img_path)
 
                 except Exception as e:
@@ -1545,55 +3662,6 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
         return None
 
-    def save_features(self, features: torch.Tensor, labels: torch.Tensor, output_path: str):
-        """Save extracted features to CSV with user oversight"""
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            headers = [f'feature_{i}' for i in range(features.shape[1])] + ['target']
-            config_path = os.path.join(os.path.dirname(output_path), "config.json")
-
-            # Create complete configuration if none exists
-            if not os.path.exists(config_path):
-                complete_config = {
-                    "file_path": output_path,
-                    "column_names": headers,
-                    "separator": ",",
-                    "has_header": True,
-                    "target_column": "target",
-                    "modelType": "Histogram",
-                    # ... (rest of config template)
-                }
-                with open(config_path, 'w') as f:
-                    json.dump(complete_config, f, indent=4)
-
-            # Process in chunks to manage memory
-            chunk_size = 1000
-            total_samples = features.shape[0]
-
-            for start_idx in range(0, total_samples, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_samples)
-                feature_dict = {
-                    f'feature_{i}': features[start_idx:end_idx, i].numpy()
-                    for i in range(features.shape[1])
-                }
-                feature_dict['target'] = labels[start_idx:end_idx].numpy()
-
-                df = pd.DataFrame(feature_dict)
-                mode = 'w' if start_idx == 0 else 'a'
-                header = start_idx == 0
-
-                df.to_csv(output_path, mode=mode, index=False, header=header)
-
-                # Cleanup
-                del feature_dict, df
-                gc.collect()
-
-            logger.info(f"Features saved to {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error saving features: {str(e)}")
-            raise
-
     def _initialize_optimizer(self) -> torch.optim.Optimizer:
         """Initialize optimizer based on configuration"""
         optimizer_config = self.config['model'].get('optimizer', {})
@@ -1804,16 +3872,17 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         plt.close()
 
     def plot_training_history(self, save_path: Optional[str] = None):
-        """Plot training metrics history"""
+        """Plot training metrics history with enhanced metrics"""
         if not self.history:
             logger.warning("No training history available to plot")
             return
 
         plt.figure(figsize=(15, 5))
 
-        # Plot loss
+        # Plot loss history
         plt.subplot(1, 2, 1)
-        plt.plot(self.history['train_loss'], label='Train Loss')
+        if 'train_loss' in self.history:
+            plt.plot(self.history['train_loss'], label='Train Loss')
         if 'val_loss' in self.history:
             plt.plot(self.history['val_loss'], label='Val Loss')
         plt.title('Loss History')
@@ -1822,16 +3891,32 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         plt.legend()
         plt.grid(True)
 
-        # Plot accuracy
+        # Plot enhancement-specific metrics if available
         plt.subplot(1, 2, 2)
-        plt.plot(self.history['train_acc'], label='Train Acc')
-        if 'val_acc' in self.history:
-            plt.plot(self.history['val_acc'], label='Val Acc')
-        plt.title('Accuracy History')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy (%)')
-        plt.legend()
-        plt.grid(True)
+        metrics = [k for k in self.history.keys()
+                  if k not in ['train_loss', 'val_loss', 'train_acc', 'val_acc']]
+
+        if metrics:
+            for metric in metrics[:3]:  # Plot up to 3 additional metrics
+                values = [float(v) if isinstance(v, torch.Tensor) else v
+                         for v in self.history[metric]]
+                plt.plot(values, label=metric.replace('_', ' ').title())
+            plt.title('Enhancement Metrics')
+            plt.xlabel('Epoch')
+            plt.ylabel('Value')
+            plt.legend()
+            plt.grid(True)
+        else:
+            # If no enhancement metrics, plot accuracy
+            if 'train_acc' in self.history:
+                plt.plot(self.history['train_acc'], label='Train Acc')
+            if 'val_acc' in self.history:
+                plt.plot(self.history['val_acc'], label='Val Acc')
+            plt.title('Accuracy History')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy (%)')
+            plt.legend()
+            plt.grid(True)
 
         plt.tight_layout()
 
@@ -1840,7 +3925,6 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             plt.savefig(save_path)
             logger.info(f"Training history plot saved to {save_path}")
         plt.close()
-
     def get_reconstruction(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """Get reconstruction for input tensor"""
         self.feature_extractor.eval()
@@ -1896,43 +3980,6 @@ class EnhancedFeatureExtractor(AutoEncoderFeatureExtractor):
             config=self.config
         ).to(self.device)
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Extract features with enhanced information"""
-        self.feature_extractor.eval()
-        features = []
-        given_labels = []
-        predicted_labels = []
-        cluster_probs = []
-
-        with torch.no_grad():
-            for inputs, labels in tqdm(loader, desc="Extracting features"):
-                inputs = inputs.to(self.device)
-                outputs = self.feature_extractor.get_feature_info(inputs)
-
-                features.append(outputs['embedding'].cpu())
-                given_labels.append(labels)
-
-                if 'class_predictions' in outputs:
-                    predicted_labels.append(outputs['class_predictions'].cpu())
-                if 'class_probabilities' in outputs:
-                    cluster_probs.append(outputs['class_probabilities'].cpu())
-
-                # Cleanup
-                del inputs, outputs
-                if len(features) % 50 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-        result = {'features': torch.cat(features),
-                 'given_labels': torch.cat(given_labels)}
-
-        if predicted_labels:
-            result['predicted_labels'] = torch.cat(predicted_labels)
-        if cluster_probs:
-            result['cluster_probabilities'] = torch.cat(cluster_probs)
-
-        return result
 
     def save_features(self, features_dict: Dict[str, torch.Tensor], output_path: str):
         """Enhanced feature saving with class information"""
@@ -2709,10 +4756,240 @@ class FeatureExtractorFactory:
         else:
             raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
-def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFeatureExtractor:
-    """Convenience function to create feature extractor"""
-    return FeatureExtractorFactory.create(config, device)
+class EnhancedAutoEncoderFeatureExtractor(AutoEncoderFeatureExtractor):
+    def predict_from_csv(self, csv_path: str):
+        """Generate reconstructions from feature vectors with optimal scaling"""
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
+        df = pd.read_csv(csv_path)
+        feature_cols = [col for col in df.columns if col.startswith('feature_')]
+        features = torch.tensor(df[feature_cols].values, dtype=torch.float32)
+
+        # Verify feature dimensions
+        expected_dims = self.config['model']['feature_dims']
+        if features.size(1) != expected_dims:
+            raise ValueError(f"Feature dimension mismatch: got {features.size(1)}, expected {expected_dims}")
+
+        # Get target dimensions from config
+        target_size = tuple(self.config['dataset']['input_size'])
+        target_channels = self.config['dataset']['in_channels']
+        logger.info(f"Target image size: {target_size}, channels: {target_channels}")
+
+        self.feature_extractor.eval()
+        output_dir = self.config['output']['image_dir']
+        os.makedirs(output_dir, exist_ok=True)
+
+        with torch.no_grad():
+            for idx, feature_vec in enumerate(tqdm(features, desc="Generating reconstructions")):
+                try:
+                    # Generate reconstruction
+                    feature_vec = feature_vec.to(self.device).unsqueeze(0)
+                    reconstruction = self.feature_extractor.decode(feature_vec)
+
+                    # Handle channel mismatch if any
+                    if reconstruction.size(1) != target_channels:
+                        if target_channels == 1 and reconstruction.size(1) == 3:
+                            # Use proper RGB to grayscale conversion
+                            reconstruction = 0.299 * reconstruction[:, 0:1] + \
+                                          0.587 * reconstruction[:, 1:2] + \
+                                          0.114 * reconstruction[:, 2:3]
+                        elif target_channels == 3 and reconstruction.size(1) == 1:
+                            reconstruction = reconstruction.repeat(1, 3, 1, 1)
+
+                    # Apply optimal scaling using interpolate
+                    current_size = (reconstruction.size(2), reconstruction.size(3))
+                    if current_size != target_size:
+                        # Choose interpolation mode based on scaling factor
+                        scale_factor = (target_size[0] / current_size[0],
+                                      target_size[1] / current_size[1])
+
+                        # Use bicubic for upscaling and area for downscaling
+                        mode = 'bicubic' if min(scale_factor) > 1 else 'area'
+
+                        reconstruction = F.interpolate(
+                            reconstruction,
+                            size=target_size,
+                            mode=mode,
+                            align_corners=False if mode == 'bicubic' else None
+                        )
+
+                    # Save reconstructed image
+                    img_path = os.path.join(output_dir, f"reconstruction_{idx}.png")
+                    self.save_reconstructed_image(reconstruction[0], img_path)
+
+                except Exception as e:
+                    logger.error(f"Error processing feature vector {idx}: {str(e)}")
+
+    def save_reconstructed_image(self, tensor: torch.Tensor, path: str):
+        """Save reconstructed tensor as image with optimal quality preservation"""
+        try:
+            tensor = tensor.detach().cpu()
+
+            # Verify channel count
+            if tensor.size(0) != self.config['dataset']['in_channels']:
+                raise ValueError(f"Expected {self.config['dataset']['in_channels']} channels, got {tensor.size(0)}")
+
+            # Move to [H, W, C] for image saving
+            tensor = tensor.permute(1, 2, 0)
+
+            # Get normalization parameters from config
+            mean = torch.tensor(self.config['dataset']['mean'], dtype=tensor.dtype)
+            std = torch.tensor(self.config['dataset']['std'], dtype=tensor.dtype)
+
+            # Reshape for broadcasting
+            mean = mean.view(1, 1, -1)
+            std = std.view(1, 1, -1)
+
+            # Denormalize
+            tensor = tensor * std + mean
+            tensor = (tensor.clamp(0, 1) * 255).to(torch.uint8)
+
+            # Handle single-channel case
+            if tensor.shape[-1] == 1:
+                tensor = tensor.squeeze(-1)
+
+            # Convert to PIL Image
+            img = Image.fromarray(tensor.numpy())
+
+            # Verify if any final resizing is needed
+            target_size = tuple(self.config['dataset']['input_size'])
+            if img.size != target_size:
+                # Use LANCZOS for upscaling and BICUBIC for downscaling
+                if img.size[0] < target_size[0] or img.size[1] < target_size[1]:
+                    resample = Image.Resampling.LANCZOS
+                else:
+                    resample = Image.Resampling.BICUBIC
+
+                img = img.resize(target_size, resample=resample)
+
+            # Save with maximum quality
+            img.save(path, quality=95, optimize=True)
+            logger.debug(f"Saved image to {path} with size {img.size}")
+
+        except Exception as e:
+            logger.error(f"Error saving reconstructed image: {str(e)}")
+            logger.error(f"Tensor shape at error: {tensor.shape if 'tensor' in locals() else 'unknown'}")
+            raise
+
+
+
+class StructurePreservingAutoencoder(DynamicAutoencoder):
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        super().__init__(input_shape, feature_dims)
+
+        # Add residual connections for detail preservation
+        self.skip_connections = nn.ModuleList()
+
+        # Enhanced encoder with more layers for fine detail capture
+        self.detail_encoder = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.PReLU(),
+                nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=4),  # Group convolution for local feature preservation
+                nn.BatchNorm2d(32),
+                nn.PReLU()
+            ) for _ in range(3)  # Multiple detail preservation layers
+        ])
+
+        # Structure-aware decoder components
+        self.structure_decoder = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.PReLU(),
+                nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=4),
+                nn.BatchNorm2d(32),
+                nn.PReLU()
+            ) for _ in range(3)
+        ])
+
+        # Edge detection and preservation module
+        self.edge_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=3, padding=1)
+        )
+
+        # Local contrast enhancement
+        self.contrast_enhancement = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=5, padding=2),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=5, padding=2)
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhanced encoding with detail preservation"""
+        skip_features = []
+
+        # Regular encoding path
+        for layer in self.encoder_layers:
+            x = layer(x)
+            skip_features.append(x)
+
+            # Apply detail preservation at each scale
+            if len(skip_features) <= len(self.detail_encoder):
+                x = self.detail_encoder[len(skip_features)-1](x) + x  # Residual connection
+
+        x = x.view(x.size(0), -1)
+        x = self.embedder(x)
+
+        return x, skip_features
+
+    def decode(self, x: torch.Tensor, skip_features: List[torch.Tensor]) -> torch.Tensor:
+        """Enhanced decoding with structure preservation"""
+        x = self.unembedder(x)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim, self.final_spatial_dim)
+
+        for idx, layer in enumerate(self.decoder_layers):
+            x = layer(x)
+
+            # Apply structure preservation
+            if idx < len(self.structure_decoder):
+                x = self.structure_decoder[idx](x) + x
+
+            # Add skip connections from encoder
+            if idx < len(skip_features):
+                x = x + skip_features[-(idx+1)]  # Add features from corresponding encoder layer
+
+        # Enhance edges and local contrast
+        edges = self.edge_detector(x)
+        contrast = self.contrast_enhancement(x)
+
+        # Combine all features
+        x = x + 0.1 * edges + 0.1 * contrast
+
+        return x
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with enhanced detail preservation"""
+        # Extract edges for detail preservation
+        edge_features = self.edge_detector(x)
+
+        # Main autoencoder path with skip connections
+        embedding, skip_features = self.encode(x)
+        reconstruction = self.decode(embedding, skip_features)
+
+        # Enhance final reconstruction with edge and contrast features
+        reconstruction = reconstruction + 0.1 * self.edge_detector(reconstruction) + \
+                        0.1 * self.contrast_enhancement(reconstruction)
+
+        return embedding, reconstruction
+
+
+def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFeatureExtractor:
+    """Get appropriate feature extractor with enhanced image handling"""
+    encoder_type = config['model'].get('encoder_type', 'cnn').lower()
+
+    if encoder_type == 'cnn':
+        return CNNFeatureExtractor(config, device)
+    elif encoder_type == 'autoenc':
+        # Always use enhanced version for autoencoder
+        return EnhancedAutoEncoderFeatureExtractor(config, device)
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
     """Custom dataset for loading images from directory structure"""
@@ -3534,6 +5811,232 @@ class ConfigManager:
 
         return input_size, in_channels
 
+class EnhancedConfigManager(ConfigManager):
+    """Enhanced configuration manager with support for specialized imaging features"""
+
+    def __init__(self, config_dir: str):
+        super().__init__(config_dir)
+        self.editor = os.environ.get('EDITOR', 'nano')
+
+    def verify_enhancement_config(self, config: Dict) -> Dict:
+        """Verify and add enhancement-specific configurations"""
+        if 'model' not in config:
+            config['model'] = {}
+
+        # Add enhancement modules configuration
+        config['model'].setdefault('enhancement_modules', {
+            'astronomical': {
+                'enabled': False,
+                'components': {
+                    'structure_preservation': True,
+                    'detail_preservation': True,
+                    'star_detection': True,
+                    'galaxy_features': True,
+                    'kl_divergence': True
+                },
+                'weights': {
+                    'detail_weight': 1.0,
+                    'structure_weight': 0.8,
+                    'edge_weight': 0.7
+                }
+            },
+            'medical': {
+                'enabled': False,
+                'components': {
+                    'tissue_boundary': True,
+                    'lesion_detection': True,
+                    'contrast_enhancement': True,
+                    'subtle_feature_preservation': True
+                },
+                'weights': {
+                    'boundary_weight': 1.0,
+                    'lesion_weight': 0.8,
+                    'contrast_weight': 0.6
+                }
+            },
+            'agricultural': {
+                'enabled': False,
+                'components': {
+                    'texture_analysis': True,
+                    'damage_detection': True,
+                    'color_anomaly': True,
+                    'pattern_enhancement': True,
+                    'morphological_features': True
+                },
+                'weights': {
+                    'texture_weight': 1.0,
+                    'damage_weight': 0.8,
+                    'pattern_weight': 0.7
+                }
+            }
+        })
+
+        # Add loss function configurations
+        config['model'].setdefault('loss_functions', {})
+        loss_functions = config['model']['loss_functions']
+
+        loss_functions.setdefault('astronomical_structure', {
+            'enabled': False,
+            'weight': 1.0,
+            'components': {
+                'edge_preservation': True,
+                'peak_preservation': True,
+                'detail_preservation': True
+            }
+        })
+
+        loss_functions.setdefault('medical_structure', {
+            'enabled': False,
+            'weight': 1.0,
+            'components': {
+                'boundary_preservation': True,
+                'tissue_contrast': True,
+                'local_structure': True
+            }
+        })
+
+        loss_functions.setdefault('agricultural_pattern', {
+            'enabled': False,
+            'weight': 1.0,
+            'components': {
+                'texture_preservation': True,
+                'damage_pattern': True,
+                'color_consistency': True
+            }
+        })
+
+        return config
+
+    def configure_image_type(self, config: Dict, image_type: str) -> Dict:
+        """Configure enhancement modules for specific image type"""
+        if 'dataset' not in config:
+            config['dataset'] = {}
+
+        config['dataset']['image_type'] = image_type
+
+        # Disable all enhancement modules first
+        for module in config['model']['enhancement_modules']:
+            config['model']['enhancement_modules'][module]['enabled'] = False
+            config['model']['loss_functions'][f'{module}_structure']['enabled'] = False
+
+        # Enable specific module if not general
+        if image_type != 'general' and image_type in config['model']['enhancement_modules']:
+            config['model']['enhancement_modules'][image_type]['enabled'] = True
+            config['model']['loss_functions'][f'{image_type}_structure']['enabled'] = True
+
+        return config
+
+    def interactive_setup(self, config: Dict) -> Dict:
+        """Interactive configuration setup for enhancements"""
+        print("\nEnhanced Autoencoder Configuration")
+        print("=================================")
+
+        # Ensure enhancement config exists
+        config = self.verify_enhancement_config(config)
+
+        # Configure based on image type
+        image_type = config['dataset']['image_type']
+        if image_type != 'general':
+            module = config['model']['enhancement_modules'][image_type]
+
+            print(f"\nConfiguring {image_type} components:")
+
+            # Configure components
+            for component in module['components']:
+                current = module['components'][component]
+                response = input(f"Enable {component}? (y/n) [{['n', 'y'][current]}]: ").lower()
+                if response in ['y', 'n']:
+                    module['components'][component] = (response == 'y')
+
+            # Configure weights
+            print(f"\nConfiguring {image_type} weights (0-1):")
+            for weight_name, current_value in module['weights'].items():
+                while True:
+                    try:
+                        new_value = input(f"{weight_name} [{current_value}]: ")
+                        if new_value:
+                            value = float(new_value)
+                            if 0 <= value <= 1:
+                                module['weights'][weight_name] = value
+                                break
+                            else:
+                                print("Weight must be between 0 and 1")
+                        else:
+                            break
+                    except ValueError:
+                        print("Please enter a valid number")
+
+            # Configure loss function
+            loss_config = config['model']['loss_functions'][f'{image_type}_structure']
+            print(f"\nConfiguring loss function components:")
+            for component in loss_config['components']:
+                current = loss_config['components'][component]
+                response = input(f"Enable {component}? (y/n) [{['n', 'y'][current]}]: ").lower()
+                if response in ['y', 'n']:
+                    loss_config['components'][component] = (response == 'y')
+
+            # Configure loss weight
+            while True:
+                try:
+                    new_weight = input(f"Loss weight [{loss_config['weight']}]: ")
+                    if new_weight:
+                        weight = float(new_weight)
+                        if weight > 0:
+                            loss_config['weight'] = weight
+                            break
+                        else:
+                            print("Weight must be positive")
+                    else:
+                        break
+                except ValueError:
+                    print("Please enter a valid number")
+
+        return config
+
+    def print_current_config(self, config: Dict):
+        """Print current enhancement configuration"""
+        print("\nCurrent Enhancement Configuration:")
+        print("================================")
+
+        image_type = config['dataset']['image_type']
+        print(f"\nImage Type: {image_type}")
+
+        if image_type != 'general':
+            module = config['model']['enhancement_modules'][image_type]
+
+            print("\nEnabled Components:")
+            for component, enabled in module['components'].items():
+                print(f"- {component}: {'✓' if enabled else '✗'}")
+
+            print("\nComponent Weights:")
+            for weight_name, value in module['weights'].items():
+                print(f"- {weight_name}: {value:.2f}")
+
+            print("\nLoss Function Configuration:")
+            loss_config = config['model']['loss_functions'][f'{image_type}_structure']
+            print(f"- Weight: {loss_config['weight']:.2f}")
+            print("\nEnabled Loss Components:")
+            for component, enabled in loss_config['components'].items():
+                print(f"- {component}: {'✓' if enabled else '✗'}")
+
+    def get_active_components(self, config: Dict) -> Dict:
+        """Get currently active enhancement components"""
+        image_type = config['dataset']['image_type']
+        if image_type == 'general':
+            return {}
+
+        module = config['model']['enhancement_modules'][image_type]
+        loss_config = config['model']['loss_functions'][f'{image_type}_structure']
+
+        return {
+            'type': image_type,
+            'components': {k: v for k, v in module['components'].items() if v},
+            'weights': module['weights'],
+            'loss_components': {k: v for k, v in loss_config['components'].items() if v},
+            'loss_weight': loss_config['weight']
+        }
+
+
 def setup_logging(log_dir: str = 'logs') -> logging.Logger:
     """Setup logging configuration"""
     os.makedirs(log_dir, exist_ok=True)
@@ -3552,6 +6055,9 @@ def setup_logging(log_dir: str = 'logs') -> logging.Logger:
     logger = logging.getLogger(__name__)
     logger.info(f"Logging setup complete. Log file: {log_file}")
     return logger
+
+
+
 
 def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
     """Get dataset based on configuration"""
@@ -3722,7 +6228,8 @@ def get_interactive_args():
 
     # If in predict mode and invert DBNN is enabled, ask for input CSV
     if args.mode == 'predict' and args.invert_dbnn:
-        default_csv = last_args.get('input_csv', '') if last_args else ''
+        fln=self.conf['dataset']['name']
+        default_csv = last_args.get(f'{fln}.csv', '') if last_args else ''
         prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
         args.input_csv = input(prompt).strip() or default_csv
 
@@ -3814,215 +6321,140 @@ def configure_enhancements(config: Dict) -> Dict:
 
     return config
 
-def merge_feature_dicts(dict1: Dict[str, torch.Tensor], dict2: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Merge two feature dictionaries while preserving class information"""
-    merged = {}
-    for key in dict1.keys():
-        merged[key] = torch.cat([dict1[key], dict2[key]])
-    return merged
 
+
+def add_enhancement_features(config: Dict) -> Dict:
+    """Add enhancement features to existing configuration"""
+    # Ensure basic structure exists
+    if 'model' not in config:
+        config['model'] = {}
+    if 'enhancement_modules' not in config['model']:
+        config['model']['enhancement_modules'] = {}
+    if 'loss_functions' not in config['model']:
+        config['model']['loss_functions'] = {}
+
+    # Ask about each enhancement type
+    print("\nAvailable Enhancement Features:")
+
+    # Astronomical features
+    if input("Add astronomical features (star detection, galaxy structure preservation)? (y/n) [n]: ").lower() == 'y':
+        config['model']['enhancement_modules']['astronomical'] = {
+            'enabled': True,
+            'components': {
+                'structure_preservation': True,
+                'detail_preservation': True,
+                'star_detection': True,
+                'galaxy_features': True,
+                'kl_divergence': True
+            },
+            'weights': {
+                'detail_weight': 1.0,
+                'structure_weight': 0.8,
+                'edge_weight': 0.7
+            }
+        }
+        config['model']['loss_functions']['astronomical_structure'] = {
+            'enabled': True,
+            'weight': 1.0,
+            'components': {
+                'edge_preservation': True,
+                'peak_preservation': True,
+                'detail_preservation': True
+            }
+        }
+        print("Astronomical features added.")
+
+    # Medical features
+    if input("Add medical features (tissue boundary, lesion detection)? (y/n) [n]: ").lower() == 'y':
+        config['model']['enhancement_modules']['medical'] = {
+            'enabled': True,
+            'components': {
+                'tissue_boundary': True,
+                'lesion_detection': True,
+                'contrast_enhancement': True,
+                'subtle_feature_preservation': True
+            },
+            'weights': {
+                'boundary_weight': 1.0,
+                'lesion_weight': 0.8,
+                'contrast_weight': 0.6
+            }
+        }
+        config['model']['loss_functions']['medical_structure'] = {
+            'enabled': True,
+            'weight': 1.0,
+            'components': {
+                'boundary_preservation': True,
+                'tissue_contrast': True,
+                'local_structure': True
+            }
+        }
+        print("Medical features added.")
+
+    # Agricultural features
+    if input("Add agricultural features (texture analysis, damage detection)? (y/n) [n]: ").lower() == 'y':
+        config['model']['enhancement_modules']['agricultural'] = {
+            'enabled': True,
+            'components': {
+                'texture_analysis': True,
+                'damage_detection': True,
+                'color_anomaly': True,
+                'pattern_enhancement': True,
+                'morphological_features': True
+            },
+            'weights': {
+                'texture_weight': 1.0,
+                'damage_weight': 0.8,
+                'pattern_weight': 0.7
+            }
+        }
+        config['model']['loss_functions']['agricultural_pattern'] = {
+            'enabled': True,
+            'weight': 1.0,
+            'components': {
+                'texture_preservation': True,
+                'damage_pattern': True,
+                'color_consistency': True
+            }
+        }
+        print("Agricultural features added.")
+
+    return config
+
+def update_existing_config(config_path: str, new_config: Dict) -> Dict:
+    """Update existing configuration while preserving current settings"""
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            existing_config = json.load(f)
+
+        # Merge configurations
+        for key in new_config:
+            if key in existing_config:
+                if isinstance(existing_config[key], dict) and isinstance(new_config[key], dict):
+                    existing_config[key].update(new_config[key])
+                else:
+                    existing_config[key] = new_config[key]
+            else:
+                existing_config[key] = new_config[key]
+
+        return existing_config
+    return new_config
 def main():
+    """Main function for CDBNN processing with enhancement configurations"""
     args = None
     try:
+        # Setup logging and parse arguments
         logger = setup_logging()
         args = parse_arguments()
 
+        # Process based on mode
         if args.mode == 'train':
-            # Setup paths
-            data_name = os.path.splitext(os.path.basename(args.data))[0]
-            data_dir = os.path.join('data', data_name)
-            config_path = os.path.join(data_dir, f"{data_name}.json")
-
-            # Process dataset
-            processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
-            train_dir, test_dir = processor.process()
-            logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
-
-            # Generate/verify configurations
-            logger.info("Generating/verifying configurations...")
-            config = processor.generate_default_config(train_dir)
-
-            # If user provided a custom config, merge it
-            if args.config:
-                with open(args.config, 'r') as f:
-                    user_config = json.load(f)
-                    config = processor._merge_configs(config, user_config)
-
-            # Ensure autoencoder config structure exists
-            if 'model' not in config:
-                config['model'] = {}
-            if 'autoencoder_config' not in config['model']:
-                config['model']['autoencoder_config'] = {}
-            if 'enhancements' not in config['model']['autoencoder_config']:
-                config['model']['autoencoder_config']['enhancements'] = {
-                    'enabled': True,
-                    'use_kl_divergence': True,
-                    'use_class_encoding': True,
-                    'kl_divergence_weight': 0.1,
-                    'classification_weight': 0.1,
-                    'clustering_temperature': 1.0,
-                    'min_cluster_confidence': 0.7
-                }
-
-            # Configure enhancements if requested
-            if input("\nWould you like to configure enhanced autoencoder features? (y/n): ").lower() == 'y':
-                enhancements = config['model']['autoencoder_config']['enhancements']
-                print("\nConfiguring Enhanced Autoencoder Features:")
-
-                # KL Divergence configuration
-                if input("Enable KL divergence clustering? (y/n) [y]: ").lower() != 'n':
-                    enhancements['use_kl_divergence'] = True
-                    enhancements['kl_divergence_weight'] = float(
-                        input("Enter KL divergence weight (0-1) [0.1]: ") or 0.1
-                    )
-                else:
-                    enhancements['use_kl_divergence'] = False
-
-                # Class encoding configuration
-                if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
-                    enhancements['use_class_encoding'] = True
-                    enhancements['classification_weight'] = float(
-                        input("Enter classification weight (0-1) [0.1]: ") or 0.1
-                    )
-                else:
-                    enhancements['use_class_encoding'] = False
-
-                # Clustering configuration if KL divergence is enabled
-                if enhancements['use_kl_divergence']:
-                    enhancements['clustering_temperature'] = float(
-                        input("Enter clustering temperature (0.1-2.0) [1.0]: ") or 1.0
-                    )
-                    enhancements['min_cluster_confidence'] = float(
-                        input("Enter minimum cluster confidence (0-1) [0.7]: ") or 0.7
-                    )
-
-            # Update configuration with command line arguments
-            config = update_config_with_args(config, args)
-
-            # Save updated config
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=4)
-
-            # Configuration editing prompt
-            print("\nConfiguration files have been created/updated. Would you like to edit them?")
-            if input("Edit configuration? (y/n): ").lower() == 'y':
-                config_manager = ConfigManager(processor.dataset_dir)
-                config_manager._open_editor(config_path)
-                config_manager._open_editor(os.path.join(data_dir, f"{data_name}.conf"))
-                config_manager._open_editor(os.path.join(data_dir, "adaptive_dbnn.conf"))
-                # Reload config if edited
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-
-            # Setup training
-            transform = processor.get_transforms(config)
-            train_dataset, test_dataset = get_dataset(config, transform)
-
-            if train_dataset is None:
-                raise ValueError("No training dataset available")
-
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=config['training']['batch_size'],
-                shuffle=True,
-                num_workers=config['training']['num_workers']
-            )
-
-            test_loader = None
-            if test_dataset is not None:
-                test_loader = DataLoader(
-                    test_dataset,
-                    batch_size=config['training']['batch_size'],
-                    shuffle=False,
-                    num_workers=config['training']['num_workers']
-                )
-
-            logger.info(f"Initializing {config['model']['encoder_type']} feature extractor...")
-            feature_extractor = get_feature_extractor(config)
-
-            # Training confirmation
-            if input("\nReady to start training. Proceed? (y/n): ").lower() != 'y':
-                logger.info("Training cancelled by user")
-                return 0
-
-            # Training and feature extraction
-            logger.info("Starting model training...")
-            history = feature_extractor.train(train_loader, test_loader)
-
-            logger.info("Extracting features...")
-            if isinstance(feature_extractor, EnhancedFeatureExtractor):
-                # Use enhanced feature extraction
-                features_dict = feature_extractor.extract_features(train_loader)
-
-                if test_loader:
-                    test_features = feature_extractor.extract_features(test_loader)
-                    # Merge train and test features
-                    for key in features_dict:
-                        if isinstance(features_dict[key], torch.Tensor):
-                            features_dict[key] = torch.cat([features_dict[key], test_features[key]])
-            else:
-                # Standard feature extraction
-                train_features, train_labels = feature_extractor.extract_features(train_loader)
-                if test_loader:
-                    test_features, test_labels = feature_extractor.extract_features(test_loader)
-                    features = torch.cat([train_features, test_features])
-                    labels = torch.cat([train_labels, test_labels])
-                else:
-                    features = train_features
-                    labels = train_labels
-                features_dict = {'features': features, 'labels': labels}
-
-            # Save features
-            output_name = f"{data_name}.csv"
-            output_path = os.path.join(data_dir, output_name)
-
-            if isinstance(feature_extractor, EnhancedFeatureExtractor):
-                feature_extractor.save_features_with_class_info(features_dict, output_path)
-            else:
-                features = features_dict['features']
-                labels = features_dict['labels']
-                feature_extractor.save_features(features, labels, output_path)
-            logger.info(f"Features saved to {output_path}")
-
-
-            # Save training history plot
-            if history:
-                plot_path = os.path.join(data_dir, 'training_history.png')
-                feature_extractor.plot_training_history(plot_path)
-
-            logger.info("Processing completed successfully!")
-            return 0
-
+            return handle_training_mode(args, logger)
         elif args.mode == 'predict':
-            # Prediction mode handling (keeping existing code)
-            data_name = os.path.splitext(os.path.basename(args.data))[0]
-            data_dir = os.path.join('data', data_name)
-            config_path = os.path.join(data_dir, f"{data_name}.json")
-
-            # Load or generate config
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    if hasattr(args, 'invert_dbnn'):
-                        config['training']['invert_DBNN'] = args.invert_dbnn
-            else:
-                processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
-                config = processor.generate_default_config(data_dir)
-
-            # Determine input CSV
-            if args.input_csv:
-                input_csv = args.input_csv
-            else:
-                input_csv = os.path.join(data_dir, f"{data_name}.csv")
-
-            if not os.path.exists(input_csv):
-                raise FileNotFoundError(f"Input CSV not found: {input_csv}")
-
-            feature_extractor = get_feature_extractor(config)
-            feature_extractor.predict_from_csv(input_csv)
-
-            logger.info(f"Predictions completed successfully!")
-            return 0
+            return handle_prediction_mode(args, logger)
+        else:
+            logger.error(f"Invalid mode: {args.mode}")
+            return 1
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
@@ -4030,7 +6462,280 @@ def main():
             traceback.print_exc()
         return 1
 
+def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
+    """Handle training mode operations"""
+    try:
+        # Setup paths
+        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_dir = os.path.join('data', data_name)
+        config_path = os.path.join(data_dir, f"{data_name}.json")
 
+        # Process dataset
+        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
+        train_dir, test_dir = processor.process()
+        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
+
+        # Generate/verify configurations
+        logger.info("Generating/verifying configurations...")
+        config = processor.generate_default_config(train_dir)
+
+        # Configure enhancements
+        config = configure_image_processing(config, logger)
+
+        # Update configuration with command line arguments
+        config = update_config_with_args(config, args)
+
+        # Setup data loading
+        transform = processor.get_transforms(config)
+        train_dataset, test_dataset = get_dataset(config, transform)
+
+        if train_dataset is None:
+            raise ValueError("No training dataset available")
+
+        # Create data loaders
+        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
+
+        # Initialize model and loss manager
+        model, loss_manager = initialize_model_components(config, logger)
+
+        # Get training confirmation
+        if not get_training_confirmation(logger):
+            return 0
+
+        # Perform training and feature extraction
+        features_dict = perform_training_and_extraction(
+            model, train_loader, test_loader, config, loss_manager, logger
+        )
+
+        # Save results
+        save_training_results(features_dict, model, config, data_dir, data_name, logger)
+
+        logger.info("Processing completed successfully!")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error in training mode: {str(e)}")
+        raise
+
+def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
+    """Handle prediction mode operations"""
+    try:
+        # Setup paths
+        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_dir = os.path.join('data', data_name)
+
+        # Load configuration
+        config_path = os.path.join(data_dir, f"{data_name}.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Determine input CSV
+        if args.invert_dbnn:
+            input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, 'reconstructed_input.csv')
+        else:
+            input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, f"{data_name}.csv")
+
+        if not os.path.exists(input_csv):
+            raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
+        # Setup output directory
+        output_dir = os.path.join(data_dir, 'predictions', datetime.now().strftime('%Y%m%d_%H%M%S'))
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Initialize prediction manager and generate predictions
+        predictor = PredictionManager(config)
+        predictor.predict_from_csv(input_csv, output_dir)
+
+        logger.info("Predictions completed successfully!")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error in prediction mode: {str(e)}")
+        if args.debug:
+            traceback.print_exc()
+        return 1
+
+def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
+    """Configure image processing type and enhancements"""
+    # Display image type options
+    print("\nSelect image type for enhanced processing:")
+    image_types = ["general", "astronomical", "medical", "agricultural"]
+    for i, type_name in enumerate(image_types, 1):
+        print(f"{i}. {type_name}")
+
+    # Get image type selection
+    type_idx = int(input("\nSelect image type (1-4): ")) - 1
+    image_type = image_types[type_idx]
+
+    # Create appropriate configuration manager
+    if image_type == "general":
+        config_manager = GeneralEnhancementConfig(config)
+        config_manager.configure_general_parameters()
+        config_manager.configure_enhancements()
+    else:
+        config_manager = SpecificEnhancementConfig(config, image_type)
+        config_manager.configure()
+
+    # Get and update configuration
+    config = config_manager.get_config()
+    config['dataset']['image_type'] = image_type
+
+    return config
+
+def create_data_loaders(train_dataset: Dataset, test_dataset: Optional[Dataset],
+                       config: Dict) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """Create data loaders for training and testing"""
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=config['training']['num_workers']
+    )
+
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config['training']['batch_size'],
+            shuffle=False,
+            num_workers=config['training']['num_workers']
+        )
+
+    return train_loader, test_loader
+
+def initialize_model_components(config: Dict, logger: logging.Logger) -> Tuple[nn.Module, EnhancedLossManager]:
+    """Initialize model and loss manager"""
+    logger.info(f"Initializing {config['dataset']['image_type']} enhanced model...")
+    model = ModelFactory.create_model(config)
+    loss_manager = EnhancedLossManager(config)
+    return model, loss_manager
+
+def get_training_confirmation(logger: logging.Logger) -> bool:
+    """Get user confirmation for training"""
+    if input("\nReady to start training. Proceed? (y/n): ").lower() != 'y':
+        logger.info("Training cancelled by user")
+        return False
+    return True
+
+# Original dataset creation point
+def perform_training_and_extraction(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader],
+    config: Dict,
+    loss_manager: EnhancedLossManager,
+    logger: logging.Logger
+) -> Dict:
+    """Perform model training and feature extraction"""
+    # Training
+    logger.info("Starting model training...")
+    # HERE: train_loader is passed but train_dataset isn't stored anywhere
+    history = train_model(model, train_loader, config, loss_manager)
+
+    # Feature extraction
+    logger.info("Extracting features...")
+    # HERE: We need train_dataset but it's not accessible
+    features_dict = extract_features_from_model(model, train_loader, test_loader)
+    return features_dict
+
+def extract_features_from_model(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader]
+) -> Dict:
+    """Extract features from the model"""
+    if isinstance(model, (AstronomicalStructurePreservingAutoencoder,
+                         MedicalStructurePreservingAutoencoder,
+                         AgriculturalPatternAutoencoder)):
+        features_dict = model.extract_features_with_class_info(train_loader)
+
+        if test_loader:
+            test_features = model.extract_features_with_class_info(test_loader)
+            for key in features_dict:
+                if isinstance(features_dict[key], torch.Tensor):
+                    features_dict[key] = torch.cat([features_dict[key], test_features[key]])
+    else:
+        train_features, train_labels = model.extract_features(train_loader)
+        if test_loader:
+            test_features, test_labels = model.extract_features(test_loader)
+            features = torch.cat([train_features, test_features])
+            labels = torch.cat([train_labels, test_labels])
+        else:
+            features = train_features
+            labels = train_labels
+        features_dict = {'features': features, 'labels': labels}
+
+    return features_dict
+
+def perform_training_and_extraction(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader],
+    config: Dict,
+    loss_manager: EnhancedLossManager,
+    logger: logging.Logger
+) -> Dict[str, torch.Tensor]:
+    """Perform model training and feature extraction"""
+    # Training
+    logger.info("Starting model training...")
+    history = train_model(model, train_loader, config, loss_manager)
+
+    # Feature extraction
+    logger.info("Extracting features...")
+    features_dict = model.extract_features(train_loader)
+
+    # If test loader exists, extract and combine features
+    if test_loader:
+        test_features_dict = model.extract_features(test_loader)
+        features_dict = merge_feature_dicts(features_dict, test_features_dict)
+
+    return features_dict
+
+def save_training_results(
+    features_dict: Dict[str, torch.Tensor],
+    model: nn.Module,
+    config: Dict,
+    data_dir: str,
+    data_name: str,
+    logger: logging.Logger
+) -> None:
+    """Save training results and features"""
+    # Save features
+    output_path = os.path.join(data_dir, f"{data_name}.csv")
+    model.save_features(features_dict, output_path)
+
+    # Save training history if available
+    if hasattr(model, 'history') and model.history:
+        history_path = os.path.join(data_dir, 'training_history.json')
+        with open(history_path, 'w') as f:
+            # Convert tensor values to float for JSON serialization
+            serializable_history = {
+                k: [float(v) if isinstance(v, torch.Tensor) else v
+                   for v in vals]
+                for k, vals in model.history.items()
+            }
+            json.dump(serializable_history, f, indent=4)
+
+        # Plot training history
+        plot_path = os.path.join(data_dir, 'training_history.png')
+        if isinstance(model, BaseAutoencoder):
+            model.plot_training_history(save_path=plot_path)
+
+def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
+                       dict2: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Merge two feature dictionaries"""
+    merged = {}
+    for key in dict1.keys():
+        if key in dict2:
+            if isinstance(dict1[key], torch.Tensor) and isinstance(dict2[key], torch.Tensor):
+                merged[key] = torch.cat([dict1[key], dict2[key]])
+            else:
+                merged[key] = dict1[key]  # Keep original if not tensor
+    return merged
 
 if __name__ == '__main__':
     sys.exit(main())
+
