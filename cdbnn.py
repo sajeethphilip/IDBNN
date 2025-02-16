@@ -2242,48 +2242,130 @@ class PredictionManager:
 
         return model.to(self.device)
 
-    def predict_from_csv(self, csv_path: str, output_dir: str):
-        """Generate predictions from CSV using selected model configuration"""
+    def predict_from_csv(self, csv_path: Optional[str] = None, output_dir: Optional[str] = None):
+        """Generate predictions from features in CSV"""
         # Load model
         model, config = self.load_model_for_prediction()
+        model.eval()  # Ensure model is in evaluation mode
+
+        # Determine input CSV path
+        if csv_path is None:
+            dataset_name = self.config['dataset']['name']
+            base_dir = os.path.join('data', dataset_name)
+
+            if self.config.get('execution_flags', {}).get('invert_DBNN', False):
+                csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
+            else:
+                csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
+
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
         # Load and process CSV
         df = pd.read_csv(csv_path)
         feature_cols = [col for col in df.columns if col.startswith('feature_')]
         features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(self.device)
 
-        # Generate predictions
+        # Verify feature dimensions
+        expected_dims = self.config['model']['feature_dims']
+        if features.size(1) != expected_dims:
+            raise ValueError(f"Feature dimension mismatch: got {features.size(1)}, expected {expected_dims}")
+
+        # Set up output directory
+        if output_dir is None:
+            output_dir = os.path.join('data', self.config['dataset']['name'], 'predictions')
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get image type and enhancement modules
+        image_type = self.config['dataset'].get('image_type', 'general')
+        enhancement_modules = self.config['model'].get('enhancement_modules', {})
+
         outputs = []
         batch_size = self.config['training'].get('batch_size', 32)
 
         with torch.no_grad():
             for i in tqdm(range(0, len(features), batch_size), desc="Generating predictions"):
                 batch = features[i:i+batch_size]
-                if config['current']['phase'] == 1:
-                    # Phase 1: Simple reconstruction
-                    reconstruction = model.decode(batch)
-                    output = {'reconstruction': reconstruction}
-                else:
-                    # Phase 2: Full forward pass with enhancements
-                    output = model(batch)
 
-                outputs.append(self._process_output(output))
+                try:
+                    if config['current']['phase'] == 1:
+                        # Phase 1: Direct decoding
+                        reconstruction = model.decode(batch)
+                        output = {'reconstruction': reconstruction}
+                    else:
+                        # Phase 2: Full forward pass with enhancements
+                        # First decode the features
+                        reconstruction = model.decode(batch)
+
+                        # Then run through full model if needed for enhancements
+                        if image_type != 'general' and image_type in enhancement_modules:
+                            enhanced_output = model(reconstruction)  # Get enhanced features
+                            output = {
+                                'reconstruction': enhanced_output['reconstruction'] if 'reconstruction' in enhanced_output else reconstruction,
+                                'embedding': enhanced_output.get('embedding', batch)
+                            }
+
+                            # Add enhancement-specific outputs
+                            if isinstance(model, AstronomicalStructurePreservingAutoencoder):
+                                output.update(self._apply_astronomical_enhancements(enhanced_output))
+                            elif isinstance(model, MedicalStructurePreservingAutoencoder):
+                                output.update(self._apply_medical_enhancements(enhanced_output))
+                            elif isinstance(model, AgriculturalPatternAutoencoder):
+                                output.update(self._apply_agricultural_enhancements(enhanced_output))
+                        else:
+                            output = {'reconstruction': reconstruction}
+
+                    outputs.append(self._process_output(output))
+
+                except Exception as e:
+                    logger.error(f"Error processing batch {i}: {str(e)}")
+                    raise
 
         # Combine and save results
         combined_output = self._combine_outputs(outputs)
         self._save_predictions(combined_output, output_dir, config)
 
-    def _process_output(self, output: Union[Dict[str, torch.Tensor], torch.Tensor]) -> Dict[str, np.ndarray]:
+    def _save_enhancement_outputs(self, predictions: Dict[str, np.ndarray], output_dir: str):
+        """Save enhancement-specific outputs"""
+        # Save astronomical features
+        if 'star_features' in predictions:
+            star_dir = os.path.join(output_dir, 'star_detection')
+            os.makedirs(star_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['star_features']):
+                img_path = os.path.join(star_dir, f'stars_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+        # Save medical features
+        if 'boundary_features' in predictions:
+            boundary_dir = os.path.join(output_dir, 'boundary_detection')
+            os.makedirs(boundary_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['boundary_features']):
+                img_path = os.path.join(boundary_dir, f'boundary_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+        # Save agricultural features
+        if 'texture_features' in predictions:
+            texture_dir = os.path.join(output_dir, 'texture_analysis')
+            os.makedirs(texture_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['texture_features']):
+                img_path = os.path.join(texture_dir, f'texture_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+    def _save_feature_map(self, feature_map: np.ndarray, path: str):
+        """Save feature map as image"""
+        # Normalize feature map to 0-255 range
+        feature_map = ((feature_map - feature_map.min()) /
+                      (feature_map.max() - feature_map.min() + 1e-8) * 255).astype(np.uint8)
+        Image.fromarray(feature_map).save(path)
+
+    def _process_output(self, output: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Process model output into numpy arrays"""
         processed = {}
-
-        if isinstance(output, dict):
-            for key, value in output.items():
-                if isinstance(value, torch.Tensor):
-                    processed[key] = value.cpu().numpy()
-        else:
-            processed['reconstruction'] = output.cpu().numpy()
-
+        for key, value in output.items():
+            if isinstance(value, torch.Tensor):
+                processed[key] = value.detach().cpu().numpy()
+            else:
+                processed[key] = value
         return processed
 
     def _combine_outputs(self, outputs: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
@@ -2307,17 +2389,21 @@ class PredictionManager:
                 img_path = os.path.join(recon_dir, f'reconstruction_{idx}.png')
                 Image.fromarray(img).save(img_path)
 
-        # Save other predictions to CSV
+        # Save enhancement-specific outputs
+        self._save_enhancement_outputs(predictions, output_dir)
+
+        # Save predictions to CSV
         pred_path = os.path.join(output_dir, 'predictions.csv')
         pred_dict = {}
 
-        if 'class_predictions' in predictions:
-            pred_dict['predicted_class'] = predictions['class_predictions']
-        if 'class_probabilities' in predictions:
-            for i in range(predictions['class_probabilities'].shape[1]):
-                pred_dict[f'class_{i}_probability'] = predictions['class_probabilities'][:, i]
-        if 'cluster_assignments' in predictions:
-            pred_dict['cluster'] = predictions['cluster_assignments']
+        # Add all numeric predictions to CSV
+        for key, value in predictions.items():
+            if isinstance(value, np.ndarray) and value.ndim <= 2:
+                if value.ndim == 1:
+                    pred_dict[key] = value
+                else:
+                    for i in range(value.shape[1]):
+                        pred_dict[f'{key}_{i}'] = value[:, i]
 
         if pred_dict:
             pd.DataFrame(pred_dict).to_csv(pred_path, index=False)
@@ -2325,17 +2411,50 @@ class PredictionManager:
         logger.info(f"Predictions saved to {output_dir}")
 
     def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
-        """Convert tensor to image array"""
-        if len(tensor.shape) == 3:
+        """Convert tensor to image array with proper normalization"""
+        if tensor.dim() == 3:
             tensor = tensor.permute(1, 2, 0)
+        tensor = tensor.cpu()
 
-        # Denormalize
+        # Denormalize using dataset mean and std
         mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
         std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
         tensor = tensor * std + mean
 
         return (tensor.clamp(0, 1) * 255).numpy().astype(np.uint8)
 
+    def _apply_astronomical_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply astronomical-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'star_features' in output:
+                enhanced['star_features'] = output['star_features']
+            if 'galaxy_features' in output:
+                enhanced['galaxy_features'] = output['galaxy_features']
+        return enhanced
+
+    def _apply_medical_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply medical-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'boundary_features' in output:
+                enhanced['boundary_features'] = output['boundary_features']
+            if 'lesion_features' in output:
+                enhanced['lesion_features'] = output['lesion_features']
+        return enhanced
+
+    def _apply_agricultural_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply agricultural-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'texture_features' in output:
+                enhanced['texture_features'] = output['texture_features']
+            if 'damage_features' in output:
+                enhanced['damage_features'] = output['damage_features']
+        return enhanced
   #----------------------------------------------
 class ClusteringLoss(nn.Module):
     """Loss function for clustering in latent space using KL divergence"""
