@@ -354,6 +354,12 @@ class BaseAutoencoder(nn.Module):
         current_size = input_shape[1]
         self.layer_sizes = self._calculate_layer_sizes()
 
+        # Initialize checkpoint path
+        self.checkpoint_dir = config['training']['checkpoint_dir']
+        self.dataset_name = config['dataset']['name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
+
+
         for _ in self.layer_sizes:
             self.spatial_dims.append(current_size)
             current_size = current_size // 2
@@ -393,7 +399,10 @@ class BaseAutoencoder(nn.Module):
 
         # Move model to appropriate device
         self.to(self.device)
+#--------------------------
 
+
+#--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
         self.train_dataset = dataset
@@ -5244,10 +5253,41 @@ class DatasetProcessor:
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
-            "model": {
+             "model": {
                 "encoder_type": "autoenc",
-                "feature_dims": feature_dims,
-                "learning_rate": 0.001,
+                "feature_dims": 128,
+                "learning_rate": 0.01,
+                "optimizer": {
+                    "type": "Adam",
+                    "weight_decay": 0.0001,
+                    "momentum": 0.9,
+                    "beta1": 0.9,
+                    "beta2": 0.999,
+                    "epsilon": 1e-08
+                },
+                "scheduler": {
+                    "type": "ReduceLROnPlateau",
+                    "factor": 0.1,
+                    "patience": 10,
+                    "min_lr": 1e-06,
+                    "verbose": True
+                },
+                "autoencoder_config": {
+                    "reconstruction_weight": 1.0,
+                    "feature_weight": 0.1,
+                    "convergence_threshold": 0.001,
+                    "min_epochs": 10,
+                    "patience": 5,
+                    "enhancements": {
+                        "enabled": True,
+                        "use_kl_divergence": True,
+                        "use_class_encoding": True,
+                        "kl_divergence_weight": 0.5,
+                        "classification_weight": 0.5,
+                        "clustering_temperature": 1.0,
+                        "min_cluster_confidence": 0.7
+                    }
+                },
                 "loss_functions": {
                     "structural": {
                         "enabled": True,
@@ -5281,29 +5321,80 @@ class DatasetProcessor:
                             "texture_weight": 0.8,
                             "frequency_weight": 0.6
                         }
+                    },
+                    "astronomical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "edge_preservation": True,
+                            "peak_preservation": True,
+                            "detail_preservation": True
+                        }
+                    },
+                    "medical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "boundary_preservation": True,
+                            "tissue_contrast": True,
+                            "local_structure": True
+                        }
+                    },
+                    "agricultural_pattern": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "texture_preservation": True,
+                            "damage_pattern": True,
+                            "color_consistency": True
+                        }
                     }
                 },
-                "optimizer": {
-                    "type": "Adam",
-                    "weight_decay": 1e-4,
-                    "momentum": 0.9,
-                    "beta1": 0.9,
-                    "beta2": 0.999,
-                    "epsilon": 1e-8
-                },
-                "scheduler": {
-                    "type": "ReduceLROnPlateau",
-                    "factor": 0.1,
-                    "patience": 10,
-                    "min_lr": 1e-6,
-                    "verbose": True
-                },
-                "autoencoder_config": {
-                    "reconstruction_weight": 1.0,
-                    "feature_weight": 0.1,
-                    "convergence_threshold": 0.001,
-                    "min_epochs": 10,
-                    "patience": 5
+                "enhancement_modules": {
+                    "astronomical": {
+                        "enabled": True,
+                        "components": {
+                            "structure_preservation": True,
+                            "detail_preservation": True,
+                            "star_detection": True,
+                            "galaxy_features": True,
+                            "kl_divergence": True
+                        },
+                        "weights": {
+                            "detail_weight": 1.0,
+                            "structure_weight": 0.8,
+                            "edge_weight": 0.7
+                        }
+                    },
+                    "medical": {
+                        "enabled": True,
+                        "components": {
+                            "tissue_boundary": True,
+                            "lesion_detection": True,
+                            "contrast_enhancement": True,
+                            "subtle_feature_preservation": True
+                        },
+                        "weights": {
+                            "boundary_weight": 1.0,
+                            "lesion_weight": 0.8,
+                            "contrast_weight": 0.6
+                        }
+                    },
+                    "agricultural": {
+                        "enabled": True,
+                        "components": {
+                            "texture_analysis": True,
+                            "damage_detection": True,
+                            "color_anomaly": True,
+                            "pattern_enhancement": True,
+                            "morphological_features": True
+                        },
+                        "weights": {
+                            "texture_weight": 1.0,
+                            "damage_weight": 0.8,
+                            "pattern_weight": 0.7
+                        }
+                    }
                 }
             },
             "training": {
@@ -6222,14 +6313,13 @@ def get_interactive_args():
     args.data = input(prompt).strip() or default
 
     # Ask about invert DBNN
-    default_invert = last_args.get('invert_dbnn', False) if last_args else False
+    default_invert = last_args.get('invert_dbnn', True) if last_args else True
     invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
     args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
 
     # If in predict mode and invert DBNN is enabled, ask for input CSV
     if args.mode == 'predict' and args.invert_dbnn:
-        fln=self.conf['dataset']['name']
-        default_csv = last_args.get(f'{fln}.csv', '') if last_args else ''
+        default_csv = last_args.get(f'input_csv', '') if last_args else ''
         prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
         args.input_csv = input(prompt).strip() or default_csv
 
@@ -6738,4 +6828,3 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
 
 if __name__ == '__main__':
     sys.exit(main())
-
