@@ -338,44 +338,74 @@ class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
+        """Initialize base autoencoder with shape management and all core components.
+
+        Args:
+            input_shape: Tuple of (channels, height, width)
+            feature_dims: Dimension of latent space features
+            config: Configuration dictionary
+        """
         super().__init__()
+
+        # Basic configuration
         self.input_shape = input_shape
         self.in_channels = input_shape[0]
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
 
-        # Set device
+        # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
 
-        # Initialize dimensions
+        # Shape tracking initialization
+        self.shape_registry = {'input': input_shape}
         self.spatial_dims = []
         current_size = input_shape[1]
+
+        # Calculate layer dimensions
         self.layer_sizes = self._calculate_layer_sizes()
 
-        # Initialize checkpoint path
-        self.checkpoint_dir = config['training']['checkpoint_dir']
-        self.dataset_name = config['dataset']['name']
-        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
-
-
+        # Track progressive spatial dimensions
         for _ in self.layer_sizes:
             self.spatial_dims.append(current_size)
             current_size = current_size // 2
 
+        # Final dimensions
         self.final_spatial_dim = current_size
         self.flattened_size = self.layer_sizes[-1] * (self.final_spatial_dim ** 2)
 
-        # Create basic layers
+        # Register key dimensions in shape registry
+        self.shape_registry.update({
+            'final_spatial': (self.final_spatial_dim, self.final_spatial_dim),
+            'flattened': (self.flattened_size,),
+            'latent': (self.feature_dims,)
+        })
+
+        # Initialize checkpoint paths
+        self.checkpoint_dir = config['training']['checkpoint_dir']
+        self.dataset_name = config['dataset']['name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir,
+                                          f"{self.dataset_name}_unified.pth")
+
+        # Create network layers
         self.encoder_layers = self._create_encoder_layers()
         self.embedder = self._create_embedder()
         self.unembedder = self._create_unembedder()
         self.decoder_layers = self._create_decoder_layers()
-        # Add latent space organization components
-        self.use_kl_divergence = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_kl_divergence', True)
-        self.use_class_encoding = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_class_encoding', True)
 
+        # Initialize enhancement components
+        self.use_kl_divergence = (config['model']
+                                 .get('autoencoder_config', {})
+                                 .get('enhancements', {})
+                                 .get('use_kl_divergence', True))
+
+        self.use_class_encoding = (config['model']
+                                  .get('autoencoder_config', {})
+                                  .get('enhancements', {})
+                                  .get('use_class_encoding', True))
+
+        # Initialize classifier if class encoding is enabled
         if self.use_class_encoding:
             num_classes = config['dataset'].get('num_classes', 10)
             self.classifier = nn.Sequential(
@@ -384,21 +414,40 @@ class BaseAutoencoder(nn.Module):
                 nn.Dropout(0.3),
                 nn.Linear(feature_dims // 2, num_classes)
             )
+            self.shape_registry['classifier_output'] = (num_classes,)
 
-        # Initialize clustering components if KL divergence is enabled
+        # Initialize clustering if KL divergence is enabled
         if self.use_kl_divergence:
-            self.cluster_centers = nn.Parameter(torch.randn(config['dataset'].get('num_classes', 10), feature_dims))
-            self.clustering_temperature = config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
+            num_clusters = config['dataset'].get('num_classes', 10)
+            self.cluster_centers = nn.Parameter(
+                torch.randn(num_clusters, feature_dims)
+            )
+            self.clustering_temperature = (config['model']
+                                         .get('autoencoder_config', {})
+                                         .get('enhancements', {})
+                                         .get('clustering_temperature', 1.0))
+            self.shape_registry['cluster_centers'] = (num_clusters, feature_dims)
 
         # Training phase tracking
         self.training_phase = 1  # Start with phase 1
-        self.config = config
 
-        # Initialize components but don't use them in phase 1
+        # Initialize latent organization
         self._initialize_latent_organization()
 
         # Move model to appropriate device
         self.to(self.device)
+
+        # Register shapes for encoder/decoder paths
+        for idx, size in enumerate(self.layer_sizes):
+            spatial_dim = self.spatial_dims[idx]
+            self.shape_registry[f'encoder_{idx}'] = (size, spatial_dim, spatial_dim)
+            self.shape_registry[f'decoder_{idx}'] = (size, spatial_dim, spatial_dim)
+
+        # Initialize training metrics
+        self.best_loss = float('inf')
+        self.best_accuracy = 0.0
+        self.current_epoch = 0
+        self.history = defaultdict(list)
 #--------------------------
 
 
@@ -6768,7 +6817,7 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
         return 1
 
 def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
-    """Configure image processing type and enhancements"""
+    """Configure image processing type and enhancements
     # Display image type options
     print("\nSelect image type for enhanced processing:")
     image_types = ["general", "astronomical", "medical", "agricultural"]
@@ -6781,13 +6830,16 @@ def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
 
     # Create appropriate configuration manager
     if image_type == "general":
-        config_manager = GeneralEnhancementConfig(config)
-        config_manager.configure_general_parameters()
-        config_manager.configure_enhancements()
+    """
+    image_type="general"
+    config_manager = GeneralEnhancementConfig(config)
+    config_manager.configure_general_parameters()
+    config_manager.configure_enhancements()
+    """
     else:
         config_manager = SpecificEnhancementConfig(config, image_type)
         config_manager.configure()
-
+    """
     # Get and update configuration
     config = config_manager.get_config()
     config['dataset']['image_type'] = image_type
