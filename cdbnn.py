@@ -66,7 +66,7 @@ import os
 from Astro_Utils import AstronomicalStructurePreservingAutoencoder,AstronomicalStructureLoss
 from basic_utils import BaseAutoencoder,BaseEnhancementConfig,GeneralEnhancementConfig,ModelFactory,DatasetProcessor
 from Medical_Utils import  MedicalStructurePreservingAutoencoder,MedicalStructureLoss
-
+from Agri_Utils import AgriculturalPatternLoss
 
 
 # Set sharing strategy at the start
