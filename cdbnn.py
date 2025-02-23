@@ -68,9 +68,6 @@ from basic_utils import BaseAutoencoder,BaseEnhancementConfig,GeneralEnhancement
 from Medical_Utils import  MedicalStructurePreservingAutoencoder
 
 
-
-
-
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
