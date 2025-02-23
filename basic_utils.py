@@ -21,6 +21,7 @@ import time
 import shutil
 import glob
 from tqdm import tqdm
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(
