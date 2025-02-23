@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch
-
+from cdbnn import BaseAutoencoder
 class AstronomicalStructureLoss(nn.Module):
     """Loss function specialized for astronomical imaging features"""
     def __init__(self):
