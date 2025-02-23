@@ -22,7 +22,7 @@ import shutil
 import glob
 from tqdm import tqdm
 from collections import defaultdict
-
+from Astro_Utils import AstronomicalStructureLoss
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
