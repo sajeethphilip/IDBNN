@@ -15,6 +15,7 @@ import tarfile
 import gzip
 import bz2
 import lzma
+import os
 
 # Configure logging
 logging.basicConfig(
