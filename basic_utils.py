@@ -31,6 +31,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+    @staticmethod
+    def color_value(current_value, previous_value=None, higher_is_better=True):
+        """Color a value based on whether it improved or declined"""
+        if previous_value is None:
+            return f"{current_value:.4f}"
+
+        if higher_is_better:
+            if current_value > previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value < previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+        else:  # lower is better
+            if current_value < previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value > previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+
+        return f"{current_value:.4f}"  # No color if equal
+
+    @staticmethod
+    def highlight_dataset(name):
+        """Highlight dataset name in red"""
+        return f"{Colors.RED}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_time(time_value):
+        """Color time values based on threshold"""
+        if time_value < 10:
+            return f"{Colors.GREEN}{time_value:.2f}{Colors.ENDC}"
+        elif time_value < 30:
+            return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
+        else:
+            return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
+
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
 
