@@ -63,6 +63,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+from Astro_Utils import AstronomicalStructurePreservingAutoencoder,AstronomicalStructureLoss
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
