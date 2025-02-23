@@ -1565,221 +1565,6 @@ class AutoencoderLoss(nn.Module):
         return self.reconstruction_weight * recon_loss + \
                self.feature_weight * feature_loss
 
-
-class CNNFeatureExtractor(BaseFeatureExtractor):
-    """CNN-based feature extractor implementation"""
-
-    def _create_model(self) -> nn.Module:
-        """Create CNN model"""
-        return FeatureExtractorCNN(
-            in_channels=self.config['dataset']['in_channels'],
-            feature_dims=self.feature_dims
-        ).to(self.device)
-
-    def _load_from_checkpoint(self):
-        """Load model from checkpoint"""
-        checkpoint_dir = self.config['training']['checkpoint_dir']
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-        # Try to find latest checkpoint
-        checkpoint_path = self._find_latest_checkpoint()
-
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            try:
-                logger.info(f"Loading checkpoint from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
-
-                # Load model state
-                self.feature_extractor.load_state_dict(checkpoint['state_dict'])
-
-                # Initialize and load optimizer
-                self.optimizer = self._initialize_optimizer()
-                if 'optimizer_state_dict' in checkpoint:
-                    try:
-                        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                        logger.info("Optimizer state loaded")
-                    except Exception as e:
-                        logger.warning(f"Failed to load optimizer state: {str(e)}")
-
-                # Load training state
-                self.current_epoch = checkpoint.get('epoch', 0)
-                self.best_accuracy = checkpoint.get('best_accuracy', 0.0)
-                self.best_loss = checkpoint.get('best_loss', float('inf'))
-
-                # Load history
-                if 'history' in checkpoint:
-                    self.history = defaultdict(list, checkpoint['history'])
-
-                logger.info("Checkpoint loaded successfully")
-
-            except Exception as e:
-                logger.error(f"Error loading checkpoint: {str(e)}")
-                self.optimizer = self._initialize_optimizer()
-        else:
-            logger.info("No checkpoint found, starting from scratch")
-            self.optimizer = self._initialize_optimizer()
-
-    def _find_latest_checkpoint(self) -> Optional[str]:
-        """Find the latest checkpoint file"""
-        dataset_name = self.config['dataset']['name']
-        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
-
-        if not os.path.exists(checkpoint_dir):
-            return None
-
-        # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
-        if os.path.exists(best_path):
-            return best_path
-
-        # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
-        if os.path.exists(checkpoint_path):
-            return checkpoint_path
-
-        return None
-
-    def _save_checkpoint(self, is_best: bool = False):
-        """Save model checkpoint"""
-        checkpoint_dir = self.config['training']['checkpoint_dir']
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-        checkpoint = {
-            'state_dict': self.feature_extractor.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'epoch': self.current_epoch,
-            'best_accuracy': self.best_accuracy,
-            'best_loss': self.best_loss,
-            'history': dict(self.history),
-            'config': self.config
-        }
-
-        # Save latest checkpoint
-        dataset_name = self.config['dataset']['name']
-        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
-        checkpoint_path = os.path.join(checkpoint_dir, filename)
-
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {checkpoint_path}")
-
-    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
-        """Train one epoch"""
-        self.feature_extractor.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
-                   unit='batch', leave=False)
-
-        try:
-            for batch_idx, (inputs, targets) in enumerate(pbar):
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-
-                self.optimizer.zero_grad()
-                outputs = self.feature_extractor(inputs)
-                loss = F.cross_entropy(outputs, targets)
-                loss.backward()
-                self.optimizer.step()
-
-                running_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-
-                # Update progress bar
-                batch_loss = running_loss / (batch_idx + 1)
-                batch_acc = 100. * correct / total
-                pbar.set_postfix({
-                    'loss': f'{batch_loss:.4f}',
-                    'acc': f'{batch_acc:.2f}%'
-                })
-
-                # Cleanup
-                del inputs, outputs, loss
-                if batch_idx % 50 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-        except Exception as e:
-            logger.error(f"Error in batch {batch_idx}: {str(e)}")
-            raise
-
-        pbar.close()
-        return running_loss / len(train_loader), 100. * correct / total
-
-    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
-        """Validate model"""
-        self.feature_extractor.eval()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-
-        with torch.no_grad():
-            for inputs, targets in val_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self.feature_extractor(inputs)
-                loss = F.cross_entropy(outputs, targets)
-
-                running_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-
-                # Cleanup
-                del inputs, outputs, loss
-
-        return running_loss / len(val_loader), 100. * correct / total
-
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract features from data"""
-        self.feature_extractor.eval()
-        features = []
-        labels = []
-
-        try:
-            with torch.no_grad():
-                for inputs, targets in tqdm(loader, desc="Extracting features"):
-                    inputs = inputs.to(self.device)
-                    outputs = self.feature_extractor(inputs)
-                    features.append(outputs.cpu())
-                    labels.append(targets)
-
-                    # Cleanup
-                    del inputs, outputs
-                    if len(features) % 50 == 0:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-            return torch.cat(features), torch.cat(labels)
-
-        except Exception as e:
-            logger.error(f"Error extracting features: {str(e)}")
-            raise
-
-    def get_feature_shape(self) -> Tuple[int, ...]:
-        """Get shape of extracted features"""
-        return (self.feature_dims,)
-
-    def plot_feature_distribution(self, loader: DataLoader, save_path: Optional[str] = None):
-        """Plot distribution of extracted features"""
-        features, _ = self.extract_features(loader)
-        features = features.numpy()
-
-        plt.figure(figsize=(12, 6))
-        plt.hist(features.flatten(), bins=50, density=True)
-        plt.title('Feature Distribution')
-        plt.xlabel('Feature Value')
-        plt.ylabel('Density')
-
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            logger.info(f"Feature distribution plot saved to {save_path}")
-        plt.close()
-
 class BaseFeatureExtractor(ABC):
     """Abstract base class for feature extraction models"""
     def __init__(self, config: Dict, device: str = None):
@@ -2245,6 +2030,223 @@ class BaseFeatureExtractor(ABC):
     def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
         """Extract features from data loader"""
         pass
+
+
+class CNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN-based feature extractor implementation"""
+
+    def _create_model(self) -> nn.Module:
+        """Create CNN model"""
+        return FeatureExtractorCNN(
+            in_channels=self.config['dataset']['in_channels'],
+            feature_dims=self.feature_dims
+        ).to(self.device)
+
+    def _load_from_checkpoint(self):
+        """Load model from checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Try to find latest checkpoint
+        checkpoint_path = self._find_latest_checkpoint()
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            try:
+                logger.info(f"Loading checkpoint from {checkpoint_path}")
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+                # Load model state
+                self.feature_extractor.load_state_dict(checkpoint['state_dict'])
+
+                # Initialize and load optimizer
+                self.optimizer = self._initialize_optimizer()
+                if 'optimizer_state_dict' in checkpoint:
+                    try:
+                        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        logger.info("Optimizer state loaded")
+                    except Exception as e:
+                        logger.warning(f"Failed to load optimizer state: {str(e)}")
+
+                # Load training state
+                self.current_epoch = checkpoint.get('epoch', 0)
+                self.best_accuracy = checkpoint.get('best_accuracy', 0.0)
+                self.best_loss = checkpoint.get('best_loss', float('inf'))
+
+                # Load history
+                if 'history' in checkpoint:
+                    self.history = defaultdict(list, checkpoint['history'])
+
+                logger.info("Checkpoint loaded successfully")
+
+            except Exception as e:
+                logger.error(f"Error loading checkpoint: {str(e)}")
+                self.optimizer = self._initialize_optimizer()
+        else:
+            logger.info("No checkpoint found, starting from scratch")
+            self.optimizer = self._initialize_optimizer()
+
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint file"""
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+
+        if not os.path.exists(checkpoint_dir):
+            return None
+
+        # Check for best model first
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        if os.path.exists(best_path):
+            return best_path
+
+        # Check for latest checkpoint
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        if os.path.exists(checkpoint_path):
+            return checkpoint_path
+
+        return None
+
+    def _save_checkpoint(self, is_best: bool = False):
+        """Save model checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config
+        }
+
+        # Save latest checkpoint
+        dataset_name = self.config['dataset']['name']
+        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        checkpoint_path = os.path.join(checkpoint_dir, filename)
+
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {checkpoint_path}")
+
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        try:
+            for batch_idx, (inputs, targets) in enumerate(pbar):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                self.optimizer.zero_grad()
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = 100. * correct / total
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'acc': f'{batch_acc:.2f}%'
+                })
+
+                # Cleanup
+                del inputs, outputs, loss
+                if batch_idx % 50 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Error in batch {batch_idx}: {str(e)}")
+            raise
+
+        pbar.close()
+        return running_loss / len(train_loader), 100. * correct / total
+
+    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
+        """Validate model"""
+        self.feature_extractor.eval()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Cleanup
+                del inputs, outputs, loss
+
+        return running_loss / len(val_loader), 100. * correct / total
+
+    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract features from data"""
+        self.feature_extractor.eval()
+        features = []
+        labels = []
+
+        try:
+            with torch.no_grad():
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                    inputs = inputs.to(self.device)
+                    outputs = self.feature_extractor(inputs)
+                    features.append(outputs.cpu())
+                    labels.append(targets)
+
+                    # Cleanup
+                    del inputs, outputs
+                    if len(features) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+            return torch.cat(features), torch.cat(labels)
+
+        except Exception as e:
+            logger.error(f"Error extracting features: {str(e)}")
+            raise
+
+    def get_feature_shape(self) -> Tuple[int, ...]:
+        """Get shape of extracted features"""
+        return (self.feature_dims,)
+
+    def plot_feature_distribution(self, loader: DataLoader, save_path: Optional[str] = None):
+        """Plot distribution of extracted features"""
+        features, _ = self.extract_features(loader)
+        features = features.numpy()
+
+        plt.figure(figsize=(12, 6))
+        plt.hist(features.flatten(), bins=50, density=True)
+        plt.title('Feature Distribution')
+        plt.xlabel('Feature Value')
+        plt.ylabel('Density')
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            logger.info(f"Feature distribution plot saved to {save_path}")
+        plt.close()
+
+
 
 class StructurePreservingAutoencoder(DynamicAutoencoder):
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
