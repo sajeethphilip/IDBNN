@@ -64,7 +64,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 from Astro_Utils import AstronomicalStructurePreservingAutoencoder,AstronomicalStructureLoss
-from basic_utils import BaseAutoencoder,BaseEnhancementConfig,GeneralEnhancementConfig,EnhancedLossManager,ModelFactory,DatasetProcessor
+from basic_utils import BaseAutoencoder,BaseEnhancementConfig,GeneralEnhancementConfig,ModelFactory,DatasetProcessor
 from Medical_Utils import  MedicalStructurePreservingAutoencoder
 
 
