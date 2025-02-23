@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
+from torchvision import datasets
 import logging
 import csv
 import json
