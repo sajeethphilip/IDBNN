@@ -79,6 +79,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class EnhancedLossManager:
+    """Manager for handling specialized loss functions"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.loss_functions = {}
+        self.initialize_loss_functions()
+
+    def initialize_loss_functions(self):
+        """Initialize appropriate loss functions based on configuration"""
+        enhancement_modules = self.config['model']['enhancement_modules']
+
+        # Initialize astronomical loss if enabled
+        if enhancement_modules['astronomical']['enabled']:
+            self.loss_functions['astronomical'] = AstronomicalStructureLoss()
+
+        # Initialize medical loss if enabled
+        if enhancement_modules['medical']['enabled']:
+            self.loss_functions['medical'] = MedicalStructureLoss()
+
+        # Initialize agricultural loss if enabled
+        if enhancement_modules['agricultural']['enabled']:
+            self.loss_functions['agricultural'] = AgriculturalPatternLoss()
+
+    def get_loss_function(self, image_type: str) -> Optional[nn.Module]:
+        """Get appropriate loss function for image type"""
+        return self.loss_functions.get(image_type)
+
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor,
+                      image_type: str) -> Dict[str, torch.Tensor]:
+        """Calculate loss with appropriate enhancements"""
+        loss_fn = self.get_loss_function(image_type)
+        if loss_fn is None:
+            return {'loss': F.mse_loss(reconstruction, target)}
+
+        loss = loss_fn(reconstruction, target)
+
+        # Get additional statistics if available
+        stats = {}
+        if isinstance(loss_fn, AgriculturalPatternLoss):
+            texture_stats = loss_fn._analyze_texture_statistics(reconstruction)
+            pattern_stats = loss_fn._analyze_pattern_distribution(reconstruction)
+            stats.update({
+                'texture_stats': texture_stats,
+                'pattern_stats': pattern_stats
+            })
+
+        return {
+            'loss': loss,
+            'stats': stats
+        }
+
+
+
+
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
