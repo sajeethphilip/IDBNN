@@ -1,3 +1,5 @@
+import torch.nn as nn
+
 class AstronomicalStructureLoss(nn.Module):
     """Loss function specialized for astronomical imaging features"""
     def __init__(self):
