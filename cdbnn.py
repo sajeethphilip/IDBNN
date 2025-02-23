@@ -1323,6 +1323,8 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
             traceback.print_exc()
         return 1
 
+
+
 def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
     """Configure image processing type and enhancements
     # Display image type options
