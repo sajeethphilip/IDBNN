@@ -52,6 +52,7 @@ import torch.amp
 
 import logging
 
+
 class DebugLogger:
     def __init__(self):
         self.enabled = False
@@ -69,6 +70,7 @@ class DebugLogger:
 
 # Create single global instance
 DEBUG = DebugLogger()
+
 class GlobalConfig:
     """Enhanced GlobalConfig with proper parameter handling"""
     def __init__(self):
@@ -338,10 +340,6 @@ class BinningHandler:
         # Rest of your existing likelihood computation code...
 
         return likelihood_params
-
-
-
-
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -6718,19 +6716,7 @@ class DBNN(GPUDBNN):
 
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
-class DebugLogger:
-    def __init__(self):
-        self.enabled = False
 
-    def enable(self):
-        self.enabled = True
-
-    def disable(self):
-        self.enabled = False
-
-    def log(self, msg, force=False):
-        if self.enabled or force:
-            print(msg)
 
 class DatasetProcessor:
     def __init__(self):
