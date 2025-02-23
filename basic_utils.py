@@ -23,7 +23,7 @@ import glob
 from tqdm import tqdm
 from collections import defaultdict
 from datetime import datetime, timedelta
-
+from PIL import Image
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
