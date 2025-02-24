@@ -37,9 +37,9 @@ class DebugLogger:
 # Create single global instance
 DEBUG = DebugLogger()
 class GlobalConfig:
-    """Enhanced GlobalConfig with proper parameter handling"""
     def __init__(self):
         # Basic parameters
+        self.file_path = None  # Add this line
         self.learning_rate = None
         self.epochs = None
         self.test_fraction = None
@@ -52,6 +52,7 @@ class GlobalConfig:
         self.cardinality_tolerance = None
         self.n_bins_per_dim = None
         self.minimum_training_accuracy = None
+        self.target_column = None  # Add this line too
 
         # Inverse DBNN parameters
         self.invert_DBNN = False
@@ -61,16 +62,17 @@ class GlobalConfig:
 
     @classmethod
     def from_dict(cls, config_dict: Dict) -> 'GlobalConfig':
-        """Create configuration from dictionary with debug tracking"""
         print("\nDEBUG: Creating GlobalConfig from dictionary")
-        # print(f"DEBUG:  Input config: {json.dumps(config_dict, indent=2)}")
-
         config = cls()
+
+        # Set file path and target column
+        config.file_path = config_dict.get('file_path')
+        config.target_column = config_dict.get('target_column')
+
         training_params = config_dict.get('training_params', {})
         execution_flags = config_dict.get('execution_flags', {})
 
-        # Load training parameters with debug
-        print("\nDEBUG: Loading training parameters:")
+        # Load training parameters
         for param, default in [
             ('learning_rate', 0.1),
             ('epochs', 1000),
@@ -89,19 +91,14 @@ class GlobalConfig:
         ]:
             value = training_params.get(param, default)
             setattr(config, param, value)
-            # print(f"DEBUG:  {param} = {value}")
 
-        # Load execution flags
-        #print("\nDEBUGLoading execution flags:")
         config.fresh_start = execution_flags.get('fresh_start', False)
         config.use_previous_model = execution_flags.get('use_previous_model', True)
-        # print(f"DEBUG:  fresh_start = {config.fresh_start}")
-        # print(f"DEBUG:  use_previous_model = {config.use_previous_model}")
-
-        ##print("\nDEBUGFinal GlobalConfig state:")
-        #print(json.dumps(config.to_dict(), indent=2))
 
         return config
+
+
+
 
     def to_dict(self) -> Dict:
         """Convert configuration to dictionary"""
@@ -137,7 +134,7 @@ class DBNNInitializer:
         self._initialize_model_components()
 
     def _setup_device_and_precision(self):
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and self.config.compute_device != "cpu":
             self.device = torch.device('cuda')
             torch.backends.cudnn.benchmark = True
             self.mixed_precision = True
@@ -163,19 +160,51 @@ class DBNNInitializer:
 
 
 
+
 class DBNNDataHandler:
-    def __init__(self, dataset_name: str, config: Dict):
+    def __init__(self, dataset_name: str, config: GlobalConfig):
         self.dataset_name = dataset_name
         self.config = config
         self.data = self._load_dataset()
-        self.target_column = self.config['target_column']
+        self.target_column = self.config.target_column
 
     def _load_dataset(self) -> pd.DataFrame:
-        file_path = self.config.get('file_path')
-        if file_path is None:
+        """Load dataset with proper format handling"""
+        if self.config.file_path is None:
             raise ValueError(f"No file path specified in dataset configuration for: {self.dataset_name}")
-        df = pd.read_csv(file_path)
-        return df
+
+        try:
+            # First check if it's a JSON file
+            with open(self.config.file_path, 'r') as f:
+                first_line = f.readline().strip()
+                if first_line.startswith('{'):
+                    print(f"Warning: The file appears to be a configuration file, not a dataset.")
+                    print(f"Please ensure {self.config.file_path} contains the actual MNIST dataset in CSV format.")
+                    print("You can download the MNIST dataset from:")
+                    print("https://www.kaggle.com/datasets/oddrationale/mnist-in-csv")
+                    raise ValueError("Invalid data format: File contains configuration, not dataset data")
+
+                # Reset file pointer and try reading as CSV
+                f.seek(0)
+                df = pd.read_csv(self.config.file_path)
+
+                # Validate the dataframe
+                if df.empty:
+                    raise ValueError("Empty dataset")
+
+                print(f"Successfully loaded dataset with {len(df)} rows and {len(df.columns)} columns")
+                print(f"Columns: {df.columns.tolist()}")
+
+                return df
+
+        except pd.errors.EmptyDataError:
+            raise ValueError(f"Empty or invalid CSV file: {self.config.file_path}")
+        except pd.errors.ParserError:
+            raise ValueError(f"Invalid CSV format in file: {self.config.file_path}")
+        except Exception as e:
+            raise ValueError(f"Error loading dataset: {str(e)}")
+
+
 
     def _preprocess_data(self, X: pd.DataFrame, is_training: bool = True) -> torch.Tensor:
         X_processed = X.copy()
@@ -396,6 +425,7 @@ class DatasetProcessor:
             print(f"Error processing dataset: {str(e)}")
             traceback.print_exc()
             return None
+
     def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
         """Check if dataset has single CSV file"""
         # Check both possible locations
