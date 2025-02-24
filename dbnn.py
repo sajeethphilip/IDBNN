@@ -2,13 +2,22 @@ import os
 import torch
 import argparse
 import time
+import json
+import pickle
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Any, List, Union
 from typing import Dict, List, Union, Optional
 from basic_utils import Colors
+import traceback  # Add to provide debug
 
+# At the top of dbnn.py, after other imports
+from typing import Dict, Tuple, Any, List, Union
+import torch
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 class DebugLogger:
     def __init__(self):
@@ -27,13 +36,104 @@ class DebugLogger:
 
 # Create single global instance
 DEBUG = DebugLogger()
+class GlobalConfig:
+    """Enhanced GlobalConfig with proper parameter handling"""
+    def __init__(self):
+        # Basic parameters
+        self.learning_rate = None
+        self.epochs = None
+        self.test_fraction = None
+        self.random_seed = None
+        self.fresh_start = None
+        self.use_previous_model = None
+        self.model_type = None
+        self.enable_adaptive = None
+        self.cardinality_threshold = None
+        self.cardinality_tolerance = None
+        self.n_bins_per_dim = None
+        self.minimum_training_accuracy = None
 
+        # Inverse DBNN parameters
+        self.invert_DBNN = False
+        self.reconstruction_weight = 0.5
+        self.feedback_strength = 0.3
+        self.inverse_learning_rate = 0.1
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict) -> 'GlobalConfig':
+        """Create configuration from dictionary with debug tracking"""
+        print("\nDEBUG: Creating GlobalConfig from dictionary")
+        # print(f"DEBUG:  Input config: {json.dumps(config_dict, indent=2)}")
+
+        config = cls()
+        training_params = config_dict.get('training_params', {})
+        execution_flags = config_dict.get('execution_flags', {})
+
+        # Load training parameters with debug
+        print("\nDEBUG: Loading training parameters:")
+        for param, default in [
+            ('learning_rate', 0.1),
+            ('epochs', 1000),
+            ('test_fraction', 0.2),
+            ('random_seed', 42),
+            ('model_type', 'Histogram'),
+            ('enable_adaptive', True),
+            ('cardinality_threshold', 0.9),
+            ('cardinality_tolerance', 4),
+            ('n_bins_per_dim', 20),
+            ('minimum_training_accuracy', 0.95),
+            ('invert_DBNN', False),
+            ('reconstruction_weight', 0.5),
+            ('feedback_strength', 0.3),
+            ('inverse_learning_rate', 0.1)
+        ]:
+            value = training_params.get(param, default)
+            setattr(config, param, value)
+            # print(f"DEBUG:  {param} = {value}")
+
+        # Load execution flags
+        #print("\nDEBUGLoading execution flags:")
+        config.fresh_start = execution_flags.get('fresh_start', False)
+        config.use_previous_model = execution_flags.get('use_previous_model', True)
+        # print(f"DEBUG:  fresh_start = {config.fresh_start}")
+        # print(f"DEBUG:  use_previous_model = {config.use_previous_model}")
+
+        ##print("\nDEBUGFinal GlobalConfig state:")
+        #print(json.dumps(config.to_dict(), indent=2))
+
+        return config
+
+    def to_dict(self) -> Dict:
+        """Convert configuration to dictionary"""
+        return {
+            'training_params': {
+                'learning_rate': self.learning_rate,
+                'epochs': self.epochs,
+                'test_fraction': self.test_fraction,
+                'random_seed': self.random_seed,
+                'modelType': self.model_type,
+                'enable_adaptive': self.enable_adaptive,
+                'cardinality_threshold': self.cardinality_threshold,
+                'cardinality_tolerance': self.cardinality_tolerance,
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'minimum_training_accuracy': self.minimum_training_accuracy,
+                'invert_DBNN': self.invert_DBNN,
+                'reconstruction_weight': self.reconstruction_weight,
+                'feedback_strength': self.feedback_strength,
+                'inverse_learning_rate': self.inverse_learning_rate
+            },
+            'execution_flags': {
+                'fresh_start': self.fresh_start,
+                'use_previous_model': self.use_previous_model
+            }
+        }
 class DBNNInitializer:
-    def __init__(self, dataset_name: str, config: Dict):
+    def __init__(self, dataset_name: str, config: GlobalConfig):
         self.dataset_name = dataset_name
         self.config = config
         self.device = self._setup_device_and_precision()
-        self.model_type = config.get('modelType', 'Histogram')
+        # Access model_type directly from config instead of using get()
+        self.model_type = config.model_type if hasattr(config, 'model_type') else 'Histogram'
         self._initialize_model_components()
 
     def _setup_device_and_precision(self):
@@ -60,6 +160,7 @@ class DBNNInitializer:
         self.current_W = None
         self.categorical_encoders = {}
         os.makedirs('Model', exist_ok=True)
+
 
 
 class DBNNDataHandler:
@@ -341,14 +442,14 @@ class DatasetProcessor:
         return False
 
 
-     def find_dataset_pairs(self, data_dir: str = 'data') -> List[Tuple[str, str, str]]:
+    def find_dataset_pairs(self, data_dir: str = 'data') -> List[Tuple[str, str, str]]:
         """Find and validate dataset configuration pairs.
 
         Args:
             data_dir: Base directory to search for datasets
 
         Returns:
-            List of tuples (dataset_name, config_path, csv_path)
+            List of tuples (dataset_name, config_path, data_path)
         """
         if not os.path.exists(data_dir):
             print(f"\nNo '{data_dir}' directory found. Creating one...")
@@ -366,24 +467,52 @@ class DatasetProcessor:
 
             # Look for JSON and CSV files with the same name as the subdirectory
             conf_file = f"{subdir_name}.conf"
-            csv_file = f"{subdir_name}.csv"
-
             conf_path = os.path.join(root, conf_file)
-            csv_path = os.path.join(root, csv_file)
 
-            # Check if both files exist
-            if os.path.exists(conf_path) and os.path.exists(csv_path):
+            # Check if the config file exists
+            if os.path.exists(conf_path):
                 if subdir_name in processed_datasets:
                     continue  # Skip if already processed
 
+                # Look for data files in multiple possible locations
+                data_path = None
+
+                # Check for a single CSV file
+                csv_file = f"{subdir_name}.csv"
+                csv_path = os.path.join(root, csv_file)
+                if os.path.exists(csv_path):
+                    data_path = csv_path
+
+                # Check for train/test split structure
+                train_folder = os.path.join(root, "train")
+                test_folder = os.path.join(root, "test")
+                if os.path.exists(train_folder) and os.path.exists(test_folder):
+                    # Look for train.csv and test.csv
+                    train_csv = os.path.join(train_folder, "train.csv")
+                    test_csv = os.path.join(test_folder, "test.csv")
+                    if os.path.exists(train_csv) and os.path.exists(test_csv):
+                        data_path = train_folder  # Use train folder as the data path
+
+                # Check for JSON file
+                json_file = f"{subdir_name}.json"
+                json_path = os.path.join(root, json_file)
+                if os.path.exists(json_path):
+                    data_path = json_path
+
+                # If no data file is found, skip this dataset
+                if data_path is None:
+                    print(f"\nWarning: No data file found for dataset: {subdir_name}")
+                    continue
+
+                # Update config with adaptive settings if available
                 if adaptive_conf:
                     self._update_config_with_adaptive(conf_path, adaptive_conf)
 
                 print(f"\nFound dataset: {subdir_name}")
                 print(f"Config: {conf_path}")
-                print(f"Data: {csv_path}")
+                print(f"Data: {data_path}")
 
-                dataset_pairs.append((subdir_name, conf_path, csv_path))
+                dataset_pairs.append((subdir_name, conf_path, data_path))
                 processed_datasets.add(subdir_name)
 
         return dataset_pairs
@@ -1137,6 +1266,64 @@ class DatasetProcessor:
             with open(filename, 'w') as f:
                 f.writelines(content)
 
+class DBNN:
+    def __init__(self, dataset_name: str, config: GlobalConfig):
+        self.dataset_name = dataset_name
+        self.config = config
+
+        # Initialize components
+        self.initializer = DBNNInitializer(dataset_name, self.config)
+        self.data_handler = DBNNDataHandler(dataset_name, self.config)
+        self.trainer = DBNNTrainer(self.initializer, self.data_handler)
+        self.predictor = DBNNPredictor(self.initializer, self.data_handler)
+        self.reconstructor = DBNNReconstructor(self.initializer, self.data_handler)
+        self.utils = DBNNUtils(self.initializer)
+
+        # Initialize device
+        self.device = self.initializer.device
+
+        # Initialize inverse model if enabled
+        if self.config.invert_DBNN:
+            self.inverse_model = InvertibleDBNN(
+                forward_model=self,
+                feature_dims=self.data_handler.data.shape[1] - 1,  # Exclude target column
+                reconstruction_weight=self.config.reconstruction_weight,
+                feedback_strength=self.config.feedback_strength
+            )
+
+    def fit(self, X_train, y_train, X_test=None, y_test=None):
+        """Train the model with the provided data"""
+        return self.trainer.train(X_train, y_train, batch_size=32)
+
+    def predict(self, X):
+        """Make predictions on new data"""
+        return self.predictor.predict(X, batch_size=32)
+
+    def reconstruct(self, predictions):
+        """Reconstruct features from predictions if inverse model is enabled"""
+        if self.config.invert_DBNN and hasattr(self, 'inverse_model'):
+            return self.inverse_model.reconstruct_features(predictions)
+        return None
+
+    def save_model(self):
+        """Save the model and its components"""
+        self.utils.save_weights()
+        if self.config.invert_DBNN and hasattr(self, 'inverse_model'):
+            self.inverse_model.save_inverse_model()
+
+    def load_model(self):
+        """Load the model and its components"""
+        self.utils.load_weights()
+        if self.config.invert_DBNN and hasattr(self, 'inverse_model'):
+            self.inverse_model.load_inverse_model()
+
+    def _get_weights_filename(self):
+        """Get the filename for model weights"""
+        return os.path.join('Model', f'Best_{self.config.model_type}_{self.dataset_name}_weights.json')
+
+    def _get_model_components_filename(self):
+        """Get the filename for model components"""
+        return os.path.join('Model', f'Best_{self.config.model_type}_{self.dataset_name}_components.pkl')
 import torch
 import numpy as np
 from typing import Dict, Tuple, Optional, List
