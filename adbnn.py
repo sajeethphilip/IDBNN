@@ -6542,7 +6542,7 @@ class DBNN(GPUDBNN):
            traceback.print_exc()
            return False
 
-    def predict(self, X: Union[torch.Tensor, pd.DataFrame], batch_size: int = 1024) -> torch.Tensor:
+    def predict(self, X: Union[torch.Tensor, pd.DataFrame], batch_size: int = 1024) -> Tuple[torch.Tensor, pd.DataFrame]:
         """
         Perform batch predictions on the input data using GPU parallelism.
 
@@ -6551,78 +6551,64 @@ class DBNN(GPUDBNN):
             batch_size: Number of samples to process in parallel. Default is 1024.
 
         Returns:
-            Tensor of predicted class labels.
+            Tuple of (predictions, results_df):
+            - predictions: Tensor of predicted class labels.
+            - results_df: DataFrame containing predictions, probabilities, and other information.
         """
         # Ensure input is a tensor and on the correct device
         if isinstance(X, pd.DataFrame):
             X = torch.FloatTensor(self._preprocess_data(X, is_training=False))
         X = X.to(self.device)
 
-        # Ensure likelihood parameters are initialized
-        if self.likelihood_params is None:
-            raise RuntimeError("Likelihood parameters not initialized. Train the model first.")
+        # Transform input data and detect outliers
+        binned_data, outlier_mask = self.binning_handler.transform(X, self.feature_columns)
 
-        # Get number of classes and feature pairs
-        n_classes = len(self.likelihood_params['classes'])
-        n_pairs = len(self.likelihood_params['feature_pairs'])
-
-        # Initialize storage for predictions
+        # Initialize storage for predictions and probabilities
         predictions = torch.zeros(X.shape[0], dtype=torch.long, device=self.device)
+        all_probs = torch.zeros((X.shape[0], len(self.label_encoder.classes_)), device=self.device)
 
         # Process data in batches
         for i in range(0, X.shape[0], batch_size):
             # Get current batch
             batch_end = min(i + batch_size, X.shape[0])
-            batch_X = X[i:batch_end]
-
-            # Initialize log likelihoods for the batch
-            log_likelihoods = torch.zeros((batch_X.shape[0], n_classes), device=self.device)
-
-            # Process all feature pairs in parallel
-            for group_idx in range(n_pairs):
-                # Get feature group data
-                feature_pair = self.likelihood_params['feature_pairs'][group_idx]
-                group_data = batch_X[:, feature_pair].contiguous()
-
-                # Get bin edges and probabilities for this feature pair
-                bin_edges = self.likelihood_params['bin_edges'][group_idx]
-                bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
-
-                # Compute bin indices for the batch
-                bin_indices = torch.stack([
-                    torch.bucketize(group_data[:, dim], bin_edges[dim].to(self.device)).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
-                    for dim in range(2)
-                ])  # [2, batch_size]
-
-                # Get weights for all classes
-                weights = torch.stack([
-                    self.weight_updater.get_histogram_weights(class_idx, group_idx).to(self.device)
-                    for class_idx in range(n_classes)
-                ])  # [n_classes, n_bins, n_bins]
-
-                # Apply weights to probabilities
-                weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
-
-                # Gather probabilities for all samples and classes
-                probs = weighted_probs[:, bin_indices[0], bin_indices[1]]  # [n_classes, batch_size]
-
-                # Add to log likelihoods
-                log_likelihoods += torch.log(probs.t() + 1e-10)
+            batch_X = binned_data[i:batch_end].contiguous()  # Ensure the batch is contiguous
 
             # Compute posteriors for the batch
-            max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
-            posteriors = torch.exp(log_likelihoods - max_log_likelihood)
-            posteriors /= posteriors.sum(dim=1, keepdim=True) + 1e-10
+            if self.model_type == "Histogram":
+                posteriors, _ = self._compute_batch_posterior(batch_X)
+            else:  # Gaussian model
+                posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-            # Get predictions for the batch
+            # Store predictions and probabilities
             batch_predictions = torch.argmax(posteriors, dim=1)
             predictions[i:batch_end] = batch_predictions
+            all_probs[i:batch_end] = posteriors
 
             # Optional: Clear memory if needed
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        return predictions
+        # Get original scale features with categorical labels
+        _, feature_df = self.binning_handler.inverse_transform(X, self.feature_columns)
+
+        # Create the results DataFrame
+        pred_df = pd.DataFrame({
+            'predicted_class': self.label_encoder.inverse_transform(predictions.cpu().numpy()),
+            'is_outlier': outlier_mask.cpu().numpy()
+        })
+
+        # Add probability columns
+        prob_dict = {
+            f'prob_{class_name}': all_probs[:, i].cpu().numpy()
+            for i, class_name in enumerate(self.label_encoder.classes_)
+        }
+        prob_df = pd.DataFrame(prob_dict)
+
+        # Combine all DataFrames
+        results_df = pd.concat([feature_df, pred_df, prob_df], axis=1)
+        results_df = results_df.copy()  # Create a clean copy to defragment
+
+        return predictions, results_df
 
     def predict_old(self, X: torch.Tensor, batch_size: int = 32) -> Tuple[torch.Tensor, pd.DataFrame]:
         """Make predictions with optimized DataFrame construction"""
