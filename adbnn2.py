@@ -44,6 +44,70 @@ class DebugLogger:
             print(msg)
 
 DEBUG = DebugLogger()
+def compute_feature_ranges(X, dataset_name):
+    """
+    Compute and save the min and max values for each feature in the dataset.
+
+    Args:
+        X: Input features (n_samples, n_features).
+        dataset_name: Name of the dataset (e.g., 'mnist').
+
+    Returns:
+        min_vals: Min values for each feature (n_features,).
+        max_vals: Max values for each feature (n_features,).
+    """
+    min_vals = X.min(axis=0)
+    max_vals = X.max(axis=0)
+
+    # Save min and max values to a .pkl file
+    ranges_path = os.path.join("data", dataset_name, f"{dataset_name}_feature_ranges.pkl")
+    with open(ranges_path, "wb") as f:
+        pickle.dump({"min_vals": min_vals, "max_vals": max_vals}, f)
+
+    print(f"Feature ranges saved to {ranges_path}")
+    return min_vals, max_vals
+
+def load_feature_ranges(dataset_name):
+    """
+    Load the min and max values for each feature from a .pkl file.
+
+    Args:
+        dataset_name: Name of the dataset (e.g., 'mnist').
+
+    Returns:
+        min_vals: Min values for each feature (n_features,).
+        max_vals: Max values for each feature (n_features,).
+    """
+    ranges_path = os.path.join("data", dataset_name, f"{dataset_name}_feature_ranges.pkl")
+    if not os.path.exists(ranges_path):
+        raise FileNotFoundError(f"Feature ranges file not found: {ranges_path}")
+
+    with open(ranges_path, "rb") as f:
+        ranges = pickle.load(f)
+
+    return ranges["min_vals"], ranges["max_vals"]
+
+def scale_features(X, min_vals, max_vals):
+    """
+    Scale features to the range [0, 1] using min and max values.
+
+    Args:
+        X: Input features (n_samples, n_features).
+        min_vals: Min values for each feature (n_features,).
+        max_vals: Max values for each feature (n_features,).
+
+    Returns:
+        X_scaled: Scaled features (n_samples, n_features).
+    """
+    # Avoid division by zero
+    scale_factors = max_vals - min_vals
+    scale_factors[scale_factors == 0] = 1.0
+
+    # Scale features
+    X_scaled = (X - min_vals) / scale_factors
+    return X_scaled
+
+
 
 class DBNN:
     def __init__(self, config, device='cuda'):
@@ -60,12 +124,21 @@ class DBNN:
         self.likelihood_params = {'bin_edges': [], 'bin_probs': []}
         self.label_encoder = LabelEncoder()
         self.inverse_model = None
+        self.min_vals = None
+        self.max_vals = None
 
     def initialize_from_data(self, X, y):
         y_encoded = self.label_encoder.fit_transform(y)
         self.n_classes = len(self.label_encoder.classes_)
         self.n_features = X.shape[1]
+
+        # Compute and save feature ranges
+        self.min_vals, self.max_vals = compute_feature_ranges(X, self.config["dataset_name"])
+
+        # Initialize uniform priors (weights)
         self.W = torch.ones(self.n_classes, device=self.device) / self.n_classes
+
+        # Initialize inverse DBNN if enabled
         if self.invert_DBNN:
             self.inverse_model = InvertibleDBNN(
                 forward_model=self,
@@ -74,7 +147,23 @@ class DBNN:
                 feedback_strength=self.config.get("training_params", {}).get("feedback_strength", 0.3),
                 debug=False
             )
+
         return y_encoded
+
+    def scale_features(self, X):
+        """
+        Scale features to the range [0, 1] using saved min and max values.
+
+        Args:
+            X: Input features (n_samples, n_features).
+
+        Returns:
+            X_scaled: Scaled features (n_samples, n_features).
+        """
+        if self.min_vals is None or self.max_vals is None:
+            raise ValueError("Feature ranges (min_vals and max_vals) must be initialized before scaling features.")
+
+        return scale_features(X, self.min_vals, self.max_vals)
 
     def compute_pairwise_likelihood(self, X, y):
         n_samples, n_features = X.shape
@@ -461,21 +550,45 @@ def main(dataset_name):
     data_path = os.path.join("data", dataset_name, f"{dataset_name}.csv")
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset file not found: {data_path}")
+
+    # Read the dataset
     df = pd.read_csv(data_path, sep=config.get("separator", ","))
     column_names = config.get("column_names", [])
     target_column = config.get("target_column", "target")
+
     if target_column not in column_names:
         raise ValueError(f"Target column '{target_column}' not found in column_names")
+
+    # Filter the dataset to include only the specified columns
     df = df[column_names]
+
+    # Separate features and target
     X = df.drop(columns=[target_column]).values
     y = df[target_column].values
+
+    # Initialize DBNN model
     dbnn = DBNN(config, device="cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize model parameters based on the dataset and encode labels
     y_encoded = dbnn.initialize_from_data(X, y)
+
+    # Scale features using saved min and max values
+    X_scaled = dbnn.scale_features(X)
+
+    # Save the LabelEncoder for later use
     save_label_encoder(dbnn.label_encoder, dataset_name)
-    dbnn.train(X, y_encoded)
-    posteriors = dbnn.compute_posterior(torch.tensor(X, dtype=torch.float32, device=dbnn.device))
+
+    # Train the model using scaled features
+    dbnn.train(X_scaled, y_encoded)
+
+    # Predict on the entire dataset
+    posteriors = dbnn.compute_posterior(torch.tensor(X_scaled, dtype=torch.float32, device=dbnn.device))
     pred_classes = torch.argmax(posteriors, dim=1).cpu().numpy()
+
+    # Decode predictions to original labels
     pred_labels = dbnn.label_encoder.inverse_transform(pred_classes)
+
+    # Save predictions
     df["predicted_class"] = pred_labels
     output_path = os.path.join("data", dataset_name, f"{dataset_name}_predictions.csv")
     df.to_csv(output_path, index=False)
