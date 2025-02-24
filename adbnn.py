@@ -2532,7 +2532,97 @@ class DBNN(GPUDBNN):
             DEBUG.log(" Stack trace:", traceback.format_exc())
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
-    def _compute_batch_posterior(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
+    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
+        """
+        Compute posterior probabilities for batches using pre-computed likelihoods.
+
+        Args:
+            features: Input features as a tensor.
+            epsilon: Small value for numerical stability.
+
+        Returns:
+            Tuple of (posteriors, bin_indices):
+            - posteriors: Tensor of shape [batch_size, n_classes]
+            - bin_indices: Dictionary mapping pair indices to bin indices
+        """
+        # Ensure features are contiguous
+        features = features.contiguous()
+
+        # Ensure weight updater is initialized
+        if self.weight_updater is None:
+            DEBUG.log(" Initializing weight updater")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
+
+        # Validate likelihood parameters
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
+
+        # Make features contiguous and get dimensions
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+
+        # Initialize log likelihoods
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=torch.float32)
+
+        # Storage for bin indices
+        bin_indices_dict = {}
+
+        # Process each feature pair
+        for group_idx, feature_pair in enumerate(self.likelihood_params['feature_pairs']):
+            # Get feature group data
+            group_data = features[:, feature_pair].contiguous()  # Ensure the group data is contiguous
+
+            # Get bin edges for this group
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            bin_edges = [edge.to(self.device).contiguous() for edge in bin_edges]  # Ensure bin edges are contiguous
+
+            # Compute bin indices for both dimensions
+            bin_indices = torch.stack([
+                torch.bucketize(
+                    group_data[:, dim].contiguous(),  # Ensure the input is contiguous
+                    bin_edges[dim].contiguous()       # Ensure the edges are contiguous
+                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+                for dim in range(2)
+            ])  # [2, batch_size]
+
+            # Store bin indices
+            bin_indices_dict[group_idx] = bin_indices
+
+            # Get pre-computed bin probabilities
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)  # Ensure on correct device
+
+            # Get weights for all classes
+            weights = torch.stack([
+                self.weight_updater.get_histogram_weights(class_idx, group_idx).to(self.device)
+                for class_idx in range(n_classes)
+            ])  # [n_classes, n_bins, n_bins]
+
+            # Ensure weights are contiguous
+            weights = weights.contiguous()
+
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+
+            # Gather probabilities for all samples and classes at once
+            probs = weighted_probs[:, bin_indices[0], bin_indices[1]]  # [n_classes, batch_size]
+
+            # Add to log likelihoods
+            log_likelihoods += torch.log(probs.t() + epsilon)
+
+        # Compute posteriors efficiently
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+
+        # Validate outputs
+        if torch.isnan(posteriors).any():
+            raise ValueError("NaN values detected in posterior probabilities")
+
+        return posteriors, bin_indices_dict
+
+    def _compute_batch_posterior_old(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations and consistent device handling"""
         # Safety checks and type conversion
         if isinstance(features, pd.DataFrame):
@@ -3107,139 +3197,6 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Error calculating batch size: {str(e)}")
             return 128  # Default fallback
 
-    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
-        """
-        Select failed samples based on relative thresholds and divergence criteria.
-
-        Args:
-            test_predictions: Predicted class labels
-            y_test: True class labels
-            test_indices: Indices of test samples
-
-        Returns:
-            List of selected sample indices for training
-        """
-        # Get configuration parameters and convert to relative thresholds
-        active_learning_config = self.config.get('active_learning', {})
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3) / 100.0
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1) / 100.0
-        min_divergence = active_learning_config.get('min_divergence', 0.1) / 100.0
-
-        # Convert inputs to tensors on correct device
-        test_predictions = torch.as_tensor(test_predictions, device=self.device)
-        y_test = torch.as_tensor(y_test, device=self.device)
-        test_indices = torch.as_tensor(test_indices, device=self.device)
-
-        # Identify misclassified samples
-        misclassified_mask = (test_predictions != y_test)
-        misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
-
-        if misclassified_indices.dim() == 0:
-            return []
-
-        selected_indices = []
-        unique_classes = torch.unique(y_test[misclassified_indices])
-
-        for class_id in unique_classes:
-            # Get samples from this class
-            class_mask = y_test[misclassified_indices] == class_id
-            class_indices = misclassified_indices[class_mask]
-
-            if len(class_indices) == 0:
-                continue
-
-            # Get features and compute probabilities
-            class_samples = self.X_tensor[test_indices[class_indices]]
-
-            # Compute posteriors
-            if self.model_type == "Histogram":
-                probs, _ = self._compute_batch_posterior(class_samples)
-            else:
-                probs, _ = self._compute_batch_posterior_std(class_samples)
-
-            # Compute error margins
-            true_probs = probs[torch.arange(len(probs)), class_id]
-            pred_classes = torch.argmax(probs, dim=1)
-            pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
-            error_margins = pred_probs - true_probs
-
-            # Find maximum error margin for relative thresholds
-            max_error_margin = error_margins.max()
-            min_error_margin = error_margins.min()
-            # First, always select the example with maximum error margin
-            max_error_idx = torch.argmax(error_margins)
-            selected_indices.append(test_indices[class_indices[max_error_idx]].item())
-
-            # Compute relative thresholds
-            relative_strong_threshold = max_error_margin * strong_margin_threshold
-            relative_marginal_threshold = min_error_margin * marginal_margin_threshold
-
-            # Identify strong and marginal failures
-            strong_failures = error_margins >= relative_strong_threshold
-            marginal_failures = (error_margins > 0) & (error_margins < relative_marginal_threshold)
-
-            for failure_mask in [strong_failures, marginal_failures]:
-                if not failure_mask.any():
-                    continue
-
-                # Get samples for this failure type
-                failure_samples = class_samples[failure_mask]
-                failure_margins = error_margins[failure_mask]
-                failure_indices = test_indices[class_indices[failure_mask]]
-
-                # Compute cardinalities
-                cardinalities = self._compute_feature_cardinalities(failure_samples)
-
-                # Use dynamic threshold based on distribution
-                cardinality_threshold = torch.median(cardinalities)
-                low_card_mask = cardinalities <= cardinality_threshold
-
-                if not low_card_mask.any():
-                    continue
-
-                # Process samples meeting cardinality criteria
-                low_card_samples = failure_samples[low_card_mask]
-                low_card_margins = failure_margins[low_card_mask]
-                low_card_indices = failure_indices[low_card_mask]
-
-                # Compute divergences
-                divergences = self._compute_sample_divergence(low_card_samples, self.feature_pairs)
-
-                # Find maximum divergence for relative threshold
-                max_divergence = divergences.max()
-                relative_min_divergence = max_divergence * min_divergence
-
-                # Select diverse samples
-                selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
-
-                # Process failures based on type
-                if failure_mask is strong_failures:
-                    # For strong failures, prioritize high margins
-                    margin_order = torch.argsort(low_card_margins, descending=True)
-                else:
-                    # For marginal failures, prioritize low margins
-                    margin_order = torch.argsort(low_card_margins)
-
-                for idx in margin_order:
-                    if selected_mask.sum() == 0:
-                        selected_mask[idx] = True
-                        continue
-
-                    # Check divergence against already selected samples
-                    min_div = divergences[idx, selected_mask].min()
-                    if min_div >= relative_min_divergence:
-                        selected_mask[idx] = True
-
-                # Add selected indices
-                selected_indices.extend(low_card_indices[selected_mask].tolist())
-
-                DEBUG.log(f"Class {class_id}:")
-                DEBUG.log(f"- Selected {selected_mask.sum().item()} samples")
-                DEBUG.log(f"- Strong threshold: {relative_strong_threshold:.6f}")
-                DEBUG.log(f"- Marginal threshold: {relative_marginal_threshold:.6f}")
-                DEBUG.log(f"- Divergence threshold: {relative_min_divergence:.6f}")
-
-        return selected_indices
 
     def adaptive_fit_predict(
         self,
@@ -4809,218 +4766,6 @@ class DBNN(GPUDBNN):
 
                 prev_accuracy = current_accuracy
                 epoch += 1
-
-                # Optional memory cleanup
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        self._save_model_components()
-        return self.current_W.cpu(), error_rates
-
-    def train_old(self, X_train, y_train, X_test=None, y_test=None, batch_size=32):
-        """
-        Complete training implementation with proper weight initialization.
-        """
-        print("\nStarting training...")
-        n_samples = len(X_train)
-        n_batches = (n_samples + batch_size - 1) // batch_size
-
-        # Initialize weights if not already done
-        if self.current_W is None:
-            n_classes = len(self.label_encoder.classes_)
-            n_pairs = len(self.feature_pairs)
-            self.current_W = torch.full(
-                (n_classes, n_pairs),
-                0.1,
-                device=self.device,
-                dtype=torch.float32
-            )
-            DEBUG.log(f" Initialized weights with shape: {self.current_W.shape}")
-
-        # Initialize best_W if not already done
-        if self.best_W is None:
-            self.best_W = self.current_W.clone()
-            self.best_error = float('inf')
-
-        # Verify likelihood parameters are initialized
-        if self.likelihood_params is None:
-            DEBUG.log(" Computing likelihood parameters")
-            if self.model_type == "Histogram":
-                self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                    self.X_tensor,
-                    self.y_tensor,
-                    self.X_tensor.shape[1]
-                )
-            else:  # Gaussian model
-                self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                    self.X_tensor,
-                    self.y_tensor,
-                    self.X_tensor.shape[1]
-                )
-
-        # Verify weight updater is initialized
-        if self.weight_updater is None:
-            DEBUG.log(" Initializing weight updater")
-            self._initialize_bin_weights()
-
-        # Initialize tracking
-        error_rates = []
-        best_train_accuracy = 0.0
-        best_test_accuracy = 0.0
-        patience_counter = 0
-        plateau_counter = 0
-        min_improvement = 0.001
-        patience = 5 if self.in_adaptive_fit else 100
-        max_plateau = 5
-        prev_accuracy = 0.0
-
-        # Main training loop with dynamic progress bar
-        with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
-            for epoch in range(self.max_epochs):
-                # Train on all batches
-                failed_cases = []
-                n_errors = 0
-                total_samples = 0
-
-                with tqdm(total=n_batches, desc=f"Epoch {epoch+1}", leave=False) as batch_pbar:
-                    for i in range(0, n_samples, batch_size):
-                        batch_end = min(i + batch_size, n_samples)
-                        batch_X = X_train[i:batch_end]
-                        batch_y = y_train[i:batch_end]
-                        batch_size_actual = len(batch_X)
-                        total_samples += batch_size_actual
-
-                        if self.model_type == "Histogram":
-                            # Compute posteriors and bin indices for the entire batch
-                            posteriors, bin_indices = self._compute_batch_posterior(batch_X)
-                        else:  # Gaussian model
-                            posteriors, component_resp = self._compute_batch_posterior_std(batch_X)
-
-                        predictions = torch.argmax(posteriors, dim=1)
-                        errors = (predictions != batch_y)
-                        n_errors += errors.sum().item()
-
-                        if errors.any():
-                            fail_idx = torch.where(errors)[0]
-                            for idx in fail_idx:
-                                if self.model_type == "Histogram":
-                                    # Create bin indices dictionary for this failed case
-                                    bin_dict = {}
-                                    for pair_idx in range(len(self.feature_pairs)):
-                                        bin_dict[pair_idx] = (
-                                            bin_indices[pair_idx][0, idx].item(),
-                                            bin_indices[pair_idx][1, idx].item()
-                                        )
-                                    failed_cases.append((
-                                        batch_X[idx],
-                                        batch_y[idx].item(),
-                                        predictions[idx].item(),
-                                        bin_dict,
-                                        posteriors[idx].cpu().numpy()
-                                    ))
-                                else:  # Gaussian model
-                                    component_dict = {}
-                                    for pair_idx in range(len(self.feature_pairs)):
-                                        component_dict[pair_idx] = component_resp[pair_idx][idx]
-                                    failed_cases.append((
-                                        batch_X[idx],
-                                        batch_y[idx].item(),
-                                        predictions[idx].item(),
-                                        component_dict,
-                                        posteriors[idx].cpu().numpy()
-                                    ))
-
-                        # Update progress
-                        current_accuracy = 1 - (n_errors / total_samples)
-                        batch_pbar.set_postfix({
-                            'accuracy': f'{current_accuracy:.4f}',
-                            'failed': n_errors
-                        })
-                        batch_pbar.update(1)
-
-                # Update weights for failed cases
-                if failed_cases:
-                    if self.model_type == "Histogram":
-                        for case in failed_cases:
-                            self.weight_updater.update_histogram_weights(
-                                failed_case=case[0],
-                                true_class=case[1],
-                                pred_class=case[2],
-                                bin_indices=case[3],
-                                posteriors=case[4],
-                                learning_rate=self.learning_rate
-                            )
-                    else:  # Gaussian model
-                        for case in failed_cases:
-                            self.weight_updater.update_gaussian_weights(
-                                failed_case=case[0],
-                                true_class=case[1],
-                                pred_class=case[2],
-                                component_responsibilities=case[3],
-                                posteriors=case[4],
-                                learning_rate=self.learning_rate
-                            )
-
-                # Calculate epoch metrics
-                epoch_error = n_errors / total_samples
-                error_rates.append(epoch_error)
-                current_accuracy = 1 - epoch_error
-
-                # Calculate test metrics if test data provided
-                test_accuracy = 0
-                if X_test is not None and y_test is not None:
-                    test_predictions = self.predict(X_test, batch_size=batch_size)
-                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
-                    if test_accuracy > best_test_accuracy:
-                        best_test_accuracy = test_accuracy
-                        # Print confusion matrix for best test performance
-                        print("\nTest Set Performance:")
-                        y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
-                        test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
-                        self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
-
-                # Update progress bar with both accuracies
-                epoch_pbar.set_postfix({
-                    'train_acc': f"{current_accuracy:.4f}",
-                    'best_train': f"{best_train_accuracy:.4f}",
-                    'test_acc': f"{test_accuracy:.4f}",
-                    'best_test': f"{best_test_accuracy:.4f}"
-                })
-                epoch_pbar.update(1)
-
-                # Check improvement and update tracking
-                accuracy_improvement = current_accuracy - prev_accuracy
-                if accuracy_improvement <= min_improvement:
-                    plateau_counter += 1
-                else:
-                    plateau_counter = 0
-
-                if current_accuracy > best_train_accuracy + min_improvement:
-                    best_train_accuracy = current_accuracy
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
-                # Save best model
-                if epoch_error <= self.best_error:
-                    self.best_error = epoch_error
-                    self.best_W = self.current_W.clone()
-                    self._save_best_weights()
-
-                # Early stopping checks
-                if current_accuracy == 1.0:
-                    print("\nReached 100% training accuracy")
-                    break
-
-                if patience_counter >= patience:
-                    print(f"\nNo improvement for {patience} epochs")
-                    break
-
-                if plateau_counter >= max_plateau:
-                    print(f"\nAccuracy plateaued for {max_plateau} epochs")
-                    break
-
-                prev_accuracy = current_accuracy
 
                 # Optional memory cleanup
                 if torch.cuda.is_available():
@@ -6610,56 +6355,6 @@ class DBNN(GPUDBNN):
 
         return predictions, results_df
 
-    def predict_old(self, X: torch.Tensor, batch_size: int = 32) -> Tuple[torch.Tensor, pd.DataFrame]:
-        """Make predictions with optimized DataFrame construction"""
-        print("\nMaking predictions...")
-
-        # Transform input data and detect outliers
-        binned_data, outlier_mask = self.binning_handler.transform(X, self.feature_columns)
-
-        # Make predictions
-        predictions = []
-        n_batches = (len(binned_data) + batch_size - 1) // batch_size
-
-        with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
-            for i in range(0, len(binned_data), batch_size):
-                batch_end = min(i + batch_size, len(binned_data))
-                batch_X = binned_data[i:batch_end]
-
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                else:
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
-
-                batch_predictions = torch.argmax(posteriors, dim=1)
-                predictions.append(batch_predictions)
-                pred_pbar.update(1)
-
-        predictions = torch.cat(predictions)
-
-        # Get original scale features with categorical labels
-        _, feature_df = self.binning_handler.inverse_transform(X, self.feature_columns)
-
-        # Get probability information
-        class_probs = self._get_test_probabilities(X)
-        # Create all DataFrames at once
-        # 1. Feature DataFrame (already created)
-        # 2. Predictions DataFrame
-        pred_df = pd.DataFrame({
-            'predicted_class': self.label_encoder.inverse_transform(predictions.cpu().numpy()),
-            'is_outlier': outlier_mask.cpu().numpy()
-        })
-        # 3. Probabilities DataFrame
-        prob_dict = {
-            f'prob_{class_name}': class_probs[:, i].cpu().numpy()
-            for i, class_name in enumerate(self.label_encoder.classes_)
-        }
-        prob_df = pd.DataFrame(prob_dict)
-        # Combine all DataFrames at once
-        results_df = pd.concat([feature_df, pred_df, prob_df], axis=1)
-        # Create a clean copy to defragment
-        results_df = results_df.copy()
-        return predictions, results_df
 
 
     def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, save_path: str,
