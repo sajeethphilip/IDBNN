@@ -2088,11 +2088,6 @@ class DBNN(GPUDBNN):
         total_cardinality = 0.0
         n_pairs = len(self.feature_pairs)
 
-        # Debug prints
-        print(f"Number of feature pairs: {n_pairs}")
-        print(f"Candidate features shape: {candidate_features.shape}")
-        print(f"Selected features shape: {selected_features.shape}")
-
         # Process feature pairs in batches
         for start_idx in range(0, n_pairs, batch_size):
             end_idx = min(start_idx + batch_size, n_pairs)
@@ -2109,28 +2104,15 @@ class DBNN(GPUDBNN):
                 for pair in batch_pairs
             ]).to(self.device)
 
-            # Ensure tensors are contiguous
-            candidate_batch = candidate_batch.contiguous()
-            selected_batch = selected_batch.contiguous()
-
-            # Debug prints
-            print(f"Candidate batch shape: {candidate_batch.shape}")
-            print(f"Selected batch shape: {selected_batch.shape}")
-
-            # Compute pairwise differences efficiently
-            diff = candidate_batch.unsqueeze(1) - selected_batch.transpose(0, 1)
-            pair_dist = torch.norm(diff, dim=2)
-
-            # Debug prints
-            print(f"Pairwise distances shape: {pair_dist.shape}")
+            # Compute distances efficiently
+            distances = torch.cdist(
+                candidate_batch.unsqueeze(1),
+                selected_batch.transpose(0, 1),
+                p=2
+            )
 
             # Add minimum distances
-            min_distances = pair_dist.min(dim=1)[0]
-            total_cardinality += min_distances.sum().item()
-
-            # Free memory explicitly
-            del candidate_batch, selected_batch, diff, pair_dist, min_distances
-            torch.cuda.empty_cache()
+            total_cardinality += distances.min(dim=1)[0].sum().item()
 
         return total_cardinality / n_pairs
 
@@ -2550,97 +2532,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(" Stack trace:", traceback.format_exc())
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
-    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> Tuple[torch.Tensor, Dict[int, torch.Tensor]]:
-        """
-        Compute posterior probabilities for batches using pre-computed likelihoods.
-
-        Args:
-            features: Input features as a tensor.
-            epsilon: Small value for numerical stability.
-
-        Returns:
-            Tuple of (posteriors, bin_indices):
-            - posteriors: Tensor of shape [batch_size, n_classes]
-            - bin_indices: Dictionary mapping pair indices to bin indices
-        """
-        # Ensure features are contiguous
-        features = features.contiguous()
-
-        # Ensure weight updater is initialized
-        if self.weight_updater is None:
-            DEBUG.log(" Initializing weight updater")
-            self._initialize_bin_weights()
-            if self.weight_updater is None:
-                raise RuntimeError("Failed to initialize weight updater")
-
-        # Validate likelihood parameters
-        if self.likelihood_params is None:
-            raise RuntimeError("Likelihood parameters not initialized")
-
-        # Make features contiguous and get dimensions
-        batch_size = features.shape[0]
-        n_classes = len(self.likelihood_params['classes'])
-
-        # Initialize log likelihoods
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=torch.float32)
-
-        # Storage for bin indices
-        bin_indices_dict = {}
-
-        # Process each feature pair
-        for group_idx, feature_pair in enumerate(self.likelihood_params['feature_pairs']):
-            # Get feature group data
-            group_data = features[:, feature_pair].contiguous()  # Ensure the group data is contiguous
-
-            # Get bin edges for this group
-            bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            bin_edges = [edge.to(self.device).contiguous() for edge in bin_edges]  # Ensure bin edges are contiguous
-
-            # Compute bin indices for both dimensions
-            bin_indices = torch.stack([
-                torch.bucketize(
-                    group_data[:, dim].contiguous(),  # Ensure the input is contiguous
-                    bin_edges[dim].contiguous()       # Ensure the edges are contiguous
-                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
-                for dim in range(2)
-            ])  # [2, batch_size]
-
-            # Store bin indices
-            bin_indices_dict[group_idx] = bin_indices
-
-            # Get pre-computed bin probabilities
-            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)  # Ensure on correct device
-
-            # Get weights for all classes
-            weights = torch.stack([
-                self.weight_updater.get_histogram_weights(class_idx, group_idx).to(self.device)
-                for class_idx in range(n_classes)
-            ])  # [n_classes, n_bins, n_bins]
-
-            # Ensure weights are contiguous
-            weights = weights.contiguous()
-
-            # Apply weights to probabilities
-            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
-
-            # Gather probabilities for all samples and classes at once
-            probs = weighted_probs[:, bin_indices[0], bin_indices[1]]  # [n_classes, batch_size]
-
-            # Add to log likelihoods
-            log_likelihoods += torch.log(probs.t() + epsilon)
-
-        # Compute posteriors efficiently
-        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
-        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
-        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
-
-        # Validate outputs
-        if torch.isnan(posteriors).any():
-            raise ValueError("NaN values detected in posterior probabilities")
-
-        return posteriors, bin_indices_dict
-
-    def _compute_batch_posterior_old(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
+    def _compute_batch_posterior(self, features: Union[torch.Tensor, pd.DataFrame], epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations and consistent device handling"""
         # Safety checks and type conversion
         if isinstance(features, pd.DataFrame):
