@@ -502,21 +502,34 @@ class DBNN:
         Returns:
             bin_indices: Bin indices for the feature pair (n_samples, 2).
         """
+        # Debug: Verify pair_data shape
+        print(f"pair_data shape in _compute_bin_indices: {pair_data.shape}")  # Debug
 
         # Ensure pair_data is 2-dimensional
         if pair_data.dim() == 1:
             pair_data = pair_data.unsqueeze(1)
 
+        # Debug: Verify pair_data shape after reshaping
+        print(f"pair_data shape after reshaping in _compute_bin_indices: {pair_data.shape}")  # Debug
 
         # Ensure pair_data is contiguous
         pair_data = pair_data.contiguous()
 
+        # Move tensors to CPU for torch.bucketize
+        pair_data_cpu = pair_data.cpu()
+        bin_edges_cpu = bin_edges.cpu()
+
         # Compute bin indices for each feature in the pair
         bin_indices = torch.stack([
-            torch.bucketize(pair_data[:, i], bin_edges[i].contiguous()) - 1
+            torch.bucketize(pair_data_cpu[:, i], bin_edges_cpu[i].contiguous()) - 1
             for i in range(2)
         ]).t()  # Transpose to get shape [n_samples, 2]
 
+        # Move bin_indices back to the original device
+        bin_indices = bin_indices.to(pair_data.device)
+
+        # Debug: Verify bin_indices shape
+        print(f"bin_indices shape: {bin_indices.shape}")  # Debug
 
         return bin_indices
 
