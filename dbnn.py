@@ -341,60 +341,52 @@ class DatasetProcessor:
         return False
 
 
-    def find_dataset_pairs(self, data_dir: str = 'data') -> List[Tuple[str, str, str]]:
-            """Find and validate dataset configuration pairs.
+     def find_dataset_pairs(self, data_dir: str = 'data') -> List[Tuple[str, str, str]]:
+        """Find and validate dataset configuration pairs.
 
-            Args:
-                data_dir: Base directory to search for datasets
+        Args:
+            data_dir: Base directory to search for datasets
 
-            Returns:
-                List of tuples (dataset_name, config_path, csv_path)
-            """
-            if not os.path.exists(data_dir):
-                print(f"\nNo '{data_dir}' directory found. Creating one...")
-                os.makedirs(data_dir)
-                return []
+        Returns:
+            List of tuples (dataset_name, config_path, csv_path)
+        """
+        if not os.path.exists(data_dir):
+            print(f"\nNo '{data_dir}' directory found. Creating one...")
+            os.makedirs(data_dir)
+            return []
 
-            dataset_pairs = []
-            processed_datasets = set()
-            adaptive_conf = self._load_global_adaptive_config()
+        dataset_pairs = []
+        processed_datasets = set()
+        adaptive_conf = self._load_global_adaptive_config()
 
-            # Walk through all subdirectories
-            for root, dirs, files in os.walk(data_dir):
-                conf_files = [f for f in files if f.endswith('.conf') and f != 'adaptive_dbnn.conf']
+        # Walk through all subdirectories
+        for root, dirs, files in os.walk(data_dir):
+            # Get the subdirectory name (basename of the current root)
+            subdir_name = os.path.basename(root)
 
-                for conf_file in conf_files:
-                    basename = os.path.splitext(conf_file)[0]
-                    if basename in processed_datasets:
-                        continue
+            # Look for JSON and CSV files with the same name as the subdirectory
+            conf_file = f"{subdir_name}.conf"
+            csv_file = f"{subdir_name}.csv"
 
-                    conf_path = os.path.join(root, conf_file)
+            conf_path = os.path.join(root, conf_file)
+            csv_path = os.path.join(root, csv_file)
 
-                    # Check for CSV in multiple possible locations
-                    csv_paths = [
-                        os.path.join(root, f"{basename}.csv"),                     # Same directory as conf
-                        os.path.join(root, basename, f"{basename}.csv"),          # Subdirectory
-                        os.path.join(root, basename, 'train', f"{basename}.csv"), # Train directory
-                        os.path.join(root, basename, 'train', "train.csv"),       # Train directory with default name
-                        os.path.join(root, 'train', f"{basename}.csv"),          # Direct train directory
-                        os.path.join(root, 'train', "train.csv")                 # Direct train directory with default name
-                    ]
+            # Check if both files exist
+            if os.path.exists(conf_path) and os.path.exists(csv_path):
+                if subdir_name in processed_datasets:
+                    continue  # Skip if already processed
 
-                    # Find first existing CSV file
-                    csv_path = next((path for path in csv_paths if os.path.exists(path)), None)
+                if adaptive_conf:
+                    self._update_config_with_adaptive(conf_path, adaptive_conf)
 
-                    if csv_path:
-                        if adaptive_conf:
-                            self._update_config_with_adaptive(conf_path, adaptive_conf)
+                print(f"\nFound dataset: {subdir_name}")
+                print(f"Config: {conf_path}")
+                print(f"Data: {csv_path}")
 
-                        print(f"\nFound dataset: {basename}")
-                        print(f"Config: {conf_path}")
-                        print(f"Data: {csv_path}")
+                dataset_pairs.append((subdir_name, conf_path, csv_path))
+                processed_datasets.add(subdir_name)
 
-                        dataset_pairs.append((basename, conf_path, csv_path))
-                        processed_datasets.add(basename)
-
-            return dataset_pairs
+        return dataset_pairs
 
     def _load_global_adaptive_config(self) -> Dict:
         adaptive_path = 'adaptive_dbnn.conf'
