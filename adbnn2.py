@@ -90,9 +90,18 @@ class DBNN:
             self.likelihood_params['bin_probs'].append(bin_probs)
 
     def _compute_bin_edges(self, pair_data):
+        """
+        Compute bin edges for a feature pair.
+
+        Args:
+            pair_data: Input data for a feature pair (n_samples, 2).
+
+        Returns:
+            bin_edges: Bin edges for the feature pair (2, n_bins_per_dim + 1).
+        """
         min_val = pair_data.min(dim=0).values
         max_val = pair_data.max(dim=0).values
-        padding = (max_val - min_val) * 0.01
+        padding = (max_val - min_val) * 0.01  # Add 1% padding to avoid edge cases
         bin_edges = torch.stack([
             torch.linspace(min_val[i] - padding[i], max_val[i] + padding[i], self.n_bins_per_dim + 1)
             for i in range(2)
@@ -100,17 +109,42 @@ class DBNN:
         return bin_edges.contiguous()
 
     def _compute_bin_probs(self, pair_data, y, bin_edges):
+        """
+        Compute bin probabilities for each class.
+
+        Args:
+            pair_data: Input data for a feature pair (n_samples, 2).
+            y: Target labels (n_samples,).
+            bin_edges: Bin edges for the feature pair (2, n_bins_per_dim + 1).
+
+        Returns:
+            bin_probs: Bin probabilities for each class (n_classes, n_bins_per_dim, n_bins_per_dim).
+        """
         bin_probs = torch.zeros(self.n_classes, self.n_bins_per_dim, self.n_bins_per_dim, device=self.device)
+
         for c in range(self.n_classes):
             class_data = pair_data[y == c]
+
+            # Ensure class_data is 2-dimensional
             if class_data.dim() == 1:
                 class_data = class_data.unsqueeze(1)
+
+            # Move tensors to CPU for torch.histogramdd
             class_data_cpu = class_data.cpu()
             bin_edges_cpu = bin_edges.cpu()
+
+            # Convert bin_edges to a tuple of tensors
             bins_tuple = tuple(bin_edges_cpu[i] for i in range(bin_edges_cpu.shape[0]))
+
+            # Compute histogram using histogramdd on CPU
             bin_counts = torch.histogramdd(class_data_cpu, bins=bins_tuple)[0]
+
+            # Move bin_counts back to the original device
             bin_counts = bin_counts.to(self.device)
+
+            # Apply Laplace smoothing
             bin_probs[c] = (bin_counts + 1) / (class_data.shape[0] + self.n_bins_per_dim ** 2)
+
         return bin_probs
 
     def _compute_bin_indices(self, pair_data, bin_edges):
