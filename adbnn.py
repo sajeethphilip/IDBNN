@@ -3928,8 +3928,8 @@ class DBNN(GPUDBNN):
             # Compute bin indices for both dimensions
             bin_indices = torch.stack([
                 torch.bucketize(
-                    group_data[:, dim],
-                    bin_edges[dim]
+                    group_data[:, dim].contiguous(),
+                    bin_edges[dim].contiguous()
                 ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
                 for dim in range(2)
             ])  # [2, batch_size]
