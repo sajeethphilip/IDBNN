@@ -2088,6 +2088,11 @@ class DBNN(GPUDBNN):
         total_cardinality = 0.0
         n_pairs = len(self.feature_pairs)
 
+        # Debug prints
+        print(f"Number of feature pairs: {n_pairs}")
+        print(f"Candidate features shape: {candidate_features.shape}")
+        print(f"Selected features shape: {selected_features.shape}")
+
         # Process feature pairs in batches
         for start_idx in range(0, n_pairs, batch_size):
             end_idx = min(start_idx + batch_size, n_pairs)
@@ -2104,15 +2109,28 @@ class DBNN(GPUDBNN):
                 for pair in batch_pairs
             ]).to(self.device)
 
-            # Compute distances efficiently
-            distances = torch.cdist(
-                candidate_batch.unsqueeze(1),
-                selected_batch.transpose(0, 1),
-                p=2
-            )
+            # Ensure tensors are contiguous
+            candidate_batch = candidate_batch.contiguous()
+            selected_batch = selected_batch.contiguous()
+
+            # Debug prints
+            print(f"Candidate batch shape: {candidate_batch.shape}")
+            print(f"Selected batch shape: {selected_batch.shape}")
+
+            # Compute pairwise differences efficiently
+            diff = candidate_batch.unsqueeze(1) - selected_batch.transpose(0, 1)
+            pair_dist = torch.norm(diff, dim=2)
+
+            # Debug prints
+            print(f"Pairwise distances shape: {pair_dist.shape}")
 
             # Add minimum distances
-            total_cardinality += distances.min(dim=1)[0].sum().item()
+            min_distances = pair_dist.min(dim=1)[0]
+            total_cardinality += min_distances.sum().item()
+
+            # Free memory explicitly
+            del candidate_batch, selected_batch, diff, pair_dist, min_distances
+            torch.cuda.empty_cache()
 
         return total_cardinality / n_pairs
 
