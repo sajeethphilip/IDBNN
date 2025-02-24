@@ -49,8 +49,8 @@ class DBNN:
     def __init__(self, config, device='cuda'):
         self.config = config
         self.device = device
-        self.n_bins_per_dim = config.get("training_params", {}).get("n_bins_per_dim", 20)
-        self.invert_DBNN = config.get("training_params", {}).get("invert_DBNN", False)
+        self.n_bins_per_dim = config.get("training_params", {}).get("n_bins_per_dim", 21)
+        self.invert_DBNN = config.get("training_params", {}).get("invert_DBNN", True)
         self.lr = config.get("training_params", {}).get("learning_rate", 0.1)
         self.max_epochs = config.get("training_params", {}).get("epochs", 1000)
         self.batch_size = config.get("training_params", {}).get("batch_size", 32)
@@ -135,7 +135,10 @@ class DBNN:
                 pair_data = X[:, pair]
                 bin_indices = self._compute_bin_indices(pair_data, self.likelihood_params['bin_edges'][i])
                 bin_probs = self.likelihood_params['bin_probs'][i][c]
-                log_posterior += torch.log(bin_probs[bin_indices[:, 0], bin_indices[:, 1]])
+                valid_indices = (bin_indices[:, 0] >= 0) & (bin_indices[:, 0] < self.n_bins_per_dim) & \
+                                (bin_indices[:, 1] >= 0) & (bin_indices[:, 1] < self.n_bins_per_dim)
+                if valid_indices.any():
+                    log_posterior[valid_indices] += torch.log(bin_probs[bin_indices[valid_indices, 0], bin_indices[valid_indices, 1]])
             posteriors[:, c] = log_posterior
         posteriors = torch.softmax(posteriors, dim=1)
         return posteriors
@@ -351,7 +354,7 @@ def load_config(dataset_name):
     config_path = os.path.join("data", dataset_name, f"{dataset_name}.conf")
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    with open(config_path, "r")   as f:
+    with open(config_path, "r") as f:
         config = json.load(f)
     return config
 
