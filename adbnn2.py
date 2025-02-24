@@ -145,8 +145,11 @@ class DBNN:
             # Apply Laplace smoothing
             bin_probs[c] = (bin_counts + 1) / (class_data.shape[0] + self.n_bins_per_dim ** 2)
 
-        return bin_probs
+        # Debug: Print bin_probs
+        print(f"bin_probs shape: {bin_probs.shape}")
+        print(f"bin_probs: {bin_probs}")
 
+        return bin_probs
     def _compute_bin_indices(self, pair_data, bin_edges):
         """
         Compute bin indices for a feature pair.
@@ -176,6 +179,9 @@ class DBNN:
         # Clamp bin_indices to valid range [0, n_bins_per_dim - 1]
         bin_indices = torch.clamp(bin_indices, 0, self.n_bins_per_dim - 1)
 
+        # Debug: Print bin_indices
+        print(f"bin_indices after clamping: {bin_indices}")
+
         # Move bin_indices back to the original device
         bin_indices = bin_indices.to(pair_data.device)
 
@@ -203,6 +209,12 @@ class DBNN:
                 pair_data = X[:, pair]
                 bin_indices = self._compute_bin_indices(pair_data, self.likelihood_params['bin_edges'][i])
                 bin_probs = self.likelihood_params['bin_probs'][i][c]
+
+                # Debug: Print shapes and values
+                print(f"bin_indices shape: {bin_indices.shape}")
+                print(f"bin_probs shape: {bin_probs.shape}")
+                print(f"bin_indices: {bin_indices}")
+                print(f"bin_probs: {bin_probs}")
 
                 # Ensure bin_indices are within valid range
                 valid_indices = (bin_indices[:, 0] >= 0) & (bin_indices[:, 0] < self.n_bins_per_dim) & \
