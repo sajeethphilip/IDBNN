@@ -114,32 +114,74 @@ class DBNN:
         return bin_probs
 
     def _compute_bin_indices(self, pair_data, bin_edges):
+        """
+        Compute bin indices for a feature pair.
+
+        Args:
+            pair_data: Input data for a feature pair (n_samples, 2).
+            bin_edges: Bin edges for the feature pair (2, n_bins_per_dim + 1).
+
+        Returns:
+            bin_indices: Bin indices for the feature pair (n_samples, 2).
+        """
+        # Ensure pair_data is 2-dimensional and contiguous
         if pair_data.dim() == 1:
             pair_data = pair_data.unsqueeze(1)
         pair_data = pair_data.contiguous()
+
+        # Move tensors to CPU for torch.bucketize
         pair_data_cpu = pair_data.cpu()
         bin_edges_cpu = bin_edges.cpu()
+
+        # Compute bin indices for each feature in the pair
         bin_indices = torch.stack([
             torch.bucketize(pair_data_cpu[:, i], bin_edges_cpu[i].contiguous()) - 1
             for i in range(2)
-        ]).t()
+        ]).t()  # Transpose to get shape [n_samples, 2]
+
+        # Clamp bin_indices to valid range [0, n_bins_per_dim - 1]
+        bin_indices = torch.clamp(bin_indices, 0, self.n_bins_per_dim - 1)
+
+        # Move bin_indices back to the original device
         bin_indices = bin_indices.to(pair_data.device)
+
         return bin_indices
 
     def compute_posterior(self, X):
+        """
+        Compute posterior probabilities for each class given the input features.
+
+        Args:
+            X: Input features (n_samples, n_features).
+
+        Returns:
+            posteriors: Posterior probabilities (n_samples, n_classes).
+        """
         n_samples = X.shape[0]
         posteriors = torch.zeros((n_samples, self.n_classes), device=self.device)
+
+        # Compute the log-posterior for each class
         for c in range(self.n_classes):
-            log_posterior = torch.log(self.W[c])
+            log_posterior = torch.log(self.W[c])  # Log of prior
+
+            # Accumulate the log-likelihood from each feature pair
             for i, pair in enumerate(self.likelihood_params['feature_pairs']):
                 pair_data = X[:, pair]
                 bin_indices = self._compute_bin_indices(pair_data, self.likelihood_params['bin_edges'][i])
                 bin_probs = self.likelihood_params['bin_probs'][i][c]
+
+                # Ensure bin_indices are within valid range
                 valid_indices = (bin_indices[:, 0] >= 0) & (bin_indices[:, 0] < self.n_bins_per_dim) & \
                                 (bin_indices[:, 1] >= 0) & (bin_indices[:, 1] < self.n_bins_per_dim)
+
+                # Use valid indices to compute log-likelihood
                 if valid_indices.any():
                     log_posterior[valid_indices] += torch.log(bin_probs[bin_indices[valid_indices, 0], bin_indices[valid_indices, 1]])
+
+            # Store the log-posterior for this class
             posteriors[:, c] = log_posterior
+
+        # Convert log-posteriors to probabilities using softmax
         posteriors = torch.softmax(posteriors, dim=1)
         return posteriors
 
