@@ -110,8 +110,9 @@ def scale_features(X, min_vals, max_vals):
 
 
 class DBNN:
-    def __init__(self, config, device='cuda'):
+    def __init__(self, config, dataset_name, device='cuda'):
         self.config = config
+        self.dataset_name = dataset_name  # Store dataset_name
         self.device = device
         self.n_bins_per_dim = config.get("training_params", {}).get("n_bins_per_dim", 21)
         self.invert_DBNN = config.get("training_params", {}).get("invert_DBNN", True)
@@ -133,7 +134,7 @@ class DBNN:
         self.n_features = X.shape[1]
 
         # Compute and save feature ranges
-        self.min_vals, self.max_vals = compute_feature_ranges(X, self.config["dataset_name"])
+        self.min_vals, self.max_vals = compute_feature_ranges(X, self.dataset_name)  # Use self.dataset_name
 
         # Initialize uniform priors (weights)
         self.W = torch.ones(self.n_classes, device=self.device) / self.n_classes
@@ -567,7 +568,7 @@ def main(dataset_name):
     y = df[target_column].values
 
     # Initialize DBNN model
-    dbnn = DBNN(config, device="cuda" if torch.cuda.is_available() else "cpu")
+    dbnn = DBNN(config, dataset_name, device="cuda" if torch.cuda.is_available() else "cpu")  # Pass dataset_name
 
     # Initialize model parameters based on the dataset and encode labels
     y_encoded = dbnn.initialize_from_data(X, y)
