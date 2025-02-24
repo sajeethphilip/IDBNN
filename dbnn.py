@@ -70,7 +70,7 @@ class GlobalConfig:
         self.n_bins_per_dim = None
         self.minimum_training_accuracy = None
         self.target_column = None  # Add this line too
-
+        self.compute_device=None
         # Inverse DBNN parameters
         self.invert_DBNN = False
         self.reconstruction_weight = 0.5
