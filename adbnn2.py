@@ -249,48 +249,47 @@ class DBNN:
             self.likelihood_params['bin_edges'].append(bin_edges)
             self.likelihood_params['bin_probs'].append(bin_probs)
 
-    def compute_posterior(self, X):
+    def _compute_bin_indices(self, pair_data, bin_edges):
         """
-        Compute posterior probabilities for each class.
+        Compute bin indices for a feature pair.
 
         Args:
-            X: Input features (n_samples, n_features).
+            pair_data: Input data for a feature pair (n_samples, 2).
+            bin_edges: Bin edges for the feature pair (2, n_bins_per_dim + 1).
 
         Returns:
-            posteriors: Posterior probabilities (n_samples, n_classes).
+            bin_indices: Bin indices for the feature pair (n_samples, 2).
         """
-        n_samples = X.shape[0]
-        log_posteriors = torch.zeros(n_samples, self.n_classes, device=self.device)
+        # Debug: Verify pair_data shape
+        print(f"pair_data shape in _compute_bin_indices: {pair_data.shape}")  # Debug
 
+        # Ensure pair_data is 2-dimensional
+        if pair_data.dim() == 1:
+            pair_data = pair_data.unsqueeze(1)
 
-        # Compute joint likelihood approximation using pairwise likelihoods
-        for pair_idx, (bin_edges, bin_probs) in enumerate(zip(
-            self.likelihood_params['bin_edges'],
-            self.likelihood_params['bin_probs']
-        )):
-            # Extract data for the current feature pair
-            pair_data = X[:, self.likelihood_params['feature_pairs'][pair_idx]]  # Correct extraction
+        # Debug: Verify pair_data shape after reshaping
+        print(f"pair_data shape after reshaping in _compute_bin_indices: {pair_data.shape}")  # Debug
 
+        # Ensure pair_data is contiguous
+        pair_data = pair_data.contiguous()
 
-            # Ensure pair_data is 2-dimensional
-            if pair_data.dim() == 1:
-                pair_data = pair_data.unsqueeze(1)
+        # Move tensors to CPU for torch.bucketize
+        pair_data_cpu = pair_data.cpu()
+        bin_edges_cpu = bin_edges.cpu()
 
+        # Compute bin indices for each feature in the pair
+        bin_indices = torch.stack([
+            torch.bucketize(pair_data_cpu[:, i], bin_edges_cpu[i].contiguous()) - 1
+            for i in range(2)
+        ]).t()  # Transpose to get shape [n_samples, 2]
 
-            # Compute bin indices
-            bin_indices = self._compute_bin_indices(pair_data, bin_edges)
+        # Move bin_indices back to the original device
+        bin_indices = bin_indices.to(pair_data.device)
 
+        # Debug: Verify bin_indices shape
+        print(f"bin_indices shape: {bin_indices.shape}")  # Debug
 
-            # Add log likelihood for each class
-            for c in range(self.n_classes):
-                log_posteriors[:, c] += torch.log(bin_probs[c][bin_indices[:, 0], bin_indices[:, 1]] + 1e-10)
-
-        # Add log prior
-        log_posteriors += torch.log(self.W)
-
-        # Normalize to get posterior probabilities
-        posteriors = torch.softmax(log_posteriors, dim=1)
-        return posteriors
+        return bin_indices
 
     def train(self, X_train, y_train, X_test=None, y_test=None):
         """
@@ -490,6 +489,7 @@ class DBNN:
 
 
         return bin_probs
+
 
     def _compute_bin_indices(self, pair_data, bin_edges):
         """
