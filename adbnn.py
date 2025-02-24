@@ -4592,6 +4592,239 @@ class DBNN(GPUDBNN):
         n_samples = len(X_train)
         n_batches = (n_samples + batch_size - 1) // batch_size
 
+        # Get minimum_training_accuracy from config
+        minimum_training_accuracy = self._get_config_value('minimum_training_accuracy', 0.95)
+        print(f"Minimum training accuracy set to: {minimum_training_accuracy:.4f}")
+
+        # Initialize weights if not already done
+        if self.current_W is None:
+            n_classes = len(self.label_encoder.classes_)
+            n_pairs = len(self.feature_pairs)
+            self.current_W = torch.full(
+                (n_classes, n_pairs),
+                0.1,
+                device=self.device,
+                dtype=torch.float32
+            )
+            DEBUG.log(f" Initialized weights with shape: {self.current_W.shape}")
+
+        # Initialize best_W if not already done
+        if self.best_W is None:
+            self.best_W = self.current_W.clone()
+            self.best_error = float('inf')
+
+        # Verify likelihood parameters are initialized
+        if self.likelihood_params is None:
+            DEBUG.log(" Computing likelihood parameters")
+            if self.model_type == "Histogram":
+                self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                    self.X_tensor,
+                    self.y_tensor,
+                    self.X_tensor.shape[1]
+                )
+            else:  # Gaussian model
+                self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                    self.X_tensor,
+                    self.y_tensor,
+                    self.X_tensor.shape[1]
+                )
+
+        # Verify weight updater is initialized
+        if self.weight_updater is None:
+            DEBUG.log(" Initializing weight updater")
+            self._initialize_bin_weights()
+
+        # Initialize tracking
+        error_rates = []
+        best_train_accuracy = 0.0
+        best_test_accuracy = 0.0
+        patience_counter = 0
+        plateau_counter = 0
+        min_improvement = 0.001
+        patience = 5 if self.in_adaptive_fit else 100
+        max_plateau = 5
+        prev_accuracy = 0.0
+
+        # Main training loop with dynamic progress bar
+        with tqdm(total=self.max_epochs, desc="Training epochs") as epoch_pbar:
+            epoch = 0
+            while True:  # Continue until minimum accuracy is met or other stopping conditions
+                if epoch >= self.max_epochs:
+                    print(f"\nMaximum epochs ({self.max_epochs}) reached, but minimum training accuracy not yet achieved.")
+                    if best_train_accuracy >= minimum_training_accuracy:
+                        print(f"Minimum training accuracy ({minimum_training_accuracy:.4f}) achieved. Stopping training.")
+                        break
+                    elif plateau_counter >= max_plateau:
+                        print(f"Accuracy plateaued for {max_plateau} epochs. Stopping training.")
+                        break
+                    else:
+                        print(f"Continuing training to reach minimum accuracy...")
+
+                # Train on all batches
+                failed_cases = []
+                n_errors = 0
+                total_samples = 0
+
+                with tqdm(total=n_batches, desc=f"Epoch {epoch+1}", leave=False) as batch_pbar:
+                    for i in range(0, n_samples, batch_size):
+                        batch_end = min(i + batch_size, n_samples)
+                        batch_X = X_train[i:batch_end]
+                        batch_y = y_train[i:batch_end]
+                        batch_size_actual = len(batch_X)
+                        total_samples += batch_size_actual
+
+                        if self.model_type == "Histogram":
+                            # Compute posteriors and bin indices for the entire batch
+                            posteriors, bin_indices = self._compute_batch_posterior(batch_X)
+                        else:  # Gaussian model
+                            posteriors, component_resp = self._compute_batch_posterior_std(batch_X)
+
+                        predictions = torch.argmax(posteriors, dim=1)
+                        errors = (predictions != batch_y)
+                        n_errors += errors.sum().item()
+
+                        if errors.any():
+                            fail_idx = torch.where(errors)[0]
+                            for idx in fail_idx:
+                                if self.model_type == "Histogram":
+                                    # Create bin indices dictionary for this failed case
+                                    bin_dict = {}
+                                    for pair_idx in range(len(self.feature_pairs)):
+                                        bin_dict[pair_idx] = (
+                                            bin_indices[pair_idx][0, idx].item(),
+                                            bin_indices[pair_idx][1, idx].item()
+                                        )
+                                    failed_cases.append((
+                                        batch_X[idx],
+                                        batch_y[idx].item(),
+                                        predictions[idx].item(),
+                                        bin_dict,
+                                        posteriors[idx].cpu().numpy()
+                                    ))
+                                else:  # Gaussian model
+                                    component_dict = {}
+                                    for pair_idx in range(len(self.feature_pairs)):
+                                        component_dict[pair_idx] = component_resp[pair_idx][idx]
+                                    failed_cases.append((
+                                        batch_X[idx],
+                                        batch_y[idx].item(),
+                                        predictions[idx].item(),
+                                        component_dict,
+                                        posteriors[idx].cpu().numpy()
+                                    ))
+
+                        # Update progress
+                        current_accuracy = 1 - (n_errors / total_samples)
+                        batch_pbar.set_postfix({
+                            'accuracy': f'{current_accuracy:.4f}',
+                            'failed': n_errors
+                        })
+                        batch_pbar.update(1)
+
+                # Update weights for failed cases
+                if failed_cases:
+                    if self.model_type == "Histogram":
+                        for case in failed_cases:
+                            self.weight_updater.update_histogram_weights(
+                                failed_case=case[0],
+                                true_class=case[1],
+                                pred_class=case[2],
+                                bin_indices=case[3],
+                                posteriors=case[4],
+                                learning_rate=self.learning_rate
+                            )
+                    else:  # Gaussian model
+                        for case in failed_cases:
+                            self.weight_updater.update_gaussian_weights(
+                                failed_case=case[0],
+                                true_class=case[1],
+                                pred_class=case[2],
+                                component_responsibilities=case[3],
+                                posteriors=case[4],
+                                learning_rate=self.learning_rate
+                            )
+
+                # Calculate epoch metrics
+                epoch_error = n_errors / total_samples
+                error_rates.append(epoch_error)
+                current_accuracy = 1 - epoch_error
+
+                # Calculate test metrics if test data provided
+                test_accuracy = 0
+                if X_test is not None and y_test is not None:
+                    test_predictions = self.predict(X_test, batch_size=batch_size)
+                    test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
+                    if test_accuracy > best_test_accuracy:
+                        best_test_accuracy = test_accuracy
+                        # Print confusion matrix for best test performance
+                        print("\nTest Set Performance:")
+                        y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+                        test_pred_labels = self.label_encoder.inverse_transform(test_predictions.cpu().numpy())
+                        self.print_colored_confusion_matrix(y_test_labels, test_pred_labels)
+
+                # Update progress bar with both accuracies
+                epoch_pbar.set_postfix({
+                    'train_acc': f"{current_accuracy:.4f}",
+                    'best_train': f"{best_train_accuracy:.4f}",
+                    'test_acc': f"{test_accuracy:.4f}",
+                    'best_test': f"{best_test_accuracy:.4f}"
+                })
+                epoch_pbar.update(1)
+
+                # Check improvement and update tracking
+                accuracy_improvement = current_accuracy - prev_accuracy
+                if accuracy_improvement <= min_improvement:
+                    plateau_counter += 1
+                else:
+                    plateau_counter = 0
+
+                if current_accuracy > best_train_accuracy + min_improvement:
+                    best_train_accuracy = current_accuracy
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                # Save best model
+                if epoch_error <= self.best_error:
+                    self.best_error = epoch_error
+                    self.best_W = self.current_W.clone()
+                    self._save_best_weights()
+
+                # Early stopping checks
+                if current_accuracy >= minimum_training_accuracy:
+                    print(f"\nMinimum training accuracy ({minimum_training_accuracy:.4f}) achieved. Stopping training.")
+                    break
+
+                if current_accuracy == 1.0:
+                    print("\nReached 100% training accuracy")
+                    break
+
+                if patience_counter >= patience:
+                    print(f"\nNo improvement for {patience} epochs")
+                    break
+
+                if plateau_counter >= max_plateau:
+                    print(f"\nAccuracy plateaued for {max_plateau} epochs")
+                    break
+
+                prev_accuracy = current_accuracy
+                epoch += 1
+
+                # Optional memory cleanup
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        self._save_model_components()
+        return self.current_W.cpu(), error_rates
+
+    def train_old(self, X_train, y_train, X_test=None, y_test=None, batch_size=32):
+        """
+        Complete training implementation with proper weight initialization.
+        """
+        print("\nStarting training...")
+        n_samples = len(X_train)
+        n_batches = (n_samples + batch_size - 1) // batch_size
+
         # Initialize weights if not already done
         if self.current_W is None:
             n_classes = len(self.label_encoder.classes_)
