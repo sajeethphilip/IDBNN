@@ -478,15 +478,24 @@ class DBNN:
             if class_data.dim() == 1:
                 class_data = class_data.unsqueeze(1)
 
-            # Convert bin_edges to a tuple of tensors
-            bins_tuple = tuple(bin_edges[i] for i in range(bin_edges.shape[0]))
+            # Move tensors to CPU for torch.histogramdd
+            class_data_cpu = class_data.cpu()
+            bin_edges_cpu = bin_edges.cpu()
 
-            # Compute histogram using histogramdd
-            bin_counts = torch.histogramdd(class_data, bins=bins_tuple)[0]
+            # Convert bin_edges to a tuple of tensors
+            bins_tuple = tuple(bin_edges_cpu[i] for i in range(bin_edges_cpu.shape[0]))
+
+            # Compute histogram using histogramdd on CPU
+            bin_counts = torch.histogramdd(class_data_cpu, bins=bins_tuple)[0]
+
+            # Move bin_counts back to the original device
+            bin_counts = bin_counts.to(self.device)
 
             # Apply Laplace smoothing
             bin_probs[c] = (bin_counts + 1) / (class_data.shape[0] + self.n_bins_per_dim ** 2)
 
+        # Debug: Verify bin_probs shape
+        print(f"bin_probs shape: {bin_probs.shape}")  # Debug
 
         return bin_probs
 
