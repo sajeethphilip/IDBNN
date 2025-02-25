@@ -2072,10 +2072,21 @@ class DBNN(GPUDBNN):
     def _compute_batch_cardinality(self, candidate_features: torch.Tensor,
                                  selected_features: torch.Tensor,
                                  batch_size: int = 100) -> float:
-        """Compute cardinality score with null checks."""
+        """Compute cardinality score with null checks and debug info."""
+        print(f"DEBUG: Entering _compute_batch_cardinality")
+        print(f"DEBUG: candidate_features shape: {candidate_features.shape}, dtype: {candidate_features.dtype}, device: {candidate_features.device}")
+        print(f"DEBUG: selected_features shape: {selected_features.shape}, dtype: {selected_features.dtype}, device: {selected_features.device}")
+        print(f"DEBUG: self.device: {self.device}")
+
         if self.feature_pairs is None:
+            print("DEBUG: Error - Feature pairs not initialized")
             raise ValueError("Feature pairs not initialized")
+
+        print(f"DEBUG: feature_pairs type: {type(self.feature_pairs)}, length: {len(self.feature_pairs)}")
+        print(f"DEBUG: Sample of feature_pairs: {self.feature_pairs[:3]}")
+
         if len(selected_features) == 0:
+            print("DEBUG: No selected features, returning inf")
             return float('inf')
 
         total_cardinality = 0.0
@@ -2085,31 +2096,118 @@ class DBNN(GPUDBNN):
         for start_idx in range(0, n_pairs, batch_size):
             end_idx = min(start_idx + batch_size, n_pairs)
             batch_pairs = self.feature_pairs[start_idx:end_idx]
+            print(f"DEBUG: Processing batch {start_idx}:{end_idx} with {len(batch_pairs)} pairs")
 
-            # Extract features for current batch of pairs
-            candidate_batch = torch.stack([
-                candidate_features[..., pair[0]:pair[0]+1, pair[1]:pair[1]+1].reshape(-1)
-                if isinstance(pair, tuple) else candidate_features[..., pair]
-                for pair in batch_pairs
-            ]).to(self.device)
+            try:
+                # Debug first pair indexing
+                if len(batch_pairs) > 0:
+                    first_pair = batch_pairs[0]
+                    print(f"DEBUG: First pair in batch: {first_pair}, type: {type(first_pair)}")
 
-            selected_batch = torch.stack([
-                selected_features[..., pair[0]:pair[0]+1, pair[1]:pair[1]+1].reshape(len(selected_features), -1)
-                if isinstance(pair, tuple) else selected_features[..., pair]
-                for pair in batch_pairs
-            ]).to(self.device)
+                    # Try accessing single element to check indexing
+                    if isinstance(first_pair, tuple) or isinstance(first_pair, list):
+                        print(f"DEBUG: Attempting to access first pair elements: {first_pair[0]}, {first_pair[1]}")
+                        print(f"DEBUG: candidate_features indices valid: {0 <= first_pair[0] < candidate_features.shape[-2] if len(candidate_features.shape) > 1 else 'N/A'}, "
+                              f"{0 <= first_pair[1] < candidate_features.shape[-1] if len(candidate_features.shape) > 1 else 'N/A'}")
+                    else:
+                        print(f"DEBUG: Attempting to access with index: {first_pair}")
+                        print(f"DEBUG: candidate_features index valid: {0 <= first_pair < candidate_features.shape[-1] if len(candidate_features.shape) > 0 else 'N/A'}")
 
-            # Compute distances efficiently
-            distances = torch.cdist(
-                candidate_batch.unsqueeze(1),
-                selected_batch.transpose(0, 1),
-                p=2
-            )
+                # Extract features for current batch of pairs - with safer approach
+                candidate_batch_list = []
+                for pair in batch_pairs:
+                    print(f"DEBUG: Processing pair: {pair}")
+                    try:
+                        if isinstance(pair, (tuple, list)) and len(pair) == 2:
+                            # For 2D indexing
+                            if len(candidate_features.shape) >= 2:
+                                feat = candidate_features[..., pair[0], pair[1]]
+                            else:
+                                print(f"DEBUG: Shape mismatch: cannot index {candidate_features.shape} with 2D pair {pair}")
+                                continue
+                        else:
+                            # For 1D indexing
+                            feat = candidate_features[..., pair]
 
-            # Add minimum distances
-            total_cardinality += distances.min(dim=1)[0].sum().item()
+                        print(f"DEBUG: Successfully extracted feature with shape: {feat.shape}")
+                        candidate_batch_list.append(feat)
+                    except Exception as e:
+                        print(f"DEBUG: Error extracting feature for pair {pair}: {str(e)}")
+                        continue
 
-        return total_cardinality / n_pairs
+                if len(candidate_batch_list) == 0:
+                    print("DEBUG: No valid features extracted for this batch")
+                    continue
+
+                print(f"DEBUG: Stacking {len(candidate_batch_list)} features")
+                candidate_batch = torch.stack(candidate_batch_list).to(self.device)
+                print(f"DEBUG: candidate_batch shape after stack: {candidate_batch.shape}")
+
+                # Do the same for selected features
+                selected_batch_list = []
+                for pair in batch_pairs:
+                    try:
+                        if isinstance(pair, (tuple, list)) and len(pair) == 2:
+                            # For 2D indexing
+                            if len(selected_features.shape) >= 3:  # Add 1 dimension for batch
+                                feat = selected_features[..., pair[0], pair[1]]
+                            else:
+                                print(f"DEBUG: Shape mismatch: cannot index {selected_features.shape} with 2D pair {pair}")
+                                continue
+                        else:
+                            # For 1D indexing
+                            feat = selected_features[..., pair]
+
+                        selected_batch_list.append(feat)
+                    except Exception as e:
+                        print(f"DEBUG: Error extracting selected feature for pair {pair}: {str(e)}")
+                        continue
+
+                if len(selected_batch_list) == 0:
+                    print("DEBUG: No valid selected features extracted for this batch")
+                    continue
+
+                selected_batch = torch.stack(selected_batch_list).to(self.device)
+                print(f"DEBUG: selected_batch shape after stack: {selected_batch.shape}")
+
+                # Reshape for cdist if needed
+                if len(candidate_batch.shape) < 2:
+                    candidate_batch = candidate_batch.unsqueeze(1)
+                    print(f"DEBUG: Reshaped candidate_batch to: {candidate_batch.shape}")
+
+                if len(selected_batch.shape) < 3:
+                    selected_batch = selected_batch.transpose(0, 1).unsqueeze(2)
+                    print(f"DEBUG: Reshaped selected_batch to: {selected_batch.shape}")
+                else:
+                    selected_batch = selected_batch.transpose(0, 1)
+                    print(f"DEBUG: Transposed selected_batch to: {selected_batch.shape}")
+
+                # Compute distances efficiently
+                print(f"DEBUG: Computing distances with shapes: {candidate_batch.shape} and {selected_batch.shape}")
+                distances = torch.cdist(
+                    candidate_batch,
+                    selected_batch,
+                    p=2
+                )
+                print(f"DEBUG: distances shape: {distances.shape}")
+
+                # Add minimum distances
+                min_distances = distances.min(dim=1)[0]
+                print(f"DEBUG: min_distances shape: {min_distances.shape}, values: {min_distances[:5]}")
+
+                batch_cardinality = min_distances.sum().item()
+                print(f"DEBUG: batch_cardinality: {batch_cardinality}")
+
+                total_cardinality += batch_cardinality
+
+            except Exception as e:
+                print(f"DEBUG: Error processing batch {start_idx}:{end_idx}: {str(e)}")
+                print(f"DEBUG: Exception type: {type(e)}")
+                traceback.print_exc()
+
+        result = total_cardinality / max(n_pairs, 1)  # Avoid division by zero
+        print(f"DEBUG: Final cardinality result: {result}")
+        return result
 
 
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
