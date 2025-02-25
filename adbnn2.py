@@ -4399,7 +4399,7 @@ def process_datasets():
             if model.config.get('enable_invertible', False):
                 invertible_model = model.create_invertible_model(
                     reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
-                    feedback_strength=model.config.get('feedback_strength', 0.3)
+                    feedback_strength=model.config.get('feedback_strength', 0.3))
                 print("Created invertible DBNN model")
 
             start_time = datetime.now()
