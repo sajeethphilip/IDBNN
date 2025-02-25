@@ -3639,13 +3639,17 @@ class DBNN(GPUDBNN):
         if os.path.exists(combinations_path):
             with open(combinations_path, 'rb') as f:
                 combinations = pickle.load(f)
-                return combinations  # Ensure this is a list of tuples or lists
+                # Ensure loaded combinations are a list of tuples or lists
+                if isinstance(combinations, torch.Tensor):
+                    combinations = combinations.tolist()
+                return combinations
 
         # Generate new combinations if none exist
         if n_features < group_size:
             raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
 
         # Generate all possible combinations
+        from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
         if not all_combinations:
             raise ValueError(f"No valid combinations generated for {n_features} features in groups of {group_size}")
