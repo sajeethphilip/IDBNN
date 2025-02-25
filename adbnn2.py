@@ -232,6 +232,29 @@ class DatasetConfig:
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
+            # Remove comments and parse
+            def remove_comments(json_str):
+                lines = []
+                in_multiline_comment = False
+                for line in json_str.split('\n'):
+                    if '_comment' in line:
+                        continue
+                    if '/*' in line and '*/' in line:
+                        line = line[:line.find('/*')] + line[line.find('*/') + 2:]
+                    elif '/*' in line:
+                        in_multiline_comment = True
+                        line = line[:line.find('/*')]
+                    elif '*/' in line:
+                        in_multiline_comment = False
+                        line = line[line.find('*/') + 2:]
+                    elif in_multiline_comment:
+                        continue
+                    if '//' in line and not ('http://' in line or 'https://' in line):
+                        line = line.split('//')[0]
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith('_comment'):
+                        lines.append(stripped)
+                return '\n'.join(lines)
 
             # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
