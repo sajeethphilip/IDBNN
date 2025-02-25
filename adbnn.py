@@ -2075,7 +2075,6 @@ class DBNN(GPUDBNN):
         """Compute cardinality score with null checks."""
         if self.feature_pairs is None:
             raise ValueError("Feature pairs not initialized")
-
         if len(selected_features) == 0:
             return float('inf')
 
@@ -2089,12 +2088,14 @@ class DBNN(GPUDBNN):
 
             # Extract features for current batch of pairs
             candidate_batch = torch.stack([
-                candidate_features[pair]
+                candidate_features[..., pair[0]:pair[0]+1, pair[1]:pair[1]+1].reshape(-1)
+                if isinstance(pair, tuple) else candidate_features[..., pair]
                 for pair in batch_pairs
             ]).to(self.device)
 
             selected_batch = torch.stack([
-                selected_features[:, pair]
+                selected_features[..., pair[0]:pair[0]+1, pair[1]:pair[1]+1].reshape(len(selected_features), -1)
+                if isinstance(pair, tuple) else selected_features[..., pair]
                 for pair in batch_pairs
             ]).to(self.device)
 
