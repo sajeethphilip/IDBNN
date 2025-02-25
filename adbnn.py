@@ -3241,6 +3241,7 @@ class DBNN(GPUDBNN):
             X = self.data[column_names]
             X = X.drop(columns=[self.target_column])
             y = self.data[self.target_column]
+            print(f" The data has {len(np.unique(y))} classes with values: {np.unique(y)}")
 
             # Setup binning handler before processing data
             self._setup_binning_handler(X)
