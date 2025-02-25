@@ -2198,7 +2198,7 @@ class DBNN(GPUDBNN):
 
                     total_cardinality += batch_cardinality
 
-                except Exception as e:
+             except Exception as e:
                     print(f"DEBUG: Error processing batch {start_idx}:{end_idx}: {str(e)}")
                     print(f"DEBUG: Exception type: {type(e)}")
                     traceback.print_exc()
