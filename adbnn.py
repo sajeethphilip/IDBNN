@@ -3628,8 +3628,8 @@ class DBNN(GPUDBNN):
         pbar.close()
         return torch.FloatTensor(X_scaled)
 
-    def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> torch.Tensor:
-        """Generate and save/load consistent feature combinations"""
+    def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> List[Tuple[int, int]]:
+        """Generate and save/load consistent feature combinations."""
         # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
@@ -3638,8 +3638,8 @@ class DBNN(GPUDBNN):
         # Check if combinations already exist
         if os.path.exists(combinations_path):
             with open(combinations_path, 'rb') as f:
-                combinations_tensor = pickle.load(f)
-                return combinations_tensor.to(self.device)
+                combinations = pickle.load(f)
+                return combinations  # Ensure this is a list of tuples or lists
 
         # Generate new combinations if none exist
         if n_features < group_size:
@@ -3656,17 +3656,14 @@ class DBNN(GPUDBNN):
             combinations_array = np.array(all_combinations)
             rng = np.random.RandomState(42)
             selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
-            all_combinations = combinations_array[selected_indices]
-
-        # Convert to tensor
-        combinations_tensor = torch.tensor(all_combinations, device=self.device)
+            all_combinations = combinations_array[selected_indices].tolist()
 
         # Save combinations for future use
         os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
         with open(combinations_path, 'wb') as f:
-            pickle.dump(combinations_tensor.cpu(), f)
+            pickle.dump(all_combinations, f)
 
-        return combinations_tensor
+        return all_combinations  # Ensure this is a list of tuples or lists
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
