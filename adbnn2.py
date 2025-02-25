@@ -220,7 +220,7 @@ class DatasetConfig:
 
         # If the config isn't in current directory, check data directory
         if not os.path.exists(config_path):
-            config_path = os.path.join('data', f"{dataset_name}.conf")
+            config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
 
         try:
             # Check if configuration file exists
