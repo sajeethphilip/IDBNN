@@ -2087,15 +2087,26 @@ class DBNN(GPUDBNN):
             end_idx = min(start_idx + batch_size, n_pairs)
             batch_pairs = self.feature_pairs[start_idx:end_idx]
 
+            # Validate indices before stacking
+            valid_pairs = []
+            for pair in batch_pairs:
+                if all(0 <= idx < candidate_features.shape[1] for idx in pair):
+                    valid_pairs.append(pair)
+                else:
+                    print(f"Warning: Invalid feature pair {pair} skipped (out of bounds)")
+
+            if not valid_pairs:
+                continue
+
             # Extract features for current batch of pairs
             candidate_batch = torch.stack([
-                candidate_features[pair]
-                for pair in batch_pairs
+                candidate_features[:, pair].contiguous()
+                for pair in valid_pairs
             ]).to(self.device)
 
             selected_batch = torch.stack([
-                selected_features[:, pair]
-                for pair in batch_pairs
+                selected_features[:, pair].contiguous()
+                for pair in valid_pairs
             ]).to(self.device)
 
             # Compute distances efficiently
@@ -2109,7 +2120,6 @@ class DBNN(GPUDBNN):
             total_cardinality += distances.min(dim=1)[0].sum().item()
 
         return total_cardinality / n_pairs
-
 
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
        """Verify if reconstructed features maintain predictive accuracy"""
