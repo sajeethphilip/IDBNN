@@ -2111,13 +2111,97 @@ class DBNN(GPUDBNN):
                     else:
                         print("DEBUG: candidate_features index valid: N/A")
 
-                # Rest of the method remains the same...
-                # ... (keep the existing code for processing the batch)
+                    # Extract features for current batch of pairs
+                    candidate_batch_list = []
+                    for pair in batch_pairs:
+                        print(f"DEBUG: Processing pair: {pair}")
+                        try:
+                            if isinstance(pair, (tuple, list)) and len(pair) == 2:
+                                # For 2D indexing
+                                if len(candidate_features.shape) >= 2:
+                                    feat = candidate_features[..., pair[0], pair[1]]
+                                else:
+                                    print(f"DEBUG: Shape mismatch: cannot index {candidate_features.shape} with 2D pair {pair}")
+                                    continue
+                            else:
+                                # For 1D indexing
+                                feat = candidate_features[..., pair]
 
-            except Exception as e:
-                print(f"DEBUG: Error processing batch {start_idx}:{end_idx}: {str(e)}")
-                print(f"DEBUG: Exception type: {type(e)}")
-                traceback.print_exc()
+                            print(f"DEBUG: Successfully extracted feature with shape: {feat.shape}")
+                            candidate_batch_list.append(feat)
+                        except Exception as e:
+                            print(f"DEBUG: Error extracting feature for pair {pair}: {str(e)}")
+                            continue
+
+                    if len(candidate_batch_list) == 0:
+                        print("DEBUG: No valid features extracted for this batch")
+                        continue
+
+                    print(f"DEBUG: Stacking {len(candidate_batch_list)} features")
+                    candidate_batch = torch.stack(candidate_batch_list).to(self.device)
+                    print(f"DEBUG: candidate_batch shape after stack: {candidate_batch.shape}")
+
+                    # Do the same for selected features
+                    selected_batch_list = []
+                    for pair in batch_pairs:
+                        try:
+                            if isinstance(pair, (tuple, list)) and len(pair) == 2:
+                                # For 2D indexing
+                                if len(selected_features.shape) >= 3:  # Add 1 dimension for batch
+                                    feat = selected_features[..., pair[0], pair[1]]
+                                else:
+                                    print(f"DEBUG: Shape mismatch: cannot index {selected_features.shape} with 2D pair {pair}")
+                                    continue
+                            else:
+                                # For 1D indexing
+                                feat = selected_features[..., pair]
+
+                            selected_batch_list.append(feat)
+                        except Exception as e:
+                            print(f"DEBUG: Error extracting selected feature for pair {pair}: {str(e)}")
+                            continue
+
+                    if len(selected_batch_list) == 0:
+                        print("DEBUG: No valid selected features extracted for this batch")
+                        continue
+
+                    selected_batch = torch.stack(selected_batch_list).to(self.device)
+                    print(f"DEBUG: selected_batch shape after stack: {selected_batch.shape}")
+
+                    # Reshape for cdist if needed
+                    if len(candidate_batch.shape) < 2:
+                        candidate_batch = candidate_batch.unsqueeze(1)
+                        print(f"DEBUG: Reshaped candidate_batch to: {candidate_batch.shape}")
+
+                    if len(selected_batch.shape) < 3:
+                        selected_batch = selected_batch.transpose(0, 1).unsqueeze(2)
+                        print(f"DEBUG: Reshaped selected_batch to: {selected_batch.shape}")
+                    else:
+                        selected_batch = selected_batch.transpose(0, 1)
+                        print(f"DEBUG: Transposed selected_batch to: {selected_batch.shape}")
+
+                    # Compute distances efficiently
+                    print(f"DEBUG: Computing distances with shapes: {candidate_batch.shape} and {selected_batch.shape}")
+                    distances = torch.cdist(
+                        candidate_batch,
+                        selected_batch,
+                        p=2
+                    )
+                    print(f"DEBUG: distances shape: {distances.shape}")
+
+                    # Add minimum distances
+                    min_distances = distances.min(dim=1)[0]
+                    print(f"DEBUG: min_distances shape: {min_distances.shape}, values: {min_distances[:5]}")
+
+                    batch_cardinality = min_distances.sum().item()
+                    print(f"DEBUG: batch_cardinality: {batch_cardinality}")
+
+                    total_cardinality += batch_cardinality
+
+                except Exception as e:
+                    print(f"DEBUG: Error processing batch {start_idx}:{end_idx}: {str(e)}")
+                    print(f"DEBUG: Exception type: {type(e)}")
+                    traceback.print_exc()
 
         result = total_cardinality / max(n_pairs, 1)  # Avoid division by zero
         print(f"DEBUG: Final cardinality result: {result}")
