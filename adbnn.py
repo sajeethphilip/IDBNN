@@ -2160,7 +2160,7 @@ class DBNN(GPUDBNN):
                         except Exception as e:
                             print(f"DEBUG: Error extracting selected feature for pair {pair}: {str(e)}")
                             continue
-                    exit(0)
+                        exit(0)
                     if len(selected_batch_list) == 0:
                         print("DEBUG: No valid selected features extracted for this batch")
                         continue
