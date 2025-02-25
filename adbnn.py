@@ -2087,32 +2087,15 @@ class DBNN(GPUDBNN):
             end_idx = min(start_idx + batch_size, n_pairs)
             batch_pairs = self.feature_pairs[start_idx:end_idx]
 
-            # Validate pairs before processing
-            valid_pairs = []
-            for pair in batch_pairs:
-                # Ensure pair is a tuple or list of indices
-                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
-                    print(f"Warning: Invalid feature pair {pair} skipped (not a tuple/list of length 2)")
-                    continue
-
-                # Ensure indices are within bounds
-                if all(0 <= idx < candidate_features.shape[1] for idx in pair):
-                    valid_pairs.append(pair)
-                else:
-                    print(f"Warning: Invalid feature pair {pair} skipped (out of bounds)")
-
-            if not valid_pairs:
-                continue
-
             # Extract features for current batch of pairs
             candidate_batch = torch.stack([
-                candidate_features[:, pair].contiguous()
-                for pair in valid_pairs
+                candidate_features[pair]
+                for pair in batch_pairs
             ]).to(self.device)
 
             selected_batch = torch.stack([
-                selected_features[:, pair].contiguous()
-                for pair in valid_pairs
+                selected_features[:, pair]
+                for pair in batch_pairs
             ]).to(self.device)
 
             # Compute distances efficiently
@@ -2126,6 +2109,8 @@ class DBNN(GPUDBNN):
             total_cardinality += distances.min(dim=1)[0].sum().item()
 
         return total_cardinality / n_pairs
+
+
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
        """Verify if reconstructed features maintain predictive accuracy"""
        try:
@@ -3628,8 +3613,8 @@ class DBNN(GPUDBNN):
         pbar.close()
         return torch.FloatTensor(X_scaled)
 
-    def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> List[Tuple[int, int]]:
-        """Generate and save/load consistent feature combinations."""
+    def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> torch.Tensor:
+        """Generate and save/load consistent feature combinations"""
         # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
@@ -3638,18 +3623,14 @@ class DBNN(GPUDBNN):
         # Check if combinations already exist
         if os.path.exists(combinations_path):
             with open(combinations_path, 'rb') as f:
-                combinations = pickle.load(f)
-                # Ensure loaded combinations are a list of tuples or lists
-                if isinstance(combinations, torch.Tensor):
-                    combinations = combinations.tolist()
-                return combinations
+                combinations_tensor = pickle.load(f)
+                return combinations_tensor.to(self.device)
 
         # Generate new combinations if none exist
         if n_features < group_size:
             raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
 
         # Generate all possible combinations
-        from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
         if not all_combinations:
             raise ValueError(f"No valid combinations generated for {n_features} features in groups of {group_size}")
@@ -3660,14 +3641,17 @@ class DBNN(GPUDBNN):
             combinations_array = np.array(all_combinations)
             rng = np.random.RandomState(42)
             selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
-            all_combinations = combinations_array[selected_indices].tolist()
+            all_combinations = combinations_array[selected_indices]
+
+        # Convert to tensor
+        combinations_tensor = torch.tensor(all_combinations, device=self.device)
 
         # Save combinations for future use
         os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
         with open(combinations_path, 'wb') as f:
-            pickle.dump(all_combinations, f)
+            pickle.dump(combinations_tensor.cpu(), f)
 
-        return all_combinations  # Ensure this is a list of tuples or lists
+        return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
