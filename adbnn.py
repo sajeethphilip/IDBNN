@@ -3141,7 +3141,7 @@ class DBNN(GPUDBNN):
                 self._setup_device_and_precision()
 
             # Initialize data
-           column_names = config['column_names']
+            column_names = config['column_names']
             X = self.data[column_names]
             X = X.drop(columns=[self.target_column])
             y = self.data[self.target_column]
