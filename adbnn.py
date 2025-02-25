@@ -909,52 +909,46 @@ class DatasetConfig:
 #---------------------------------------Feature Filter with a #------------------------------------
 def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
-    Filter DataFrame columns based on commented features in config
+    Filter DataFrame to only include specified columns from config
 
     Args:
         df: Input DataFrame
         config: Configuration dictionary containing column names
 
     Returns:
-        DataFrame with filtered columns
+        DataFrame with only the specified columns
     """
     # If no column names in config, return original DataFrame
-    if 'column_names' not in config:
+    if 'column_names' not in config or not config['column_names']:
+        print("No column names specified in config. Keeping all columns.")
         return df
-
-    # Get column names from config
-    column_names = config['column_names']
-
-    # Create mapping of position to column name
-    col_mapping = {i: name.strip() for i, name in enumerate(column_names)}
-
-    # Identify commented features (starting with #)
-    commented_features = {
-        i: name.lstrip('#').strip()
-        for i, name in col_mapping.items()
-        if name.startswith('#')
-    }
 
     # Get current DataFrame columns
     current_cols = df.columns.tolist()
+    print(f"Current DataFrame columns: {current_cols}")
 
-    # Columns to drop (either by name or position)
-    cols_to_drop = []
+    # Get column names from config (only those not commented out)
+    requested_columns = [
+        name.strip() for name in config['column_names']
+        if not name.strip().startswith('#')
+    ]
 
-    for pos, name in commented_features.items():
-        # Try to drop by name first
-        if name in current_cols:
-            cols_to_drop.append(name)
-        # If name not found, try position
-        elif pos < len(current_cols):
-            cols_to_drop.append(current_cols[pos])
+    # If no uncommented columns found in config, return original DataFrame
+    if not requested_columns:
+        print("No uncommented column names found in config. Returning original DataFrame.")
+        return df
 
-    # Drop identified columns
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
-        print(f"Dropped commented features: {cols_to_drop}")
+    # Check if any requested columns exist in the DataFrame
+    valid_columns = [col for col in requested_columns if col in current_cols]
 
-    return df
+    # If no valid columns found, return original DataFrame
+    if not valid_columns:
+        print("None of the requested columns exist in the DataFrame. Returning original DataFrame.")
+        return df
+
+    # Return DataFrame with only the columns to keep
+    print(f"Keeping only these features: {valid_columns}")
+    return df[valid_columns]
 #-------------------------------------------------
 class ComputationCache:
     """Cache for frequently used computations"""
@@ -2431,18 +2425,17 @@ class DBNN(GPUDBNN):
 
         return features
 
+
     def _load_dataset(self) -> pd.DataFrame:
         """Load and preprocess dataset with improved error handling"""
-        DEBUG.log(f" Loading dataset from config: {self.data_config}")
+        DEBUG.log(f" Loading dataset from config: {self.config}")
         try:
-            # Validate dataset configuration
-            if self.data_config is None:
-                raise ValueError(f"No dataset configuration found for: {self.dataset_name}")
-
-            file_path = self.data_config.get('file_path')
+            # Validate configuration
+            if self.config is None:
+                raise ValueError(f"No configuration found for dataset: {self.dataset_name}")
+            file_path = self.config.get('file_path')
             if file_path is None:
-                raise ValueError(f"No file path specified in dataset configuration for: {self.dataset_name}")
-
+                raise ValueError(f"No file path specified in configuration for dataset: {self.dataset_name}")
             # Handle URL or local file
             try:
                 if file_path.startswith(('http://', 'https://')):
@@ -2452,81 +2445,89 @@ class DBNN(GPUDBNN):
                     data = StringIO(response.text)
                 else:
                     DEBUG.log(f" Loading from local file: {file_path}")
-                    # Try the configured path first
                     if not os.path.exists(file_path):
-                        # Try looking in data/dataset_name directory
-                        alt_path = os.path.join('data', self.dataset_name, f"{self.dataset_name}.csv")
-                        if os.path.exists(alt_path):
-                            file_path = alt_path
-                            DEBUG.log(f" Found file at alternate path: {file_path}")
-                        else:
-                            raise FileNotFoundError(f"Dataset file not found at either {file_path} or {alt_path}")
+                        raise FileNotFoundError(f"Dataset file not found: {file_path}")
                     data = file_path
 
-                # Read CSV with appropriate parameters from dataset config
-                # Get header configuration
-                has_header = self.data_config.get('has_header', True)
+                # First, read the CSV to get the actual headers
+                has_header = self.config.get('has_header', True)
 
-                # Read CSV with appropriate parameters
                 read_params = {
-                    'sep': self.data_config.get('separator', ','),
+                    'sep': self.config.get('separator', ','),
                     'header': 0 if has_header else None,
                 }
 
-                # If column names are provided and no header, use them
-                if not has_header and self.data_config.get('column_names'):
-                    read_params['names'] = self.data_config.get('column_names')
-
+                # DO NOT include 'names' parameter for the initial read
+                # This allows us to read the actual headers from the file
                 DEBUG.log(f" Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
 
-                # If no header and no column names provided, generate default names
-                if not has_header and 'names' not in read_params:
-                    df.columns = [f'col_{i}' for i in range(df.shape[1])]
+                if df is None or df.empty:
+                    raise ValueError(f"Empty dataset loaded from {file_path}")
 
-                # Handle target column specification
-                target_col = self.data_config.get('target_column', -1)
-                if isinstance(target_col, int):
-                    # Convert negative index to positive
-                    if target_col < 0:
-                        target_col = df.shape[1] + target_col
-                    # Validate target column index
-                    if target_col >= df.shape[1] or target_col < 0:
-                        print(f"Warning: Invalid target column index {target_col}. Using last column.")
-                        target_col = df.shape[1] - 1
-                    # Set target column name
-                    self.target_column = df.columns[target_col]
+                DEBUG.log(f" Loaded DataFrame shape: {df.shape}")
+                DEBUG.log(f" Original DataFrame columns: {df.columns.tolist()}")
+
+                # Filter features based on config after reading the actual data
+                if 'column_names' in self.config:
+                    DEBUG.log(" Filtering features based on config")
+                    df = _filter_features_from_config(df, self.config)
+                    DEBUG.log(f" Shape after filtering: {df.shape}")
+
+                # Handle target column
+                target_column = self.config.get('target_column')
+                if target_column is None:
+                    raise ValueError(f"No target column specified for dataset: {self.dataset_name}")
+
+                if isinstance(target_column, int):
+                    cols = df.columns.tolist()
+                    if target_column >= len(cols):
+                        raise ValueError(f"Target column index {target_column} is out of range")
+                    target_column = cols[target_column]
+                    self.config['target_column'] = target_column
+                    DEBUG.log(f" Using target column: {target_column}")
+
+                if target_column not in df.columns:
+                    raise ValueError(f"Target column '{target_column}' not found in dataset")
+
+                DEBUG.log(f" Dataset loaded successfully. Shape: {df.shape}")
+                DEBUG.log(f" Columns: {df.columns.tolist()}")
+                DEBUG.log(f" Data types:\n{df.dtypes}")
+
+                # Create data directory path
+                dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+                base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
+                data_dir = os.path.join(base_path, dataset_folder, 'data')
+                shuffled_file = os.path.join(data_dir, 'shuffled_data.csv')
+
+                # Check if this is a fresh start with random shuffling
+                if self.fresh_start and self.random_state == -1:
+                    print("Fresh start with random shuffling enabled")
+                    # Perform 3 rounds of truly random shuffling
+                    for _ in range(3):
+                        df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+                    # Ensure directory exists before saving
+                    os.makedirs(data_dir, exist_ok=True)
+                    # Save shuffled data
+                    df.to_csv(shuffled_file, index=False)
+                    print(f"Saved shuffled data to {shuffled_file}")
+                elif os.path.exists(shuffled_file):
+                    print(f"Loading previously shuffled data from {shuffled_file}")
+                    df = pd.read_csv(shuffled_file)
                 else:
-                    # Target column specified by name
-                    if target_col not in df.columns:
-                        print(f"Warning: Target column '{target_col}' not found. Using last column.")
-                        self.target_column = df.columns[-1]
-                    else:
-                        self.target_column = target_col
-
-                # Filter features if specified in config
-                if '#' in str(self.data_config.get('column_names')):
-                    df = _filter_features_from_config(df, self.data_config)
-
-                DEBUG.log(f" Dataset loaded successfully:")
-                DEBUG.log(f" - Shape: {df.shape}")
-                DEBUG.log(f" - Columns: {df.columns.tolist()}")
-                DEBUG.log(f" - Target column: {self.target_column}")
+                    print("Using original data order (no shuffling required)")
 
                 return df
 
             except requests.exceptions.RequestException as e:
                 DEBUG.log(f" Error downloading dataset from URL: {str(e)}")
                 raise RuntimeError(f"Failed to download dataset from URL: {str(e)}")
-
             except pd.errors.EmptyDataError:
                 DEBUG.log(f" Error: Dataset file is empty")
                 raise ValueError(f"Dataset file is empty: {file_path}")
-
             except pd.errors.ParserError as e:
                 DEBUG.log(f" Error parsing CSV file: {str(e)}")
                 raise ValueError(f"Invalid CSV format: {str(e)}")
-
         except Exception as e:
             DEBUG.log(f" Error loading dataset: {str(e)}")
             DEBUG.log(" Stack trace:", traceback.format_exc())
@@ -3140,7 +3141,9 @@ class DBNN(GPUDBNN):
                 self._setup_device_and_precision()
 
             # Initialize data
-            X = self.data.drop(columns=[self.target_column])
+           column_names = config['column_names']
+            X = self.data[column_names]
+            X = X.drop(columns=[self.target_column])
             y = self.data[self.target_column]
 
             # Setup binning handler before processing data
