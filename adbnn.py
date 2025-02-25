@@ -2087,9 +2087,15 @@ class DBNN(GPUDBNN):
             end_idx = min(start_idx + batch_size, n_pairs)
             batch_pairs = self.feature_pairs[start_idx:end_idx]
 
-            # Validate indices before stacking
+            # Validate pairs before processing
             valid_pairs = []
             for pair in batch_pairs:
+                # Ensure pair is a tuple or list of indices
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    print(f"Warning: Invalid feature pair {pair} skipped (not a tuple/list of length 2)")
+                    continue
+
+                # Ensure indices are within bounds
                 if all(0 <= idx < candidate_features.shape[1] for idx in pair):
                     valid_pairs.append(pair)
                 else:
@@ -2120,7 +2126,6 @@ class DBNN(GPUDBNN):
             total_cardinality += distances.min(dim=1)[0].sum().item()
 
         return total_cardinality / n_pairs
-
     def verify_reconstruction_predictions(self, predictions_df: pd.DataFrame, reconstructions_df: pd.DataFrame) -> Dict:
        """Verify if reconstructed features maintain predictive accuracy"""
        try:
