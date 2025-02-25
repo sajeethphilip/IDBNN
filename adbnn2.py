@@ -212,6 +212,10 @@ class DatasetConfig:
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
         """Enhanced configuration loading with URL handling and comment removal"""
+        if not dataset_name or not isinstance(dataset_name, str):
+            print("Error: Invalid dataset name provided.")
+            return None
+
         config_path = f"{dataset_name}.conf"
 
         # If the config isn't in current directory, check data directory
@@ -229,46 +233,9 @@ class DatasetConfig:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
 
-            def remove_comments(json_str):
-                """Remove both inline and multiline comments"""
-                # Handle multi-line comments
-                lines = []
-                in_multiline_comment = False
-                for line in json_str.split('\n'):
-                    if '_comment' in line:
-                        continue
-
-                    # Handle multi-line comments
-                    if '/*' in line and '*/' in line:
-                        line = line[:line.find('/*')] + line[line.find('*/') + 2:]
-                    elif '/*' in line:
-                        in_multiline_comment = True
-                        line = line[:line.find('/*')]
-                    elif '*/' in line:
-                        in_multiline_comment = False
-                        line = line[line.find('*/') + 2:]
-                    elif in_multiline_comment:
-                        continue
-
-                    # Remove single-line comments, but skip if // is part of http:// or https://
-                    if '//' in line and not ('http://' in line or 'https://' in line):
-                        line = line.split('//')[0]
-
-                    # Only add non-empty lines
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith('_comment'):
-                        lines.append(stripped)
-
-                return '\n'.join(lines)
-
-            # Clean configuration text and parse JSON
+            # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
-            try:
-                config = json.loads(clean_config)
-            except json.JSONDecodeError as e:
-                print(f"Error parsing {config_path}: {str(e)}")
-                print("Creating default configuration instead")
-                return DatasetConfig.create_default_config(dataset_name)
+            config = json.loads(clean_config)
 
             # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
@@ -314,7 +281,6 @@ class DatasetConfig:
                 try:
                     df = pd.read_csv(validated_config['file_path'], nrows=0)
                     validated_config['column_names'] = df.columns.tolist()
-                    #print(f"Inferred column names from CSV: {validated_config['column_names']}")
                 except Exception as e:
                     print(f"Warning: Could not infer column names: {str(e)}")
                     return None
@@ -1133,8 +1099,7 @@ class DBNN(GPUDBNN):
 
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
                  dataset_name: Optional[str] = None):
-        super().__init__(config, dataset_name)
-        self.invertible_model = None
+
         """
         Initialize DBNN with configuration
 
@@ -1151,7 +1116,6 @@ class DBNN(GPUDBNN):
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
 
-
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
@@ -1167,6 +1131,19 @@ class DBNN(GPUDBNN):
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
+
+        # Validate dataset_name
+        if not dataset_name or not isinstance(dataset_name, str):
+            raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
+
+        # Load configuration
+        self.config = DatasetConfig.load_config(dataset_name)
+        if self.config is None:
+            raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
+
+        # Initialize other attributes
+        self.target_column = self.config['target_column']
+        self.invertible_model = None
 
     def create_invertible_model(self, reconstruction_weight: float = 0.5, feedback_strength: float = 0.3):
         """Create an invertible DBNN model"""
@@ -4380,6 +4357,11 @@ def process_datasets():
         print(f"Data file: {csv_path}")
         print('='*60)
 
+        # Validate dataset name
+        if not basename or not isinstance(basename, str):
+            print(f"Invalid dataset name: {basename}. Skipping...")
+            continue
+
         # Print dataset information
         print_dataset_info(conf_path, csv_path)
 
@@ -4399,7 +4381,8 @@ def process_datasets():
             if model.config.get('enable_invertible', False):
                 invertible_model = model.create_invertible_model(
                     reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
-                    feedback_strength=model.config.get('feedback_strength', 0.3))
+                    feedback_strength=model.config.get('feedback_strength', 0.3)
+                )
                 print("Created invertible DBNN model")
 
             start_time = datetime.now()
