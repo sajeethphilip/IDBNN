@@ -279,7 +279,22 @@ class DatasetProcessor:
 
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
+
+            # Check for duplicate entries and remove them
+            if "feature_group_size" in config and "likelihood_config" in config:
+                print(f"[WARNING] Duplicate entries found in {config_path}. Removing duplicates...")
+                # Remove the standalone entries
+                config.pop("feature_group_size", None)
+                config.pop("max_combinations", None)
+                config.pop("bin_sizes", None)
+
+                # Save the cleaned configuration
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=4)
+                print(f"[INFO] Configuration file cleaned and saved.")
+
+            return config
 
         # Create default dataset config
         csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
@@ -301,8 +316,7 @@ class DatasetProcessor:
                 "cardinality_threshold_percentile": 95,
                 "strong_margin_threshold": 0.3,
                 "marginal_margin_threshold": 0.1,
-                "min_divergence": 0.1,
-                "max_class_addition_percent": 5  # Default value for m (5%)
+                "min_divergence": 0.1
             },
             "training_params": {
                 "Save_training_epochs": True,
@@ -315,7 +329,6 @@ class DatasetProcessor:
             json.dump(default_config, f, indent=4)
 
         return default_config
-
     def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
         """Check if dataset has single CSV file"""
         # Check both possible locations
@@ -2965,6 +2978,11 @@ class DBNN(GPUDBNN):
 
     def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations"""
+        # Get parameters from likelihood_config
+        likelihood_config = self.config.get('likelihood_config', {})
+        group_size = group_size or likelihood_config.get('feature_group_size', 2)
+        max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
+
         # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
