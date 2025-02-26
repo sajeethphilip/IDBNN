@@ -2489,6 +2489,13 @@ class DBNN(GPUDBNN):
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
+
+           # Encode labels if not already done
+            if not hasattr(self.label_encoder, 'classes_'):
+                y_encoded = self.label_encoder.fit_transform(y)
+            else:
+                y_encoded = self.label_encoder.transform(y)
+
             print(self.target_column)
             print(f" Initial data shape: X={X.shape}, y={len(y)}")
             print(f"Number of classes in data = {np.unique(y)}")
@@ -3498,7 +3505,6 @@ class DBNN(GPUDBNN):
 
         return None, None
 
-#---------------------------------------------------------------------------------------------------------
 
     def predict(self, X: torch.Tensor, batch_size: int = 32):
         """Make predictions in batches using the best model weights"""
@@ -3911,7 +3917,89 @@ class DBNN(GPUDBNN):
         self._save_model_components()
         return self.current_W.cpu(), error_rates
 
+    #---------------------------------Train InvertableDBNN on the fly ------------------------------------
+    def save_reconstruction_features(self,
+                                     reconstructed_features: torch.Tensor,
+                                     original_features: torch.Tensor,
+                                     predictions: torch.Tensor,
+                                     true_labels: torch.Tensor = None,
+                                     class_probs: torch.Tensor = None) -> Dict:
+        """Save reconstruction features and return JSON-compatible output.
 
+        Args:
+            reconstructed_features: Reconstructed feature tensor
+            original_features: Original input feature tensor
+            predictions: Model predictions tensor
+            true_labels: True labels tensor (optional)
+            class_probs: Class probabilities tensor (optional)
+
+        Returns:
+            Dict containing reconstruction data and paths
+        """
+        # Create reconstruction directory
+        dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        recon_dir = os.path.join('data', dataset_name, 'reconstruction')
+        os.makedirs(recon_dir, exist_ok=True)
+
+        # Convert tensors to numpy arrays
+        recon_np = reconstructed_features.cpu().numpy()
+        orig_np = original_features.cpu().numpy()
+        pred_np = predictions.cpu().numpy()
+
+        # Create DataFrame with original and reconstructed features
+        feature_cols = [f'feature_{i}' for i in range(orig_np.shape[1])]
+        recon_cols = [f'reconstructed_{i}' for i in range(recon_np.shape[1])]
+
+        df = pd.DataFrame(orig_np, columns=feature_cols)
+        df = pd.concat([df, pd.DataFrame(recon_np, columns=recon_cols)], axis=1)
+
+        # Add predictions
+        df['predicted_class'] = self.label_encoder.inverse_transform(pred_np)
+
+        # Add true labels if provided
+        if true_labels is not None:
+            true_np = true_labels.cpu().numpy()
+            df['true_class'] = self.label_encoder.inverse_transform(true_np)
+
+        # Add class probabilities if provided
+        if class_probs is not None:
+            probs_np = class_probs.cpu().numpy()
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                df[f'prob_{class_name}'] = probs_np[:, i]
+
+        # Add reconstruction error
+        df['reconstruction_error'] = np.mean((orig_np - recon_np) ** 2, axis=1)
+
+        # Save to CSV
+        csv_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction.csv')
+        df.to_csv(csv_path, index=False)
+
+        # Create JSON-compatible output
+        output = {
+            'dataset': dataset_name,
+            'reconstruction_path': csv_path,
+            'feature_count': orig_np.shape[1],
+            'sample_count': len(df),
+            'mean_reconstruction_error': float(df['reconstruction_error'].mean()),
+            'std_reconstruction_error': float(df['reconstruction_error'].std()),
+            'features': {
+                'original': feature_cols,
+                'reconstructed': recon_cols
+            },
+            'class_mapping': dict(zip(
+                range(len(self.label_encoder.classes_)),
+                self.label_encoder.classes_
+            ))
+        }
+
+        # Save metadata as JSON
+        json_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction_meta.json')
+        with open(json_path, 'w') as f:
+            json.dump(output, f, indent=2)
+
+        return output
+
+    #------------------------------End Train InvertableDBNN on the fly ------------------------------------
 
     def plot_training_metrics(self, train_loss, test_loss, train_acc, test_acc, save_path=None):
         """Plot training and testing metrics over epochs"""
@@ -4735,6 +4823,23 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
     plt.show()
 
 
+def save_label_encoder(label_encoder, dataset_name):
+    save_dir = os.path.join('Model', f'Best_{dataset_name}')
+    os.makedirs(save_dir, exist_ok=True)
+    encoder_path = os.path.join(save_dir, 'label_encoder.pkl')
+    with open(encoder_path, 'wb') as f:
+        pickle.dump(label_encoder, f)
+    print(f"Label encoder saved to {encoder_path}")
+
+def load_label_encoder(dataset_name):
+    encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
+    if os.path.exists(encoder_path):
+        with open(encoder_path, 'rb') as f:
+            label_encoder = pickle.load(f)
+        print(f"Label encoder loaded from {encoder_path}")
+        return label_encoder
+    else:
+        raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
 
 
 def generate_test_datasets():
@@ -5628,7 +5733,7 @@ def main():
     args = parser.parse_args()
 
     processor = DatasetProcessor()
-
+    parser.print_help()
     if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
@@ -5641,6 +5746,10 @@ def main():
 
                 if input("\nProcess this dataset? (y/n): ").lower() == 'y':
                     process_datasets()
+                    # Save the label encoder after training
+                    model = DBNN(dataset_name=basename)
+                    save_label_encoder(model.label_encoder, basename)
+
     elif args.mode !="invertDBNN":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
@@ -5648,6 +5757,66 @@ def main():
         conf_path=os.path.join(f"data/{basename}/{basename}.conf")
         csv_path=os.path.join(f"data/{basename}/{basename}.csv")
         process_datasets()
+        # Save the label encoder after training
+        model = DBNN(dataset_name=basename)
+        save_label_encoder(model.label_encoder, basename)
+
+    elif args.mode =="invertDBNN":
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        # Invert DBNN mode
+        model = DBNN(dataset_name=basename)
+        model._load_model_components()
+        # Load configuration
+        with open(conf_path, 'r') as f:
+            config_dict = json.load(f)
+
+        print("\nDEBUG: Inverse DBNN Settings:")
+        for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
+            value = config_dict.get('training_params', {}).get(param, 0.1)
+            print(f"- {param}: {value}")
+
+        print("DEBUG: Initializing inverse model...")
+
+        # Load the label encoder
+        try:
+            label_encoder = load_label_encoder(basename)
+            model.label_encoder = label_encoder
+
+            # Now you can safely access model.label_encoder.classes_
+            #print(f"Classes in label encoder: {model.label_encoder.classes_}")
+
+            # Proceed with inverse model initialization
+            inverse_model = InvertibleDBNN(
+                forward_model=model,
+                feature_dims=model.data.shape[1] - 1,  # Exclude target column
+                reconstruction_weight=config_dict['training_params'].get('reconstruction_weight', 0.5),
+                feedback_strength=config_dict['training_params'].get('feedback_strength', 0.3)
+            )
+
+            # Reconstruct features
+            X_test = model.data.drop(columns=[model.target_column])
+            test_probs = model._get_test_probabilities(X_test)
+            reconstruction_features = inverse_model.reconstruct_features(test_probs)
+
+            # Save reconstructed features
+            output_dir = os.path.join('data', basename, 'Predicted_features')
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f'{basename}.csv')
+
+            feature_columns = model.data.drop(columns=[model.target_column]).columns
+            reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
+            reconstructed_df.to_csv(output_file, index=False)
+
+            print(f"Reconstructed features saved to {output_file}")
+
+        except FileNotFoundError as e:
+            print(f"Error: {str(e)}")
+            print("Please ensure the model has been trained before using invertDBNN mode.")
+            return
 
     else:
         print("\nNo datasets found in data folder")
