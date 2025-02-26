@@ -2976,59 +2976,59 @@ class DBNN(GPUDBNN):
         pbar.close()
         return torch.FloatTensor(X_scaled)
 
-def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
-    """Generate and save/load consistent feature combinations"""
-    # Get parameters from likelihood_config
-    likelihood_config = self.config.get('likelihood_config', {})
-    group_size = group_size or likelihood_config.get('feature_group_size', 2)
-    max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
+    def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
+        """Generate and save/load consistent feature combinations"""
+        # Get parameters from likelihood_config
+        likelihood_config = self.config.get('likelihood_config', {})
+        group_size = group_size or likelihood_config.get('feature_group_size', 2)
+        max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
 
-    # Debug: Print parameters
-    print(f"[DEBUG] Generating feature combinations with:")
-    print(f"- n_features: {n_features}")
-    print(f"- group_size: {group_size}")
-    print(f"- max_combinations: {max_combinations}")
+        # Debug: Print parameters
+        print(f"[DEBUG] Generating feature combinations with:")
+        print(f"- n_features: {n_features}")
+        print(f"- group_size: {group_size}")
+        print(f"- max_combinations: {max_combinations}")
 
-    # Create path for storing feature combinations
-    dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
-    base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
-    combinations_path = os.path.join(base_path, dataset_folder, 'feature_combinations.pkl')
+        # Create path for storing feature combinations
+        dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
+        combinations_path = os.path.join(base_path, dataset_folder, 'feature_combinations.pkl')
 
-    # Check if combinations already exist
-    if os.path.exists(combinations_path):
-        print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
-        with open(combinations_path, 'rb') as f:
-            combinations_tensor = pickle.load(f)
-            return combinations_tensor.to(self.device)
+        # Check if combinations already exist
+        if os.path.exists(combinations_path):
+            print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            with open(combinations_path, 'rb') as f:
+                combinations_tensor = pickle.load(f)
+                return combinations_tensor.to(self.device)
 
-    # Generate new combinations if none exist
-    if n_features < group_size:
-        raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
+        # Generate new combinations if none exist
+        if n_features < group_size:
+            raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
 
-    # Generate all possible combinations
-    from itertools import combinations
-    all_combinations = list(combinations(range(n_features), group_size))
-    print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
+        # Generate all possible combinations
+        from itertools import combinations
+        all_combinations = list(combinations(range(n_features), group_size))
+        print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
-    # Sample combinations if max_combinations specified
-    if max_combinations and len(all_combinations) > max_combinations:
-        print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
-        # Convert list of tuples to numpy array for sampling
-        combinations_array = np.array(all_combinations)
-        rng = np.random.RandomState(42)
-        selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
-        all_combinations = combinations_array[selected_indices]
+        # Sample combinations if max_combinations specified
+        if max_combinations and len(all_combinations) > max_combinations:
+            print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
+            # Convert list of tuples to numpy array for sampling
+            combinations_array = np.array(all_combinations)
+            rng = np.random.RandomState(42)
+            selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
+            all_combinations = combinations_array[selected_indices]
 
-    # Convert to tensor
-    combinations_tensor = torch.tensor(all_combinations, device=self.device)
+        # Convert to tensor
+        combinations_tensor = torch.tensor(all_combinations, device=self.device)
 
-    # Save combinations for future use
-    os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
-    with open(combinations_path, 'wb') as f:
-        pickle.dump(combinations_tensor.cpu(), f)
+        # Save combinations for future use
+        os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
+        with open(combinations_path, 'wb') as f:
+            pickle.dump(combinations_tensor.cpu(), f)
 
-    print(f"[DEBUG] Saved {len(all_combinations)} feature combinations to {combinations_path}")
-    return combinations_tensor
+        print(f"[DEBUG] Saved {len(all_combinations)} feature combinations to {combinations_path}")
+        return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
