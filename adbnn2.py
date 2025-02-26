@@ -317,6 +317,7 @@ class DatasetProcessor:
                 "strong_margin_threshold": 0.3,
                 "marginal_margin_threshold": 0.1,
                 "min_divergence": 0.1
+                 "max_class_addition_percent": 5  # Default value for m (5%)
             },
             "training_params": {
                 "Save_training_epochs": True,
