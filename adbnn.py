@@ -316,7 +316,7 @@ class DatasetProcessor:
                 "cardinality_threshold_percentile": 95,
                 "strong_margin_threshold": 0.3,
                 "marginal_margin_threshold": 0.1,
-                "min_divergence": 0.1
+                "min_divergence": 0.1,
                  "max_class_addition_percent": 5  # Default value for m (5%)
             },
             "training_params": {
