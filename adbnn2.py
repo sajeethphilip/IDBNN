@@ -1,5 +1,6 @@
 import torch
 import time
+import argparse
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -63,7 +64,488 @@ from typing import Dict, List, Union, Optional
 from collections import defaultdict
 import requests
 from io import StringIO
+import os
+import requests
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Optional, Tuple
+from io import StringIO
+import zipfile
+import tarfile
+import json
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from tqdm import tqdm
 
+class DatasetProcessor:
+    """A class to handle dataset-related operations such as downloading, processing, and formatting."""
+
+    def __init__(self, data_dir: str = 'data', config_dir: str = 'config'):
+        """
+        Initialize the DatasetProcessor.
+
+        Args:
+            data_dir: Directory to store datasets.
+            config_dir: Directory to store configuration files.
+        """
+        self.data_dir = data_dir
+        self.config_dir = config_dir
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.config_dir, exist_ok=True)
+        self.base_url = "https://archive.ics.uci.edu/ml/machine-learning-databases/"
+        self.compressed_extensions = ['.zip', '.gz', '.tar', '.7z', '.rar']
+        self.colors = Colors()
+    def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
+        """Handle dataset with single CSV file and debug config processing"""
+        #print("\nDEBUGEntering _handle_single_csv")
+        # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
+
+        # Handle CSV paths
+        csv_paths = [
+            os.path.join(folder_path, f"{base_name}.csv"),
+            os.path.join(folder_path, base_name, f"{base_name}.csv")
+        ]
+        csv_path = next((path for path in csv_paths if os.path.exists(path)), None)
+
+        if not csv_path:
+            return None
+
+        return True
+
+    def _download_from_uci(self, dataset_name: str) -> Optional[str]:
+        """Download dataset from UCI repository"""
+        folder_path = os.path.join('data', dataset_name.lower())
+        os.makedirs(folder_path, exist_ok=True)
+
+        save_path = os.path.join(folder_path, f"{dataset_name.lower()}.csv")
+
+        # Try different UCI repository URL patterns
+        url_patterns = [
+            f"{self.base_url}/{dataset_name}/{dataset_name}.data",
+            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.data",
+            f"{self.base_url}/{dataset_name}/{dataset_name}.csv",
+            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.csv"
+        ]
+
+        for url in url_patterns:
+            try:
+                print(f"Trying URL: {url}")
+                response = requests.get(url)
+                if response.status_code == 200:
+                    with open(save_path, 'wb') as f:
+                        f.write(response.content)
+                    print(f"Successfully downloaded to {save_path}")
+                    return save_path
+            except Exception as e:
+                self.debug.log(f"Failed to download from {url}: {str(e)}")
+                continue
+
+        return None
+
+    def process_dataset(self, file_path: str) -> None:
+        """Process dataset with proper path handling.
+
+        Args:
+            file_path: Path to the dataset file
+        """
+        try:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+            # Create main data directory if it doesn't exist
+            if not os.path.exists('data'):
+                os.makedirs('data')
+
+            # Setup dataset folder structure
+            dataset_folder = os.path.join('data', base_name)
+            os.makedirs(dataset_folder, exist_ok=True)
+
+            print(f"\nProcessing dataset:")
+            print(f"Base name: {base_name}")
+            print(f"Dataset folder: {dataset_folder}")
+
+            # Define target CSV path
+            target_csv = os.path.join(dataset_folder, f"{base_name}.csv")
+
+            # If file exists at original path and isn't in dataset folder, copy it
+            if os.path.exists(file_path) and os.path.isfile(file_path) and file_path != target_csv:
+                try:
+                    import shutil
+                    shutil.copy2(file_path, target_csv)
+                    print(f"Copied dataset to: {target_csv}")
+                except Exception as e:
+                    print(f"Warning: Could not copy dataset: {str(e)}")
+
+            # If file doesn't exist in target location, try downloading from UCI
+            if not os.path.exists(target_csv):
+                print(f"File not found locally: {target_csv}")
+                print("Attempting to download from UCI repository...")
+                downloaded_path = self._download_from_uci(base_name.upper())
+                if downloaded_path:
+                    print(f"Successfully downloaded dataset to {downloaded_path}")
+                    # Ensure downloaded file is in the correct location
+                    if downloaded_path != target_csv:
+                        try:
+                            import shutil
+                            shutil.move(downloaded_path, target_csv)
+                        except Exception as e:
+                            print(f"Warning: Could not move downloaded file: {str(e)}")
+                else:
+                    print(f"Could not find or download dataset: {base_name}")
+                    return None
+
+            # Verify file exists before proceeding
+            if not os.path.exists(target_csv):
+                raise FileNotFoundError(f"Dataset file not found at {target_csv}")
+
+            # Process based on dataset structure
+            config = self._create_dataset_configs(dataset_folder, base_name)
+
+            if self._has_test_train_split(dataset_folder, base_name):
+                print("Found train/test split structure")
+                return self._handle_split_dataset(dataset_folder, base_name)
+            elif os.path.exists(target_csv):
+                print("Found single CSV file structure")
+                return self._handle_single_csv(dataset_folder, base_name, config)
+            elif self._is_compressed(file_path):
+                print("Found compressed file, extracting...")
+                extracted_path = self._decompress(file_path, dataset_folder)
+                return self.process_dataset(extracted_path)
+            else:
+                print(f"Could not determine dataset structure for {dataset_folder}")
+                return None
+
+        except Exception as e:
+            print(f"Error processing dataset: {str(e)}")
+            traceback.print_exc()
+            return None
+
+    def _create_dataset_configs(self, folder_path: str, dataset_name: str) -> Dict:
+       """Create or load both dataset and adaptive configs"""
+       dataset_config = self._create_or_load_dataset_config(folder_path, dataset_name)
+       adaptive_config = self._create_or_load_adaptive_config(folder_path, dataset_name)
+       return self._merge_configs(dataset_config, adaptive_config)
+
+    def _merge_configs(self, dataset_config: Dict, adaptive_config: Dict) -> Dict:
+       """Merge dataset and adaptive configs with adaptive taking precedence"""
+       merged = dataset_config.copy()
+       if 'training_params' in adaptive_config:
+           merged['training_params'].update(adaptive_config['training_params'])
+       if 'execution_flags' in adaptive_config:
+           merged['execution_flags'] = adaptive_config['execution_flags']
+       return merged
+
+    def _create_or_load_adaptive_config(self, folder_path: str, dataset_name: str) -> Dict:
+       """Create or load dataset-specific adaptive config"""
+       adaptive_path = os.path.join(folder_path, 'adaptive_dbnn.conf')
+       if os.path.exists(adaptive_path):
+           with open(adaptive_path, 'r') as f:
+               return json.load(f)
+
+       default_adaptive = {
+           "training_params": {
+               "trials": 100,
+               "cardinality_threshold": 0.9,
+               "cardinality_tolerance": 4,
+               "learning_rate": 0.1,
+               "random_seed": 42,
+               "epochs": 100,
+               "test_fraction": 0.2,
+               "enable_adaptive": True,
+               "modelType": "Histogram",
+               "compute_device": "auto",
+               "use_interactive_kbd": False,
+               "debug_enabled": True,
+               "Save_training_epochs": True,
+               "training_save_path": f"training_data/{dataset_name}"
+           },
+           "execution_flags": {
+               "train": True,
+               "train_only": False,
+               "predict": True,
+               "gen_samples": False,
+               "fresh_start": False,
+               "use_previous_model": True
+           }
+       }
+
+       with open(adaptive_path, 'w') as f:
+           json.dump(default_adaptive, f, indent=4)
+       return default_adaptive
+
+    def _create_or_load_dataset_config(self, folder_path: str, dataset_name: str) -> Dict:
+       """Create or load dataset-specific configuration"""
+       config_path = os.path.join(folder_path, f"{dataset_name}.conf")
+
+       if os.path.exists(config_path):
+           with open(config_path, 'r') as f:
+               return json.load(f)
+
+       # Create default dataset config
+       csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
+       df = pd.read_csv(csv_path, nrows=0)
+
+       default_config = {
+           "file_path": csv_path,
+           "column_names": df.columns.tolist(),
+           "separator": ",",
+           "has_header": True,
+           "target_column": df.columns[-1],
+           "likelihood_config": {
+               "feature_group_size": 2,
+               "max_combinations": 1000,
+               "bin_sizes": [20]
+           },
+           "active_learning": {
+               "tolerance": 1.0,
+               "cardinality_threshold_percentile": 95,
+               "strong_margin_threshold": 0.3,
+               "marginal_margin_threshold": 0.1,
+               "min_divergence": 0.1
+           },
+           "training_params": {
+               "Save_training_epochs": True,
+               "training_save_path": f"training_data/{dataset_name}"
+           },
+           "modelType": "Histogram"
+       }
+
+       with open(config_path, 'w') as f:
+           json.dump(default_config, f, indent=4)
+
+       return default_config
+
+    def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
+        """Check if dataset has single CSV file"""
+        # Check both possible locations
+        csv_paths = [
+            os.path.join(folder_path, f"{base_name}.csv"),
+            os.path.join(folder_path, base_name, f"{base_name}.csv")
+        ]
+        exists = any(os.path.exists(path) for path in csv_paths)
+        if exists:
+            found_path = next(path for path in csv_paths if os.path.exists(path))
+            print(f"Found CSV file: {found_path}")
+        return exists
+
+    def _has_test_train_split(self, folder_path: str, base_name: str) -> bool:
+        """Check for train/test split in dataset folder structure"""
+        dataset_folder = os.path.join(folder_path, base_name)
+        train_path = os.path.join(dataset_folder, 'train')
+        test_path = os.path.join(dataset_folder, 'test')
+
+        # Check if both train and test folders exist
+        has_folders = os.path.exists(train_path) and os.path.exists(test_path)
+
+        if has_folders:
+            # Check for either dataset-named files or train.csv/test.csv
+            train_files = [
+                os.path.join(train_path, f"{base_name}.csv"),
+                os.path.join(train_path, "train.csv")
+            ]
+            test_files = [
+                os.path.join(test_path, f"{base_name}.csv"),
+                os.path.join(test_path, "test.csv")
+            ]
+
+            has_train = any(os.path.exists(f) for f in train_files)
+            has_test = any(os.path.exists(f) for f in test_files)
+
+            if has_train and has_test:
+                train_file = next(f for f in train_files if os.path.exists(f))
+                test_file = next(f for f in test_files if os.path.exists(f))
+                print(f"Found train file: {train_file}")
+                print(f"Found test file: {test_file}")
+                return True
+
+        return False
+    def download_uci_dataset(self, dataset_name: str, url: str) -> str:
+        """
+        Download a dataset from the UCI repository.
+
+        Args:
+            dataset_name: Name of the dataset.
+            url: URL to the dataset.
+
+        Returns:
+            Path to the downloaded dataset.
+        """
+        dataset_path = os.path.join(self.data_dir, f"{dataset_name}.csv")
+        if os.path.exists(dataset_path):
+            print(f"Dataset {dataset_name} already exists at {dataset_path}.")
+            return dataset_path
+
+        print(f"Downloading dataset {dataset_name} from {url}...")
+        response = requests.get(url)
+        response.raise_for_status()
+
+        # Save the dataset
+        with open(dataset_path, 'wb') as f:
+            f.write(response.content)
+
+        print(f"Dataset saved to {dataset_path}.")
+        return dataset_path
+
+    def extract_compressed_dataset(self, dataset_path: str, extract_dir: str) -> List[str]:
+        """
+        Extract a compressed dataset (zip, tar, etc.).
+
+        Args:
+            dataset_path: Path to the compressed dataset.
+            extract_dir: Directory to extract the dataset to.
+
+        Returns:
+            List of extracted file paths.
+        """
+        os.makedirs(extract_dir, exist_ok=True)
+        extracted_files = []
+
+        if dataset_path.endswith('.zip'):
+            with zipfile.ZipFile(dataset_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+                extracted_files = zip_ref.namelist()
+        elif dataset_path.endswith('.tar.gz') or dataset_path.endswith('.tar'):
+            with tarfile.open(dataset_path, 'r:*') as tar_ref:
+                tar_ref.extractall(extract_dir)
+                extracted_files = tar_ref.getnames()
+        else:
+            raise ValueError("Unsupported file format. Only .zip and .tar.gz are supported.")
+
+        print(f"Extracted {len(extracted_files)} files to {extract_dir}.")
+        return [os.path.join(extract_dir, f) for f in extracted_files]
+
+    def load_dataset(self, dataset_path: str, delimiter: str = ',', header: Optional[int] = 0) -> pd.DataFrame:
+        """
+        Load a dataset from a file.
+
+        Args:
+            dataset_path: Path to the dataset file.
+            delimiter: Delimiter used in the dataset file.
+            header: Row number to use as the column names.
+
+        Returns:
+            Loaded DataFrame.
+        """
+        print(f"Loading dataset from {dataset_path}...")
+        try:
+            df = pd.read_csv(dataset_path, delimiter=delimiter, header=header)
+            print(f"Dataset loaded with {df.shape[0]} rows and {df.shape[1]} columns.")
+            return df
+        except Exception as e:
+            print(f"Error loading dataset: {str(e)}")
+            raise
+
+    def create_config_file(self, dataset_name: str, target_column: str, column_names: List[str], **kwargs) -> str:
+        """
+        Create a configuration file for a dataset.
+
+        Args:
+            dataset_name: Name of the dataset.
+            target_column: Name of the target column.
+            column_names: List of column names.
+            **kwargs: Additional configuration parameters.
+
+        Returns:
+            Path to the created configuration file.
+        """
+        config = {
+            "file_path": os.path.join(self.data_dir, f"{dataset_name}.csv"),
+            "column_names": column_names,
+            "target_column": target_column,
+            **kwargs
+        }
+
+        config_path = os.path.join(self.config_dir, f"{dataset_name}.conf")
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        print(f"Configuration file created at {config_path}.")
+        return config_path
+
+    def preprocess_dataset(self, df: pd.DataFrame, target_column: str, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """
+        Preprocess a dataset by splitting it into training and testing sets and scaling the features.
+
+        Args:
+            df: Input DataFrame.
+            target_column: Name of the target column.
+            test_size: Proportion of the dataset to include in the test split.
+            random_state: Random seed for reproducibility.
+
+        Returns:
+            Tuple containing X_train, X_test, y_train, y_test.
+        """
+        print("Preprocessing dataset...")
+        X = df.drop(columns=[target_column])
+        y = df[target_column]
+
+        # Encode categorical labels
+        label_encoder = LabelEncoder()
+        y_encoded = label_encoder.fit_transform(y)
+
+        # Split the dataset
+        X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=test_size, random_state=random_state)
+
+        # Scale the features
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        print("Dataset preprocessing complete.")
+        return X_train, X_test, y_train, y_test
+
+    def search_uci_repository(self, query: str) -> List[Dict[str, str]]:
+        """
+        Search the UCI repository for datasets matching a query.
+
+        Args:
+            query: Search query.
+
+        Returns:
+            List of dictionaries containing dataset information.
+        """
+        search_url = f"https://archive.ics.uci.edu/ml/datasets.php?format=json&query={query}"
+        response = requests.get(search_url)
+        response.raise_for_status()
+
+        datasets = response.json()
+        print(f"Found {len(datasets)} datasets matching query '{query}'.")
+        return datasets
+
+    def download_and_process_uci_dataset(self, dataset_name: str, target_column: str, **kwargs) -> Tuple[pd.DataFrame, str]:
+        """
+        Download and process a dataset from the UCI repository.
+
+        Args:
+            dataset_name: Name of the dataset.
+            target_column: Name of the target column.
+            **kwargs: Additional arguments for dataset processing.
+
+        Returns:
+            Tuple containing the processed DataFrame and the path to the configuration file.
+        """
+        # Search for the dataset
+        datasets = self.search_uci_repository(dataset_name)
+        if not datasets:
+            raise ValueError(f"No datasets found matching '{dataset_name}'.")
+
+        # Download the first matching dataset
+        dataset_info = datasets[0]
+        dataset_url = dataset_info['url']
+        dataset_path = self.download_uci_dataset(dataset_name, dataset_url)
+
+        # Extract if necessary
+        if dataset_path.endswith('.zip') or dataset_path.endswith('.tar.gz'):
+            extract_dir = os.path.join(self.data_dir, dataset_name)
+            extracted_files = self.extract_compressed_dataset(dataset_path, extract_dir)
+            dataset_path = extracted_files[0]  # Assume the first file is the main dataset
+
+        # Load the dataset
+        df = self.load_dataset(dataset_path, **kwargs)
+
+        # Create configuration file
+        config_path = self.create_config_file(dataset_name, target_column, df.columns.tolist())
+
+        return df, config_path
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -129,6 +611,7 @@ class DatasetConfig:
             "cardinality_threshold_percentile": 95
         },
         "training_params": {
+            "save_plots": True,  # Parameter to save plots
             "Save_training_epochs": False,  # Save the epochs parameter
             "training_save_path": "training_data"  # Save epochs path parameter
         }
@@ -188,17 +671,37 @@ class DatasetConfig:
         config['training_params'] = {
             "trials": 100,
             "cardinality_threshold": 0.9,
+            "minimum_training_accuracy": 0.95,
             "cardinality_tolerance": 4,
             "learning_rate": 0.1,
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
+            "n_bins_per_dim": 20,
             "enable_adaptive": True,
-            "compute_device": "auto"
+            "compute_device": "auto",
+            "invert_DBNN": True,
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.1,
+            "save_plots": True
         }
-
+        config["active_learning"]= {
+            "tolerance": 1.0,
+            "cardinality_threshold_percentile": 95,
+            "strong_margin_threshold": 0.3,
+            "marginal_margin_threshold": 0.1,
+            "min_divergence": 0.1
+        }
+        config["execution_flags"]= {
+            "train": true,
+            "train_only": false,
+            "predict": true,
+            "fresh_start": false,
+            "use_previous_model": true
+        }
         # Save the configuration
-        config_path = f"{dataset_name}.conf"
+        config_path = f"data/{dataset_name}/{dataset_name}.conf"
         try:
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
@@ -1154,6 +1657,7 @@ class DBNN(GPUDBNN):
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
+        self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
 
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
@@ -1924,6 +2428,48 @@ class DBNN(GPUDBNN):
 
         print(f"\nTotal samples selected: {len(final_selected_indices)}")
         return final_selected_indices
+
+    def _save_reconstruction_plots(self, original_features: np.ndarray,
+                                reconstructed_features: np.ndarray,
+                                true_labels: np.ndarray,
+                                save_path: str):
+        """Generate visualization plots for reconstruction analysis"""
+        plt.figure(figsize=(15, 5))
+
+        # Feature-wise reconstruction error
+        plt.subplot(131)
+        errors = np.mean((original_features - reconstructed_features) ** 2, axis=0)
+        plt.bar(range(len(errors)), errors)
+        plt.title('Feature-wise Reconstruction Error')
+        plt.xlabel('Feature Index')
+        plt.ylabel('MSE')
+
+        # Class-wise reconstruction quality
+        plt.subplot(132)
+        unique_classes = np.unique(true_labels)
+        class_errors = []
+        for class_label in unique_classes:
+            mask = (true_labels == class_label)
+            error = np.mean((original_features[mask] - reconstructed_features[mask]) ** 2)
+            class_errors.append(error)
+
+        plt.bar(unique_classes, class_errors)
+        plt.title('Class-wise Reconstruction Error')
+        plt.xlabel('Class')
+        plt.ylabel('MSE')
+
+        # Error distribution
+        plt.subplot(133)
+        all_errors = np.mean((original_features - reconstructed_features) ** 2, axis=1)
+        plt.hist(all_errors, bins=30)
+        plt.title('Error Distribution')
+        plt.xlabel('MSE')
+        plt.ylabel('Count')
+
+        plt.tight_layout()
+        plt.savefig(f"{save_path}_reconstruction_plots.png")
+        plt.close()
+
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -3342,13 +3888,23 @@ class DBNN(GPUDBNN):
             # Update weights if there were failures
             if failed_cases:
                 self._update_priors_parallel(failed_cases, batch_size)
+            # Save reconstruction plots if enabled
+            if self.save_plots:
+                # Reconstruct features from predictions
+                reconstructed_features = self.reconstruct_features(posteriors)
+                self._save_reconstruction_plots(
+                    original_features=X_train.cpu().numpy(),
+                    reconstructed_features=reconstructed_features.cpu().numpy(),
+                    true_labels=y_train.cpu().numpy(),
+                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_epoch_{epoch+1}"
+                )
 
-            # Plot metrics
-            self.plot_training_metrics(
-                train_losses, test_losses,
-                train_accuracies, test_accuracies,
-                save_path=f'{self.dataset_name}_training_metrics.png'
-            )
+                # Plot metrics
+                self.plot_training_metrics(
+                    train_losses, test_losses,
+                    train_accuracies, test_accuracies,
+                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_training_metrics.png"
+                )
 
         # Training complete
         epoch_pbar.close()
@@ -5064,15 +5620,30 @@ class InvertibleDBNN(torch.nn.Module):
 
             return results
 
+def main():
+    parser = argparse.ArgumentParser(description='Process ML datasets')
+    parser.add_argument("file_path", nargs='?', help="Path to dataset file or folder")
+    args = parser.parse_args()
+
+    processor = DatasetProcessor()
+
+    if not args.file_path:
+        parser.print_help()
+        input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
+    else:
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+    if dataset_pairs:
+        for basename, conf_path, csv_path in dataset_pairs:
+            print(f"\nFound dataset: {basename}")
+            print(f"Config: {conf_path}")
+            print(f"Data: {csv_path}")
+
+            if input("\nProcess this dataset? (y/n): ").lower() == 'y':
+                process_datasets()
+    else:
+        print("\nNo datasets found in data folder")
 if __name__ == "__main__":
     print("DBNN Dataset Processor")
     print("=" * 40)
-
-    try:
-        process_datasets()
-    except KeyboardInterrupt:
-        print("\nProcessing interrupted by user")
-    except Exception as e:
-        print(f"\nUnexpected error: {str(e)}")
-    finally:
-        print("\nProgram complete")
+    main()

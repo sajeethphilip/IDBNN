@@ -3237,7 +3237,9 @@ class DBNN(GPUDBNN):
                 self._setup_device_and_precision()
 
             # Initialize data
-            X = self.data.drop(columns=[self.target_column])
+            column_names = self.config.get('column_names')
+            X = self.data[column_names]
+            X = X.drop(columns=[self.target_column])
             y = self.data[self.target_column]
             print(f" The data has {len(np.unique(y))} classes with values: {np.unique(y)}")
 
