@@ -274,46 +274,47 @@ class DatasetProcessor:
        return default_adaptive
 
     def _create_or_load_dataset_config(self, folder_path: str, dataset_name: str) -> Dict:
-       """Create or load dataset-specific configuration"""
-       config_path = os.path.join(folder_path, f"{dataset_name}.conf")
+        """Create or load dataset-specific configuration"""
+        config_path = os.path.join(folder_path, f"{dataset_name}.conf")
 
-       if os.path.exists(config_path):
-           with open(config_path, 'r') as f:
-               return json.load(f)
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                return json.load(f)
 
-       # Create default dataset config
-       csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
-       df = pd.read_csv(csv_path, nrows=0)
+        # Create default dataset config
+        csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
+        df = pd.read_csv(csv_path, nrows=0)
 
-       default_config = {
-           "file_path": csv_path,
-           "column_names": df.columns.tolist(),
-           "separator": ",",
-           "has_header": True,
-           "target_column": df.columns[-1],
-           "likelihood_config": {
-               "feature_group_size": 2,
-               "max_combinations": 1000,
-               "bin_sizes": [20]
-           },
-           "active_learning": {
-               "tolerance": 1.0,
-               "cardinality_threshold_percentile": 95,
-               "strong_margin_threshold": 0.3,
-               "marginal_margin_threshold": 0.1,
-               "min_divergence": 0.1
-           },
-           "training_params": {
-               "Save_training_epochs": True,
-               "training_save_path": f"data/{dataset_name}"
-           },
-           "modelType": "Histogram"
-       }
+        default_config = {
+            "file_path": csv_path,
+            "column_names": df.columns.tolist(),
+            "separator": ",",
+            "has_header": True,
+            "target_column": df.columns[-1],
+            "likelihood_config": {
+                "feature_group_size": 2,
+                "max_combinations": 1000,
+                "bin_sizes": [20]
+            },
+            "active_learning": {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.3,
+                "marginal_margin_threshold": 0.1,
+                "min_divergence": 0.1,
+                "max_class_addition_percent": 5  # Default value for m (5%)
+            },
+            "training_params": {
+                "Save_training_epochs": True,
+                "training_save_path": f"data/{dataset_name}"
+            },
+            "modelType": "Histogram"
+        }
 
-       with open(config_path, 'w') as f:
-           json.dump(default_config, f, indent=4)
+        with open(config_path, 'w') as f:
+            json.dump(default_config, f, indent=4)
 
-       return default_config
+        return default_config
 
     def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
         """Check if dataset has single CSV file"""
@@ -2309,6 +2310,7 @@ class DBNN(GPUDBNN):
         min_divergence = active_learning_config.get('min_divergence', 0.1)
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)  # Default to 5%
 
         # Calculate optimal batch size based on sample size
         sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
@@ -2322,7 +2324,7 @@ class DBNN(GPUDBNN):
         misclassified_mask = (test_predictions != y_test)
         misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
 
-        if  misclassified_indices.dim() == 0:
+        if misclassified_indices.dim() == 0:
             return []
 
         final_selected_indices = []
@@ -2334,6 +2336,10 @@ class DBNN(GPUDBNN):
 
             if len(class_indices) == 0:
                 continue
+
+            # Calculate the maximum number of samples to add from this class
+            total_class_samples = (y_test == class_id).sum().item()
+            max_samples_to_add = int(total_class_samples * (max_class_addition_percent / 100.0))
 
             # Process class samples in batches
             for batch_start in range(0, len(class_indices), batch_size):
@@ -2413,8 +2419,13 @@ class DBNN(GPUDBNN):
                         best_idx = torch.argmin(candidate_margins) if failure_type == "marginal" else torch.argmax(candidate_margins)
                         selected_mask[best_idx] = True
 
-                    # Add selected indices
+                    # Add selected indices, but ensure we don't exceed the maximum allowed for this class
                     selected_indices = low_card_indices[selected_mask]
+                    if len(final_selected_indices) + len(selected_indices) > max_samples_to_add:
+                        # If adding these samples would exceed the limit, only add enough to reach the limit
+                        remaining_samples = max_samples_to_add - len(final_selected_indices)
+                        selected_indices = selected_indices[:remaining_samples]
+
                     final_selected_indices.extend(selected_indices.cpu().tolist())
 
                     # Print selection info

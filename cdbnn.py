@@ -4217,12 +4217,28 @@ class FeatureExtractorCNN_old(nn.Module):
             x = self.batch_norm(x)
         return x
 
+class DCTLayer(nn.Module):     # Do a cosine Transform
+    def __init__(self):
+        super(DCTLayer, self).__init__()
+
+    def forward(self, x):
+        return self.dct(x)
+
+    def dct(self, x):
+        x = x.permute(0, 2, 3, 1)  # Change to [batch, height, width, channels]
+        x = torch.fft.fft(x, dim=1)
+        x = torch.fft.fft(x, dim=2)
+        x = x.real
+        x = x.permute(0, 3, 1, 2)  # Change back to [batch, channels, height, width]
+        return x
+
 class DynamicAutoencoder(nn.Module):
-    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int):
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, num_classes: Optional[int] = None):
         super().__init__()
         self.input_shape = input_shape  # e.g., (3, 32, 32) for CIFAR
         self.in_channels = input_shape[0]  # Store input channels explicitly
         self.feature_dims = feature_dims
+        self.num_classes = num_classes
 
         # Calculate progressive spatial dimensions
         self.spatial_dims = []
@@ -4237,7 +4253,7 @@ class DynamicAutoencoder(nn.Module):
         # Calculate flattened size after all conv layers
         self.flattened_size = self.layer_sizes[-1] * (self.final_spatial_dim ** 2)
 
-        # Encoder layers
+        # Encoder layers with self-attention
         self.encoder_layers = nn.ModuleList()
         in_channels = self.in_channels  # Start with input channels
         for size in self.layer_sizes:
@@ -4245,10 +4261,15 @@ class DynamicAutoencoder(nn.Module):
                 nn.Sequential(
                     nn.Conv2d(in_channels, size, 3, stride=2, padding=1),
                     nn.BatchNorm2d(size),
-                    nn.LeakyReLU(0.2)
+                    nn.LeakyReLU(0.2),
+                    SelfAttention(size)
                 )
             )
             in_channels = size
+
+        # Class-aware embedding
+        if self.num_classes is not None:
+            self.class_embedding = nn.Embedding(num_classes, feature_dims)
 
         # Embedder layers
         self.embedder = nn.Sequential(
@@ -4264,7 +4285,7 @@ class DynamicAutoencoder(nn.Module):
             nn.LeakyReLU(0.2)
         )
 
-        # Decoder layers with careful channel tracking
+        # Decoder layers with self-attention and DCT
         self.decoder_layers = nn.ModuleList()
         in_channels = self.layer_sizes[-1]
 
@@ -4278,46 +4299,45 @@ class DynamicAutoencoder(nn.Module):
                         kernel_size=3, stride=2, padding=1, output_padding=1
                     ),
                     nn.BatchNorm2d(out_channels) if i > 0 else nn.Identity(),
-                    nn.LeakyReLU(0.2) if i > 0 else nn.Tanh()
+                    nn.LeakyReLU(0.2) if i > 0 else nn.Tanh(),
+                    SelfAttention(out_channels),
+                    DCTLayer() if i == 0 else nn.Identity()  # Apply DCT at the final layer
                 )
             )
             in_channels = out_channels
 
     def _calculate_layer_sizes(self) -> List[int]:
         """Calculate progressive channel sizes for encoder/decoder"""
-        # Start with input channels
-        base_channels = 32  # Reduced from 64 to handle smaller images
+        base_channels = 32
         sizes = []
         current_size = base_channels
 
-        # Calculate maximum number of downsampling layers based on smallest spatial dimension
         min_dim = min(self.input_shape[1:])
-        max_layers = int(np.log2(min_dim)) - 2  # Ensure we don't reduce too much
+        max_layers = int(np.log2(min_dim)) - 2
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 256:  # Reduced from 512 to handle smaller images
+            if current_size < 256:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
         return sizes
 
-    def _calculate_flattened_size(self) -> int:
-        """Calculate size of flattened feature maps before linear layer"""
-        reduction_factor = 2 ** (len(self.layer_sizes) - 1)
-        reduced_dims = [dim // reduction_factor for dim in self.spatial_dims]
-        return self.layer_sizes[-1] * np.prod(reduced_dims)
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Encode input images to feature space"""
-        # Verify input channels
         if x.size(1) != self.in_channels:
             raise ValueError(f"Input has {x.size(1)} channels, expected {self.in_channels}")
 
         for layer in self.encoder_layers:
             x = layer(x)
         x = x.view(x.size(0), -1)
-        return self.embedder(x)
+        x = self.embedder(x)
+
+        if self.num_classes is not None and class_labels is not None:
+            class_emb = self.class_embedding(class_labels)
+            x = x + class_emb
+
+        return x
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Decode features back to image space"""
@@ -4328,15 +4348,14 @@ class DynamicAutoencoder(nn.Module):
         for layer in self.decoder_layers:
             x = layer(x)
 
-        # Verify output shape
         if x.size(1) != self.in_channels:
             raise ValueError(f"Output has {x.size(1)} channels, expected {self.in_channels}")
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the autoencoder"""
-        embedding = self.encode(x)
+        embedding = self.encode(x, class_labels)
         reconstruction = self.decode(embedding)
         return embedding, reconstruction
 
