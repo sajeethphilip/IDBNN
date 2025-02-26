@@ -4391,7 +4391,15 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         if checkpoint_path and os.path.exists(checkpoint_path):
             try:
                 logger.info(f"Loading checkpoint from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+                # Determine the appropriate device for loading
+                if torch.cuda.is_available():
+                    map_location = self.device  # Use GPU if available
+                else:
+                    map_location = torch.device('cpu')  # Fallback to CPU
+
+                # Load checkpoint with weights_only=True for security
+                checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
 
                 # Load model state
                 self.feature_extractor.load_state_dict(checkpoint['state_dict'])
@@ -4422,7 +4430,6 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         else:
             logger.info("No checkpoint found, starting from scratch")
             self.optimizer = self._initialize_optimizer()
-
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
         dataset_name = self.config['dataset']['name']
