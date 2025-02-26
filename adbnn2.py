@@ -5130,6 +5130,9 @@ def process_datasets():
             print(f"Training log saved to: {results['log_path']}")
             print(f"Processed {results['n_samples']} samples with {results['n_features']} features")
             print(f"Excluded {results['n_excluded']} features")
+            # Save the label encoder after training
+            model = DBNN(dataset_name=basename)
+            save_label_encoder(model.label_encoder, basename)
 
         except Exception as e:
             print(f"\nError processing dataset {basename}:")
@@ -5252,18 +5255,7 @@ def main():
     if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
-        dataset_pairs = find_dataset_pairs()
-        if dataset_pairs:
-            for basename, conf_path, csv_path in dataset_pairs:
-                print(f"\nFound dataset: {basename}")
-                print(f"Config: {conf_path}")
-                print(f"Data: {csv_path}")
-
-                if input("\nProcess this dataset? (y/n): ").lower() == 'y':
-                    process_datasets()
-                    # Save the label encoder after training
-                    model = DBNN(dataset_name=basename)
-                    save_label_encoder(model.label_encoder, basename)
+        process_datasets()
 
     elif args.mode !="invertDBNN":
         processor.process_dataset(args.file_path)
@@ -5271,9 +5263,29 @@ def main():
         basename=args.file_path.split('/')[-1].split('.')[0]
         conf_path=os.path.join(f"data/{basename}/{basename}.conf")
         csv_path=os.path.join(f"data/{basename}/{basename}.csv")
-        process_datasets()
         # Save the label encoder after training
+       # Create DBNN instance with specific dataset name
         model = DBNN(dataset_name=basename)
+
+        # Optionally create an invertible model
+        if model.config.get('enable_invertible', False):
+            invertible_model = model.create_invertible_model(
+                reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
+                feedback_strength=model.config.get('feedback_strength', 0.3)
+            )
+            print("Created invertible DBNN model")
+
+        start_time = datetime.now()
+        results = model.process_dataset(conf_path)
+        end_time = datetime.now()
+
+        # Print results
+        print("\nProcessing complete!")
+        print(f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+        print(f"Results saved to: {results['results_path']}")
+        print(f"Training log saved to: {results['log_path']}")
+        print(f"Processed {results['n_samples']} samples with {results['n_features']} features")
+        print(f"Excluded {results['n_excluded']} features")
         save_label_encoder(model.label_encoder, basename)
 
     elif args.mode =="invertDBNN":
