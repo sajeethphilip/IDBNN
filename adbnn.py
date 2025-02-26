@@ -309,7 +309,7 @@ class DatasetProcessor:
             "likelihood_config": {
                 "feature_group_size": 2,
                 "max_combinations": 10000,
-                "bin_sizes": [64]
+                "bin_sizes": [20]
             },
             "active_learning": {
                 "tolerance": 1.0,
@@ -620,7 +620,7 @@ class DatasetConfig:
         "likelihood_config": {
             "feature_group_size": 2,
             "max_combinations": 10000,
-            "bin_sizes": [64]
+            "bin_sizes": [20]
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -693,7 +693,7 @@ class DatasetConfig:
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
-            "n_bins_per_dim": 64,
+            "n_bins_per_dim": 20,
             "enable_adaptive": True,
             "compute_device": "auto",
             "invert_DBNN": True,
