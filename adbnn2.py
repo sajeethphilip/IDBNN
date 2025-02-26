@@ -2984,7 +2984,7 @@ class DBNN(GPUDBNN):
         max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
 
         # Debug: Print parameters
-        print(f"[DEBUG] Generating feature combinations with:")
+        print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
         print(f"- n_features: {n_features}")
         print(f"- group_size: {group_size}")
         print(f"- max_combinations: {max_combinations}")
@@ -2996,7 +2996,10 @@ class DBNN(GPUDBNN):
 
         # Check if combinations already exist
         if os.path.exists(combinations_path):
+            print("------------------------------------------------------------------------------------------------------------")
             print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            print("Remove this if you change the feature combinations in config file")
+            print("------------------------------------------------------------------------------------------------------------")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
                 return combinations_tensor.to(self.device)
@@ -3008,11 +3011,11 @@ class DBNN(GPUDBNN):
         # Generate all possible combinations
         from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
-        print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
+        #print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
         # Sample combinations if max_combinations specified
         if max_combinations and len(all_combinations) > max_combinations:
-            print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
+            #print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
             # Convert list of tuples to numpy array for sampling
             combinations_array = np.array(all_combinations)
             rng = np.random.RandomState(42)
