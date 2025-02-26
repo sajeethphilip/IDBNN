@@ -3184,7 +3184,43 @@ class BaseFeatureExtractor(ABC):
         """Extract features from data loader"""
         pass
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+class SelfAttention(nn.Module):
+    """Self-attention module for feature maps"""
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.in_channels = in_channels
+
+        # Query, Key, and Value transformations
+        self.query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+        # Output transformation
+        self.gamma = nn.Parameter(torch.zeros(1))  # Learnable scaling factor
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, channels, height, width = x.size()
+
+        # Compute queries, keys, and values
+        queries = self.query(x).view(batch_size, -1, height * width).permute(0, 2, 1)  # (B, H*W, C')
+        keys = self.key(x).view(batch_size, -1, height * width)  # (B, C', H*W)
+        values = self.value(x).view(batch_size, -1, height * width)  # (B, C, H*W)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
+        attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
+
+        # Apply attention to values
+        out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
+        out = out.view(batch_size, channels, height, width)  # Reshape to original dimensions
+
+        # Combine with input
+        out = self.gamma * out + x  # Residual connection
+        return out
 
 class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
     def __init__(self, config: Dict, device: str = None):
@@ -4041,8 +4077,113 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             logger.error(f"Error loading model: {str(e)}")
             raise
 
-
 class FeatureExtractorCNN(nn.Module):
+    """CNN-based feature extractor model with self-attention"""
+    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
+        super().__init__()
+        self.dropout_prob = dropout_prob
+
+        # Layer 1
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 2
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 3
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Self-attention after Layer 3
+        self.attention1 = SelfAttention(128)
+
+        # Layer 4
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 5
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 6
+        self.conv6 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Self-attention after Layer 6
+        self.attention2 = SelfAttention(512)
+
+        # Layer 7
+        self.conv7 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
+        )
+
+        # Fully connected layer
+        self.fc = nn.Linear(512, feature_dims)
+        self.batch_norm = nn.BatchNorm1d(feature_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # Add batch dimension
+
+        # Forward pass through layers
+        x1 = self.conv1(x)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
+
+        # Apply self-attention
+        x3 = self.attention1(x3)
+
+        x4 = self.conv4(x3)
+        x5 = self.conv5(x4)
+        x6 = self.conv6(x5)
+
+        # Apply self-attention
+        x6 = self.attention2(x6)
+
+        x7 = self.conv7(x6)
+
+        # Flatten and fully connected layer
+        x7 = x7.view(x7.size(0), -1)
+        x7 = self.fc(x7)
+        if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x7 = self.batch_norm(x7)
+
+        return x7
+class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
         super().__init__()
