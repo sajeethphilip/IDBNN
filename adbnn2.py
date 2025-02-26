@@ -256,7 +256,7 @@ class DatasetProcessor:
                "use_interactive_kbd": False,
                "debug_enabled": True,
                "Save_training_epochs": True,
-               "training_save_path": f"training_data/{dataset_name}"
+               "training_save_path": f"data/{dataset_name}"
            },
            "execution_flags": {
                "train": True,
@@ -304,7 +304,7 @@ class DatasetProcessor:
            },
            "training_params": {
                "Save_training_epochs": True,
-               "training_save_path": f"training_data/{dataset_name}"
+               "training_save_path": f"data/{dataset_name}"
            },
            "modelType": "Histogram"
        }
@@ -613,7 +613,7 @@ class DatasetConfig:
         "training_params": {
             "save_plots": True,  # Parameter to save plots
             "Save_training_epochs": False,  # Save the epochs parameter
-            "training_save_path": "training_data"  # Save epochs path parameter
+            "training_save_path": "data"  # Save epochs path parameter
         }
     }
 
@@ -1397,7 +1397,7 @@ class GPUDBNN:
         #------------------------------------------Adaptive Learning--------------------------------------
         super().__init__()
         self.adaptive_learning = True
-        self.base_save_path = './training_data'
+        self.base_save_path = './data'
         os.makedirs(self.base_save_path, exist_ok=True)
         self.in_adaptive_fit=False # Set when we are in adaptive learning process
         #------------------------------------------Adaptive Learning--------------------------------------
@@ -3441,11 +3441,11 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'{dataset_name}_Last_training.csv', index=False)
+        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=False)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'{dataset_name}_Last_testing.csv', index=False)
+        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=False)
         print(f"Last testing data is saved to {dataset_name}_Last_testing.csv")
         print(f"Last training data is saved to {dataset_name}_Last_training.csv")
 
@@ -5622,7 +5622,9 @@ class InvertibleDBNN(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
-    parser.add_argument("file_path", nargs='?', help="Path to dataset file or folder")
+    parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
+    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
+                        required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
     args = parser.parse_args()
 
     processor = DatasetProcessor()
@@ -5630,17 +5632,23 @@ def main():
     if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
-    else:
+        dataset_pairs = find_dataset_pairs()
+        if dataset_pairs:
+            for basename, conf_path, csv_path in dataset_pairs:
+                print(f"\nFound dataset: {basename}")
+                print(f"Config: {conf_path}")
+                print(f"Data: {csv_path}")
+
+                if input("\nProcess this dataset? (y/n): ").lower() == 'y':
+                    process_datasets()
+    elif args.mode !="invertDBNN":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
-    if dataset_pairs:
-        for basename, conf_path, csv_path in dataset_pairs:
-            print(f"\nFound dataset: {basename}")
-            print(f"Config: {conf_path}")
-            print(f"Data: {csv_path}")
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        process_datasets()
 
-            if input("\nProcess this dataset? (y/n): ").lower() == 'y':
-                process_datasets()
     else:
         print("\nNo datasets found in data folder")
 if __name__ == "__main__":
