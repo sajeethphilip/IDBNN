@@ -1,5 +1,6 @@
 import torch
 import time
+import argparse
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ import os
 import pickle
 import configparser
 import traceback  # Add to provide debug
+from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
 Train_device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
@@ -63,7 +65,503 @@ from typing import Dict, List, Union, Optional
 from collections import defaultdict
 import requests
 from io import StringIO
+import os
+import requests
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Optional, Tuple
+from io import StringIO
+import zipfile
+import tarfile
+import json
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from tqdm import tqdm
 
+class DatasetProcessor:
+    """A class to handle dataset-related operations such as downloading, processing, and formatting."""
+
+    def __init__(self, data_dir: str = 'data', config_dir: str = 'config'):
+        """
+        Initialize the DatasetProcessor.
+
+        Args:
+            data_dir: Directory to store datasets.
+            config_dir: Directory to store configuration files.
+        """
+        self.data_dir = data_dir
+        self.config_dir = config_dir
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.config_dir, exist_ok=True)
+        self.base_url = "https://archive.ics.uci.edu/ml/machine-learning-databases/"
+        self.compressed_extensions = ['.zip', '.gz', '.tar', '.7z', '.rar']
+        self.colors = Colors()
+    def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
+        """Handle dataset with single CSV file and debug config processing"""
+        #print("\nDEBUGEntering _handle_single_csv")
+        # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
+
+        # Handle CSV paths
+        csv_paths = [
+            os.path.join(folder_path, f"{base_name}.csv"),
+            os.path.join(folder_path, base_name, f"{base_name}.csv")
+        ]
+        csv_path = next((path for path in csv_paths if os.path.exists(path)), None)
+
+        if not csv_path:
+            return None
+
+        return True
+
+    def _download_from_uci(self, dataset_name: str) -> Optional[str]:
+        """Download dataset from UCI repository"""
+        folder_path = os.path.join('data', dataset_name.lower())
+        os.makedirs(folder_path, exist_ok=True)
+
+        save_path = os.path.join(folder_path, f"{dataset_name.lower()}.csv")
+
+        # Try different UCI repository URL patterns
+        url_patterns = [
+            f"{self.base_url}/{dataset_name}/{dataset_name}.data",
+            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.data",
+            f"{self.base_url}/{dataset_name}/{dataset_name}.csv",
+            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.csv"
+        ]
+
+        for url in url_patterns:
+            try:
+                print(f"Trying URL: {url}")
+                response = requests.get(url)
+                if response.status_code == 200:
+                    with open(save_path, 'wb') as f:
+                        f.write(response.content)
+                    print(f"Successfully downloaded to {save_path}")
+                    return save_path
+            except Exception as e:
+                self.debug.log(f"Failed to download from {url}: {str(e)}")
+                continue
+
+        return None
+
+    def process_dataset(self, file_path: str) -> None:
+        """Process dataset with proper path handling.
+
+        Args:
+            file_path: Path to the dataset file
+        """
+        try:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+            # Create main data directory if it doesn't exist
+            if not os.path.exists('data'):
+                os.makedirs('data')
+
+            # Setup dataset folder structure
+            dataset_folder = os.path.join('data', base_name)
+            os.makedirs(dataset_folder, exist_ok=True)
+
+            print(f"\nProcessing dataset:")
+            print(f"Base name: {base_name}")
+            print(f"Dataset folder: {dataset_folder}")
+
+            # Define target CSV path
+            target_csv = os.path.join(dataset_folder, f"{base_name}.csv")
+
+            # If file exists at original path and isn't in dataset folder, copy it
+            if os.path.exists(file_path) and os.path.isfile(file_path) and file_path != target_csv:
+                try:
+                    import shutil
+                    shutil.copy2(file_path, target_csv)
+                    print(f"Copied dataset to: {target_csv}")
+                except Exception as e:
+                    print(f"Warning: Could not copy dataset: {str(e)}")
+
+            # If file doesn't exist in target location, try downloading from UCI
+            if not os.path.exists(target_csv):
+                print(f"File not found locally: {target_csv}")
+                print("Attempting to download from UCI repository...")
+                downloaded_path = self._download_from_uci(base_name.upper())
+                if downloaded_path:
+                    print(f"Successfully downloaded dataset to {downloaded_path}")
+                    # Ensure downloaded file is in the correct location
+                    if downloaded_path != target_csv:
+                        try:
+                            import shutil
+                            shutil.move(downloaded_path, target_csv)
+                        except Exception as e:
+                            print(f"Warning: Could not move downloaded file: {str(e)}")
+                else:
+                    print(f"Could not find or download dataset: {base_name}")
+                    return None
+
+            # Verify file exists before proceeding
+            if not os.path.exists(target_csv):
+                raise FileNotFoundError(f"Dataset file not found at {target_csv}")
+
+            # Process based on dataset structure
+            config = self._create_dataset_configs(dataset_folder, base_name)
+
+            if self._has_test_train_split(dataset_folder, base_name):
+                print("Found train/test split structure")
+                return self._handle_split_dataset(dataset_folder, base_name)
+            elif os.path.exists(target_csv):
+                print("Found single CSV file structure")
+                return self._handle_single_csv(dataset_folder, base_name, config)
+            elif self._is_compressed(file_path):
+                print("Found compressed file, extracting...")
+                extracted_path = self._decompress(file_path, dataset_folder)
+                return self.process_dataset(extracted_path)
+            else:
+                print(f"Could not determine dataset structure for {dataset_folder}")
+                return None
+
+        except Exception as e:
+            print(f"Error processing dataset: {str(e)}")
+            traceback.print_exc()
+            return None
+
+    def _create_dataset_configs(self, folder_path: str, dataset_name: str) -> Dict:
+       """Create or load both dataset and adaptive configs"""
+       dataset_config = self._create_or_load_dataset_config(folder_path, dataset_name)
+       adaptive_config = self._create_or_load_adaptive_config(folder_path, dataset_name)
+       return self._merge_configs(dataset_config, adaptive_config)
+
+    def _merge_configs(self, dataset_config: Dict, adaptive_config: Dict) -> Dict:
+       """Merge dataset and adaptive configs with adaptive taking precedence"""
+       merged = dataset_config.copy()
+       if 'training_params' in adaptive_config:
+           merged['training_params'].update(adaptive_config['training_params'])
+       if 'execution_flags' in adaptive_config:
+           merged['execution_flags'] = adaptive_config['execution_flags']
+       return merged
+
+    def _create_or_load_adaptive_config(self, folder_path: str, dataset_name: str) -> Dict:
+       """Create or load dataset-specific adaptive config"""
+       adaptive_path = os.path.join(folder_path, 'adaptive_dbnn.conf')
+       if os.path.exists(adaptive_path):
+           with open(adaptive_path, 'r') as f:
+               return json.load(f)
+
+       default_adaptive = {
+           "training_params": {
+               "trials": 100,
+               "cardinality_threshold": 0.9,
+               "cardinality_tolerance": 4,
+               "learning_rate": 0.1,
+               "random_seed": 42,
+               "epochs": 100,
+               "test_fraction": 0.2,
+               "enable_adaptive": True,
+               "modelType": "Histogram",
+               "compute_device": "auto",
+               "use_interactive_kbd": False,
+               "debug_enabled": True,
+               "Save_training_epochs": True,
+               "training_save_path": f"data/{dataset_name}"
+           },
+           "execution_flags": {
+               "train": True,
+               "train_only": False,
+               "predict": True,
+               "gen_samples": False,
+               "fresh_start": False,
+               "use_previous_model": True
+           }
+       }
+
+       with open(adaptive_path, 'w') as f:
+           json.dump(default_adaptive, f, indent=4)
+       return default_adaptive
+
+    def _create_or_load_dataset_config(self, folder_path: str, dataset_name: str) -> Dict:
+        """Create or load dataset-specific configuration"""
+        config_path = os.path.join(folder_path, f"{dataset_name}.conf")
+
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Check for duplicate entries and remove them
+            if "feature_group_size" in config and "likelihood_config" in config:
+                print(f"[WARNING] Duplicate entries found in {config_path}. Removing duplicates...")
+                # Remove the standalone entries
+                config.pop("feature_group_size", None)
+                config.pop("max_combinations", None)
+                config.pop("bin_sizes", None)
+
+                # Save the cleaned configuration
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=4)
+                print(f"[INFO] Configuration file cleaned and saved.")
+
+            return config
+
+        # Create default dataset config
+        csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
+        df = pd.read_csv(csv_path, nrows=0)
+
+        default_config = {
+            "file_path": csv_path,
+            "column_names": df.columns.tolist(),
+            "separator": ",",
+            "has_header": True,
+            "target_column": df.columns[-1],
+            "likelihood_config": {
+                "feature_group_size": 2,
+                "max_combinations": 10000,
+                "bin_sizes": [20]
+            },
+            "active_learning": {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.3,
+                "marginal_margin_threshold": 0.1,
+                "min_divergence": 0.1,
+                 "max_class_addition_percent": 5  # Default value for m (5%)
+            },
+            "training_params": {
+                "Save_training_epochs": True,
+                "training_save_path": f"data/{dataset_name}"
+            },
+            "modelType": "Histogram"
+        }
+
+        with open(config_path, 'w') as f:
+            json.dump(default_config, f, indent=4)
+
+        return default_config
+    def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
+        """Check if dataset has single CSV file"""
+        # Check both possible locations
+        csv_paths = [
+            os.path.join(folder_path, f"{base_name}.csv"),
+            os.path.join(folder_path, base_name, f"{base_name}.csv")
+        ]
+        exists = any(os.path.exists(path) for path in csv_paths)
+        if exists:
+            found_path = next(path for path in csv_paths if os.path.exists(path))
+            print(f"Found CSV file: {found_path}")
+        return exists
+
+    def _has_test_train_split(self, folder_path: str, base_name: str) -> bool:
+        """Check for train/test split in dataset folder structure"""
+        dataset_folder = os.path.join(folder_path, base_name)
+        train_path = os.path.join(dataset_folder, 'train')
+        test_path = os.path.join(dataset_folder, 'test')
+
+        # Check if both train and test folders exist
+        has_folders = os.path.exists(train_path) and os.path.exists(test_path)
+
+        if has_folders:
+            # Check for either dataset-named files or train.csv/test.csv
+            train_files = [
+                os.path.join(train_path, f"{base_name}.csv"),
+                os.path.join(train_path, "train.csv")
+            ]
+            test_files = [
+                os.path.join(test_path, f"{base_name}.csv"),
+                os.path.join(test_path, "test.csv")
+            ]
+
+            has_train = any(os.path.exists(f) for f in train_files)
+            has_test = any(os.path.exists(f) for f in test_files)
+
+            if has_train and has_test:
+                train_file = next(f for f in train_files if os.path.exists(f))
+                test_file = next(f for f in test_files if os.path.exists(f))
+                print(f"Found train file: {train_file}")
+                print(f"Found test file: {test_file}")
+                return True
+
+        return False
+    def download_uci_dataset(self, dataset_name: str, url: str) -> str:
+        """
+        Download a dataset from the UCI repository.
+
+        Args:
+            dataset_name: Name of the dataset.
+            url: URL to the dataset.
+
+        Returns:
+            Path to the downloaded dataset.
+        """
+        dataset_path = os.path.join(self.data_dir, f"{dataset_name}.csv")
+        if os.path.exists(dataset_path):
+            print(f"Dataset {dataset_name} already exists at {dataset_path}.")
+            return dataset_path
+
+        print(f"Downloading dataset {dataset_name} from {url}...")
+        response = requests.get(url)
+        response.raise_for_status()
+
+        # Save the dataset
+        with open(dataset_path, 'wb') as f:
+            f.write(response.content)
+
+        print(f"Dataset saved to {dataset_path}.")
+        return dataset_path
+
+    def extract_compressed_dataset(self, dataset_path: str, extract_dir: str) -> List[str]:
+        """
+        Extract a compressed dataset (zip, tar, etc.).
+
+        Args:
+            dataset_path: Path to the compressed dataset.
+            extract_dir: Directory to extract the dataset to.
+
+        Returns:
+            List of extracted file paths.
+        """
+        os.makedirs(extract_dir, exist_ok=True)
+        extracted_files = []
+
+        if dataset_path.endswith('.zip'):
+            with zipfile.ZipFile(dataset_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+                extracted_files = zip_ref.namelist()
+        elif dataset_path.endswith('.tar.gz') or dataset_path.endswith('.tar'):
+            with tarfile.open(dataset_path, 'r:*') as tar_ref:
+                tar_ref.extractall(extract_dir)
+                extracted_files = tar_ref.getnames()
+        else:
+            raise ValueError("Unsupported file format. Only .zip and .tar.gz are supported.")
+
+        print(f"Extracted {len(extracted_files)} files to {extract_dir}.")
+        return [os.path.join(extract_dir, f) for f in extracted_files]
+
+    def load_dataset(self, dataset_path: str, delimiter: str = ',', header: Optional[int] = 0) -> pd.DataFrame:
+        """
+        Load a dataset from a file.
+
+        Args:
+            dataset_path: Path to the dataset file.
+            delimiter: Delimiter used in the dataset file.
+            header: Row number to use as the column names.
+
+        Returns:
+            Loaded DataFrame.
+        """
+        print(f"Loading dataset from {dataset_path}...")
+        try:
+            df = pd.read_csv(dataset_path, delimiter=delimiter, header=header)
+            print(f"Dataset loaded with {df.shape[0]} rows and {df.shape[1]} columns.")
+            return df
+        except Exception as e:
+            print(f"Error loading dataset: {str(e)}")
+            raise
+
+    def create_config_file(self, dataset_name: str, target_column: str, column_names: List[str], **kwargs) -> str:
+        """
+        Create a configuration file for a dataset.
+
+        Args:
+            dataset_name: Name of the dataset.
+            target_column: Name of the target column.
+            column_names: List of column names.
+            **kwargs: Additional configuration parameters.
+
+        Returns:
+            Path to the created configuration file.
+        """
+        config = {
+            "file_path": os.path.join(self.data_dir, f"{dataset_name}.csv"),
+            "column_names": column_names,
+            "target_column": target_column,
+            **kwargs
+        }
+
+        config_path = os.path.join(self.config_dir, f"{dataset_name}.conf")
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        print(f"Configuration file created at {config_path}.")
+        return config_path
+
+    def preprocess_dataset(self, df: pd.DataFrame, target_column: str, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """
+        Preprocess a dataset by splitting it into training and testing sets and scaling the features.
+
+        Args:
+            df: Input DataFrame.
+            target_column: Name of the target column.
+            test_size: Proportion of the dataset to include in the test split.
+            random_state: Random seed for reproducibility.
+
+        Returns:
+            Tuple containing X_train, X_test, y_train, y_test.
+        """
+        print("Preprocessing dataset...")
+        X = df.drop(columns=[target_column])
+        y = df[target_column]
+
+        # Encode categorical labels
+        label_encoder = LabelEncoder()
+        y_encoded = label_encoder.fit_transform(y)
+
+        # Split the dataset
+        X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=test_size, random_state=random_state)
+
+        # Scale the features
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        print("Dataset preprocessing complete.")
+        return X_train, X_test, y_train, y_test
+
+    def search_uci_repository(self, query: str) -> List[Dict[str, str]]:
+        """
+        Search the UCI repository for datasets matching a query.
+
+        Args:
+            query: Search query.
+
+        Returns:
+            List of dictionaries containing dataset information.
+        """
+        search_url = f"https://archive.ics.uci.edu/ml/datasets.php?format=json&query={query}"
+        response = requests.get(search_url)
+        response.raise_for_status()
+
+        datasets = response.json()
+        print(f"Found {len(datasets)} datasets matching query '{query}'.")
+        return datasets
+
+    def download_and_process_uci_dataset(self, dataset_name: str, target_column: str, **kwargs) -> Tuple[pd.DataFrame, str]:
+        """
+        Download and process a dataset from the UCI repository.
+
+        Args:
+            dataset_name: Name of the dataset.
+            target_column: Name of the target column.
+            **kwargs: Additional arguments for dataset processing.
+
+        Returns:
+            Tuple containing the processed DataFrame and the path to the configuration file.
+        """
+        # Search for the dataset
+        datasets = self.search_uci_repository(dataset_name)
+        if not datasets:
+            raise ValueError(f"No datasets found matching '{dataset_name}'.")
+
+        # Download the first matching dataset
+        dataset_info = datasets[0]
+        dataset_url = dataset_info['url']
+        dataset_path = self.download_uci_dataset(dataset_name, dataset_url)
+
+        # Extract if necessary
+        if dataset_path.endswith('.zip') or dataset_path.endswith('.tar.gz'):
+            extract_dir = os.path.join(self.data_dir, dataset_name)
+            extracted_files = self.extract_compressed_dataset(dataset_path, extract_dir)
+            dataset_path = extracted_files[0]  # Assume the first file is the main dataset
+
+        # Load the dataset
+        df = self.load_dataset(dataset_path, **kwargs)
+
+        # Create configuration file
+        config_path = self.create_config_file(dataset_name, target_column, df.columns.tolist())
+
+        return df, config_path
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -121,7 +619,7 @@ class DatasetConfig:
         "has_header": True,
         "likelihood_config": {
             "feature_group_size": 2,
-            "max_combinations": 1000,
+            "max_combinations": 10000,
             "bin_sizes": [20]
         },
         "active_learning": {
@@ -129,8 +627,9 @@ class DatasetConfig:
             "cardinality_threshold_percentile": 95
         },
         "training_params": {
+            "save_plots": True,  # Parameter to save plots
             "Save_training_epochs": False,  # Save the epochs parameter
-            "training_save_path": "training_data"  # Save epochs path parameter
+            "training_save_path": "data"  # Save epochs path parameter
         }
     }
 
@@ -188,17 +687,37 @@ class DatasetConfig:
         config['training_params'] = {
             "trials": 100,
             "cardinality_threshold": 0.9,
+            "minimum_training_accuracy": 0.95,
             "cardinality_tolerance": 4,
             "learning_rate": 0.1,
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
+            "n_bins_per_dim": 20,
             "enable_adaptive": True,
-            "compute_device": "auto"
+            "compute_device": "auto",
+            "invert_DBNN": True,
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.1,
+            "save_plots": True
         }
-
+        config["active_learning"]= {
+            "tolerance": 1.0,
+            "cardinality_threshold_percentile": 95,
+            "strong_margin_threshold": 0.3,
+            "marginal_margin_threshold": 0.1,
+            "min_divergence": 0.1
+        }
+        config["execution_flags"]= {
+            "train": true,
+            "train_only": false,
+            "predict": true,
+            "fresh_start": false,
+            "use_previous_model": true
+        }
         # Save the configuration
-        config_path = f"{dataset_name}.conf"
+        config_path = f"data/{dataset_name}/{dataset_name}.conf"
         try:
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
@@ -212,11 +731,15 @@ class DatasetConfig:
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
         """Enhanced configuration loading with URL handling and comment removal"""
+        if not dataset_name or not isinstance(dataset_name, str):
+            print("Error: Invalid dataset name provided.")
+            return None
+
         config_path = f"{dataset_name}.conf"
 
         # If the config isn't in current directory, check data directory
         if not os.path.exists(config_path):
-            config_path = os.path.join('data', f"{dataset_name}.conf")
+            config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
 
         try:
             # Check if configuration file exists
@@ -228,17 +751,13 @@ class DatasetConfig:
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-
+            # Remove comments and parse
             def remove_comments(json_str):
-                """Remove both inline and multiline comments"""
-                # Handle multi-line comments
                 lines = []
                 in_multiline_comment = False
                 for line in json_str.split('\n'):
                     if '_comment' in line:
                         continue
-
-                    # Handle multi-line comments
                     if '/*' in line and '*/' in line:
                         line = line[:line.find('/*')] + line[line.find('*/') + 2:]
                     elif '/*' in line:
@@ -249,26 +768,16 @@ class DatasetConfig:
                         line = line[line.find('*/') + 2:]
                     elif in_multiline_comment:
                         continue
-
-                    # Remove single-line comments, but skip if // is part of http:// or https://
                     if '//' in line and not ('http://' in line or 'https://' in line):
                         line = line.split('//')[0]
-
-                    # Only add non-empty lines
                     stripped = line.strip()
                     if stripped and not stripped.startswith('_comment'):
                         lines.append(stripped)
-
                 return '\n'.join(lines)
 
-            # Clean configuration text and parse JSON
+            # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
-            try:
-                config = json.loads(clean_config)
-            except json.JSONDecodeError as e:
-                print(f"Error parsing {config_path}: {str(e)}")
-                print("Creating default configuration instead")
-                return DatasetConfig.create_default_config(dataset_name)
+            config = json.loads(clean_config)
 
             # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
@@ -314,7 +823,6 @@ class DatasetConfig:
                 try:
                     df = pd.read_csv(validated_config['file_path'], nrows=0)
                     validated_config['column_names'] = df.columns.tolist()
-                    #print(f"Inferred column names from CSV: {validated_config['column_names']}")
                 except Exception as e:
                     print(f"Warning: Could not infer column names: {str(e)}")
                     return None
@@ -905,7 +1413,7 @@ class GPUDBNN:
         #------------------------------------------Adaptive Learning--------------------------------------
         super().__init__()
         self.adaptive_learning = True
-        self.base_save_path = './training_data'
+        self.base_save_path = './data'
         os.makedirs(self.base_save_path, exist_ok=True)
         self.in_adaptive_fit=False # Set when we are in adaptive learning process
         #------------------------------------------Adaptive Learning--------------------------------------
@@ -1133,6 +1641,7 @@ class DBNN(GPUDBNN):
 
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
                  dataset_name: Optional[str] = None):
+
         """
         Initialize DBNN with configuration
 
@@ -1149,7 +1658,6 @@ class DBNN(GPUDBNN):
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
 
-
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
@@ -1165,7 +1673,31 @@ class DBNN(GPUDBNN):
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
+        self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
 
+        # Validate dataset_name
+        if not dataset_name or not isinstance(dataset_name, str):
+            raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
+
+        # Load configuration
+        self.config = DatasetConfig.load_config(dataset_name)
+        if self.config is None:
+            raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
+
+        # Initialize other attributes
+        self.target_column = self.config['target_column']
+        self.invertible_model = None
+
+    def create_invertible_model(self, reconstruction_weight: float = 0.5, feedback_strength: float = 0.3):
+        """Create an invertible DBNN model"""
+        if self.invertible_model is None:
+            self.invertible_model = InvertibleDBNN(
+                forward_model=self,
+                feature_dims=self.data.shape[1] - 1,  # Exclude target column
+                reconstruction_weight=reconstruction_weight,
+                feedback_strength=feedback_strength
+            )
+        return self.invertible_model
 
     def process_dataset(self, config_path: str) -> Dict:
         """
@@ -1792,6 +2324,7 @@ class DBNN(GPUDBNN):
         min_divergence = active_learning_config.get('min_divergence', 0.1)
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)  # Default to 5%
 
         # Calculate optimal batch size based on sample size
         sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
@@ -1805,7 +2338,7 @@ class DBNN(GPUDBNN):
         misclassified_mask = (test_predictions != y_test)
         misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
 
-        if  misclassified_indices.dim() == 0:
+        if misclassified_indices.dim() == 0:
             return []
 
         final_selected_indices = []
@@ -1817,6 +2350,10 @@ class DBNN(GPUDBNN):
 
             if len(class_indices) == 0:
                 continue
+
+            # Calculate the maximum number of samples to add from this class
+            total_class_samples = (y_test == class_id).sum().item()
+            max_samples_to_add = int(total_class_samples * (max_class_addition_percent / 100.0))
 
             # Process class samples in batches
             for batch_start in range(0, len(class_indices), batch_size):
@@ -1896,8 +2433,13 @@ class DBNN(GPUDBNN):
                         best_idx = torch.argmin(candidate_margins) if failure_type == "marginal" else torch.argmax(candidate_margins)
                         selected_mask[best_idx] = True
 
-                    # Add selected indices
+                    # Add selected indices, but ensure we don't exceed the maximum allowed for this class
                     selected_indices = low_card_indices[selected_mask]
+                    if len(final_selected_indices) + len(selected_indices) > max_samples_to_add:
+                        # If adding these samples would exceed the limit, only add enough to reach the limit
+                        remaining_samples = max_samples_to_add - len(final_selected_indices)
+                        selected_indices = selected_indices[:remaining_samples]
+
                     final_selected_indices.extend(selected_indices.cpu().tolist())
 
                     # Print selection info
@@ -1912,6 +2454,48 @@ class DBNN(GPUDBNN):
 
         print(f"\nTotal samples selected: {len(final_selected_indices)}")
         return final_selected_indices
+
+    def _save_reconstruction_plots(self, original_features: np.ndarray,
+                                reconstructed_features: np.ndarray,
+                                true_labels: np.ndarray,
+                                save_path: str):
+        """Generate visualization plots for reconstruction analysis"""
+        plt.figure(figsize=(15, 5))
+
+        # Feature-wise reconstruction error
+        plt.subplot(131)
+        errors = np.mean((original_features - reconstructed_features) ** 2, axis=0)
+        plt.bar(range(len(errors)), errors)
+        plt.title('Feature-wise Reconstruction Error')
+        plt.xlabel('Feature Index')
+        plt.ylabel('MSE')
+
+        # Class-wise reconstruction quality
+        plt.subplot(132)
+        unique_classes = np.unique(true_labels)
+        class_errors = []
+        for class_label in unique_classes:
+            mask = (true_labels == class_label)
+            error = np.mean((original_features[mask] - reconstructed_features[mask]) ** 2)
+            class_errors.append(error)
+
+        plt.bar(unique_classes, class_errors)
+        plt.title('Class-wise Reconstruction Error')
+        plt.xlabel('Class')
+        plt.ylabel('MSE')
+
+        # Error distribution
+        plt.subplot(133)
+        all_errors = np.mean((original_features - reconstructed_features) ** 2, axis=1)
+        plt.hist(all_errors, bins=30)
+        plt.title('Error Distribution')
+        plt.xlabel('MSE')
+        plt.ylabel('Count')
+
+        plt.tight_layout()
+        plt.savefig(f"{save_path}_reconstruction_plots.png")
+        plt.close()
+
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -1931,6 +2515,13 @@ class DBNN(GPUDBNN):
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
+
+           # Encode labels if not already done
+            if not hasattr(self.label_encoder, 'classes_'):
+                y_encoded = self.label_encoder.fit_transform(y)
+            else:
+                y_encoded = self.label_encoder.transform(y)
+
             print(self.target_column)
             print(f" Initial data shape: X={X.shape}, y={len(y)}")
             print(f"Number of classes in data = {np.unique(y)}")
@@ -2386,8 +2977,19 @@ class DBNN(GPUDBNN):
         pbar.close()
         return torch.FloatTensor(X_scaled)
 
-    def _generate_feature_combinations(self, n_features: int, group_size: int, max_combinations: int = None) -> torch.Tensor:
+    def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations"""
+        # Get parameters from likelihood_config
+        likelihood_config = self.config.get('likelihood_config', {})
+        group_size = group_size or likelihood_config.get('feature_group_size', 2)
+        max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
+
+        # Debug: Print parameters
+        print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
+        print(f"- n_features: {n_features}")
+        print(f"- group_size: {group_size}")
+        print(f"- max_combinations: {max_combinations}")
+
         # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
@@ -2395,6 +2997,10 @@ class DBNN(GPUDBNN):
 
         # Check if combinations already exist
         if os.path.exists(combinations_path):
+            print("------------------------------------------------------------------------------------------------------------")
+            print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            print("Remove this if you change the feature combinations in config file")
+            print("------------------------------------------------------------------------------------------------------------")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
                 return combinations_tensor.to(self.device)
@@ -2404,12 +3010,13 @@ class DBNN(GPUDBNN):
             raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
 
         # Generate all possible combinations
+        from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
-        if not all_combinations:
-            raise ValueError(f"No valid combinations generated for {n_features} features in groups of {group_size}")
+        #print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
         # Sample combinations if max_combinations specified
         if max_combinations and len(all_combinations) > max_combinations:
+            #print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
             # Convert list of tuples to numpy array for sampling
             combinations_array = np.array(all_combinations)
             rng = np.random.RandomState(42)
@@ -2424,6 +3031,7 @@ class DBNN(GPUDBNN):
         with open(combinations_path, 'wb') as f:
             pickle.dump(combinations_tensor.cpu(), f)
 
+        print(f"[DEBUG] Saved {len(all_combinations)} feature combinations to {combinations_path}")
         return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
@@ -2883,11 +3491,11 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'{dataset_name}_Last_training.csv', index=False)
+        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=False)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'{dataset_name}_Last_testing.csv', index=False)
+        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=False)
         print(f"Last testing data is saved to {dataset_name}_Last_testing.csv")
         print(f"Last training data is saved to {dataset_name}_Last_training.csv")
 
@@ -2940,7 +3548,6 @@ class DBNN(GPUDBNN):
 
         return None, None
 
-#---------------------------------------------------------------------------------------------------------
 
     def predict(self, X: torch.Tensor, batch_size: int = 32):
         """Make predictions in batches using the best model weights"""
@@ -3330,20 +3937,161 @@ class DBNN(GPUDBNN):
             # Update weights if there were failures
             if failed_cases:
                 self._update_priors_parallel(failed_cases, batch_size)
+            # Save reconstruction plots if enabled
+            if self.save_plots:
+                # Reconstruct features from predictions
+                reconstructed_features = self.reconstruct_features(posteriors)
+                self._save_reconstruction_plots(
+                    original_features=X_train.cpu().numpy(),
+                    reconstructed_features=reconstructed_features.cpu().numpy(),
+                    true_labels=y_train.cpu().numpy(),
+                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_epoch_{epoch+1}"
+                )
 
-            # Plot metrics
-            self.plot_training_metrics(
-                train_losses, test_losses,
-                train_accuracies, test_accuracies,
-                save_path=f'{self.dataset_name}_training_metrics.png'
-            )
+                # Plot metrics
+                self.plot_training_metrics(
+                    train_losses, test_losses,
+                    train_accuracies, test_accuracies,
+                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_training_metrics.png"
+                )
 
         # Training complete
         epoch_pbar.close()
         self._save_model_components()
         return self.current_W.cpu(), error_rates
 
+    #---------------------------------Train InvertableDBNN on the fly ------------------------------------
+    def load_inverse_model(self, custom_path: str = None) -> bool:
+       try:
+           load_dir = custom_path or os.path.join('Model', f'Best_inverse_{self.forward_model.dataset_name}')
+           model_path = os.path.join(load_dir, 'inverse_model.pt')
+           config_path = os.path.join(load_dir, 'inverse_config.json')
 
+           if not (os.path.exists(model_path) and os.path.exists(config_path)):
+               print(f"No saved inverse model found at {load_dir}")
+               return False
+
+           model_state = torch.load(model_path, map_location=self.device, weights_only=True)
+
+           with open(config_path, 'r') as f:
+               config = json.load(f)
+
+           if config['feature_dims'] != self.feature_dims or config['n_classes'] != self.n_classes:
+               raise ValueError("Model architecture mismatch")
+
+           # Load parameters
+           self.weight_linear.data = model_state['weight_linear']
+           self.weight_nonlinear.data = model_state['weight_nonlinear']
+           self.bias_linear.data = model_state['bias_linear']
+           self.bias_nonlinear.data = model_state['bias_nonlinear']
+           self.feature_attention.data = model_state['feature_attention']
+           self.layer_norm.load_state_dict(model_state['layer_norm'])
+
+           # Safely update or register buffers
+           for param in ['min_vals', 'max_vals', 'scale_factors', 'inverse_feature_pairs']:
+               if param in model_state:
+                   buffer_data = model_state[param]
+                   if buffer_data is not None:
+                       if hasattr(self, param) and getattr(self, param) is not None:
+                           getattr(self, param).copy_(buffer_data)
+                       else:
+                           self.register_buffer(param, buffer_data)
+
+           # Restore other attributes
+           self.metrics = model_state.get('metrics', {})
+           self.reconstruction_weight = model_state.get('reconstruction_weight', 0.5)
+           self.feedback_strength = model_state.get('feedback_strength', 0.3)
+
+           print(f"Loaded inverse model from {load_dir}")
+           return True
+
+       except Exception as e:
+           print(f"Error loading inverse model: {str(e)}")
+           traceback.print_exc()
+           return False
+
+    def save_reconstruction_features(self,
+                                     reconstructed_features: torch.Tensor,
+                                     original_features: torch.Tensor,
+                                     predictions: torch.Tensor,
+                                     true_labels: torch.Tensor = None,
+                                     class_probs: torch.Tensor = None) -> Dict:
+        """Save reconstruction features and return JSON-compatible output.
+
+        Args:
+            reconstructed_features: Reconstructed feature tensor
+            original_features: Original input feature tensor
+            predictions: Model predictions tensor
+            true_labels: True labels tensor (optional)
+            class_probs: Class probabilities tensor (optional)
+
+        Returns:
+            Dict containing reconstruction data and paths
+        """
+        # Create reconstruction directory
+        dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        recon_dir = os.path.join('data', dataset_name, 'reconstruction')
+        os.makedirs(recon_dir, exist_ok=True)
+
+        # Convert tensors to numpy arrays
+        recon_np = reconstructed_features.cpu().numpy()
+        orig_np = original_features.cpu().numpy()
+        pred_np = predictions.cpu().numpy()
+
+        # Create DataFrame with original and reconstructed features
+        feature_cols = [f'feature_{i}' for i in range(orig_np.shape[1])]
+        recon_cols = [f'reconstructed_{i}' for i in range(recon_np.shape[1])]
+
+        df = pd.DataFrame(orig_np, columns=feature_cols)
+        df = pd.concat([df, pd.DataFrame(recon_np, columns=recon_cols)], axis=1)
+
+        # Add predictions
+        df['predicted_class'] = self.label_encoder.inverse_transform(pred_np)
+
+        # Add true labels if provided
+        if true_labels is not None:
+            true_np = true_labels.cpu().numpy()
+            df['true_class'] = self.label_encoder.inverse_transform(true_np)
+
+        # Add class probabilities if provided
+        if class_probs is not None:
+            probs_np = class_probs.cpu().numpy()
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                df[f'prob_{class_name}'] = probs_np[:, i]
+
+        # Add reconstruction error
+        df['reconstruction_error'] = np.mean((orig_np - recon_np) ** 2, axis=1)
+
+        # Save to CSV
+        csv_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction.csv')
+        df.to_csv(csv_path, index=False)
+
+        # Create JSON-compatible output
+        output = {
+            'dataset': dataset_name,
+            'reconstruction_path': csv_path,
+            'feature_count': orig_np.shape[1],
+            'sample_count': len(df),
+            'mean_reconstruction_error': float(df['reconstruction_error'].mean()),
+            'std_reconstruction_error': float(df['reconstruction_error'].std()),
+            'features': {
+                'original': feature_cols,
+                'reconstructed': recon_cols
+            },
+            'class_mapping': dict(zip(
+                range(len(self.label_encoder.classes_)),
+                self.label_encoder.classes_
+            ))
+        }
+
+        # Save metadata as JSON
+        json_path = os.path.join(recon_dir, f'{dataset_name}_reconstruction_meta.json')
+        with open(json_path, 'w') as f:
+            json.dump(output, f, indent=2)
+
+        return output
+
+    #------------------------------End Train InvertableDBNN on the fly ------------------------------------
 
     def plot_training_metrics(self, train_loss, test_loss, train_acc, test_acc, save_path=None):
         """Plot training and testing metrics over epochs"""
@@ -4167,6 +4915,23 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
     plt.show()
 
 
+def save_label_encoder(label_encoder, dataset_name):
+    save_dir = os.path.join('Model', f'Best_{dataset_name}')
+    os.makedirs(save_dir, exist_ok=True)
+    encoder_path = os.path.join(save_dir, 'label_encoder.pkl')
+    with open(encoder_path, 'wb') as f:
+        pickle.dump(label_encoder, f)
+    print(f"Label encoder saved to {encoder_path}")
+
+def load_label_encoder(dataset_name):
+    encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
+    if os.path.exists(encoder_path):
+        with open(encoder_path, 'rb') as f:
+            label_encoder = pickle.load(f)
+        print(f"Label encoder loaded from {encoder_path}")
+        return label_encoder
+    else:
+        raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
 
 
 def generate_test_datasets():
@@ -4356,8 +5121,6 @@ def process_datasets():
 
     if not dataset_pairs:
         print("\nNo matching .conf and .csv file pairs found in the current directory.")
-        print("Each dataset should have both a .conf configuration file and a matching .csv data file.")
-        print("Example: 'dataset1.conf' and 'dataset1.csv'")
         return
 
     print(f"\nFound {len(dataset_pairs)} dataset pair(s)")
@@ -4370,16 +5133,16 @@ def process_datasets():
         print(f"Data file: {csv_path}")
         print('='*60)
 
+        # Validate dataset name
+        if not basename or not isinstance(basename, str):
+            print(f"Invalid dataset name: {basename}. Skipping...")
+            continue
+
         # Print dataset information
         print_dataset_info(conf_path, csv_path)
 
         # Ask user if they want to process this dataset
-        while True:
-            response = input("\nProcess this dataset? (y/n): ").lower()
-            if response in ['y', 'n']:
-                break
-            print("Please enter 'y' or 'n'")
-
+        response = input("\nProcess this dataset? (y/n): ").lower()
         if response == 'n':
             print(f"Skipping dataset: {basename}")
             continue
@@ -4389,6 +5152,14 @@ def process_datasets():
         try:
             # Create DBNN instance with specific dataset name
             model = DBNN(dataset_name=basename)
+
+            # Optionally create an invertible model
+            if model.config.get('enable_invertible', False):
+                invertible_model = model.create_invertible_model(
+                    reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
+                    feedback_strength=model.config.get('feedback_strength', 0.3)
+                )
+                print("Created invertible DBNN model")
 
             start_time = datetime.now()
             results = model.process_dataset(conf_path)
@@ -4401,6 +5172,9 @@ def process_datasets():
             print(f"Training log saved to: {results['log_path']}")
             print(f"Processed {results['n_samples']} samples with {results['n_features']} features")
             print(f"Excluded {results['n_excluded']} features")
+            # Save the label encoder after training
+            model = DBNN(dataset_name=basename)
+            save_label_encoder(model.label_encoder, basename)
 
         except Exception as e:
             print(f"\nError processing dataset {basename}:")
@@ -4510,15 +5284,112 @@ def print_dataset_info(conf_path: str, csv_path: str):
         print(f"Error reading dataset info: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
 
+
+def main():
+    parser = argparse.ArgumentParser(description='Process ML datasets')
+    parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
+    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
+                        required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
+    args = parser.parse_args()
+
+    processor = DatasetProcessor()
+    parser.print_help()
+    if not args.file_path:
+        parser.print_help()
+        input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
+        process_datasets()
+
+    elif args.mode !="invertDBNN":
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        # Save the label encoder after training
+       # Create DBNN instance with specific dataset name
+        model = DBNN(dataset_name=basename)
+
+        # Optionally create an invertible model
+        if model.config.get('enable_invertible', False):
+            invertible_model = model.create_invertible_model(
+                reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
+                feedback_strength=model.config.get('feedback_strength', 0.3)
+            )
+            print("Created invertible DBNN model")
+
+        start_time = datetime.now()
+        results = model.process_dataset(conf_path)
+        end_time = datetime.now()
+
+        # Print results
+        print("\nProcessing complete!")
+        print(f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+        print(f"Results saved to: {results['results_path']}")
+        print(f"Training log saved to: {results['log_path']}")
+        print(f"Processed {results['n_samples']} samples with {results['n_features']} features")
+        print(f"Excluded {results['n_excluded']} features")
+        save_label_encoder(model.label_encoder, basename)
+
+    elif args.mode =="invertDBNN":
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        # Invert DBNN mode
+        model = DBNN(dataset_name=basename)
+        model._load_model_components()
+        # Load configuration
+        with open(conf_path, 'r') as f:
+            config_dict = json.load(f)
+
+        print("\nDEBUG: Inverse DBNN Settings:")
+        for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
+            value = config_dict.get('training_params', {}).get(param, 0.1)
+            print(f"- {param}: {value}")
+
+        print("DEBUG: Initializing inverse model...")
+
+        # Load the label encoder
+        try:
+            label_encoder = load_label_encoder(basename)
+            model.label_encoder = label_encoder
+
+            # Now you can safely access model.label_encoder.classes_
+            #print(f"Classes in label encoder: {model.label_encoder.classes_}")
+
+            # Proceed with inverse model initialization
+            inverse_model = InvertibleDBNN(
+                forward_model=model,
+                feature_dims=model.data.shape[1] - 1,  # Exclude target column
+                reconstruction_weight=config_dict['training_params'].get('reconstruction_weight', 0.5),
+                feedback_strength=config_dict['training_params'].get('feedback_strength', 0.3)
+            )
+
+            # Reconstruct features
+            X_test = model.data.drop(columns=[model.target_column])
+            test_probs = model._get_test_probabilities(X_test)
+            reconstruction_features = inverse_model.reconstruct_features(test_probs)
+
+            # Save reconstructed features
+            output_dir = os.path.join('data', basename, 'Predicted_features')
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f'{basename}.csv')
+
+            feature_columns = model.data.drop(columns=[model.target_column]).columns
+            reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
+            reconstructed_df.to_csv(output_file, index=False)
+
+            print(f"Reconstructed features saved to {output_file}")
+
+        except FileNotFoundError as e:
+            print(f"Error: {str(e)}")
+            print("Please ensure the model has been trained before using invertDBNN mode.")
+            return
+
+    else:
+        print("\nNo datasets found in data folder")
 if __name__ == "__main__":
     print("DBNN Dataset Processor")
     print("=" * 40)
-
-    try:
-        process_datasets()
-    except KeyboardInterrupt:
-        print("\nProcessing interrupted by user")
-    except Exception as e:
-        print(f"\nUnexpected error: {str(e)}")
-    finally:
-        print("\nProgram complete")
+    main()
