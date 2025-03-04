@@ -3868,23 +3868,17 @@ class DBNN(GPUDBNN):
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
 
-                # Validation metrics using current weights
-                test_predictions = self.predict(X_test, batch_size=batch_size)
-                test_accuracy = (test_predictions == y_test.cpu()).float().mean()
-                test_loss = (test_predictions != y_test.cpu()).float().mean()
-
                 # Restore original weights
                 self.current_W = orig_weights
 
             # Update best accuracies
             best_train_accuracy = max(best_train_accuracy, train_accuracy)
-            best_test_accuracy = max(best_test_accuracy, test_accuracy)
 
             # Store metrics
             train_losses.append(train_loss)
-            test_losses.append(test_loss)
+
             train_accuracies.append(train_accuracy)
-            test_accuracies.append(test_accuracy)
+
 
             # Calculate training time
             Trend_time = time.time()
@@ -3894,25 +3888,18 @@ class DBNN(GPUDBNN):
             epoch_pbar.update(1)
             epoch_pbar.set_postfix({
                 'train_err': f"{train_error_rate:.4f} (best: {1-best_train_accuracy:.4f})",
-                'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})",
-                'val_acc': f"{test_accuracy:.4f} (best: {best_test_accuracy:.4f})"
+                'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
             })
 
             print(f"\nEpoch {epoch + 1}/{self.max_epochs}:")
             print(f"Training time: {Colors.highlight_time(training_time)} seconds")
             print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})")
             print(f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})")
-            print(f"Test accuracy: {Colors.color_value(test_accuracy, prev_test_accuracy, True)} (best: {Colors.GREEN}{best_test_accuracy:.4f}{Colors.ENDC})")
 
             # Update previous values for next iteration
             prev_train_error = train_error_rate
             prev_train_accuracy = train_accuracy
-            prev_test_accuracy = test_accuracy
 
-            # Check for convergence
-            if test_accuracy == 1.0 or train_error_rate == 0:
-                print(f"Achieved perfect accuracy at epoch {epoch + 1}")
-                break
 
             # Update best model if improved
             if train_error_rate <= self.best_error:
@@ -3930,8 +3917,8 @@ class DBNN(GPUDBNN):
                 patience_counter += 1
 
             # Early stopping check
-            if patience_counter >= patience:
-                print(f"\nNo significant improvement for {patience} epochs. Early stopping.")
+            if patience_counter >= patience or  train_accuracy ==1.00:
+                print(f"\n Early stopping.")
                 break
 
             # Update weights if there were failures
@@ -3948,12 +3935,6 @@ class DBNN(GPUDBNN):
                     save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_epoch_{epoch+1}"
                 )
 
-                # Plot metrics
-                self.plot_training_metrics(
-                    train_losses, test_losses,
-                    train_accuracies, test_accuracies,
-                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_training_metrics.png"
-                )
 
         # Training complete
         epoch_pbar.close()
