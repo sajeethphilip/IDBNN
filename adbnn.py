@@ -1016,41 +1016,43 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5, group_size=2):
+    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5):
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
-        self.group_size = group_size  # New parameter for group size
-        self.device = Train_device
+        self.device=Train_device
+        # Initialize histogram_weights as empty dictionary first
+        self.histogram_weights = {}
 
-        # Initialize histogram_weights for each class and feature group
-        self.histogram_weights = {
-            class_id: {
-                pair_idx: torch.full(
-                    [self.n_bins_per_dim] * self.group_size,  # Dynamic shape based on group size
+        # Create weights for each class and feature pair
+        for class_id in range(n_classes):
+            self.histogram_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                # Initialize with default weight of 0.1
+                #print(f"[DEBUG] Creating weights for class {class_id}, pair {pair_idx}")
+                self.histogram_weights[class_id][pair_idx] = torch.full(
+                    (n_bins_per_dim, n_bins_per_dim),
                     0.1,
+                    dtype=torch.float32,
+                    device=self.device  # Ensure weights are created on correct device
+                ).contiguous()
+
+        # Initialize weights for each class and feature pair
+        self.gaussian_weights = {}
+        for class_id in range(n_classes):
+            self.gaussian_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                # Initialize with default weight of 0.1
+                self.gaussian_weights[class_id][pair_idx] = torch.tensor(0.1,
                     dtype=torch.float32,
                     device=self.device
                 ).contiguous()
-                for pair_idx in range(len(feature_pairs))
-            }
-            for class_id in range(n_classes)
-        }
-
-        # Initialize Gaussian weights (if needed)
-        self.gaussian_weights = {
-            class_id: {
-                pair_idx: torch.tensor(0.1, dtype=torch.float32, device=self.device).contiguous()
-                for pair_idx in range(len(feature_pairs))
-            }
-            for class_id in range(n_classes)
-        }
 
         # Verify initialization
         print(f"[DEBUG] Weight initialization complete. Structure:")
         print(f"- Number of classes: {len(self.histogram_weights)}")
         for class_id in self.histogram_weights:
-            print(f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature groups")
+            print(f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
 
         # Use a single contiguous tensor for all weights
         self.weights = torch.full(
@@ -2976,7 +2978,7 @@ class DBNN(GPUDBNN):
         return torch.FloatTensor(X_scaled)
 
     def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
-        """Generate and save/load consistent feature combinations of arbitrary size."""
+        """Generate and save/load consistent feature combinations"""
         # Get parameters from likelihood_config
         likelihood_config = self.config.get('likelihood_config', {})
         group_size = group_size or likelihood_config.get('feature_group_size', 2)
@@ -3010,12 +3012,16 @@ class DBNN(GPUDBNN):
         # Generate all possible combinations
         from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
+        #print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
-        # Sample combinations if max_combinations is specified
+        # Sample combinations if max_combinations specified
         if max_combinations and len(all_combinations) > max_combinations:
+            #print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
+            # Convert list of tuples to numpy array for sampling
+            combinations_array = np.array(all_combinations)
             rng = np.random.RandomState(42)
-            selected_indices = rng.choice(len(all_combinations), max_combinations, replace=False)
-            all_combinations = [all_combinations[i] for i in selected_indices]
+            selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
+            all_combinations = combinations_array[selected_indices]
 
         # Convert to tensor
         combinations_tensor = torch.tensor(all_combinations, device=self.device)
@@ -3030,16 +3036,16 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized likelihood computation for feature groups of arbitrary size."""
+        """Optimized non-parametric likelihood computation with configurable bin sizes"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
-        print("\nComputing likelihoods...")
+        print("\nComputing pairwise likelihoods...")
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
         labels = torch.as_tensor(labels, device=self.device).contiguous()
 
         # Initialize progress tracking
-        n_groups = len(self.feature_pairs)
-        group_pbar = tqdm(total=n_groups, desc="Processing feature groups")
+        n_pairs = len(self.feature_pairs)
+        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
 
         # Pre-compute unique classes once
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
@@ -3095,8 +3101,7 @@ class DBNN(GPUDBNN):
                 ).contiguous()
                 bin_edges.append(edges)
                 DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
-            group_pbar.update(1)
-
+            pair_pbar.update(1)
             # Initialize bin counts with appropriate shape for variable bin sizes
             bin_shape = [n_classes] + [size for size in group_bin_sizes]
             bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
@@ -3107,22 +3112,21 @@ class DBNN(GPUDBNN):
                 if class_mask.any():
                     class_data = group_data[class_mask].contiguous()
 
-                    # Compute bin indices for all dimensions
-                    bin_indices = torch.stack([
-                        torch.bucketize(
-                            class_data[:, dim].contiguous(),
-                            bin_edges[dim].contiguous()
-                        ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                        for dim in range(n_dims)
-                    ])
+                    if n_dims == 2:  # Optimized path for pairs
+                        # Compute bin indices for both dimensions
+                        bin_indices = torch.stack([
+                            torch.bucketize(
+                                class_data[:, dim].contiguous(),
+                                bin_edges[dim].contiguous()
+                            ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
+                            for dim in range(2)
+                        ])
 
-                    # Use scatter_add_ for efficient counting
-                    flat_indices = torch.zeros(len(class_data), dtype=torch.long, device=self.device)
-                    for dim in range(n_dims):
-                        flat_indices += bin_indices[dim] * (group_bin_sizes[dim] ** dim)
-                    counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
-                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
-                    bin_counts[class_idx] = counts.reshape(group_bin_sizes)
+                        # Use scatter_add_ for efficient counting
+                        counts = torch.zeros(group_bin_sizes[0] * group_bin_sizes[1], device=self.device)
+                        flat_indices = bin_indices[0] * group_bin_sizes[1] + bin_indices[1]
+                        counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
+                        bin_counts[class_idx] = counts.reshape(group_bin_sizes[0], group_bin_sizes[1])
 
             # Apply Laplace smoothing and compute probabilities
             smoothed_counts = bin_counts + 1.0
@@ -3135,7 +3139,7 @@ class DBNN(GPUDBNN):
 
             DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
             DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
-        group_pbar.close()
+        pair_pbar.close()
         return {
             'bin_edges': all_bin_edges,
             'bin_counts': all_bin_counts,
@@ -3865,22 +3869,22 @@ class DBNN(GPUDBNN):
                 train_loss = n_errors / n_samples
 
                 # Validation metrics using current weights
-                #test_predictions = self.predict(X_test, batch_size=batch_size)
-                #test_accuracy = (test_predictions == y_test.cpu()).float().mean()
-                #test_loss = (test_predictions != y_test.cpu()).float().mean()
+                test_predictions = self.predict(X_test, batch_size=batch_size)
+                test_accuracy = (test_predictions == y_test.cpu()).float().mean()
+                test_loss = (test_predictions != y_test.cpu()).float().mean()
 
                 # Restore original weights
                 self.current_W = orig_weights
 
             # Update best accuracies
             best_train_accuracy = max(best_train_accuracy, train_accuracy)
-            #best_test_accuracy = max(best_test_accuracy, test_accuracy)
+            best_test_accuracy = max(best_test_accuracy, test_accuracy)
 
             # Store metrics
             train_losses.append(train_loss)
-            #test_losses.append(test_loss)
+            test_losses.append(test_loss)
             train_accuracies.append(train_accuracy)
-            #test_accuracies.append(test_accuracy)
+            test_accuracies.append(test_accuracy)
 
             # Calculate training time
             Trend_time = time.time()
@@ -3891,23 +3895,23 @@ class DBNN(GPUDBNN):
             epoch_pbar.set_postfix({
                 'train_err': f"{train_error_rate:.4f} (best: {1-best_train_accuracy:.4f})",
                 'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})",
-                #'val_acc': f"{test_accuracy:.4f} (best: {best_test_accuracy:.4f})"
+                'val_acc': f"{test_accuracy:.4f} (best: {best_test_accuracy:.4f})"
             })
 
             print(f"\nEpoch {epoch + 1}/{self.max_epochs}:")
             print(f"Training time: {Colors.highlight_time(training_time)} seconds")
             print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})")
             print(f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})")
-            #print(f"Test accuracy: {Colors.color_value(test_accuracy, prev_test_accuracy, True)} (best: {Colors.GREEN}{best_test_accuracy:.4f}{Colors.ENDC})")
+            print(f"Test accuracy: {Colors.color_value(test_accuracy, prev_test_accuracy, True)} (best: {Colors.GREEN}{best_test_accuracy:.4f}{Colors.ENDC})")
 
             # Update previous values for next iteration
             prev_train_error = train_error_rate
             prev_train_accuracy = train_accuracy
-            #prev_test_accuracy = test_accuracy
+            prev_test_accuracy = test_accuracy
 
             # Check for convergence
-            if train_accuracy == 1.0 or train_error_rate == 0:
-                print(f"Achieved perfect accuracy on train data at epoch {epoch + 1}")
+            if test_accuracy == 1.0 or train_error_rate == 0:
+                print(f"Achieved perfect accuracy at epoch {epoch + 1}")
                 break
 
             # Update best model if improved
