@@ -735,11 +735,7 @@ class DatasetConfig:
             print("Error: Invalid dataset name provided.")
             return None
 
-        config_path = f"{dataset_name}.conf"
-
-        # If the config isn't in current directory, check data directory
-        if not os.path.exists(config_path):
-            config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
+        config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
 
         try:
             # Check if configuration file exists
@@ -778,7 +774,6 @@ class DatasetConfig:
             # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
             config = json.loads(clean_config)
-
             # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
@@ -1758,6 +1753,7 @@ class DBNN(GPUDBNN):
         self.data['original_index'] = range(len(self.data))
 
         # Extract features and target
+
         if 'target_column' not in self.data_config:
             self.data_config['target_column'] = 'target'  # Set default target column
             print(f"Using default target column: 'target'")
@@ -1962,6 +1958,7 @@ class DBNN(GPUDBNN):
 
                 # Handle target column
                 target_column = self.config.get('target_column')
+
                 if target_column is None:
                     raise ValueError(f"No target column specified for dataset: {self.dataset_name}")
 
@@ -2997,10 +2994,11 @@ class DBNN(GPUDBNN):
 
         # Check if combinations already exist
         if os.path.exists(combinations_path):
-            print("------------------------------------------------------------------------------------------------------------")
-            print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
-            print("Remove this if you change the feature combinations in config file")
-            print("------------------------------------------------------------------------------------------------------------")
+            color = Colors.RED
+            print(f"{color}------------------------------------------------------------------------------------------------------------{Colors.ENDC}")
+            print(f"{color}[DEBUG] Loading cached feature combinations from {combinations_path}{Colors.ENDC}")
+            print(f"{color}Remove this if you change the feature combinations in config file{Colors.ENDC}")
+            print(f"{color}------------------------------------------------------------------------------------------------------------{Colors.ENDC}")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
                 return combinations_tensor.to(self.device)
@@ -5016,19 +5014,6 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     dataset_pairs = []
     processed_datasets = set()
 
-    # Load adaptive_dbnn.conf if it exists
-    adaptive_conf = {}
-    adaptive_conf_path = 'adaptive_dbnn.conf'
-    if os.path.exists(adaptive_conf_path):
-        try:
-            with open(adaptive_conf_path, 'r') as f:
-                adaptive_conf = json.load(f)
-            print(f"Loaded adaptive configuration from {adaptive_conf_path}")
-        except Exception as e:
-            print(f"Warning: Could not load adaptive configuration: {str(e)}")
-    else:
-        print("No adaptive_dbnn.conf found in working directory")
-
     # Walk through all subdirectories
     for root, dirs, files in os.walk(data_dir):
         # Process configuration files
@@ -5047,6 +5032,18 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                 os.path.join(root, csv_file),
                 os.path.join(root, basename, csv_file)
             ]
+           # Load adaptive_dbnn.conf if it exists
+            adaptive_conf = {}
+            adaptive_conf_path =f'{data_dir}/{basename}/adaptive_dbnn.conf'
+            if os.path.exists(adaptive_conf_path):
+                try:
+                    with open(adaptive_conf_path, 'r') as f:
+                        adaptive_conf = json.load(f)
+                    print(f"Loaded adaptive configuration from {adaptive_conf_path}")
+                except Exception as e:
+                    print(f"Warning: Could not load adaptive configuration from{adaptive_conf_path}: {str(e)}")
+            else:
+                print(f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}")
 
             csv_path = None
             for path in csv_paths:
@@ -5224,6 +5221,7 @@ def print_dataset_info(conf_path: str, csv_path: str):
         print(f"Model type: {config.get('modelType', 'Not specified')}")
 
         # Safely access configuration values
+
         target_column = config.get('target_column', 'target')  # Default to 'target' if not specified
         print(f"Target column: {target_column}")
 
