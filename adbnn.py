@@ -247,7 +247,7 @@ class DatasetProcessor:
                "trials": 100,
                "cardinality_threshold": 0.9,
                "cardinality_tolerance": 4,
-               "learning_rate": 0.1,
+               "learning_rate": 0.001,
                "random_seed": 42,
                "epochs": 100,
                "test_fraction": 0.2,
@@ -689,7 +689,7 @@ class DatasetConfig:
             "cardinality_threshold": 0.9,
             "minimum_training_accuracy": 0.95,
             "cardinality_tolerance": 4,
-            "learning_rate": 0.1,
+            "learning_rate": 0.001,
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
@@ -699,7 +699,7 @@ class DatasetConfig:
             "invert_DBNN": True,
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.1,
+            "inverse_learning_rate": 0.001,
             "save_plots": True
         }
         config["active_learning"]= {
@@ -1588,7 +1588,7 @@ class DBNNConfig:
         self.trials = kwargs.get('trials', 100)
         self.cardinality_threshold = kwargs.get('cardinality_threshold', 0.9)
         self.cardinality_tolerance = kwargs.get('cardinality_tolerance', 4)
-        self.learning_rate = kwargs.get('learning_rate', 0.1)
+        self.learning_rate = kwargs.get('learning_rate', 0.001)
         self.random_seed = kwargs.get('random_seed', 42)
         self.epochs = kwargs.get('epochs', 1000)
         self.test_fraction = kwargs.get('test_fraction', 0.2)
