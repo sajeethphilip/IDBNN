@@ -3021,6 +3021,7 @@ class DBNN(GPUDBNN):
           #  selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
            # all_combinations = combinations_array[selected_indices]
         max_combination= len(all_combinations)
+        color = Colors.RED
         print(f"{color} Using {max_combination}  combination pairs{Colors.ENDC}")
         all_combinations = np.array(all_combinations)
         # Convert to tensor
