@@ -5102,7 +5102,7 @@ class DatasetProcessor:
              "model": {
                 "encoder_type": "autoenc",
                 "feature_dims": 128,
-                "learning_rate": 0.01,
+                "learning_rate": 0.001,
                 "optimizer": {
                     "type": "Adam",
                     "weight_decay": 0.0001,
@@ -5303,7 +5303,7 @@ class DatasetProcessor:
             "target_column": "target",
             "modelType": "Histogram",
             "feature_group_size": 2,
-            "max_combinations": 1000,
+            "max_combinations": 10000,
             "bin_sizes": [21],
             "active_learning": {
                 "tolerance": 1.0,
@@ -5315,7 +5315,7 @@ class DatasetProcessor:
             "training_params": {
                 "trials": 100,
                 "epochs": 1000,
-                "learning_rate": 0.1,
+                "learning_rate": 0.001,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5326,7 +5326,7 @@ class DatasetProcessor:
                 "invert_DBNN": True,
                 "reconstruction_weight": 0.5,
                 "feedback_strength": 0.3,
-                "inverse_learning_rate": 0.1,
+                "inverse_learning_rate": 0.001,
                 "Save_training_epochs": True,
                 "training_save_path": "training_data",
                 "enable_vectorized": False,
