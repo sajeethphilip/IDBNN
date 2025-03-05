@@ -2089,6 +2089,80 @@ class DBNN(GPUDBNN):
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
         return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
+
+    def _compute_batch_posterior_old(self, features: torch.Tensor, epsilon: float = 1e-10):
+        """Optimized batch posterior with vectorized operations"""
+        # Safety checks
+        if self.weight_updater is None:
+            DEBUG.log(" Weight updater not initialized, initializing now...")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
+
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
+
+        # Ensure input features are contiguous
+        if not features.is_contiguous():
+            features = features.contiguous()
+
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+
+        # Pre-allocate tensors
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+        # Process all feature pairs at once
+        feature_groups = torch.stack([
+            features[:, pair].contiguous()
+            for pair in self.likelihood_params['feature_pairs']
+        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+
+        # Compute all bin indices at once
+        bin_indices_dict = {}
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous() for edge in bin_edges])
+
+            # Vectorized binning with contiguous tensors
+            indices = torch.stack([
+                torch.bucketize(
+                    feature_groups[:, group_idx, dim].contiguous(),
+                    edges[dim].contiguous()
+                )
+                for dim in range(2)
+            ])  # [2, batch_size]
+            indices = indices.sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+            bin_indices_dict[group_idx] = indices
+
+        # Process all classes simultaneously
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
+            indices = bin_indices_dict[group_idx]  # [2, batch_size]
+
+            # Get all weights at once
+            weights = torch.stack([
+                self.weight_updater.get_histogram_weights(c, group_idx)
+                for c in range(n_classes)
+            ])  # [n_classes, n_bins, n_bins]
+
+            # Ensure weights are contiguous
+            if not weights.is_contiguous():
+                weights = weights.contiguous()
+
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+
+            # Gather probabilities for all samples and classes at once
+            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+            log_likelihoods += torch.log(probs.t() + epsilon)
+
+        # Compute posteriors efficiently
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+
+        return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
 #----------------------
 
     def set_feature_bounds(self, dataset):
@@ -3012,14 +3086,6 @@ class DBNN(GPUDBNN):
         all_combinations = list(combinations(range(n_features), group_size))
         #print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
-        # Sample combinations if max_combinations specified
-        #if max_combinations and len(all_combinations) > max_combinations:
-            #print(f"[DEBUG] Sampling {max_combinations} combinations from {len(all_combinations)}")
-            # Convert list of tuples to numpy array for sampling
-            #combinations_array = np.array(all_combinations)
-         #   rng = np.random.RandomState(42)
-          #  selected_indices = rng.choice(len(combinations_array), max_combinations, replace=False)
-           # all_combinations = combinations_array[selected_indices]
         max_combination= len(all_combinations)
         color = Colors.RED
         print(f"{color} Using {max_combination}  combination pairs{Colors.ENDC}")
