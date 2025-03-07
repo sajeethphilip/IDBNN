@@ -1335,7 +1335,7 @@ class InvertibleDBNN(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dims, hidden_dims),
             nn.ReLU(),
-            nn.Linear(hidden_dims, feature_dims)
+            nn.Linear(hidden_dims, feature_dims))
 
         # Move model to the appropriate device
         self.to(device)
