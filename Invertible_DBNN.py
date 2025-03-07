@@ -6,7 +6,7 @@ import logging
 from tqdm import tqdm
 
 class InvertibleDBNN(torch.nn.Module):
-    """Enhanced Invertible Deep Bayesian Neural Network implementation with proper gradient tracking"""
+    """Enhanced Invertible Difference Boosting Neural Network implementation with proper gradient tracking"""
 
     def __init__(self,
                  forward_model: 'DBNN',

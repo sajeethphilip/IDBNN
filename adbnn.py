@@ -1300,7 +1300,117 @@ class BinWeightUpdater:
             log_likelihoods.add_(group_log_likelihoods)
 
         return log_likelihoods
+#----------------------------------------------------------------------------------------------------------------------------
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from typing import Optional, Dict
+import numpy as np
+from tqdm import tqdm
 
+class InvertibleDBNN(nn.Module):
+    """Invertible DBNN for reconstructing input features from classification probabilities."""
+
+    def __init__(self, forward_model: nn.Module, feature_dims: int, n_classes: int, hidden_dims: int = 128, device: str = 'cuda'):
+        """
+        Initialize the Invertible DBNN.
+
+        Args:
+            forward_model (nn.Module): The forward DBNN model.
+            feature_dims (int): Number of input feature dimensions.
+            n_classes (int): Number of classes in the classification task.
+            hidden_dims (int): Number of hidden dimensions in the inverse model.
+            device (str): Device to run the model on ('cuda' or 'cpu').
+        """
+        super(InvertibleDBNN, self).__init__()
+        self.forward_model = forward_model
+        self.feature_dims = feature_dims
+        self.n_classes = n_classes
+        self.hidden_dims = hidden_dims
+        self.device = device
+
+        # Define the inverse model architecture
+        self.inverse_model = nn.Sequential(
+            nn.Linear(n_classes, hidden_dims),
+            nn.ReLU(),
+            nn.Linear(hidden_dims, hidden_dims),
+            nn.ReLU(),
+            nn.Linear(hidden_dims, feature_dims)
+
+        # Move model to the appropriate device
+        self.to(device)
+
+    def forward(self, class_probs: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the inverse model to reconstruct features.
+
+        Args:
+            class_probs (torch.Tensor): Classification probabilities (batch_size, n_classes).
+
+        Returns:
+            torch.Tensor: Reconstructed features (batch_size, feature_dims).
+        """
+        return self.inverse_model(class_probs)
+
+    def reconstruct_features(self, class_probs: torch.Tensor, original_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Reconstruct features from classification probabilities.
+
+        Args:
+            class_probs (torch.Tensor): Classification probabilities (batch_size, n_classes).
+            original_features (Optional[torch.Tensor]): Original features for validation (batch_size, feature_dims).
+
+        Returns:
+            torch.Tensor: Reconstructed features (batch_size, feature_dims).
+        """
+        reconstructed_features = self.forward(class_probs)
+
+        if original_features is not None:
+            # Calculate reconstruction error
+            reconstruction_error = torch.mean((reconstructed_features - original_features) ** 2)
+            print(f"Reconstruction Error: {reconstruction_error.item():.4f}")
+
+        return reconstructed_features
+
+    def train_inverse_model(self, class_probs: torch.Tensor, original_features: torch.Tensor, epochs: int = 100, lr: float = 0.001):
+        """
+        Train the inverse model to reconstruct features from classification probabilities.
+
+        Args:
+            class_probs (torch.Tensor): Classification probabilities (batch_size, n_classes).
+            original_features (torch.Tensor): Original features (batch_size, feature_dims).
+            epochs (int): Number of training epochs.
+            lr (float): Learning rate for the optimizer.
+        """
+        self.train()
+        optimizer = optim.Adam(self.parameters(), lr=lr)
+        criterion = nn.MSELoss()
+
+        for epoch in tqdm(range(epochs), desc="Training Inverse Model"):
+            optimizer.zero_grad()
+
+            # Forward pass
+            reconstructed_features = self.forward(class_probs)
+
+            # Compute reconstruction loss
+            loss = criterion(reconstructed_features, original_features)
+
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
+
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}")
+
+    def save_model(self, path: str):
+        """Save the inverse model to a file."""
+        torch.save(self.state_dict(), path)
+        print(f"Model saved to {path}")
+
+    def load_model(self, path: str):
+        """Load the inverse model from a file."""
+        self.load_state_dict(torch.load(path, map_location=self.device))
+        print(f"Model loaded from {path}")
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
     """GPU-Optimized Deep Bayesian Neural Network with Parallel Feature Pair Processing"""
