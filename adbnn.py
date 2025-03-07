@@ -29,7 +29,7 @@ import os
 import pickle
 import configparser
 import traceback  # Add to provide debug
-from Invertible_DBNN import InvertibleDBNN
+#from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
 Train_device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
