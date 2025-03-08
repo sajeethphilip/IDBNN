@@ -3068,16 +3068,25 @@ class DBNN(GPUDBNN):
 
     def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
-        # Get parameters from likelihood_config
+        # Get parameters from likelihood_config or directly from config if not nested
         likelihood_config = self.config.get('likelihood_config', {})
-        group_size = group_size or likelihood_config.get('feature_group_size', 2)  # Use group_size from config
-        max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
+
+        # If likelihood_config is empty, try to get parameters directly from config
+        if not likelihood_config:
+            group_size = group_size or self.config.get('feature_group_size', 2)
+            max_combinations = max_combinations or self.config.get('max_combinations', None)
+            bin_sizes = self.config.get('bin_sizes', [20])
+        else:
+            group_size = group_size or likelihood_config.get('feature_group_size', 2)
+            max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
+            bin_sizes = likelihood_config.get('bin_sizes', [20])
 
         # Debug: Print parameters
         print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
         print(f"- n_features: {n_features}")
         print(f"- group_size: {group_size}")  # This should now reflect the value from the config
         print(f"- max_combinations: {max_combinations}")
+        print(f"- bin_sizes: {bin_sizes}")
 
         # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
