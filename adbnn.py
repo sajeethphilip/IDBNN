@@ -3072,10 +3072,10 @@ class DBNN(GPUDBNN):
         likelihood_config = self.config.get('likelihood_config', {})
 
         # If likelihood_config is empty, try to get parameters directly from config
-        if not likelihood_config:
-            group_size = group_size or self.config.get('feature_group_size', 2)
-            max_combinations = max_combinations or self.config.get('max_combinations', None)
-            bin_sizes = self.config.get('bin_sizes', [20])
+        if not likelihood_config or 'feature_group_size' not in likelihood_config:
+                group_size = group_size or self.config.get('feature_group_size', 2)
+                max_combinations = max_combinations or self.config.get('max_combinations', None)
+                bin_sizes = self.config.get('bin_sizes', [20])
         else:
             group_size = group_size or likelihood_config.get('feature_group_size', 2)
             max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
