@@ -236,42 +236,42 @@ class DatasetProcessor:
        return merged
 
     def _create_or_load_adaptive_config(self, folder_path: str, dataset_name: str) -> Dict:
-       """Create or load dataset-specific adaptive config"""
-       adaptive_path = os.path.join(folder_path, 'adaptive_dbnn.conf')
-       if os.path.exists(adaptive_path):
-           with open(adaptive_path, 'r') as f:
-               return json.load(f)
+        """Create or load dataset-specific adaptive config"""
+        adaptive_path = os.path.join(folder_path, 'adaptive_dbnn.conf')
+        if os.path.exists(adaptive_path):
+            with open(adaptive_path, 'r') as f:
+                return json.load(f)
 
-       default_adaptive = {
-           "training_params": {
-               "trials": 100,
-               "cardinality_threshold": 0.9,
-               "cardinality_tolerance": 4,
-               "learning_rate": 0.001,
-               "random_seed": 42,
-               "epochs": 100,
-               "test_fraction": 0.2,
-               "enable_adaptive": True,
-               "modelType": "Histogram",
-               "compute_device": "auto",
-               "use_interactive_kbd": False,
-               "debug_enabled": True,
-               "Save_training_epochs": True,
-               "training_save_path": f"data/{dataset_name}"
-           },
-           "execution_flags": {
-               "train": True,
-               "train_only": False,
-               "predict": True,
-               "gen_samples": False,
-               "fresh_start": False,
-               "use_previous_model": True
-           }
-       }
+        default_adaptive = {
+            "training_params": {
+                "trials": 100,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "learning_rate": 0.001,
+                "random_seed": 42,
+                "epochs": 100,
+                "test_fraction": 0.2,
+                "enable_adaptive": True,
+                "modelType": "Histogram",
+                "compute_device": "auto",
+                "use_interactive_kbd": False,
+                "debug_enabled": True,
+                "Save_training_epochs": True,
+                "training_save_path": f"data/{dataset_name}"
+            },
+            "execution_flags": {
+                "train": True,
+                "train_only": False,
+                "predict": True,
+                "gen_samples": False,
+                "fresh_start": False,
+                "use_previous_model": True
+            }
+        }
 
-       with open(adaptive_path, 'w') as f:
-           json.dump(default_adaptive, f, indent=4)
-       return default_adaptive
+        with open(adaptive_path, 'w') as f:
+            json.dump(default_adaptive, f, indent=4)
+        return default_adaptive
 
     def _create_or_load_dataset_config(self, folder_path: str, dataset_name: str) -> Dict:
         """Create or load dataset-specific configuration"""
@@ -317,7 +317,7 @@ class DatasetProcessor:
                 "strong_margin_threshold": 0.3,
                 "marginal_margin_threshold": 0.1,
                 "min_divergence": 0.1,
-                 "max_class_addition_percent": 5  # Default value for m (5%)
+                "max_class_addition_percent": 5  # Default value for m (5%)
             },
             "training_params": {
                 "Save_training_epochs": True,
@@ -3067,7 +3067,7 @@ class DBNN(GPUDBNN):
         return torch.FloatTensor(X_scaled)
 
     def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
-        """Generate and save/load consistent feature combinations"""
+        """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters from likelihood_config
         likelihood_config = self.config.get('likelihood_config', {})
         group_size = group_size or likelihood_config.get('feature_group_size', 2)
@@ -3099,24 +3099,33 @@ class DBNN(GPUDBNN):
         if n_features < group_size:
             raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
 
-        # Generate all possible combinations
+        # Generate all possible combinations as sorted tuples to ensure uniqueness
         from itertools import combinations
         all_combinations = list(combinations(range(n_features), group_size))
-        #print(f"[DEBUG] Total possible combinations: {len(all_combinations)}")
 
-        max_combination= len(all_combinations)
-        color = Colors.RED
-        print(f"{color} Using {max_combination}  combination pairs{Colors.ENDC}")
-        all_combinations = np.array(all_combinations)
-        # Convert to tensor
-        combinations_tensor = torch.tensor(all_combinations, device=self.device)
+        # Convert each combination to a sorted tuple to treat {c1, c2} and {c2, c1} as the same
+        all_combinations = [tuple(sorted(comb)) for comb in all_combinations]
+
+        # Remove duplicates by converting to a set and back to a list
+        unique_combinations = list(set(all_combinations))
+
+        # Sort the unique combinations for consistency
+        unique_combinations = sorted(unique_combinations)
+
+        # Limit the number of combinations if max_combinations is specified
+        if max_combinations is not None and len(unique_combinations) > max_combinations:
+            unique_combinations = unique_combinations[:max_combinations]
+
+        # Convert to numpy array and then to tensor
+        unique_combinations = np.array(unique_combinations)
+        combinations_tensor = torch.tensor(unique_combinations, device=self.device)
 
         # Save combinations for future use
         os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
         with open(combinations_path, 'wb') as f:
             pickle.dump(combinations_tensor.cpu(), f)
 
-        print(f"[DEBUG] Saved {len(all_combinations)} feature combinations to {combinations_path}")
+        print(f"[DEBUG] Saved {len(unique_combinations)} unique feature combinations to {combinations_path}")
         return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
