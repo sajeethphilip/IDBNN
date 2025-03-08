@@ -1012,25 +1012,25 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5):
+    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5, group_size=2):
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
-        self.device=Train_device
-        # Initialize histogram_weights as empty dictionary first
-        self.histogram_weights = {}
+        self.group_size = group_size
+        self.device = Train_device
 
-        # Create weights for each class and feature pair
+        # Initialize histogram_weights with proper dimensionality
+        self.histogram_weights = {}
         for class_id in range(n_classes):
             self.histogram_weights[class_id] = {}
             for pair_idx in range(len(feature_pairs)):
                 # Initialize with default weight of 0.1
-                #print(f"[DEBUG] Creating weights for class {class_id}, pair {pair_idx}")
+                weight_shape = [n_bins_per_dim] * group_size
                 self.histogram_weights[class_id][pair_idx] = torch.full(
-                    (n_bins_per_dim, n_bins_per_dim),
+                    weight_shape,
                     0.1,
                     dtype=torch.float32,
-                    device=self.device  # Ensure weights are created on correct device
+                    device=self.device
                 ).contiguous()
 
         # Initialize weights for each class and feature pair
@@ -2108,23 +2108,14 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Optimized batch posterior with vectorized operations"""
-        # Safety checks
-        if self.weight_updater is None:
-            DEBUG.log(" Weight updater not initialized, initializing now...")
-            self._initialize_bin_weights()
-            if self.weight_updater is None:
-                raise RuntimeError("Failed to initialize weight updater")
-
-        if self.likelihood_params is None:
-            raise RuntimeError("Likelihood parameters not initialized")
-
+        """Optimized batch posterior with proper dimensionality handling."""
         # Ensure input features are contiguous
         if not features.is_contiguous():
             features = features.contiguous()
 
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
+        group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
 
         # Pre-allocate tensors
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
@@ -2133,7 +2124,7 @@ class DBNN(GPUDBNN):
         feature_groups = torch.stack([
             features[:, pair].contiguous()
             for pair in self.likelihood_params['feature_pairs']
-        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+        ]).transpose(0, 1)  # [batch_size, n_pairs, group_size]
 
         # Compute all bin indices at once
         bin_indices_dict = {}
@@ -2147,35 +2138,31 @@ class DBNN(GPUDBNN):
                     feature_groups[:, group_idx, dim].contiguous(),
                     edges[dim].contiguous()
                 )
-                for dim in range(2)
-            ])  # [2, batch_size]
+                for dim in range(group_size)
+            ])  # [group_size, batch_size]
             indices = indices.sub_(1).clamp_(0, self.n_bins_per_dim - 1)
             bin_indices_dict[group_idx] = indices
 
         # Process all classes simultaneously
         for group_idx in range(len(self.likelihood_params['feature_pairs'])):
-            bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
-            indices = bin_indices_dict[group_idx]  # [2, batch_size]
+            bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, ..., n_bins]
+            indices = bin_indices_dict[group_idx]  # [group_size, batch_size]
 
             # Get all weights at once
             weights = torch.stack([
                 self.weight_updater.get_histogram_weights(c, group_idx)
                 for c in range(n_classes)
-            ])  # [n_classes, n_bins, n_bins]
-
-            # Ensure weights are contiguous
-            if not weights.is_contiguous():
-                weights = weights.contiguous()
+            ])  # [n_classes, n_bins, ..., n_bins]
 
             # Ensure bin_probs and weights have the same shape
             if bin_probs.shape != weights.shape:
                 raise ValueError(f"Shape mismatch: bin_probs {bin_probs.shape}, weights {weights.shape}")
 
             # Apply weights to probabilities
-            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, ..., n_bins]
 
             # Gather probabilities for all samples and classes at once
-            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+            probs = weighted_probs[:, indices[0], indices[1], ...]  # [n_classes, batch_size]
             log_likelihoods += torch.log(probs.t() + epsilon)
 
         # Compute posteriors efficiently
@@ -3213,39 +3200,21 @@ class DBNN(GPUDBNN):
 
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized non-parametric likelihood computation with configurable bin sizes."""
-        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
-        print("\nComputing pairwise likelihoods...")
-
-        # Input validation and preparation
+        """Compute pairwise likelihood PDFs with proper dimensionality handling."""
         dataset = dataset.to(self.device).contiguous()
         labels = labels.to(self.device).contiguous()
 
-        # Initialize progress tracking
-        n_pairs = len(self.feature_pairs)
-        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
-
-        # Pre-compute unique classes once
+        # Get unique classes and their counts
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
-        n_classes = len(unique_classes)
-        n_samples = len(dataset)
+        n_classes = len(unique_classes)  # Define n_classes here
 
-        # Get bin sizes from configuration
+        # Get feature group size from config
+        group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
+        max_combinations = self.config.get('likelihood_config', {}).get('max_combinations', None)
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
-        if len(bin_sizes) == 1:
-            # If single bin size provided, use it for all dimensions
-            n_bins = bin_sizes[0]
-            self.n_bins_per_dim = n_bins  # Store for reference
-            DEBUG.log(f" Using uniform {n_bins} bins per dimension")
-        else:
-            DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
 
         # Generate feature combinations
-        self.feature_pairs = self._generate_feature_combinations(
-            feature_dims,
-            self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
-            self.config.get('likelihood_config', {}).get('max_combinations', None)
-        ).to(self.device)
+        self.feature_pairs = self._generate_feature_combinations(feature_dims, group_size, max_combinations)
 
         # Pre-allocate storage arrays
         all_bin_edges = []
@@ -3253,15 +3222,11 @@ class DBNN(GPUDBNN):
         all_bin_probs = []
 
         # Process each feature group
-        for feature_group in self.feature_pairs:
-            feature_group = [int(x) for x in feature_group]
-            DEBUG.log(f" Processing feature group: {feature_group}")
-
-            # Extract group data
+        for group_idx, feature_group in enumerate(self.feature_pairs):
             group_data = dataset[:, feature_group].contiguous()
             n_dims = len(feature_group)
 
-            # Get appropriate bin sizes for this group
+            # Get bin sizes for this group
             group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
 
             # Compute bin edges for all dimensions
@@ -3274,16 +3239,14 @@ class DBNN(GPUDBNN):
                 edges = torch.linspace(
                     dim_min - padding,
                     dim_max + padding,
-                    group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                    group_bin_sizes[dim] + 1,
                     device=self.device
                 ).contiguous()
                 bin_edges.append(edges)
-                DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
-            pair_pbar.update(1)
 
             # Initialize bin counts with appropriate shape for variable bin sizes
-            bin_shape = [n_classes] + [size for size in group_bin_sizes]
-            bin_counts = torch.zeros(bin_shape, dtype=torch.long, device='cpu')  # Use CPU for sparse operations
+            bin_shape = [n_classes] + group_bin_sizes  # Now n_classes is defined
+            bin_counts = torch.zeros(bin_shape, dtype=torch.long, device='cpu')
 
             # Process each class
             for class_idx, class_label in enumerate(unique_classes):
@@ -3300,42 +3263,26 @@ class DBNN(GPUDBNN):
                         for dim in range(n_dims)
                     ])  # Shape: (n_dims, batch_size)
 
-                    # Move bin_indices to CPU for efficient counting
-                    bin_indices = bin_indices.cpu()
-
-                    # Use scatter_add_ for efficient counting
-                    counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.long, device='cpu')
-                    flat_indices = torch.sum(
-                        bin_indices * torch.tensor(
-                            [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
-                            device='cpu'
-                        ).unsqueeze(1),  # Add a new dimension for broadcasting
-                        dim=0
-                    ).long()  # Cast to int64
-                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.long))
-                    bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
+                    # Update bin counts
+                    for sample_idx in range(len(class_data)):
+                        idx = tuple([class_idx] + [bin_indices[d, sample_idx] for d in range(n_dims)])
+                        bin_counts[idx] += 1
 
             # Apply Laplace smoothing and compute probabilities
-            smoothed_counts = bin_counts.float() + 1.0  # Convert to float for division
+            smoothed_counts = bin_counts + 1.0
             bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
-
-            # Move bin_probs to GPU for computation
-            bin_probs = bin_probs.to(self.device)
 
             # Store results
             all_bin_edges.append(bin_edges)
             all_bin_counts.append(smoothed_counts)
             all_bin_probs.append(bin_probs)
 
-            DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
-            DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
-        pair_pbar.close()
         return {
             'bin_edges': all_bin_edges,
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
             'feature_pairs': self.feature_pairs,
-            'classes': unique_classes.to(self.device)
+            'classes': unique_classes
         }
  #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -3452,20 +3399,23 @@ class DBNN(GPUDBNN):
         return posteriors, None
 
     def _initialize_bin_weights(self):
-        """Initialize weights for either histogram bins or Gaussian components"""
+        """Initialize weights for either histogram bins or Gaussian components."""
         n_classes = len(self.label_encoder.classes_)
+        group_size = self.config.get('likelihood_config', {}).get('feature_group_size', 2)
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
+
         if self.model_type == "Histogram":
             self.weight_updater = BinWeightUpdater(
                 n_classes=n_classes,
                 feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim
+                n_bins_per_dim=bin_sizes[0],
+                group_size=group_size  # Pass group size to handle dimensionality
             )
         elif self.model_type == "Gaussian":
-            # Use same weight structure but for Gaussian components
             self.weight_updater = BinWeightUpdater(
                 n_classes=n_classes,
                 feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim  # Number of Gaussian components
+                n_bins_per_dim=bin_sizes[0]  # Number of Gaussian components
             )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
