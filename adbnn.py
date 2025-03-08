@@ -3215,8 +3215,8 @@ class DBNN(GPUDBNN):
         print("\nComputing pairwise likelihoods...")
 
         # Input validation and preparation
-        dataset = torch.as_tensor(dataset, device=self.device).contiguous()
-        labels = torch.as_tensor(labels, device=self.device).contiguous()
+        dataset = dataset.to(self.device).contiguous()
+        labels = labels.to(self.device).contiguous()
 
         # Initialize progress tracking
         n_pairs = len(self.feature_pairs)
@@ -3280,7 +3280,7 @@ class DBNN(GPUDBNN):
 
             # Initialize bin counts with appropriate shape for variable bin sizes
             bin_shape = [n_classes] + [size for size in group_bin_sizes]
-            bin_counts = SparseTensor(*bin_shape, device=self.device)  # Use sparse tensor
+            bin_counts = torch.zeros(bin_shape, dtype=torch.long, device='cpu')  # Use CPU for sparse operations
 
             # Process each class
             for class_idx, class_label in enumerate(unique_classes):
@@ -3298,20 +3298,23 @@ class DBNN(GPUDBNN):
                     ])  # Shape: (n_dims, batch_size)
 
                     # Use scatter_add_ for efficient counting
-                    counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
+                    counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.long, device='cpu')
                     flat_indices = torch.sum(
                         bin_indices * torch.tensor(
                             [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
-                            device=self.device
+                            device='cpu'
                         ).unsqueeze(1),  # Add a new dimension for broadcasting
                         dim=0
                     ).long()  # Cast to int64
-                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
+                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.long))
                     bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
             # Apply Laplace smoothing and compute probabilities
-            smoothed_counts = bin_counts + 1.0
+            smoothed_counts = bin_counts.float() + 1.0  # Convert to float for division
             bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
+
+            # Move bin_probs to GPU for computation
+            bin_probs = bin_probs.to(self.device)
 
             # Store results
             all_bin_edges.append(bin_edges)
