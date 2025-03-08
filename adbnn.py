@@ -3142,6 +3142,7 @@ class DBNN(GPUDBNN):
         """Optimized non-parametric likelihood computation with configurable bin sizes"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
         print("\nComputing pairwise likelihoods...")
+
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
         labels = torch.as_tensor(labels, device=self.device).contiguous()
@@ -3156,7 +3157,7 @@ class DBNN(GPUDBNN):
         n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [5])
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
         if len(bin_sizes) == 1:
             # If single bin size provided, use it for all dimensions
             n_bins = bin_sizes[0]
@@ -3223,14 +3224,17 @@ class DBNN(GPUDBNN):
                             bin_edges[dim].contiguous()
                         ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
                         for dim in range(n_dims)
-                    ])
+                    ])  # Shape: (n_dims, batch_size)
 
                     # Use scatter_add_ for efficient counting
                     counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
                     flat_indices = torch.sum(
-                        bin_indices * torch.tensor([np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)], device=self.device),
+                        bin_indices * torch.tensor(
+                            [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
+                            device=self.device
+                        ).unsqueeze(1),  # Add a new dimension for broadcasting
                         dim=0
-                    )
+                    )  # Shape: (batch_size,)
                     counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
                     bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
