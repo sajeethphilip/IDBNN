@@ -4827,7 +4827,7 @@ class DBNN(GPUDBNN):
             'target_column': self.target_column,
             'target_classes': self.label_encoder.classes_,
             'target_mapping': dict(zip(self.label_encoder.classes_,
-                                     range(len(self.label_encoder.classes_)))),
+                                     range(len(self.label_encoder.classes_))),
             'config': self.config,
             'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
             'original_columns': getattr(self, 'original_columns', None),
@@ -4840,7 +4840,6 @@ class DBNN(GPUDBNN):
         # Get the filename using existing method
         components_file = self._get_model_components_filename()
 
-
         # Ensure directory exists
         os.makedirs(os.path.dirname(components_file), exist_ok=True)
 
@@ -4849,6 +4848,7 @@ class DBNN(GPUDBNN):
             pickle.dump(components, f)
 
         print(f"Saved model components to {components_file}")
+        print(f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes")
         return True
 
 
@@ -4857,6 +4857,8 @@ class DBNN(GPUDBNN):
         """Load all model components"""
         components_file = self._get_model_components_filename()
         if os.path.exists(components_file):
+            print(f"[DEBUG] Loading model components from {components_file}")
+            print(f"[DEBUG] File size: {os.path.getsize(components_file)} bytes")
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
                 self.label_encoder.classes_ = components['target_classes']
@@ -4871,6 +4873,8 @@ class DBNN(GPUDBNN):
                 self.weight_updater = components.get('weight_updater')
                 self.n_bins_per_dim = components.get('n_bins_per_dim', 20)
                 return True
+        else:
+            print(f"[DEBUG] Model components file not found: {components_file}")
         return False
 
 
