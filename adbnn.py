@@ -3070,13 +3070,13 @@ class DBNN(GPUDBNN):
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters from likelihood_config
         likelihood_config = self.config.get('likelihood_config', {})
-        group_size = group_size or likelihood_config.get('feature_group_size', 2)
+        group_size = group_size or likelihood_config.get('feature_group_size', 2)  # Use group_size from config
         max_combinations = max_combinations or likelihood_config.get('max_combinations', None)
 
         # Debug: Print parameters
         print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
         print(f"- n_features: {n_features}")
-        print(f"- group_size: {group_size}")
+        print(f"- group_size: {group_size}")  # This should now reflect the value from the config
         print(f"- max_combinations: {max_combinations}")
 
         # Create path for storing feature combinations
@@ -3101,7 +3101,7 @@ class DBNN(GPUDBNN):
 
         # Generate all possible combinations as sorted tuples to ensure uniqueness
         from itertools import combinations
-        all_combinations = list(combinations(range(n_features), group_size))
+        all_combinations = list(combinations(range(n_features), group_size))  # Use group_size here
 
         # Convert each combination to a sorted tuple to treat {c1, c2} and {c2, c1} as the same
         all_combinations = [tuple(sorted(comb)) for comb in all_combinations]
@@ -3159,7 +3159,7 @@ class DBNN(GPUDBNN):
         # Generate feature combinations
         self.feature_pairs = self._generate_feature_combinations(
             feature_dims,
-            self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+            self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
             self.config.get('likelihood_config', {}).get('max_combinations', None)
         ).to(self.device)
 
@@ -3196,6 +3196,7 @@ class DBNN(GPUDBNN):
                 bin_edges.append(edges)
                 DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
             pair_pbar.update(1)
+
             # Initialize bin counts with appropriate shape for variable bin sizes
             bin_shape = [n_classes] + [size for size in group_bin_sizes]
             bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
@@ -3206,21 +3207,23 @@ class DBNN(GPUDBNN):
                 if class_mask.any():
                     class_data = group_data[class_mask].contiguous()
 
-                    if n_dims == 2:  # Optimized path for pairs
-                        # Compute bin indices for both dimensions
-                        bin_indices = torch.stack([
-                            torch.bucketize(
-                                class_data[:, dim].contiguous(),
-                                bin_edges[dim].contiguous()
-                            ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                            for dim in range(2)
-                        ])
+                    # Compute bin indices for all dimensions
+                    bin_indices = torch.stack([
+                        torch.bucketize(
+                            class_data[:, dim].contiguous(),
+                            bin_edges[dim].contiguous()
+                        ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
+                        for dim in range(n_dims)
+                    ])
 
-                        # Use scatter_add_ for efficient counting
-                        counts = torch.zeros(group_bin_sizes[0] * group_bin_sizes[1], device=self.device)
-                        flat_indices = bin_indices[0] * group_bin_sizes[1] + bin_indices[1]
-                        counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
-                        bin_counts[class_idx] = counts.reshape(group_bin_sizes[0], group_bin_sizes[1])
+                    # Use scatter_add_ for efficient counting
+                    counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
+                    flat_indices = torch.sum(
+                        bin_indices * torch.tensor([np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)], device=self.device),
+                        dim=0
+                    )
+                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
+                    bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
             # Apply Laplace smoothing and compute probabilities
             smoothed_counts = bin_counts + 1.0
@@ -3241,7 +3244,6 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs,
             'classes': unique_classes.to(self.device)
         }
-
  #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
