@@ -3209,131 +3209,131 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
 
-def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-    """Optimized non-parametric likelihood computation with configurable bin sizes."""
-    DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
-    print("\nComputing pairwise likelihoods...")
+    def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Optimized non-parametric likelihood computation with configurable bin sizes."""
+        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
+        print("\nComputing pairwise likelihoods...")
 
-    # Input validation and preparation
-    dataset = dataset.to(self.device).contiguous()
-    labels = labels.to(self.device).contiguous()
+        # Input validation and preparation
+        dataset = dataset.to(self.device).contiguous()
+        labels = labels.to(self.device).contiguous()
 
-    # Initialize progress tracking
-    n_pairs = len(self.feature_pairs)
-    pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
+        # Initialize progress tracking
+        n_pairs = len(self.feature_pairs)
+        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
 
-    # Pre-compute unique classes once
-    unique_classes, class_counts = torch.unique(labels, return_counts=True)
-    n_classes = len(unique_classes)
-    n_samples = len(dataset)
+        # Pre-compute unique classes once
+        unique_classes, class_counts = torch.unique(labels, return_counts=True)
+        n_classes = len(unique_classes)
+        n_samples = len(dataset)
 
-    # Get bin sizes from configuration
-    bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
-    if len(bin_sizes) == 1:
-        # If single bin size provided, use it for all dimensions
-        n_bins = bin_sizes[0]
-        self.n_bins_per_dim = n_bins  # Store for reference
-        DEBUG.log(f" Using uniform {n_bins} bins per dimension")
-    else:
-        DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
+        # Get bin sizes from configuration
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
+        if len(bin_sizes) == 1:
+            # If single bin size provided, use it for all dimensions
+            n_bins = bin_sizes[0]
+            self.n_bins_per_dim = n_bins  # Store for reference
+            DEBUG.log(f" Using uniform {n_bins} bins per dimension")
+        else:
+            DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
 
-    # Generate feature combinations
-    self.feature_pairs = self._generate_feature_combinations(
-        feature_dims,
-        self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
-        self.config.get('likelihood_config', {}).get('max_combinations', None)
-    ).to(self.device)
+        # Generate feature combinations
+        self.feature_pairs = self._generate_feature_combinations(
+            feature_dims,
+            self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
+            self.config.get('likelihood_config', {}).get('max_combinations', None)
+        ).to(self.device)
 
-    # Pre-allocate storage arrays
-    all_bin_edges = []
-    all_bin_counts = []
-    all_bin_probs = []
+        # Pre-allocate storage arrays
+        all_bin_edges = []
+        all_bin_counts = []
+        all_bin_probs = []
 
-    # Process each feature group
-    for feature_group in self.feature_pairs:
-        feature_group = [int(x) for x in feature_group]
-        DEBUG.log(f" Processing feature group: {feature_group}")
+        # Process each feature group
+        for feature_group in self.feature_pairs:
+            feature_group = [int(x) for x in feature_group]
+            DEBUG.log(f" Processing feature group: {feature_group}")
 
-        # Extract group data
-        group_data = dataset[:, feature_group].contiguous()
-        n_dims = len(feature_group)
+            # Extract group data
+            group_data = dataset[:, feature_group].contiguous()
+            n_dims = len(feature_group)
 
-        # Get appropriate bin sizes for this group
-        group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
+            # Get appropriate bin sizes for this group
+            group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
 
-        # Compute bin edges for all dimensions
-        bin_edges = []
-        for dim in range(n_dims):
-            dim_data = group_data[:, dim].contiguous()
-            dim_min, dim_max = dim_data.min(), dim_data.max()
-            padding = (dim_max - dim_min) * 0.01
+            # Compute bin edges for all dimensions
+            bin_edges = []
+            for dim in range(n_dims):
+                dim_data = group_data[:, dim].contiguous()
+                dim_min, dim_max = dim_data.min(), dim_data.max()
+                padding = (dim_max - dim_min) * 0.01
 
-            edges = torch.linspace(
-                dim_min - padding,
-                dim_max + padding,
-                group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
-                device=self.device
-            ).contiguous()
-            bin_edges.append(edges)
-            DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
-        pair_pbar.update(1)
+                edges = torch.linspace(
+                    dim_min - padding,
+                    dim_max + padding,
+                    group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                    device=self.device
+                ).contiguous()
+                bin_edges.append(edges)
+                DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
+            pair_pbar.update(1)
 
-        # Initialize bin counts with appropriate shape for variable bin sizes
-        bin_shape = [n_classes] + [size for size in group_bin_sizes]
-        bin_counts = torch.zeros(bin_shape, dtype=torch.long, device='cpu')  # Use CPU for sparse operations
+            # Initialize bin counts with appropriate shape for variable bin sizes
+            bin_shape = [n_classes] + [size for size in group_bin_sizes]
+            bin_counts = torch.zeros(bin_shape, dtype=torch.long, device='cpu')  # Use CPU for sparse operations
 
-        # Process each class
-        for class_idx, class_label in enumerate(unique_classes):
-            class_mask = labels == class_label
-            if class_mask.any():
-                class_data = group_data[class_mask].contiguous()
+            # Process each class
+            for class_idx, class_label in enumerate(unique_classes):
+                class_mask = labels == class_label
+                if class_mask.any():
+                    class_data = group_data[class_mask].contiguous()
 
-                # Compute bin indices for all dimensions
-                bin_indices = torch.stack([
-                    torch.bucketize(
-                        class_data[:, dim].contiguous(),
-                        bin_edges[dim].contiguous()
-                    ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                    for dim in range(n_dims)
-                ])  # Shape: (n_dims, batch_size)
+                    # Compute bin indices for all dimensions
+                    bin_indices = torch.stack([
+                        torch.bucketize(
+                            class_data[:, dim].contiguous(),
+                            bin_edges[dim].contiguous()
+                        ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
+                        for dim in range(n_dims)
+                    ])  # Shape: (n_dims, batch_size)
 
-                # Move bin_indices to CPU for efficient counting
-                bin_indices = bin_indices.cpu()
+                    # Move bin_indices to CPU for efficient counting
+                    bin_indices = bin_indices.cpu()
 
-                # Use scatter_add_ for efficient counting
-                counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.long, device='cpu')
-                flat_indices = torch.sum(
-                    bin_indices * torch.tensor(
-                        [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
-                        device='cpu'
-                    ).unsqueeze(1),  # Add a new dimension for broadcasting
-                    dim=0
-                ).long()  # Cast to int64
-                counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.long))
-                bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
+                    # Use scatter_add_ for efficient counting
+                    counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.long, device='cpu')
+                    flat_indices = torch.sum(
+                        bin_indices * torch.tensor(
+                            [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
+                            device='cpu'
+                        ).unsqueeze(1),  # Add a new dimension for broadcasting
+                        dim=0
+                    ).long()  # Cast to int64
+                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.long))
+                    bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
-        # Apply Laplace smoothing and compute probabilities
-        smoothed_counts = bin_counts.float() + 1.0  # Convert to float for division
-        bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
+            # Apply Laplace smoothing and compute probabilities
+            smoothed_counts = bin_counts.float() + 1.0  # Convert to float for division
+            bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
 
-        # Move bin_probs to GPU for computation
-        bin_probs = bin_probs.to(self.device)
+            # Move bin_probs to GPU for computation
+            bin_probs = bin_probs.to(self.device)
 
-        # Store results
-        all_bin_edges.append(bin_edges)
-        all_bin_counts.append(smoothed_counts)
-        all_bin_probs.append(bin_probs)
+            # Store results
+            all_bin_edges.append(bin_edges)
+            all_bin_counts.append(smoothed_counts)
+            all_bin_probs.append(bin_probs)
 
-        DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
-        DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
-    pair_pbar.close()
-    return {
-        'bin_edges': all_bin_edges,
-        'bin_counts': all_bin_counts,
-        'bin_probs': all_bin_probs,
-        'feature_pairs': self.feature_pairs,
-        'classes': unique_classes.to(self.device)
-    }
+            DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
+            DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
+        pair_pbar.close()
+        return {
+            'bin_edges': all_bin_edges,
+            'bin_counts': all_bin_counts,
+            'bin_probs': all_bin_probs,
+            'feature_pairs': self.feature_pairs,
+            'classes': unique_classes.to(self.device)
+        }
  #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
