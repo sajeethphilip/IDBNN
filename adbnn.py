@@ -3084,7 +3084,7 @@ class DBNN(GPUDBNN):
         # Debug: Print parameters
         print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
         print(f"- n_features: {n_features}")
-        print(f"- group_size: {group_size}")  # This should now reflect the value from the config
+        print(f"- group_size: {group_size}")
         print(f"- max_combinations: {max_combinations}")
         print(f"- bin_sizes: {bin_sizes}")
 
@@ -3095,46 +3095,26 @@ class DBNN(GPUDBNN):
 
         # Check if combinations already exist
         if os.path.exists(combinations_path):
-            color = Colors.RED
-            print(f"{color}------------------------------------------------------------------------------------------------------------{Colors.ENDC}")
-            print(f"{color}[DEBUG] Loading cached feature combinations from {combinations_path}{Colors.ENDC}")
-            print(f"{color}Remove this if you change the feature combinations in config file{Colors.ENDC}")
-            print(f"{color}------------------------------------------------------------------------------------------------------------{Colors.ENDC}")
+            print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
-                return combinations_tensor.to(self.device)
+            print(f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
+            return combinations_tensor.to(self.device)
 
         # Generate new combinations if none exist
-        if n_features < group_size:
-            raise ValueError(f"Number of features ({n_features}) must be >= group size ({group_size})")
-
-        # Generate all possible combinations as sorted tuples to ensure uniqueness
+        print(f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
         from itertools import combinations
-        all_combinations = list(combinations(range(n_features), group_size))  # Use group_size here
-
-        # Convert each combination to a sorted tuple to treat {c1, c2} and {c2, c1} as the same
-        all_combinations = [tuple(sorted(comb)) for comb in all_combinations]
-
-        # Remove duplicates by converting to a set and back to a list
-        unique_combinations = list(set(all_combinations))
-
-        # Sort the unique combinations for consistency
-        unique_combinations = sorted(unique_combinations)
-
-        # Limit the number of combinations if max_combinations is specified
-        if max_combinations is not None and len(unique_combinations) > max_combinations:
-            unique_combinations = unique_combinations[:max_combinations]
-
-        # Convert to numpy array and then to tensor
-        unique_combinations = np.array(unique_combinations)
+        all_combinations = list(combinations(range(n_features), group_size))
+        unique_combinations = list(set([tuple(sorted(comb)) for comb in all_combinations]))
+        unique_combinations = sorted(unique_combinations)[:max_combinations]
         combinations_tensor = torch.tensor(unique_combinations, device=self.device)
 
-        # Save combinations for future use
+        # Save the new combinations
         os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
         with open(combinations_path, 'wb') as f:
             pickle.dump(combinations_tensor.cpu(), f)
-
         print(f"[DEBUG] Saved {len(unique_combinations)} unique feature combinations to {combinations_path}")
+
         return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
