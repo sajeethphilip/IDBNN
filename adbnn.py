@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
+from torch.sparse import FloatTensor as SparseTensor
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -2965,7 +2966,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: pd.DataFrame, is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with improved error handling and column consistency"""
+        """Preprocess data with improved error handling and column consistency."""
         print(f"\n[DEBUG] ====== Starting preprocessing ======")
         DEBUG.log(f" Input shape: {X.shape}")
         DEBUG.log(f" Input columns: {X.columns.tolist()}")
@@ -2978,24 +2979,22 @@ class DBNN(GPUDBNN):
             DEBUG.log(" Training mode preprocessing")
             self.original_columns = X.columns.tolist()
 
-            with tqdm(total=4, desc="Preprocessing steps") as pbar:
+            # Calculate cardinality threshold
+            cardinality_threshold = self._calculate_cardinality_threshold()
+            DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
 
-                # Calculate cardinality threshold
-                cardinality_threshold = self._calculate_cardinality_threshold()
-                DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
+            # Remove high cardinality columns
+            X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
 
-                # Remove high cardinality columns
-                X = self._remove_high_cardinality_columns(X, cardinality_threshold)
-                DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist()
+            DEBUG.log(f" Selected feature columns: {self.feature_columns}")
 
-                # Store the features we'll actually use
-                self.feature_columns = X.columns.tolist()
-                DEBUG.log(f" Selected feature columns: {self.feature_columns}")
-
-                # Store high cardinality columns for future reference
-                self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
-                if self.high_cardinality_columns:
-                    DEBUG.log(f" Removed high cardinality columns: {self.high_cardinality_columns}")
+            # Store high cardinality columns for future reference
+            self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+            if self.high_cardinality_columns:
+                DEBUG.log(f" Removed high cardinality columns: {self.high_cardinality_columns}")
         else:
             DEBUG.log(" Prediction mode preprocessing")
             if not hasattr(self, 'feature_columns'):
@@ -3064,7 +3063,106 @@ class DBNN(GPUDBNN):
 
         DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
         pbar.close()
-        return torch.FloatTensor(X_scaled)
+        return torch.FloatTensor(X_scaled)  # Keep on CPU for nowdef _preprocess_data(self, X: pd.DataFrame, is_training: bool = True) -> torch.Tensor:
+        """Preprocess data with improved error handling and column consistency."""
+        print(f"\n[DEBUG] ====== Starting preprocessing ======")
+        DEBUG.log(f" Input shape: {X.shape}")
+        DEBUG.log(f" Input columns: {X.columns.tolist()}")
+        DEBUG.log(f" Input dtypes:\n{X.dtypes}")
+
+        # Make a copy to avoid modifying original data
+        X = X.copy()
+
+        if is_training:
+            DEBUG.log(" Training mode preprocessing")
+            self.original_columns = X.columns.tolist()
+
+            # Calculate cardinality threshold
+            cardinality_threshold = self._calculate_cardinality_threshold()
+            DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
+
+            # Remove high cardinality columns
+            X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
+
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist()
+            DEBUG.log(f" Selected feature columns: {self.feature_columns}")
+
+            # Store high cardinality columns for future reference
+            self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+            if self.high_cardinality_columns:
+                DEBUG.log(f" Removed high cardinality columns: {self.high_cardinality_columns}")
+        else:
+            DEBUG.log(" Prediction mode preprocessing")
+            if not hasattr(self, 'feature_columns'):
+                raise ValueError("Model not trained - feature columns not found")
+
+            # For prediction, only try to use columns that were used during training
+            available_cols = set(X.columns)
+            needed_cols = set(self.feature_columns)
+
+            # Check for missing columns
+            missing_cols = needed_cols - available_cols
+            if missing_cols:
+                # Create missing columns with default values
+                for col in missing_cols:
+                    X[col] = 0
+                    DEBUG.log(f" Created missing column {col} with default value 0")
+
+            # Only keep the columns we used during training
+            X = X[self.feature_columns]
+
+            if hasattr(self, 'high_cardinality_columns'):
+                X = X.drop(columns=self.high_cardinality_columns, errors='ignore')
+
+        print("Preprocessing prediction data...")
+        with tqdm(total=2, desc="Preprocessing steps") as pbar:
+
+            # Handle categorical features
+            DEBUG.log(" Starting categorical encoding")
+            try:
+                X_encoded = self._encode_categorical_features(X, is_training)
+                DEBUG.log(f" Shape after categorical encoding: {X_encoded.shape}")
+                DEBUG.log(f" Encoded dtypes:\n{X_encoded.dtypes}")
+            except Exception as e:
+                DEBUG.log(f" Error in categorical encoding: {str(e)}")
+                raise
+
+            # Convert to numpy and check for issues
+            try:
+                X_numpy = X_encoded.to_numpy()
+                DEBUG.log(f" Numpy array shape: {X_numpy.shape}")
+                DEBUG.log(f" Any NaN: {np.isnan(X_numpy).any()}")
+                DEBUG.log(f" Any Inf: {np.isinf(X_numpy).any()}")
+            except Exception as e:
+                DEBUG.log(f" Error converting to numpy: {str(e)}")
+                raise
+
+            # Scale the features
+            try:
+                if is_training:
+                    X_scaled = self.scaler.fit_transform(X_numpy)
+                else:
+                    X_scaled = self.scaler.transform(X_numpy)
+
+                DEBUG.log(f" Scaling successful")
+            except Exception as e:
+                DEBUG.log(f" Standard scaling failed: {str(e)}. Using manual scaling")
+            pbar.update(1)
+            if X_numpy.size == 0:
+                print("[WARNING] Empty feature array! Returning original data")
+                X_scaled = X_numpy
+            else:
+                means = np.nanmean(X_numpy, axis=0)
+                stds = np.nanstd(X_numpy, axis=0)
+                stds[stds == 0] = 1
+                X_scaled = (X_numpy - means) / stds
+
+        DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
+        pbar.close()
+        return torch.FloatTensor(X_scaled)  # Keep on CPU for now
+
 
     def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
@@ -3110,8 +3208,9 @@ class DBNN(GPUDBNN):
         return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
+
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized non-parametric likelihood computation with configurable bin sizes"""
+        """Optimized non-parametric likelihood computation with configurable bin sizes."""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
         print("\nComputing pairwise likelihoods...")
 
@@ -3181,7 +3280,7 @@ class DBNN(GPUDBNN):
 
             # Initialize bin counts with appropriate shape for variable bin sizes
             bin_shape = [n_classes] + [size for size in group_bin_sizes]
-            bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
+            bin_counts = SparseTensor(*bin_shape, device=self.device)  # Use sparse tensor
 
             # Process each class
             for class_idx, class_label in enumerate(unique_classes):
@@ -3863,6 +3962,9 @@ class DBNN(GPUDBNN):
         """Training loop with proper weight handling and enhanced progress tracking"""
         print("\nStarting training...")
 
+        # Clear GPU cache before training
+        torch.cuda.empty_cache()
+
         # Initialize progress bar for epochs
         epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs")
 
@@ -4493,7 +4595,7 @@ class DBNN(GPUDBNN):
 
 
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
-        """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
+        """Full training and prediction pipeline with GPU optimization and optional prediction saving."""
         try:
             # Set a flag to indicate we're printing metrics
             self._last_metrics_printed = True
