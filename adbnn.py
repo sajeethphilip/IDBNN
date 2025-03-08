@@ -4827,7 +4827,7 @@ class DBNN(GPUDBNN):
             'target_column': self.target_column,
             'target_classes': self.label_encoder.classes_,
             'target_mapping': dict(zip(self.label_encoder.classes_,
-                                     range(len(self.label_encoder.classes_))),
+                                     range(len(self.label_encoder.classes_)))),
             'config': self.config,
             'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
             'original_columns': getattr(self, 'original_columns', None),
