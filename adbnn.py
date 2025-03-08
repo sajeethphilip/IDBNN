@@ -3234,7 +3234,7 @@ class DBNN(GPUDBNN):
                             device=self.device
                         ).unsqueeze(1),  # Add a new dimension for broadcasting
                         dim=0
-                    )  # Shape: (batch_size,)
+                    ).long()  # Cast to int64
                     counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
                     bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
