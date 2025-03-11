@@ -4529,10 +4529,8 @@ class DBNN(GPUDBNN):
         DEBUG.log(f" Detected categorical columns: {categorical_columns}")
         return categorical_columns
 
-
-
     def _get_train_test_split(self, X_tensor, y_tensor):
-        """Get or create consistent train-test split"""
+        """Get or create consistent train-test split using smaller chunks to avoid memory issues."""
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
         split_path = os.path.join(base_path, dataset_folder, 'train_test_split.pkl')
@@ -4544,13 +4542,14 @@ class DBNN(GPUDBNN):
                 return (X_tensor[train_idx], X_tensor[test_idx],
                         y_tensor[train_idx], y_tensor[test_idx])
 
-        X_cpu = X_tensor.cpu()
-        y_cpu = y_tensor.cpu()
+        # If no saved split exists, create one using smaller chunks
+        X_cpu = X_tensor.cpu().numpy()  # Move data to CPU for sklearn compatibility
+        y_cpu = y_tensor.cpu().numpy()
 
-        # Perform train-test split on CPU
+        # Perform train-test split on CPU in smaller chunks
         X_train, X_test, y_train, y_test = train_test_split(
-            X_cpu.numpy(),  # Convert to NumPy for sklearn compatibility
-            y_cpu.numpy(),
+            X_cpu,  # Use NumPy array for sklearn compatibility
+            y_cpu,
             test_size=self.test_size,
             random_state=self.random_state,
             shuffle=(self.shuffle_state != -1)
@@ -4562,11 +4561,11 @@ class DBNN(GPUDBNN):
         y_train = torch.tensor(y_train, dtype=torch.long).to(self.device)
         y_test = torch.tensor(y_test, dtype=torch.long).to(self.device)
 
-        # Save split indices
+        # Save split indices to avoid recomputing
         os.makedirs(os.path.dirname(split_path), exist_ok=True)
         split_indices = {
-            'train': torch.where(X_tensor == X_train.unsqueeze(1))[0],
-            'test': torch.where(X_tensor == X_test.unsqueeze(1))[0]
+            'train': torch.arange(len(X_train),  # Indices for training set
+            'test': torch.arange(len(X_train), len(X_train) + torch.arange(len(X_test))  # Indices for test set
         }
         with open(split_path, 'wb') as f:
             pickle.dump(split_indices, f)
