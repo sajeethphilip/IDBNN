@@ -1830,6 +1830,30 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._preprocess_and_split_data()
 
+    def compute_global_statistics(self, X: pd.DataFrame):
+        """Compute global statistics (e.g., mean, std) for normalization."""
+        batch_size = 1024  # Adjust based on available memory
+        n_samples = len(X)
+        n_features = X.shape[1]
+
+        # Initialize accumulators
+        sum_features = np.zeros(n_features)
+        sum_squared_features = np.zeros(n_features)
+
+        # Compute sum and sum of squares in batches
+        for i in range(0, n_samples, batch_size):
+            batch_X = X.iloc[i:i + batch_size]
+            batch_X_numeric = batch_X.select_dtypes(include=[np.number])  # Only numeric features
+            sum_features += batch_X_numeric.sum(axis=0)
+            sum_squared_features += (batch_X_numeric ** 2).sum(axis=0)
+
+        # Compute mean and standard deviation
+        self.global_mean = sum_features / n_samples
+        self.global_std = np.sqrt((sum_squared_features / n_samples) - (self.global_mean ** 2))
+
+        # Handle zero standard deviation (replace with 1 to avoid division by zero)
+        self.global_std[self.global_std == 0] = 1.0
+
     def _preprocess_and_split_data(self):
         """Preprocess data and split into training and testing sets."""
         # Load dataset
@@ -3060,6 +3084,7 @@ class DBNN(GPUDBNN):
 
         if is_training:
             DEBUG.log(" Training mode preprocessing")
+            self.compute_global_statistics(X)
             self.original_columns = X.columns.tolist()
 
             # Step 1: Remove high cardinality columns
