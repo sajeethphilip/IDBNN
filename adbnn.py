@@ -2696,9 +2696,9 @@ class DBNN(GPUDBNN):
 
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
-                            improvement_threshold: float = 0.001,
-                            load_epoch: int = None,
-                            batch_size: int = 32):
+                             improvement_threshold: float = 0.001,
+                             load_epoch: int = None,
+                             batch_size: int = 32):
         """Modified adaptive training strategy with proper fresh start handling"""
         DEBUG.log(" Starting adaptive_fit_predict")
         if not EnableAdaptive:
@@ -2716,16 +2716,6 @@ class DBNN(GPUDBNN):
 
             # Encode labels if not already done
             if not hasattr(self.label_encoder, 'classes_'):
-                y_encoded = self.label_encoder.fit_transform(y)
-            else:
-                y_encoded = self.label_encoder.transform(y)
-
-            print(self.target_column)
-            print(f" Initial data shape: X={X.shape}, y={len(y)}")
-            print(f"Number of classes in data = {np.unique(y)}")
-            print(self.data.head)
-            # Initialize label encoder if not already done
-            if not hasattr(self.label_encoder, 'classes_'):
                 self.label_encoder.fit(y)
 
             # Use existing label encoder
@@ -2733,7 +2723,9 @@ class DBNN(GPUDBNN):
 
             # Process features and initialize model components if needed
             X_processed = self._preprocess_data(X, is_training=True)
-            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
+
+            # Fix: Create tensor on CPU first, then move to GPU
+            self.X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
             self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
             # Handle model state based on flags
@@ -2775,8 +2767,8 @@ class DBNN(GPUDBNN):
                             print("No previous training data found - starting fresh")
                             train_indices = []
                             test_indices = list(range(len(X)))
-                else:
-                    print("No previous model found - starting fresh")
+                    else:
+                        print("No previous model found - starting fresh")
 
             if not model_loaded:
                 print("Initializing fresh model")
