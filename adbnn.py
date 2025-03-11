@@ -3167,18 +3167,14 @@ class DBNN(GPUDBNN):
             )
             DEBUG.log(f" Generated {len(self.feature_pairs)} feature pairs")
 
-            # Compute bin edges using the preprocessed data
-            self.bin_edges = self._compute_bin_edges(X_scaled, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+            # Convert scaled data to a PyTorch tensor before computing bin edges
+            X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
+
+            # Compute bin edges using the preprocessed data (now a tensor)
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
             DEBUG.log(f" Computed bin edges for {len(self.bin_edges)} feature pairs")
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
-
-            # Convert to tensor in batches to avoid GPU memory issues
-            X_tensor = torch.zeros((len(X_scaled), X_scaled.shape[1]), dtype=torch.float32, device=self.device)
-            for i in range(0, len(X_scaled), batch_size):
-                batch_end = min(i + batch_size, len(X_scaled))
-                X_tensor[i:batch_end] = torch.tensor(X_scaled[i:batch_end], dtype=torch.float32).to(self.device)
-
             return X_tensor
 
         else:
@@ -3255,6 +3251,7 @@ class DBNN(GPUDBNN):
                 X_tensor[i:batch_end] = torch.tensor(X_scaled[i:batch_end], dtype=torch.float32).to(self.device)
 
             return X_tensor
+
     def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters directly from the root of the config file
@@ -3276,7 +3273,9 @@ class DBNN(GPUDBNN):
 
         # Check if combinations already exist
         if os.path.exists(combinations_path):
+            print("---------------------BEWARE!! Remove if you get Error on retraining------------------------")
             print(f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            print("---------------------BEWARE!! Remove if you get Error on retraining------------------------")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
             print(f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
