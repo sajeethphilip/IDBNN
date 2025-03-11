@@ -1832,7 +1832,7 @@ class DBNN(GPUDBNN):
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
-        batch_size = 1024  # Adjust based on available memory
+        batch_size = 32  # Adjust based on available memory
         n_samples = len(X)
         n_features = X.shape[1]
 
@@ -1862,6 +1862,9 @@ class DBNN(GPUDBNN):
         # Preprocess features and target
         X = self.data.drop(columns=[self.target_column])
         y = self.data[self.target_column]
+
+        # Compute global statistics for normalization
+        self.compute_global_statistics(X)
 
         # Encode labels if not already done
         if not hasattr(self.label_encoder, 'classes_'):
@@ -3073,7 +3076,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: pd.DataFrame, is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with improved error handling and column consistency"""
+        """Preprocess data with improved error handling and column consistency, using batch processing."""
         print(f"\n[DEBUG] ====== Starting preprocessing ======")
         DEBUG.log(f" Input shape: {X.shape}")
         DEBUG.log(f" Input columns: {X.columns.tolist()}")
@@ -3122,9 +3125,23 @@ class DBNN(GPUDBNN):
                 DEBUG.log(f" Error converting to numpy: {str(e)}")
                 raise
 
-            # Step 4: Scale the features
+            # Step 4: Scale the features in batches
             try:
-                X_scaled = self.scaler.fit_transform(X_numpy)
+                # Initialize an empty array for scaled features
+                X_scaled = np.zeros_like(X_numpy)
+                batch_size = 1024  # Adjust based on available memory
+
+                # Process data in batches
+                for i in range(0, len(X_numpy), batch_size):
+                    batch_end = min(i + batch_size, len(X_numpy))
+                    batch_X = X_numpy[i:batch_end]
+
+                    # Scale the batch
+                    if is_training:
+                        X_scaled[i:batch_end] = self.scaler.fit_transform(batch_X)
+                    else:
+                        X_scaled[i:batch_end] = self.scaler.transform(batch_X)
+
                 DEBUG.log(f" Scaling successful")
             except Exception as e:
                 DEBUG.log(f" Standard scaling failed: {str(e)}. Using manual scaling")
@@ -3136,9 +3153,6 @@ class DBNN(GPUDBNN):
                     stds = np.nanstd(X_numpy, axis=0)
                     stds[stds == 0] = 1
                     X_scaled = (X_numpy - means) / stds
-
-            # Convert to tensor and move to device
-            X_tensor = torch.FloatTensor(X_scaled).to(self.device)
 
             # Step 5: Compute feature pairs and bin edges AFTER preprocessing and filtering
             # Use the indices of the remaining features (0 to n-1)
@@ -3154,10 +3168,17 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Generated {len(self.feature_pairs)} feature pairs")
 
             # Compute bin edges using the preprocessed data
-            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+            self.bin_edges = self._compute_bin_edges(X_scaled, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
             DEBUG.log(f" Computed bin edges for {len(self.bin_edges)} feature pairs")
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
+
+            # Convert to tensor in batches to avoid GPU memory issues
+            X_tensor = torch.zeros((len(X_scaled), X_scaled.shape[1]), dtype=torch.float32, device=self.device)
+            for i in range(0, len(X_scaled), batch_size):
+                batch_end = min(i + batch_size, len(X_scaled))
+                X_tensor[i:batch_end] = torch.tensor(X_scaled[i:batch_end], dtype=torch.float32).to(self.device)
+
             return X_tensor
 
         else:
@@ -3203,9 +3224,16 @@ class DBNN(GPUDBNN):
                 DEBUG.log(f" Error converting to numpy: {str(e)}")
                 raise
 
-            # Scale the features
+            # Scale the features in batches
             try:
-                X_scaled = self.scaler.transform(X_numpy)
+                X_scaled = np.zeros_like(X_numpy)
+                batch_size = 1024  # Adjust based on available memory
+
+                for i in range(0, len(X_numpy), batch_size):
+                    batch_end = min(i + batch_size, len(X_numpy))
+                    batch_X = X_numpy[i:batch_end]
+                    X_scaled[i:batch_end] = self.scaler.transform(batch_X)
+
                 DEBUG.log(f" Scaling successful")
             except Exception as e:
                 DEBUG.log(f" Standard scaling failed: {str(e)}. Using manual scaling")
@@ -3219,8 +3247,14 @@ class DBNN(GPUDBNN):
                     X_scaled = (X_numpy - means) / stds
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
-            return torch.FloatTensor(X_scaled)
 
+            # Convert to tensor in batches to avoid GPU memory issues
+            X_tensor = torch.zeros((len(X_scaled), X_scaled.shape[1]), dtype=torch.float32, device=self.device)
+            for i in range(0, len(X_scaled), batch_size):
+                batch_end = min(i + batch_size, len(X_scaled))
+                X_tensor[i:batch_end] = torch.tensor(X_scaled[i:batch_end], dtype=torch.float32).to(self.device)
+
+            return X_tensor
     def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters directly from the root of the config file
