@@ -3038,7 +3038,7 @@ class DBNN(GPUDBNN):
             # Step 1: Remove high cardinality columns
             cardinality_threshold = self._calculate_cardinality_threshold()
             DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
-            X = self._remove_high_cardity_columns(X, cardinality_threshold)
+            X = self._remove_high_cardinality_columns(X, cardinality_threshold)  # Fixed typo here
             DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
 
             # Store the features we'll actually use
@@ -3158,6 +3158,7 @@ class DBNN(GPUDBNN):
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
             return torch.FloatTensor(X_scaled)
+
     def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters directly from the root of the config file
