@@ -1828,7 +1828,8 @@ class DBNN(GPUDBNN):
         self.target_column = self.config['target_column']
         self.invertible_model = None
         # Preprocess data once during initialization
-        self._preprocess_and_split_data()
+        self._is_preprocessed = False  # Flag to track preprocessing
+        self._preprocess_and_split_data()  # Call preprocessing only once
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -1882,6 +1883,8 @@ class DBNN(GPUDBNN):
         # Split data into training and testing sets
         self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
             self.X_tensor, self.y_tensor)
+
+        self._is_preprocessed = True  # Mark preprocessing as complete
 
     def create_invertible_model(self, reconstruction_weight: float = 0.5, feedback_strength: float = 0.3):
         """Create an invertible DBNN model"""
