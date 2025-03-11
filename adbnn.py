@@ -3244,8 +3244,12 @@ class DBNN(GPUDBNN):
 
             return X_tensor
 
-    def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
+    def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
+        # Ensure feature_indices is a list
+        if isinstance(feature_indices, int):
+            feature_indices = list(range(feature_indices))  # Convert integer to list of indices
+
         # Get parameters directly from the root of the config file
         group_size = self.config.get('feature_group_size', 2)
         max_combinations = max_combinations or self.config.get('max_combinations', None)
