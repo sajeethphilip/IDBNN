@@ -2163,6 +2163,9 @@ class DBNN(GPUDBNN):
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations"""
+        # Ensure input features are on the correct device
+        features = features.to(self.device)
+
         # Safety checks
         if self.weight_updater is None:
             DEBUG.log(" Weight updater not initialized, initializing now...")
@@ -2173,19 +2176,15 @@ class DBNN(GPUDBNN):
         if self.likelihood_params is None:
             raise RuntimeError("Likelihood parameters not initialized")
 
-        # Ensure input features are contiguous
-        if not features.is_contiguous():
-            features = features.contiguous()
-
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
 
-        # Pre-allocate tensors
+        # Pre-allocate tensors on the correct device
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
         # Process all feature pairs at once
         feature_groups = torch.stack([
-            features[:, pair].contiguous()
+            features[:, pair].contiguous().to(self.device)  # Ensure on correct device
             for pair in self.likelihood_params['feature_pairs']
         ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
 
@@ -2193,18 +2192,18 @@ class DBNN(GPUDBNN):
         bin_indices_dict = {}
         for group_idx in range(len(self.likelihood_params['feature_pairs'])):
             bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            edges = torch.stack([edge.contiguous() for edge in bin_edges])
+            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])  # Ensure on correct device
 
             # Vectorized binning with contiguous tensors
             indices = torch.stack([
                 torch.bucketize(
                     feature_groups[:, group_idx, dim].contiguous(),
                     edges[dim].contiguous()
-                )
+                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
                 for dim in range(2)
-            ])  # [2, batch_size]
-            indices = indices.sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+            ])  # Shape: (2, batch_size)
             bin_indices_dict[group_idx] = indices
+
 
         # Process all classes simultaneously
         for group_idx in range(len(self.likelihood_params['feature_pairs'])):
@@ -3085,6 +3084,9 @@ class DBNN(GPUDBNN):
                     stds[stds == 0] = 1
                     X_scaled = (X_numpy - means) / stds
 
+            # Convert to tensor and move to device
+            X_tensor = torch.FloatTensor(X_scaled).to(self.device)
+
             # Step 5: Compute feature pairs and bin edges AFTER preprocessing
             # Use the indices of the remaining features (0 to n-1)
             remaining_feature_indices = list(range(len(self.feature_columns)))
@@ -3093,10 +3095,13 @@ class DBNN(GPUDBNN):
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
             )
-            self.bin_edges = self._compute_bin_edges(torch.FloatTensor(X_scaled), self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+
+            # Compute bin edges using the preprocessed data
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
-            return torch.FloatTensor(X_scaled)
+            return X_tensor
+
 
         else:
             DEBUG.log(" Prediction mode preprocessing")
