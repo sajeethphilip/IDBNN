@@ -1848,9 +1848,9 @@ class DBNN(GPUDBNN):
         # Preprocess features
         X_processed = self._preprocess_data(X, is_training=True)
 
-        # Convert to tensors and move to device
-        self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
-        self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
+        # Convert to tensors on CPU first, then move to device
+        self.X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+        self.y_tensor = torch.tensor(y_encoded, dtype=torch.long).to(self.device)
 
         # Split data into training and testing sets
         self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
