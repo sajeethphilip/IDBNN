@@ -3152,7 +3152,12 @@ class DBNN(GPUDBNN):
                     X_scaled = X_numpy
                 else:
                     means = np.nanmean(X_numpy, axis=0)
-                    stds = np.nanstd(X_numpy
+                    stds = np.nanstd(X_numpy, axis=0)
+                    stds[stds == 0] = 1
+                    X_scaled = (X_numpy - means) / stds
+
+            DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
+            return torch.FloatTensor(X_scaled)
 
     def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
