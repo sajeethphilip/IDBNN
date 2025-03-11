@@ -4564,8 +4564,8 @@ class DBNN(GPUDBNN):
         # Save split indices to avoid recomputing
         os.makedirs(os.path.dirname(split_path), exist_ok=True)
         split_indices = {
-            'train': torch.arange(len(X_train),  # Indices for training set
-            'test': torch.arange(len(X_train), len(X_train) + torch.arange(len(X_test))  # Indices for test set
+            'train': torch.arange(len(X_train)),  # Indices for training set
+            'test': torch.arange(len(X_train), len(X_train) + len(X_test))  # Indices for test set
         }
         with open(split_path, 'wb') as f:
             pickle.dump(split_indices, f)
