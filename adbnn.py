@@ -3035,24 +3035,67 @@ class DBNN(GPUDBNN):
             DEBUG.log(" Training mode preprocessing")
             self.original_columns = X.columns.tolist()
 
-            with tqdm(total=4, desc="Preprocessing steps") as pbar:
+            # Step 1: Remove high cardinality columns
+            cardinality_threshold = self._calculate_cardinality_threshold()
+            DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
+            X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
 
-                # Calculate cardinality threshold
-                cardinality_threshold = self._calculate_cardinality_threshold()
-                DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist()
+            DEBUG.log(f" Selected feature columns: {self.feature_columns}")
 
-                # Remove high cardinality columns
-                X = self._remove_high_cardinality_columns(X, cardinality_threshold)
-                DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
+            # Store high cardinality columns for future reference
+            self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+            if self.high_cardinality_columns:
+                DEBUG.log(f" Removed high cardinality columns: {self.high_cardinality_columns}")
 
-                # Store the features we'll actually use
-                self.feature_columns = X.columns.tolist()
-                DEBUG.log(f" Selected feature columns: {self.feature_columns}")
+            # Step 2: Handle categorical features
+            DEBUG.log(" Starting categorical encoding")
+            try:
+                X_encoded = self._encode_categorical_features(X, is_training)
+                DEBUG.log(f" Shape after categorical encoding: {X_encoded.shape}")
+                DEBUG.log(f" Encoded dtypes:\n{X_encoded.dtypes}")
+            except Exception as e:
+                DEBUG.log(f" Error in categorical encoding: {str(e)}")
+                raise
 
-                # Store high cardinality columns for future reference
-                self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
-                if self.high_cardinality_columns:
-                    DEBUG.log(f" Removed high cardinality columns: {self.high_cardinality_columns}")
+            # Step 3: Convert to numpy and check for issues
+            try:
+                X_numpy = X_encoded.to_numpy()
+                DEBUG.log(f" Numpy array shape: {X_numpy.shape}")
+                DEBUG.log(f" Any NaN: {np.isnan(X_numpy).any()}")
+                DEBUG.log(f" Any Inf: {np.isinf(X_numpy).any()}")
+            except Exception as e:
+                DEBUG.log(f" Error converting to numpy: {str(e)}")
+                raise
+
+            # Step 4: Scale the features
+            try:
+                X_scaled = self.scaler.fit_transform(X_numpy)
+                DEBUG.log(f" Scaling successful")
+            except Exception as e:
+                DEBUG.log(f" Standard scaling failed: {str(e)}. Using manual scaling")
+                if X_numpy.size == 0:
+                    print("[WARNING] Empty feature array! Returning original data")
+                    X_scaled = X_numpy
+                else:
+                    means = np.nanmean(X_numpy, axis=0)
+                    stds = np.nanstd(X_numpy, axis=0)
+                    stds[stds == 0] = 1
+                    X_scaled = (X_numpy - means) / stds
+
+            # Step 5: Compute feature pairs and bin edges AFTER preprocessing
+            self.feature_pairs = self._generate_feature_combinations(
+                len(self.feature_columns),
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            )
+            self.bin_edges = self._compute_bin_edges(torch.FloatTensor(X_scaled), self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+
+            DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
+            return torch.FloatTensor(X_scaled)
+
         else:
             DEBUG.log(" Prediction mode preprocessing")
             if not hasattr(self, 'feature_columns'):
@@ -3076,9 +3119,6 @@ class DBNN(GPUDBNN):
             if hasattr(self, 'high_cardinality_columns'):
                 X = X.drop(columns=self.high_cardinality_columns, errors='ignore')
 
-        print("Preprocessing prediction data...")
-        with tqdm(total=2, desc="Preprocessing steps") as pbar:
-
             # Handle categorical features
             DEBUG.log(" Starting categorical encoding")
             try:
@@ -3101,27 +3141,21 @@ class DBNN(GPUDBNN):
 
             # Scale the features
             try:
-                if is_training:
-                    X_scaled = self.scaler.fit_transform(X_numpy)
-                else:
-                    X_scaled = self.scaler.transform(X_numpy)
-
+                X_scaled = self.scaler.transform(X_numpy)
                 DEBUG.log(f" Scaling successful")
             except Exception as e:
                 DEBUG.log(f" Standard scaling failed: {str(e)}. Using manual scaling")
-            pbar.update(1)
-            if X_numpy.size == 0:
-                print("[WARNING] Empty feature array! Returning original data")
-                X_scaled = X_numpy
-            else:
-                means = np.nanmean(X_numpy, axis=0)
-                stds = np.nanstd(X_numpy, axis=0)
-                stds[stds == 0] = 1
-                X_scaled = (X_numpy - means) / stds
+                if X_numpy.size == 0:
+                    print("[WARNING] Empty feature array! Returning original data")
+                    X_scaled = X_numpy
+                else:
+                    means = np.nanmean(X_numpy, axis=0)
+                    stds = np.nanstd(X_numpy, axis=0)
+                    stds[stds == 0] = 1
+                    X_scaled = (X_numpy - means) / stds
 
-        DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
-        pbar.close()
-        return torch.FloatTensor(X_scaled)
+            DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
+            return torch.FloatTensor(X_scaled)
 
     def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
