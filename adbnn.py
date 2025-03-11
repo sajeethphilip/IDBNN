@@ -3038,7 +3038,7 @@ class DBNN(GPUDBNN):
             # Step 1: Remove high cardinality columns
             cardinality_threshold = self._calculate_cardinality_threshold()
             DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
-            X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            X = self._remove_high_cardity_columns(X, cardinality_threshold)
             DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
 
             # Store the features we'll actually use
@@ -3086,8 +3086,10 @@ class DBNN(GPUDBNN):
                     X_scaled = (X_numpy - means) / stds
 
             # Step 5: Compute feature pairs and bin edges AFTER preprocessing
+            # Use the indices of the remaining features
+            remaining_feature_indices = list(range(len(self.feature_columns)))
             self.feature_pairs = self._generate_feature_combinations(
-                len(self.feature_columns),
+                remaining_feature_indices,
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
             )
@@ -3156,8 +3158,7 @@ class DBNN(GPUDBNN):
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
             return torch.FloatTensor(X_scaled)
-
-    def _generate_feature_combinations(self, n_features: int, group_size: int = None, max_combinations: int = None) -> torch.Tensor:
+    def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
         # Get parameters directly from the root of the config file
         group_size = self.config.get('feature_group_size', 2)
@@ -3166,7 +3167,7 @@ class DBNN(GPUDBNN):
 
         # Debug: Print parameters
         print(f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
-        print(f"- n_features: {n_features}")
+        print(f"- n_features: {len(feature_indices)}")
         print(f"- group_size: {group_size}")
         print(f"- max_combinations: {max_combinations}")
         print(f"- bin_sizes: {bin_sizes}")
@@ -3187,7 +3188,7 @@ class DBNN(GPUDBNN):
         # Generate new combinations if none exist
         print(f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
         from itertools import combinations
-        all_combinations = list(combinations(range(n_features), group_size))
+        all_combinations = list(combinations(feature_indices, group_size))
         unique_combinations = list(set([tuple(sorted(comb)) for comb in all_combinations]))
         unique_combinations = sorted(unique_combinations)[:max_combinations]
         combinations_tensor = torch.tensor(unique_combinations, device=self.device)
