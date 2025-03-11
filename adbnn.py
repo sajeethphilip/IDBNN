@@ -1827,6 +1827,34 @@ class DBNN(GPUDBNN):
         # Initialize other attributes
         self.target_column = self.config['target_column']
         self.invertible_model = None
+        # Preprocess data once during initialization
+        self._preprocess_and_split_data()
+
+    def _preprocess_and_split_data(self):
+        """Preprocess data and split into training and testing sets."""
+        # Load dataset
+        self.data = self._load_dataset()
+
+        # Preprocess features and target
+        X = self.data.drop(columns=[self.target_column])
+        y = self.data[self.target_column]
+
+        # Encode labels if not already done
+        if not hasattr(self.label_encoder, 'classes_'):
+            y_encoded = self.label_encoder.fit_transform(y)
+        else:
+            y_encoded = self.label_encoder.transform(y)
+
+        # Preprocess features
+        X_processed = self._preprocess_data(X, is_training=True)
+
+        # Convert to tensors and move to device
+        self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
+        self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
+
+        # Split data into training and testing sets
+        self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
+            self.X_tensor, self.y_tensor)
 
     def create_invertible_model(self, reconstruction_weight: float = 0.5, feedback_strength: float = 0.3):
         """Create an invertible DBNN model"""
@@ -3087,21 +3115,25 @@ class DBNN(GPUDBNN):
             # Convert to tensor and move to device
             X_tensor = torch.FloatTensor(X_scaled).to(self.device)
 
-            # Step 5: Compute feature pairs and bin edges AFTER preprocessing
+            # Step 5: Compute feature pairs and bin edges AFTER preprocessing and filtering
             # Use the indices of the remaining features (0 to n-1)
             remaining_feature_indices = list(range(len(self.feature_columns)))
+            DEBUG.log(f" Computing feature pairs from {len(remaining_feature_indices)} features")
+
+            # Generate feature pairs using the updated set of features
             self.feature_pairs = self._generate_feature_combinations(
                 remaining_feature_indices,
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
             )
+            DEBUG.log(f" Generated {len(self.feature_pairs)} feature pairs")
 
             # Compute bin edges using the preprocessed data
             self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+            DEBUG.log(f" Computed bin edges for {len(self.bin_edges)} feature pairs")
 
             DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
             return X_tensor
-
 
         else:
             DEBUG.log(" Prediction mode preprocessing")
@@ -4548,65 +4580,17 @@ class DBNN(GPUDBNN):
         return {c_id: posteriors[idx].item() for idx, c_id in enumerate(classes)}
 
 
-
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
-        """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
+        """Full training and prediction pipeline using preprocessed data."""
         try:
             # Set a flag to indicate we're printing metrics
             self._last_metrics_printed = True
 
-            # Handle data preparation based on whether we're in adaptive training or final evaluation
-            if self.in_adaptive_fit:
-                if not hasattr(self, 'X_tensor') or not hasattr(self, 'y_tensor'):
-                    raise ValueError("X_tensor or y_tensor not found. Initialize them in adaptive_fit_predict first.")
-
-                if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
-                    raise ValueError("train_indices or test_indices not found")
-
-                # Use stored tensors and indices, but verify sizes match
-                try:
-                    X_train = self.X_tensor[self.train_indices]
-                    X_test = self.X_tensor[self.test_indices]
-                    y_train = self.y_tensor[self.train_indices]
-                    y_test = self.y_tensor[self.test_indices]
-                except Exception as e:
-                    # If there's any issue with indices, fall back to regular training path
-                    DEBUG.log(f"Error using stored indices: {str(e)}. Falling back to regular training.")
-                    self.in_adaptive_fit = False
-                    # Reset indices and proceed with regular path
-                    self.train_indices = None
-                    self.test_indices = None
-                    return self.fit_predict(batch_size=batch_size, save_path=save_path)
-
-            else:
-                # Regular training path
-                X = self.data.drop(columns=[self.target_column])
-                y = self.data[self.target_column]
-
-                # Check if label encoder is already fitted
-                if not hasattr(self.label_encoder, 'classes_'):
-                    y_encoded = self.label_encoder.fit_transform(y)
-                else:
-                    y_encoded = self.label_encoder.transform(y)
-
-                # Preprocess features including categorical encoding
-                X_processed = self._preprocess_data(X, is_training=True)
-
-                # Convert to tensors and move to device
-                X_tensor = torch.FloatTensor(X_processed).to(self.device)
-                y_tensor = torch.LongTensor(y_encoded).to(self.device)
-
-                # Split data
-                # Get consistent train-test split
-                X_train, X_test, y_train, y_test = self._get_train_test_split(
-                    X_tensor, y_tensor)
-
-
-                # Convert split data back to tensors
-                X_train = torch.from_numpy(X_train).to(self.device, dtype=torch.float32)
-                X_test = torch.from_numpy(X_test).to(self.device, dtype=torch.float32)
-                y_train = torch.from_numpy(y_train).to(self.device, dtype=torch.long)
-                y_test = torch.from_numpy(y_test).to(self.device, dtype=torch.long)
+            # Use preprocessed data stored during initialization
+            X_train = self.X_train
+            X_test = self.X_test
+            y_train = self.y_train
+            y_test = self.y_test
 
             # Verify tensor sizes match before training
             if X_train.size(0) != y_train.size(0) or X_test.size(0) != y_test.size(0):
@@ -4628,15 +4612,9 @@ class DBNN(GPUDBNN):
 
             # Save predictions if path is provided
             if save_path:
-                if self.in_adaptive_fit:
-                    # Get corresponding rows from original DataFrame for test set
-                    X_test_df = self.data.drop(columns=[self.target_column]).iloc[self.test_indices]
-                    y_test_series = self.data[self.target_column].iloc[self.test_indices]
-                else:
-                    X_test_indices = range(len(X_test))
-                    X_test_df = X.iloc[X_test_indices]
-                    y_test_series = y.iloc[X_test_indices]
-
+                # Get corresponding rows from original DataFrame for test set
+                X_test_df = self.data.drop(columns=[self.target_column]).iloc[self.test_indices]
+                y_test_series = self.data[self.target_column].iloc[self.test_indices]
                 self.save_predictions(X_test_df, y_pred, save_path, y_test_series)
 
             # Calculate metrics
