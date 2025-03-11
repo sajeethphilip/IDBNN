@@ -4544,9 +4544,23 @@ class DBNN(GPUDBNN):
                 return (X_tensor[train_idx], X_tensor[test_idx],
                         y_tensor[train_idx], y_tensor[test_idx])
 
-        # Create new split
-        X_train, X_test, y_train, y_test = self._train_test_split_tensor(
-            X_tensor, y_tensor, self.test_size, self.random_state)
+        X_cpu = X_tensor.cpu()
+        y_cpu = y_tensor.cpu()
+
+        # Perform train-test split on CPU
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_cpu.numpy(),  # Convert to NumPy for sklearn compatibility
+            y_cpu.numpy(),
+            test_size=self.test_size,
+            random_state=self.random_state,
+            shuffle=(self.shuffle_state != -1)
+        )
+
+        # Convert back to PyTorch tensors and move to the appropriate device
+        X_train = torch.tensor(X_train, dtype=torch.float32).to(self.device)
+        X_test = torch.tensor(X_test, dtype=torch.float32).to(self.device)
+        y_train = torch.tensor(y_train, dtype=torch.long).to(self.device)
+        y_test = torch.tensor(y_test, dtype=torch.long).to(self.device)
 
         # Save split indices
         os.makedirs(os.path.dirname(split_path), exist_ok=True)
