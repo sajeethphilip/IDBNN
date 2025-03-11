@@ -1574,14 +1574,20 @@ class GPUDBNN:
                     raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
 
                 # Compute bin edges
-                edges = torch.linspace(
-                    dim_min - padding,
-                    dim_max + padding,
-                    group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
-                    device=self.device
-                ).contiguous()
-                group_bin_edges.append(edges)
-                DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
+                try:
+                    edges = torch.linspace(
+                        dim_min - padding,
+                        dim_max + padding,
+                        group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                        device=self.device
+                    ).contiguous()
+                    group_bin_edges.append(edges)
+                    DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
+                except Exception as e:
+                    print(f"Error computing bin edges for dimension {dim}: {str(e)}")
+                    print(f"dim_min: {dim_min}, dim_max: {dim_max}, padding: {padding}, bin_size: {group_bin_sizes[dim]}")
+                    raise
+
             bin_edges.append(group_bin_edges)
 
         return bin_edges
