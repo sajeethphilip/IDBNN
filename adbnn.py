@@ -1549,6 +1549,10 @@ class GPUDBNN:
         Returns:
             List of tensors containing bin edges for each feature pair
         """
+        DEBUG.log("Starting _compute_bin_edges")
+        print(f"Dataset shape: {dataset.shape}")
+        print(f"Bin sizes: {bin_sizes}")
+
         bin_edges = []
         for feature_group in self.feature_pairs:
             feature_group = [int(x) for x in feature_group]
@@ -1565,6 +1569,11 @@ class GPUDBNN:
                 dim_min, dim_max = dim_data.min(), dim_data.max()
                 padding = (dim_max - dim_min) * 0.01
 
+                # Ensure bin size is valid
+                if group_bin_sizes[dim] <= 1:
+                    raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
+
+                # Compute bin edges
                 edges = torch.linspace(
                     dim_min - padding,
                     dim_max + padding,
