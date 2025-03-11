@@ -3038,7 +3038,7 @@ class DBNN(GPUDBNN):
             # Step 1: Remove high cardinality columns
             cardinality_threshold = self._calculate_cardinality_threshold()
             DEBUG.log(f" Cardinality threshold: {cardinality_threshold}")
-            X = self._remove_high_cardinality_columns(X, cardinality_threshold)  # Fixed typo here
+            X = self._remove_high_cardinality_columns(X, cardinality_threshold)
             DEBUG.log(f" Shape after cardinality filtering: {X.shape}")
 
             # Store the features we'll actually use
@@ -3086,7 +3086,7 @@ class DBNN(GPUDBNN):
                     X_scaled = (X_numpy - means) / stds
 
             # Step 5: Compute feature pairs and bin edges AFTER preprocessing
-            # Use the indices of the remaining features
+            # Use the indices of the remaining features (0 to n-1)
             remaining_feature_indices = list(range(len(self.feature_columns)))
             self.feature_pairs = self._generate_feature_combinations(
                 remaining_feature_indices,
@@ -3152,12 +3152,7 @@ class DBNN(GPUDBNN):
                     X_scaled = X_numpy
                 else:
                     means = np.nanmean(X_numpy, axis=0)
-                    stds = np.nanstd(X_numpy, axis=0)
-                    stds[stds == 0] = 1
-                    X_scaled = (X_numpy - means) / stds
-
-            DEBUG.log(f" Final preprocessed shape: {X_scaled.shape}")
-            return torch.FloatTensor(X_scaled)
+                    stds = np.nanstd(X_numpy
 
     def _generate_feature_combinations(self, feature_indices: List[int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
