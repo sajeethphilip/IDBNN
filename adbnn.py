@@ -1705,11 +1705,11 @@ class GPUDBNN:
         print(f"\n{Colors.BOLD}{Colors.BLUE}{prefix}Detailed Metrics:{Colors.ENDC}")
 
         # Raw accuracy
-        acc_color = Colors.GREEN if raw_acc >= 0.9 else Colors.YELLOW if raw_acc >= 0.7 else Colors.RED
+        acc_color = Colors.GREEN if raw_acc >= 0.9 else Colors.YELLOW if raw_acc >= 0.7 else Colors.BLUE
         print(f"{Colors.BOLD}Raw Accuracy:{Colors.ENDC} {acc_color}{raw_acc:.4%}{Colors.ENDC}")
 
         # Balanced accuracy
-        bal_color = Colors.GREEN if balanced_acc >= 0.9 else Colors.YELLOW if balanced_acc >= 0.7 else Colors.RED
+        bal_color = Colors.GREEN if balanced_acc >= 0.9 else Colors.YELLOW if balanced_acc >= 0.7 else Colors.BLUE
         print(f"{Colors.BOLD}Balanced Accuracy:{Colors.ENDC} {bal_color}{balanced_acc:.4%}{Colors.ENDC}")
 
         # Per-class metrics
@@ -1719,7 +1719,7 @@ class GPUDBNN:
 
         for i, label in enumerate(class_labels):
             class_acc = cm[i,i] / cm[i].sum() if cm[i].sum() > 0 else 0
-            color = Colors.GREEN if class_acc >= 0.9 else Colors.YELLOW if class_acc >= 0.7 else Colors.RED
+            color = Colors.GREEN if class_acc >= 0.9 else Colors.YELLOW if class_acc >= 0.7 else Colors.BLUE
             samples = cm[i].sum()
             print(f"Class {label}: {color}{class_acc:.4%}{Colors.ENDC} ({samples:,} samples)")
 
@@ -3976,7 +3976,7 @@ class DBNN(GPUDBNN):
             elif acc >= 0.7:
                 color = Colors.YELLOW
             else:
-                color = Colors.RED
+                color = Colors.BLUE
             print(f"{color}{acc:>7.2%}{Colors.ENDC}")
 
         # Print overall accuracy
@@ -3985,7 +3985,7 @@ class DBNN(GPUDBNN):
         if total_samples > 0:
             overall_acc = total_correct / total_samples
             print("-" * (15 + 8 * n_classes + 10))
-            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.RED
+            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
             print(f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
 
         # Save confusion matrix to file
@@ -4372,7 +4372,7 @@ class DBNN(GPUDBNN):
         # Color code for correctly classified
         correct_color = Colors.GREEN if (n_correct/n_total) >= 0.9 else \
                        Colors.YELLOW if (n_correct/n_total) >= 0.7 else \
-                       Colors.RED
+                       Colors.BLUE
         print(f"{Colors.BOLD}Correctly classified:{Colors.ENDC} {correct_color}{n_correct:,}{Colors.ENDC}")
 
         # Color code for incorrectly classified
@@ -4386,7 +4386,7 @@ class DBNN(GPUDBNN):
         accuracy = n_correct/n_total
         accuracy_color = Colors.GREEN if accuracy >= 0.9 else \
                         Colors.YELLOW if accuracy >= 0.7 else \
-                        Colors.RED
+                        Colors.BLUE
         print(f"{Colors.BOLD}Raw accuracy:{Colors.ENDC} {accuracy_color}{accuracy:.4%}{Colors.ENDC}\n")
 
         # Print confusion matrix with colors
