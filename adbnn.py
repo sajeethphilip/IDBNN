@@ -4360,6 +4360,7 @@ class DBNN(GPUDBNN):
                 self.current_W = train_weights
 
                 # Training metrics
+                print("Predctions on Training data", end="\r", flush=True)
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
@@ -5095,7 +5096,7 @@ class DBNN(GPUDBNN):
                         for column, mapping in data.items()
                     }
 
-                print(f"Loaded categorical encoders from {encoders_file}")
+                print(f"Loaded categorical encoders from {encoders_file}", end="\r", flush=True)
             except Exception as e:
                 print(f"Warning: Failed to load categorical encoders: {str(e)}")
                 self.categorical_encoders = {}
@@ -5169,7 +5170,10 @@ class DBNN(GPUDBNN):
 
         # Get preprocessed features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
-        X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+        if isinstance(X_processed, torch.Tensor):
+            X_tensor = X_processed.clone().detach().to(self.device)
+        else:
+            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
 
         # Compute probabilities in batches
         batch_size = 32
@@ -5196,7 +5200,7 @@ class DBNN(GPUDBNN):
         if all_probabilities:
             all_probabilities = np.vstack(all_probabilities)
         else:
-            print("No probabilities were computed successfully")
+            print("No probabilities were computed successfully", end="\r", flush=True)
             return None
 
         # Ensure we're only using valid class indices
@@ -5227,7 +5231,7 @@ class DBNN(GPUDBNN):
             self.verify_classifications(X, true_labels, predictions)
 
         result_df.to_csv(output_file, index=False)
-        print(f"\nSaved predictions to {output_file}")
+        print(f"\nSaved predictions to {output_file}", end="\r", flush=True)
 
         return result_df
 #--------------------------------------------------------------------------------------------------------------
@@ -5266,8 +5270,8 @@ class DBNN(GPUDBNN):
         with open(components_file, 'wb') as f:
             pickle.dump(components, f)
 
-        print(f"Saved model components to {components_file}")
-        print(f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes")
+        print(f"Saved model components to {components_file}", end="\r", flush=True)
+        print(f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
         return True
 
 
@@ -5275,8 +5279,8 @@ class DBNN(GPUDBNN):
         """Load all model components"""
         components_file = self._get_model_components_filename()
         if os.path.exists(components_file):
-            print(f"[DEBUG] Loading model components from {components_file}")
-            print(f"[DEBUG] File size: {os.path.getsize(components_file)} bytes")
+            print(f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
+            print(f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
                 self.label_encoder.classes_ = components['target_classes']
@@ -5291,10 +5295,10 @@ class DBNN(GPUDBNN):
                 self.n_bins_per_dim = components.get('n_bins_per_dim', 20)
                 self.bin_edges = components.get('bin_edges')  # Load bin_edges
                 self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
-                print(f"Loaded model components from {components_file}")
+                print(f"Loaded model components from {components_file}", end="\r", flush=True)
                 return True
         else:
-            print(f"[DEBUG] Model components file not found: {components_file}")
+            print(f"[DEBUG] Model components file not found: {components_file}", end="\r", flush=True)
         return False
 
 
@@ -5307,7 +5311,7 @@ class DBNN(GPUDBNN):
             components_loaded = self._load_model_components()
 
             if not (weights_loaded and components_loaded):
-                print("Complete model not found. Training required.")
+                print("Complete model not found. Training required.", end="\r", flush=True)
                 results = self.fit_predict(batch_size=batch_size)
                 return results
 
@@ -5317,7 +5321,7 @@ class DBNN(GPUDBNN):
 
             # Explicitly use best weights for prediction
             if self.best_W is None:
-                print("No best weights found. Training required.")
+                print("No best weights found. Training required.", end="\r", flush=True)
                 results = self.fit_predict(batch_size=batch_size)
                 return results
 
@@ -5360,7 +5364,7 @@ class DBNN(GPUDBNN):
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 32):
     """Run benchmark using GPU-optimized implementation"""
-    print(f"\nRunning GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...")
+    print(f"\nRunning GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...", end="\r", flush=True)
 
     if Train:
         # First run adaptive training if enabled
@@ -5420,14 +5424,14 @@ def save_label_encoder(label_encoder, dataset_name):
     encoder_path = os.path.join(save_dir, 'label_encoder.pkl')
     with open(encoder_path, 'wb') as f:
         pickle.dump(label_encoder, f)
-    print(f"Label encoder saved to {encoder_path}")
+    print(f"Label encoder saved to {encoder_path}", end="\r", flush=True)
 
 def load_label_encoder(dataset_name):
     encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
     if os.path.exists(encoder_path):
         with open(encoder_path, 'rb') as f:
             label_encoder = pickle.load(f)
-        print(f"Label encoder loaded from {encoder_path}")
+        print(f"Label encoder loaded from {encoder_path}", end="\r", flush=True)
         return label_encoder
     else:
         raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
@@ -5527,7 +5531,7 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     """
     # Ensure data directory exists
     if not os.path.exists(data_dir):
-        print(f"\nNo '{data_dir}' directory found. Creating one...")
+        print(f"\nNo '{data_dir}' directory found. Creating one...", end="\r", flush=True)
         os.makedirs(data_dir)
         return []
 
@@ -5559,11 +5563,11 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                 try:
                     with open(adaptive_conf_path, 'r') as f:
                         adaptive_conf = json.load(f)
-                    print(f"Loaded adaptive configuration from {adaptive_conf_path}")
+                    print(f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
                 except Exception as e:
                     print(f"Warning: Could not load adaptive configuration from{adaptive_conf_path}: {str(e)}")
             else:
-                print(f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}")
+                print(f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
 
             csv_path = None
             for path in csv_paths:
@@ -5589,16 +5593,16 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                         # Save updated configuration
                         with open(conf_path, 'w') as f:
                             json.dump(dataset_conf, f, indent=4)
-                        print(f"Updated configuration for {basename} with adaptive settings")
+                        print(f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
 
                     except Exception as e:
                         print(f"Warning: Could not update configuration for {basename}: {str(e)}")
 
                 dataset_pairs.append((basename, conf_path, csv_path))
                 processed_datasets.add(basename)
-                print(f"\nFound dataset pair:")
-                print(f"  Config: {conf_path}")
-                print(f"  Data  : {csv_path}")
+                print(f"\nFound dataset pair:", end="\r", flush=True)
+                print(f"  Config: {conf_path}", end="\r", flush=True)
+                print(f"  Data  : {csv_path}", end="\r", flush=True)
             else:
                 print(f"\nWarning: Config file {conf_file} exists but no matching CSV found")
                 print(f"Looked in:")
