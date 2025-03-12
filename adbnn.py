@@ -2004,7 +2004,7 @@ class DBNN(GPUDBNN):
         """Generate detailed predictions with confidence metrics"""
         # Get preprocessed features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
-        X_tensor = torch.FloatTensor(X_processed).to(self.device)
+        X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
 
         # Create results DataFrame
         results_df = self.data.copy()
@@ -2990,7 +2990,7 @@ class DBNN(GPUDBNN):
             X_processed = self._preprocess_data(X, is_training=True)
 
             # Fix: Create tensor on CPU first, then move to GPU
-            self.X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
             self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
             # Handle model state based on flags
@@ -4966,7 +4966,7 @@ class DBNN(GPUDBNN):
                 X_processed = self._preprocess_data(X, is_training=True)
 
                 # Convert to tensors and move to device
-                X_tensor = torch.FloatTensor(X_processed).to(self.device)
+                 X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
                 y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
                 # Split data
@@ -5169,7 +5169,7 @@ class DBNN(GPUDBNN):
 
         # Get preprocessed features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
-        X_tensor = torch.FloatTensor(X_processed).to(self.device)
+        X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
 
         # Compute probabilities in batches
         batch_size = 32
