@@ -1508,7 +1508,6 @@ class GPUDBNN:
 
         print(f"Using device: {self.device}")
 
-        self.dataset_name = dataset_name
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.test_size = test_size
@@ -2699,6 +2698,269 @@ class DBNN(GPUDBNN):
 
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
+                            improvement_threshold: float = 0.001,
+                            load_epoch: int = None,
+                            batch_size: int = 32):
+        """Modified adaptive training strategy with proper fresh start handling"""
+        DEBUG.log(" Starting adaptive_fit_predict")
+        if not EnableAdaptive:
+            print("Adaptive learning is disabled. Using standard training.")
+            return self.fit_predict(batch_size=batch_size)
+
+        self.in_adaptive_fit = True
+        train_indices = []
+        test_indices = None
+
+        try:
+            # Get initial data
+            X = self.data.drop(columns=[self.target_column])
+            y = self.data[self.target_column]
+            print(self.target_column)
+            print(f" Initial data shape: X={X.shape}, y={len(y)}")
+            print(f"Number of classes in data = {np.unique(y)}")
+            print(self.data.head)
+            # Initialize label encoder if not already done
+            if not hasattr(self.label_encoder, 'classes_'):
+                self.label_encoder.fit(y)
+
+            # Use existing label encoder
+            y_encoded = self.label_encoder.transform(y)
+
+            # Process features and initialize model components if needed
+            X_processed = self._preprocess_data(X, is_training=True)
+            self.X_tensor = torch.FloatTensor(X_processed).to(self.device)
+            self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
+
+            # Handle model state based on flags
+            model_loaded = False
+            if self.use_previous_model:
+                print("Loading previous model state")
+                if self._load_model_components():
+                    self._load_best_weights()
+                    self._load_categorical_encoders()
+                    model_loaded = True
+
+                    if not self.fresh_start:
+                        # Load previous training data
+                        print("Loading previous training data...")
+                        prev_train_file = f'{self.dataset_name}_Last_training.csv'
+                        if os.path.exists(prev_train_file):
+                            prev_train_data = pd.read_csv(prev_train_file)
+
+                            # Match rows between previous training data and current data
+                            train_indices = []
+                            prev_features = prev_train_data.drop(columns=[self.target_column])
+                            current_features = X
+
+                            # Ensure columns match
+                            common_cols = list(set(prev_features.columns) & set(current_features.columns))
+
+                            # Find matching rows
+                            for idx, row in current_features[common_cols].iterrows():
+                                # Check if this row exists in previous training data
+                                matches = (prev_features[common_cols] == row).all(axis=1)
+                                if matches.any():
+                                    train_indices.append(idx)
+
+                            print(f"Loaded {len(train_indices)} previous training samples")
+
+                            # Initialize test indices as all indices not in training
+                            test_indices = list(set(range(len(X))) - set(train_indices))
+                        else:
+                            print("No previous training data found - starting fresh")
+                            train_indices = []
+                            test_indices = list(range(len(X)))
+                else:
+                    print("No previous model found - starting fresh")
+
+            if not model_loaded:
+                print("Initializing fresh model")
+                self._clean_existing_model()
+                train_indices = []
+                test_indices = list(range(len(X)))
+
+                # Initialize feature pairs for fresh start
+                self.feature_pairs = self._generate_feature_combinations(
+                    self.X_tensor.shape[1],
+                    self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                    self.config.get('likelihood_config', {}).get('max_combinations', None)
+                )
+
+            # Initialize test indices if still None
+            if test_indices is None:
+                test_indices = list(range(len(X)))
+
+            # Initialize likelihood parameters if needed
+            if self.likelihood_params is None:
+                DEBUG.log(" Initializing likelihood parameters")
+                if self.model_type == "Histogram":
+                    self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                    )
+                elif self.model_type == "Gaussian":
+                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                    )
+                DEBUG.log(" Likelihood parameters computed")
+
+            # Initialize weights if needed
+            if self.weight_updater is None:
+                DEBUG.log(" Initializing weight updater")
+                self._initialize_bin_weights()
+                DEBUG.log(" Weight updater initialized")
+
+            # Initialize model weights if needed
+            if self.current_W is None:
+                DEBUG.log(" Initializing model weights")
+                n_classes = len(self.label_encoder.classes_)
+                n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
+                if n_pairs == 0:
+                    raise ValueError("Feature pairs not initialized")
+                self.current_W = torch.full(
+                    (n_classes, n_pairs),
+                    0.1,
+                    device=self.device,
+                    dtype=torch.float32
+                )
+                if self.best_W is None:
+                    self.best_W = self.current_W.clone()
+
+            # Initialize training set if empty
+            if len(train_indices) == 0:
+                print("Initializing new training set with minimum samples")
+                # Select minimum samples from each class for initial training
+                unique_classes = self.label_encoder.classes_
+                for class_label in unique_classes:
+                    class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
+                    if len(class_indices) < 2:
+                        selected_indices = class_indices
+                    else:
+                        selected_indices = class_indices[:2]
+                    train_indices.extend(selected_indices)
+
+                # Update test indices
+                test_indices = list(set(range(len(X))) - set(train_indices))
+
+            DEBUG.log(f" Initial training set size: {len(train_indices)}")
+            DEBUG.log(f" Initial test set size: {len(test_indices)}")
+
+            # Continue with training loop...
+            for round_num in range(max_rounds):
+                print(f"\nRound {round_num + 1}/{max_rounds}")
+                print(f"Training set size: {len(train_indices)}")
+                print(f"Test set size: {len(test_indices)}")
+
+                # Save indices for this epoch
+                self.save_epoch_data(round_num, train_indices, test_indices)
+
+                # Create feature tensors for training
+                X_train = self.X_tensor[train_indices]
+                y_train = self.y_tensor[train_indices]
+
+                # Train the model
+                save_path = f"round_{round_num}_predictions.csv"
+                self.train_indices = train_indices
+                self.test_indices = test_indices
+                results = self.fit_predict(batch_size=batch_size, save_path=save_path)
+
+                # Check training accuracy
+                train_predictions = self.predict(X_train, batch_size=batch_size)
+                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
+                print(f"Training accuracy: {train_accuracy:.4f}")
+
+                # Get test accuracy from results
+                test_accuracy = results['test_accuracy']
+
+                # Check if we're improving overall
+                improved = False
+                if 'best_train_accuracy' not in locals():
+                    best_train_accuracy = train_accuracy
+                    improved = True
+                elif train_accuracy > best_train_accuracy + improvement_threshold:
+                    best_train_accuracy = train_accuracy
+                    improved = True
+                    print(f"Improved training accuracy to {train_accuracy:.4f}")
+
+                if 'best_test_accuracy' not in locals():
+                    best_test_accuracy = test_accuracy
+                    improved = True
+                elif test_accuracy > best_test_accuracy + improvement_threshold:
+                    best_test_accuracy = test_accuracy
+                    improved = True
+                    print(f"Improved test accuracy to {test_accuracy:.4f}")
+
+                # Reset adaptive patience if improved
+                if improved:
+                    adaptive_patience_counter = 0
+                else:
+                    adaptive_patience_counter += 1
+                    print(f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                    if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
+                        print(f"No improvement in accuracy after 5 rounds of adding samples.")
+                        print(f"Best training accuracy achieved: {best_train_accuracy:.4f}")
+                        print(f"Best test accuracy achieved: {best_test_accuracy:.4f}")
+                        print("Stopping adaptive training.")
+                        break
+
+                # Evaluate test data
+                X_test = self.X_tensor[test_indices]
+                y_test = self.y_tensor[test_indices]
+                test_predictions = self.predict(X_test, batch_size=batch_size)
+
+                # Only print test performance header if we didn't just print metrics in fit_predict
+                if not hasattr(self, '_last_metrics_printed') or not self._last_metrics_printed:
+                    print(f"\n{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
+                    y_test_cpu = y_test.cpu().numpy()
+                    test_predictions_cpu = test_predictions.cpu().numpy()
+                    self.print_colored_confusion_matrix(y_test_cpu, test_predictions_cpu)
+
+                # Reset the metrics printed flag
+                self._last_metrics_printed = False
+
+                # Check if we've achieved perfect accuracy
+                if train_accuracy == 1.0:
+                    if len(test_indices) == 0:
+                        print("No more test samples available. Training complete.")
+                        break
+
+                    # Get new training samples from misclassified examples
+                    new_train_indices = self._select_samples_from_failed_classes(
+                        test_predictions, y_test, test_indices
+                    )
+
+                    if not new_train_indices:
+                        print("Achieved 100% accuracy on all data. Training complete.")
+                        self.in_adaptive_fit = False
+                        return {'train_indices': [], 'test_indices': []}
+
+                else:
+                    # Training did not achieve 100% accuracy, select new samples
+                    new_train_indices = self._select_samples_from_failed_classes(
+                        test_predictions, y_test, test_indices
+                    )
+
+                    if not new_train_indices:
+                        print("No suitable new samples found. Training complete.")
+                        break
+
+                # Update training and test sets with new samples
+                train_indices.extend(new_train_indices)
+                test_indices = list(set(test_indices) - set(new_train_indices))
+                print(f"Added {len(new_train_indices)} new samples to training set")
+
+                # Save the current split
+                self.save_last_split(train_indices, test_indices)
+
+            self.in_adaptive_fit = False
+            return {'train_indices': train_indices, 'test_indices': test_indices}
+
+        except Exception as e:
+            DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
+            DEBUG.log(" Traceback:", traceback.format_exc())
+            self.in_adaptive_fit = False
+            raise
+
+    def adaptive_fit_predict_old(self, max_rounds: int = 10,
                              improvement_threshold: float = 0.001,
                              load_epoch: int = None,
                              batch_size: int = 32):
@@ -3776,12 +4038,16 @@ class DBNN(GPUDBNN):
 
 
     def predict(self, X: torch.Tensor, batch_size: int = 32):
-        """Make predictions in batches using the best model weights"""
+        """
+        Make predictions in batches using the best model weights.
+        This function ensures all batches are processed and predictions are concatenated correctly.
+        """
         # Store current weights temporarily
         print("\nMaking predictions...")
         temp_W = self.current_W
         n_batches = (len(X) + batch_size - 1) // batch_size
         pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
+
         # Use best weights for prediction
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
 
@@ -3791,15 +4057,16 @@ class DBNN(GPUDBNN):
         try:
             for i in range(0, len(X), batch_size):
                 batch_X = X[i:min(i + batch_size, len(X))]
-                if self.model_type=="Histogram":
+                if self.model_type == "Histogram":
                     # Get posteriors only, ignore bin indices
                     posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type=="Gaussian":
+                elif self.model_type == "Gaussian":
                     # Get posteriors only, ignore component responsibilities
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
                 else:
-                    print(f"{self.model_type} is invalid. Please edit configuration file")
+                    raise ValueError(f"{self.model_type} is an invalid model type. Please edit the configuration file.")
 
+                # Get predictions for the current batch
                 batch_predictions = torch.argmax(posteriors, dim=1)
                 predictions.append(batch_predictions)
                 pred_pbar.update(1)
@@ -3809,6 +4076,8 @@ class DBNN(GPUDBNN):
             self.current_W = temp_W
 
         pred_pbar.close()
+
+        # Concatenate predictions from all batches
         return torch.cat(predictions).cpu()
 
 
@@ -4569,6 +4838,9 @@ class DBNN(GPUDBNN):
         with open(split_path, 'wb') as f:
             pickle.dump(split_indices, f)
 
+        # Store test indices for later use
+        self.test_indices = split_indices['test']
+
         return X_train, X_test, y_train, y_test
 
     def _train_test_split_tensor(self, X, y, test_size, random_state):
@@ -4651,16 +4923,63 @@ class DBNN(GPUDBNN):
 
 
     def fit_predict(self, batch_size: int = 32, save_path: str = None):
-        """Full training and prediction pipeline using preprocessed data."""
+        """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
         try:
             # Set a flag to indicate we're printing metrics
             self._last_metrics_printed = True
 
-            # Use preprocessed data stored during initialization
-            X_train = self.X_train
-            X_test = self.X_test
-            y_train = self.y_train
-            y_test = self.y_test
+            # Handle data preparation based on whether we're in adaptive training or final evaluation
+            if self.in_adaptive_fit:
+                if not hasattr(self, 'X_tensor') or not hasattr(self, 'y_tensor'):
+                    raise ValueError("X_tensor or y_tensor not found. Initialize them in adaptive_fit_predict first.")
+
+                if not hasattr(self, 'train_indices') or not hasattr(self, 'test_indices'):
+                    raise ValueError("train_indices or test_indices not found")
+
+                # Use stored tensors and indices, but verify sizes match
+                try:
+                    X_train = self.X_tensor[self.train_indices]
+                    X_test = self.X_tensor[self.test_indices]
+                    y_train = self.y_tensor[self.train_indices]
+                    y_test = self.y_tensor[self.test_indices]
+                except Exception as e:
+                    # If there's any issue with indices, fall back to regular training path
+                    DEBUG.log(f"Error using stored indices: {str(e)}. Falling back to regular training.")
+                    self.in_adaptive_fit = False
+                    # Reset indices and proceed with regular path
+                    self.train_indices = None
+                    self.test_indices = None
+                    return self.fit_predict(batch_size=batch_size, save_path=save_path)
+
+            else:
+                # Regular training path
+                X = self.data.drop(columns=[self.target_column])
+                y = self.data[self.target_column]
+
+                # Check if label encoder is already fitted
+                if not hasattr(self.label_encoder, 'classes_'):
+                    y_encoded = self.label_encoder.fit_transform(y)
+                else:
+                    y_encoded = self.label_encoder.transform(y)
+
+                # Preprocess features including categorical encoding
+                X_processed = self._preprocess_data(X, is_training=True)
+
+                # Convert to tensors and move to device
+                X_tensor = torch.FloatTensor(X_processed).to(self.device)
+                y_tensor = torch.LongTensor(y_encoded).to(self.device)
+
+                # Split data
+                # Get consistent train-test split
+                X_train, X_test, y_train, y_test = self._get_train_test_split(
+                    X_tensor, y_tensor)
+
+
+                # Convert split data back to tensors
+                X_train = torch.from_numpy(X_train).to(self.device, dtype=torch.float32)
+                X_test = torch.from_numpy(X_test).to(self.device, dtype=torch.float32)
+                y_train = torch.from_numpy(y_train).to(self.device, dtype=torch.long)
+                y_test = torch.from_numpy(y_test).to(self.device, dtype=torch.long)
 
             # Verify tensor sizes match before training
             if X_train.size(0) != y_train.size(0) or X_test.size(0) != y_test.size(0):
@@ -4682,9 +5001,15 @@ class DBNN(GPUDBNN):
 
             # Save predictions if path is provided
             if save_path:
-                # Get corresponding rows from original DataFrame for test set
-                X_test_df = self.data.drop(columns=[self.target_column]).iloc[self.test_indices]
-                y_test_series = self.data[self.target_column].iloc[self.test_indices]
+                if self.in_adaptive_fit:
+                    # Get corresponding rows from original DataFrame for test set
+                    X_test_df = self.data.drop(columns=[self.target_column]).iloc[self.test_indices]
+                    y_test_series = self.data[self.target_column].iloc[self.test_indices]
+                else:
+                    X_test_indices = range(len(X_test))
+                    X_test_df = X.iloc[X_test_indices]
+                    y_test_series = y.iloc[X_test_indices]
+
                 self.save_predictions(X_test_df, y_pred, save_path, y_test_series)
 
             # Calculate metrics
@@ -5349,6 +5674,32 @@ def process_datasets():
             model = DBNN(dataset_name=basename)
             save_label_encoder(model.label_encoder, basename)
 
+        except FileNotFoundError as e:
+            print(f"\nDataset file not found: {e}")
+            print("Searching UCI repository for the dataset...")
+            dataset_processor = DatasetProcessor()
+            datasets = dataset_processor.search_uci_repository(basename)
+            if datasets:
+                print(f"\nFound {len(datasets)} matching datasets in UCI repository:")
+                for i, dataset in enumerate(datasets):
+                    print(f"{i+1}. {dataset['name']} - {dataset['url']}")
+                choice = input("\nEnter the number of the dataset to download (or 'q' to quit): ")
+                if choice.lower() != 'q':
+                    try:
+                        selected_dataset = datasets[int(choice) - 1]
+                        print(f"\nDownloading dataset: {selected_dataset['name']}")
+                        dataset_path = dataset_processor.download_uci_dataset(selected_dataset['name'], selected_dataset['url'])
+                        print(f"Dataset downloaded to: {dataset_path}")
+                        # Process the downloaded dataset
+                        model = DBNN(dataset_name=selected_dataset['name'])
+                        results = model.process_dataset(dataset_path)
+                        print("\nProcessing complete!")
+                        print(f"Results saved to: {results['results_path']}")
+                    except Exception as e:
+                        print(f"Error downloading or processing dataset: {str(e)}")
+            else:
+                print(f"No matching datasets found in UCI repository for: {basename}")
+
         except Exception as e:
             print(f"\nError processing dataset {basename}:")
             print(f"Error details: {str(e)}")
@@ -5567,3 +5918,4 @@ if __name__ == "__main__":
     print("DBNN Dataset Processor")
     print("=" * 40)
     main()
+
