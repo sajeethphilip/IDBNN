@@ -4966,7 +4966,7 @@ class DBNN(GPUDBNN):
                 X_processed = self._preprocess_data(X, is_training=True)
 
                 # Convert to tensors and move to device
-                 X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+                X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
                 y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
                 # Split data
