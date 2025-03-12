@@ -3784,7 +3784,7 @@ class DBNN(GPUDBNN):
         This function ensures all batches are processed and predictions are concatenated correctly.
         """
         # Store current weights temporarily
-        print("\nMaking predictions...")
+        #print("\nMaking predictions...")
         temp_W = self.current_W
         n_batches = (len(X) + batch_size - 1) // batch_size
         pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
