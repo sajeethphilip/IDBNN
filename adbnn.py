@@ -2864,6 +2864,7 @@ class DBNN(GPUDBNN):
                 results = self.fit_predict(batch_size=batch_size, save_path=save_path)
 
                 # Check training accuracy
+                print(f"\n{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 print(f"Training accuracy: {train_accuracy:.4f}")
@@ -2905,6 +2906,7 @@ class DBNN(GPUDBNN):
                 # Evaluate test data
                 X_test = self.X_tensor[test_indices]
                 y_test = self.y_tensor[test_indices]
+                print(f"\n{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
                 test_predictions = self.predict(X_test, batch_size=batch_size)
 
                 # Only print test performance header if we didn't just print metrics in fit_predict
@@ -4099,7 +4101,7 @@ class DBNN(GPUDBNN):
                 self.current_W = train_weights
 
                 # Training metrics
-                print("Predctions on Training data", end="\r", flush=True)
+                print(f"\n{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
@@ -4733,6 +4735,7 @@ class DBNN(GPUDBNN):
             self._save_categorical_encoders()
 
             # Make predictions
+            print(f"\n{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
             y_pred = self.predict(X_test, batch_size=batch_size)
 
             # Verify prediction size matches test set
@@ -5079,6 +5082,7 @@ class DBNN(GPUDBNN):
                 X_tensor = self._preprocess_data(X, is_training=False)
 
                 # Make predictions
+                print(f"\n{Colors.BLUE}Predctions for saving data{Colors.ENDC}", end="\r", flush=True)
                 predictions = self.predict(X_tensor, batch_size=batch_size)
 
                 # Save predictions and metrics
