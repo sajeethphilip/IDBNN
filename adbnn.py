@@ -2532,7 +2532,6 @@ class DBNN(GPUDBNN):
         sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
         self.batch_size = self._calculate_optimal_batch_size(sample_size)
         batch_size=self.batch_size
-        print(f"\n{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
         print(f"\n{Colors.GREEN}Upadated batch size to  {batch_size} using dynamic batchsize updater{Colors.ENDC}", end="\r", flush=True)
 
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
