@@ -1011,13 +1011,14 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5):
+    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5,batch_size=128):
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
         self.device=Train_device
         # Initialize histogram_weights as empty dictionary first
         self.histogram_weights = {}
+        self.batch_size=batch_size
 
         # Create weights for each class and feature pair
         for class_id in range(n_classes):
@@ -1068,7 +1069,7 @@ class BinWeightUpdater:
             n_updates = len(class_indices)
 
             # Process in batches for memory efficiency
-            batch_size = 100  # Adjust based on available memory
+            batch_size = self.batch_size  # Adjust based on available memory
             for i in range(0, n_updates, batch_size):
                 end_idx = min(i + batch_size, n_updates)
 
@@ -1737,7 +1738,7 @@ class DBNNConfig:
         self.epochs = kwargs.get('epochs', 1000)
         self.test_fraction = kwargs.get('test_fraction', 0.2)
         self.enable_adaptive = kwargs.get('enable_adaptive', True)
-        self.batch_size = kwargs.get('batch_size', 32)
+        self.batch_size = kwargs.get('batch_size', 128)
 
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
@@ -1825,6 +1826,7 @@ class DBNN(GPUDBNN):
 
         # Initialize other attributes
         self.target_column = self.config['target_column']
+        self.batch_size = self.config.get('batch_size',128)
         self.invertible_model = None
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
@@ -1832,7 +1834,7 @@ class DBNN(GPUDBNN):
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
-        batch_size = 32  # Adjust based on available memory
+        batch_size = self.batch_size  # Adjust based on available memory
         n_samples = len(X)
         n_features = X.shape[1]
 
@@ -1935,7 +1937,7 @@ class DBNN(GPUDBNN):
             'learning_rate': self.data_config.get('training_params', {}).get('learning_rate', LearningRate),
             'model_type': self.data_config.get('modelType', 'Histogram'),
             'enable_adaptive': self.data_config.get('training_params', {}).get('enable_adaptive', EnableAdaptive),
-            'batch_size': self.data_config.get('training_params', {}).get('batch_size', 32),
+            'batch_size': self.data_config.get('training_params', {}).get('batch_size', 128),
             'training_data_dir': self.data_config.get('training_params', {}).get('training_save_path', 'training_data')
         }
         self.model_config = DBNNConfig(**config_params)
@@ -2010,7 +2012,7 @@ class DBNN(GPUDBNN):
         results_df = self.data.copy()
 
         # Compute probabilities in batches
-        batch_size = 32
+        batch_size = self.batch_size
         all_probabilities = []
 
         for i in range(0, len(X_tensor), batch_size):
@@ -2452,7 +2454,7 @@ class DBNN(GPUDBNN):
         cardinalities = torch.zeros(len(samples_data), device=self.device)
 
         # Process feature pairs in batches
-        batch_size = 100  # Adjust based on memory constraints
+        batch_size = self.batch_size  # Adjust based on memory constraints
         for i in range(0, len(samples_data), batch_size):
             batch_end = min(i + batch_size, len(samples_data))
             batch_data = samples_data[i:batch_end]
@@ -2528,7 +2530,7 @@ class DBNN(GPUDBNN):
 
         # Calculate optimal batch size based on sample size
         sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
-        batch_size = self._calculate_optimal_batch_size(sample_size)
+        self.batch_size = self._calculate_optimal_batch_size(sample_size)
         DEBUG.log(f"\nUsing dynamic batch size: {batch_size}")
 
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
@@ -3605,7 +3607,8 @@ class DBNN(GPUDBNN):
             self.weight_updater = BinWeightUpdater(
                 n_classes=n_classes,
                 feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim
+                n_bins_per_dim=self.n_bins_per_dim,
+                batch_size=self.batch_size
             )
         elif self.model_type == "Gaussian":
             # Use same weight structure but for Gaussian components
