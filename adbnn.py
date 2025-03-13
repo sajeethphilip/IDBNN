@@ -160,7 +160,7 @@ class DatasetProcessor:
             dataset_folder = os.path.join('data', base_name)
             os.makedirs(dataset_folder, exist_ok=True)
 
-            print(f"\nProcessing dataset:")
+            print(f"Processing dataset:")
             print(f"Base name: {base_name}")
             print(f"Dataset folder: {dataset_folder}")
 
@@ -1683,7 +1683,7 @@ class GPUDBNN:
                       f"error margin: {info['error_margin']:.3f})")
 
         # Print summary
-        print(f"\nSelection Summary:")
+        print(f"Selection Summary:")
         print(f"Total failing classes: {len(class_stats)}")
         print(f"Selected {len(selected_indices)} samples total")
         for cls in sorted(class_stats.keys()):
@@ -1703,7 +1703,7 @@ class GPUDBNN:
         raw_acc = np.mean(y_true == y_pred)
 
         # Print metrics with colors
-        print(f"\n{Colors.BOLD}{Colors.BLUE}{prefix}Detailed Metrics:{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.BLUE}{prefix}Detailed Metrics:{Colors.ENDC}")
 
         # Raw accuracy
         acc_color = Colors.GREEN if raw_acc >= 0.9 else Colors.YELLOW if raw_acc >= 0.7 else Colors.BLUE
@@ -1714,7 +1714,7 @@ class GPUDBNN:
         print(f"{Colors.BOLD}Balanced Accuracy:{Colors.ENDC} {bal_color}{balanced_acc:.4%}{Colors.ENDC}")
 
         # Per-class metrics
-        print(f"\n{Colors.BOLD}Per-class Performance:{Colors.ENDC}")
+        print(f"{Colors.BOLD}Per-class Performance:{Colors.ENDC}")
         cm = confusion_matrix(y_true, y_pred)
         class_labels = np.unique(y_true)
 
@@ -2403,7 +2403,7 @@ class DBNN(GPUDBNN):
         threshold = np.percentile(cardinalities, percentile)
 
         # Print detailed analysis
-        print(f"\nCardinality Analysis:")
+        print(f"Cardinality Analysis:")
         print(f"- Using {percentile}th percentile threshold")
         print(f"- Distribution statistics:")
         print(f"  - Min: {min_card:.2f}")
@@ -2655,7 +2655,7 @@ class DBNN(GPUDBNN):
                 # Clear cache after processing each batch
                 torch.cuda.empty_cache()
 
-        print(f"\nTotal samples selected: {len(final_selected_indices)}")
+        print(f"Total samples selected: {len(final_selected_indices)}")
         return final_selected_indices
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
@@ -2849,7 +2849,7 @@ class DBNN(GPUDBNN):
 
             # Continue with training loop...
             for round_num in range(max_rounds):
-                print(f"\nRound {round_num + 1}/{max_rounds}")
+                print(f"Round {round_num + 1}/{max_rounds}")
                 print(f"Training set size: {len(train_indices)}")
                 print(f"Test set size: {len(test_indices)}")
 
@@ -2867,7 +2867,7 @@ class DBNN(GPUDBNN):
                 results = self.fit_predict(batch_size=batch_size, save_path=save_path)
 
                 # Check training accuracy
-                print(f"\n{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
+                print(f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 print(f"Training accuracy: {train_accuracy:.4f}")
@@ -2909,12 +2909,12 @@ class DBNN(GPUDBNN):
                 # Evaluate test data
                 X_test = self.X_tensor[test_indices]
                 y_test = self.y_tensor[test_indices]
-                print(f"\n{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
+                print(f"{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
                 test_predictions = self.predict(X_test, batch_size=batch_size)
 
                 # Only print test performance header if we didn't just print metrics in fit_predict
                 if not hasattr(self, '_last_metrics_printed') or not self._last_metrics_printed:
-                    print(f"\n{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
+                    print(f"{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
                     y_test_cpu = y_test.cpu().numpy()
                     test_predictions_cpu = test_predictions.cpu().numpy()
                     # Generate classification report and confusion matrix
@@ -3078,7 +3078,7 @@ class DBNN(GPUDBNN):
 
     def _preprocess_data(self, X: pd.DataFrame, is_training: bool = True) -> torch.Tensor:
         """Preprocess data with improved error handling and column consistency, using batch processing."""
-        print(f"\n[DEBUG] ====== Starting preprocessing ======")
+        print(f"[DEBUG] ====== Starting preprocessing ======")
         DEBUG.log(f" Input shape: {X.shape}")
         DEBUG.log(f" Input columns: {X.columns.tolist()}")
         DEBUG.log(f" Input dtypes:\n{X.dtypes}")
@@ -3951,7 +3951,7 @@ class DBNN(GPUDBNN):
                 class_accuracy[i] = 0.0
 
         # Print header
-        print(f"\n{Colors.BOLD}Confusion Matrix and Class-wise Accuracy:{Colors.ENDC}")
+        print(f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy:{Colors.ENDC}")
 
         # Print class labels header
         print(f"{'Actual/Predicted':<15}", end='')
@@ -4105,7 +4105,7 @@ class DBNN(GPUDBNN):
                 self.current_W = train_weights
 
                 # Training metrics
-                print(f"\n{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
+                print(f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_predictions = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_predictions == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
@@ -4133,7 +4133,7 @@ class DBNN(GPUDBNN):
                 'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
             })
 
-            print(f"\nEpoch {epoch + 1}/{self.max_epochs}:", end="\r", flush=True)
+            print(f"Epoch {epoch + 1}/{self.max_epochs}:", end="\r", flush=True)
             print(f"Training time: {Colors.highlight_time(training_time)} seconds", end="\r", flush=True)
             print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})", end="\r", flush=True)
             print(f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})", end="\r", flush=True)
@@ -4160,7 +4160,7 @@ class DBNN(GPUDBNN):
 
             # Early stopping check
             if patience_counter >= patience or  train_accuracy ==1.00:
-                print(f"\n Early stopping.")
+                print(f"{Colors.YELLOW} Early stopping.{Colors.ENDC}")
                 break
 
             # Update weights if there were failures
@@ -4372,7 +4372,7 @@ class DBNN(GPUDBNN):
         n_correct = correct_mask.sum()
 
         # Print basic metrics with colors
-        print(f"\n{Colors.BOLD}{Colors.BLUE}Detailed Classification Analysis:{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.BLUE}Detailed Classification Analysis:{Colors.ENDC}")
         print(f"{Colors.BOLD}Total samples:{Colors.ENDC} {Colors.YELLOW}{n_total:,}{Colors.ENDC}")
 
         # Color code for correctly classified
@@ -4433,7 +4433,7 @@ class DBNN(GPUDBNN):
                         for col, val in X.iloc[idx].items():
                             f.write(f"{col}: {val}\n")
 
-        print(f"\nDetailed analysis saved to {analysis_file}")
+        print(f"Detailed analysis saved to {analysis_file}")
 
 #------------------------------------------------------------End of PP code ---------------------------------------------------
     def _compute_pairwise_likelihood(self, dataset, labels, feature_dims):
@@ -4739,7 +4739,7 @@ class DBNN(GPUDBNN):
             self._save_categorical_encoders()
 
             # Make predictions
-            print(f"\n{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
+            print(f"{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
             y_pred = self.predict(X_test, batch_size=batch_size)
 
             # Verify prediction size matches test set
@@ -4775,7 +4775,7 @@ class DBNN(GPUDBNN):
                 'test_accuracy': (y_pred_cpu == y_test_cpu).mean()
             }
 
-            print(f"\nTest Accuracy: {results['test_accuracy']:.4f}")
+            print(f"Test Accuracy: {results['test_accuracy']:.4f}")
             self._save_model_components()
             return results
 
@@ -4977,7 +4977,7 @@ class DBNN(GPUDBNN):
             self.verify_classifications(X, true_labels, predictions)
 
         result_df.to_csv(output_file, index=False)
-        print(f"\nSaved predictions to {output_file}", end="\r", flush=True)
+        print(f"Saved predictions to {output_file}", end="\r", flush=True)
 
         return result_df
 #--------------------------------------------------------------------------------------------------------------
@@ -5086,7 +5086,7 @@ class DBNN(GPUDBNN):
                 X_tensor = self._preprocess_data(X, is_training=False)
 
                 # Make predictions
-                print(f"\n{Colors.BLUE}Predctions for saving data{Colors.ENDC}", end="\r", flush=True)
+                print(f"{Colors.BLUE}Predctions for saving data{Colors.ENDC}", end="\r", flush=True)
                 predictions = self.predict(X_tensor, batch_size=batch_size)
 
                 # Save predictions and metrics
@@ -5111,7 +5111,7 @@ class DBNN(GPUDBNN):
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 32):
     """Run benchmark using GPU-optimized implementation"""
-    print(f"\nRunning GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...", end="\r", flush=True)
+    print(f"Running GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...", end="\r", flush=True)
 
     if Train:
         # First run adaptive training if enabled
@@ -5131,7 +5131,7 @@ def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 32):
             dataset_name
         )
 
-        print(f"\n{Colors.BOLD}Classification Report for {Colors.highlight_dataset(dataset_name)}:{Colors.ENDC}")
+        print(f"{Colors.BOLD}Classification Report for {Colors.highlight_dataset(dataset_name)}:{Colors.ENDC}")
         print(results['classification_report'])
 
     return model, results
@@ -5278,7 +5278,7 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     """
     # Ensure data directory exists
     if not os.path.exists(data_dir):
-        print(f"\nNo '{data_dir}' directory found. Creating one...", end="\r", flush=True)
+        print(f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
         os.makedirs(data_dir)
         return []
 
@@ -5347,11 +5347,11 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
 
                 dataset_pairs.append((basename, conf_path, csv_path))
                 processed_datasets.add(basename)
-                print(f"\nFound dataset pair:", end="\r", flush=True)
+                print(f"Found dataset pair:", end="\r", flush=True)
                 print(f"  Config: {conf_path}", end="\r", flush=True)
                 print(f"  Data  : {csv_path}", end="\r", flush=True)
             else:
-                print(f"\nWarning: Config file {conf_file} exists but no matching CSV found")
+                print(f"Warning: Config file {conf_file} exists but no matching CSV found")
                 print(f"Looked in:")
                 for path in csv_paths:
                     print(f"  - {path}")
@@ -5372,11 +5372,11 @@ def process_datasets():
         print("\nNo matching .conf and .csv file pairs found in the current directory.")
         return
 
-    print(f"\nFound {len(dataset_pairs)} dataset pair(s)")
+    print(f"Found {len(dataset_pairs)} dataset pair(s)")
 
     # Process each dataset
     for basename, conf_path, csv_path in dataset_pairs:
-        print(f"\n{'='*60}")
+        print(f"{'='*60}")
         print(f"Dataset: {basename}")
         print(f"Config file: {conf_path}")
         print(f"Data file: {csv_path}")
@@ -5397,7 +5397,7 @@ def process_datasets():
             continue
 
         # Process dataset
-        print(f"\nProcessing dataset: {basename}")
+        print(f"Processing dataset: {basename}")
         try:
             # Create DBNN instance with specific dataset name
             model = DBNN(dataset_name=basename)
@@ -5426,19 +5426,19 @@ def process_datasets():
             save_label_encoder(model.label_encoder, basename)
 
         except FileNotFoundError as e:
-            print(f"\nDataset file not found: {e}")
+            print(f"Dataset file not found: {e}")
             print("Searching UCI repository for the dataset...")
             dataset_processor = DatasetProcessor()
             datasets = dataset_processor.search_uci_repository(basename)
             if datasets:
-                print(f"\nFound {len(datasets)} matching datasets in UCI repository:")
+                print(f"Found {len(datasets)} matching datasets in UCI repository:")
                 for i, dataset in enumerate(datasets):
                     print(f"{i+1}. {dataset['name']} - {dataset['url']}")
                 choice = input("\nEnter the number of the dataset to download (or 'q' to quit): ")
                 if choice.lower() != 'q':
                     try:
                         selected_dataset = datasets[int(choice) - 1]
-                        print(f"\nDownloading dataset: {selected_dataset['name']}")
+                        print(f"Downloading dataset: {selected_dataset['name']}")
                         dataset_path = dataset_processor.download_uci_dataset(selected_dataset['name'], selected_dataset['url'])
                         print(f"Dataset downloaded to: {dataset_path}")
                         # Process the downloaded dataset
@@ -5452,7 +5452,7 @@ def process_datasets():
                 print(f"No matching datasets found in UCI repository for: {basename}")
 
         except Exception as e:
-            print(f"\nError processing dataset {basename}:")
+            print(f"Error processing dataset {basename}:")
             print(f"Error details: {str(e)}")
             traceback.print_exc()
 
