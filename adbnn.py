@@ -2531,6 +2531,7 @@ class DBNN(GPUDBNN):
         # Calculate optimal batch size based on sample size
         sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
         self.batch_size = self._calculate_optimal_batch_size(sample_size)
+        batch_size=self.batch_size
         DEBUG.log(f"\nUsing dynamic batch size: {batch_size}")
 
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
