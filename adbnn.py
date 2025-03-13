@@ -2655,7 +2655,7 @@ class DBNN(GPUDBNN):
                 # Clear cache after processing each batch
                 torch.cuda.empty_cache()
 
-        print(f"Total samples selected: {len(final_selected_indices)}")
+        print(f"Total samples selected: {len(final_selected_indices)}                                                           ")
         return final_selected_indices
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
