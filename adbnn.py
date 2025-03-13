@@ -2936,7 +2936,7 @@ class DBNN(GPUDBNN):
                     )
 
                     if not new_train_indices:
-                        print("Achieved 100% accuracy on all data. Training complete.")
+                        print("Achieved 100% accuracy on all data. Training complete.                                           ")
                         self.in_adaptive_fit = False
                         return {'train_indices': [], 'test_indices': []}
 
