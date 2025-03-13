@@ -98,7 +98,7 @@ class DatasetProcessor:
         self.colors = Colors()
     def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
         """Handle dataset with single CSV file and debug config processing"""
-        #print("\nDEBUGEntering _handle_single_csv")
+        #print("DEBUGEntering _handle_single_csv")
         # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
 
         # Handle CSV paths
@@ -892,7 +892,7 @@ class DatasetConfig:
 
         # If requested, ask about creating configs for remaining CSVs
         if create_configs and csv_without_conf:
-            print("\nFound CSV files without configuration:")
+            print("Found CSV files without configuration:")
             for csv_name in sorted(csv_without_conf):
                 response = input(f"Create configuration for {csv_name}.csv? (y/n): ")
                 if response.lower() == 'y':
@@ -2387,7 +2387,7 @@ class DBNN(GPUDBNN):
 
         # If no cardinalities provided, create a synthetic distribution
         if not cardinalities:
-            print("\nWarning: No cardinality data available. Using synthetic distribution based on percentile.")
+            print("Warning: No cardinality data available. Using synthetic distribution based on percentile.")
             # Create a synthetic distribution around the percentile threshold
             cardinalities = np.array([1.0, 2.0, 5.0, 10.0, 20.0])  # Synthetic values
         else:
@@ -3306,7 +3306,7 @@ class DBNN(GPUDBNN):
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """Optimized non-parametric likelihood computation with precomputed feature pairs and bin edges"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
-        print("\nComputing pairwise likelihoods...")
+        print("Computing pairwise likelihoods...")
 
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
@@ -3473,7 +3473,7 @@ class DBNN(GPUDBNN):
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """Optimized Gaussian likelihood computation with precomputed feature pairs and Gaussian parameters"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel_std")
-        print("\nComputing Gaussian likelihoods...")
+        print("Computing Gaussian likelihoods...")
 
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
@@ -3788,7 +3788,7 @@ class DBNN(GPUDBNN):
         This function ensures all batches are processed and predictions are concatenated correctly.
         """
         # Store current weights temporarily
-        #print("\nMaking predictions...")
+        #print("Making predictions...")
         temp_W = self.current_W
         n_batches = (len(X) + batch_size - 1) // batch_size
         pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
@@ -4020,7 +4020,7 @@ class DBNN(GPUDBNN):
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
         """Training loop with proper weight handling and enhanced progress tracking"""
-        print("\nStarting training..." , end="\r", flush=True)
+        print("Starting training..." , end="\r", flush=True)
 
 
         # Initialize progress bar for epochs
@@ -5357,7 +5357,7 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                     print(f"  - {path}")
 
     if not dataset_pairs:
-        print("\nNo matching .conf and .csv file pairs found.")
+        print("No matching .conf and .csv file pairs found.")
         print("Each dataset should have both a .conf configuration file and a matching .csv data file.")
         print("Example: 'dataset1.conf' and 'dataset1.csv'")
 
@@ -5369,7 +5369,7 @@ def process_datasets():
     dataset_pairs = find_dataset_pairs()
 
     if not dataset_pairs:
-        print("\nNo matching .conf and .csv file pairs found in the current directory.")
+        print("No matching .conf and .csv file pairs found in the current directory.")
         return
 
     print(f"Found {len(dataset_pairs)} dataset pair(s)")
@@ -5415,7 +5415,7 @@ def process_datasets():
             end_time = datetime.now()
 
             # Print results
-            print("\nProcessing complete!")
+            print("Processing complete!")
             print(f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
             print(f"Results saved to: {results['results_path']}")
             print(f"Training log saved to: {results['log_path']}")
@@ -5444,7 +5444,7 @@ def process_datasets():
                         # Process the downloaded dataset
                         model = DBNN(dataset_name=selected_dataset['name'])
                         results = model.process_dataset(dataset_path)
-                        print("\nProcessing complete!")
+                        print("Processing complete!")
                         print(f"Results saved to: {results['results_path']}")
                     except Exception as e:
                         print(f"Error downloading or processing dataset: {str(e)}")
@@ -5456,7 +5456,7 @@ def process_datasets():
             print(f"Error details: {str(e)}")
             traceback.print_exc()
 
-    print("\nAll datasets processed")
+    print("All datasets processed")
 
 
 def validate_config(conf_path: str) -> bool:
@@ -5511,7 +5511,7 @@ def print_dataset_info(conf_path: str, csv_path: str):
         conf_size = os.path.getsize(conf_path)
         csv_size = os.path.getsize(csv_path)
 
-        print("\nDataset Information:")
+        print("Dataset Information:")
         print(f"Dataset name: {os.path.splitext(os.path.basename(conf_path))[0]}")
         print(f"Configuration file: {conf_path} ({conf_size/1024:.1f} KB)")
         print(f"Data file: {csv_path} ({csv_size/1024:.1f} KB)")
@@ -5532,7 +5532,7 @@ def print_dataset_info(conf_path: str, csv_path: str):
             print(f"Excluded features: {excluded}")
 
             # Show first few column names
-            print("\nFeatures:")
+            print("Features:")
             for col in column_names[:5]:
                 excluded = "  (excluded)" if str(col).startswith('#') else ""
                 print(f"  {col}{excluded}")
@@ -5544,7 +5544,7 @@ def print_dataset_info(conf_path: str, csv_path: str):
                 df = pd.read_csv(csv_path, nrows=0)
                 columns = df.columns.tolist()
                 print(f"Number of columns (from CSV): {len(columns)}")
-                print("\nFeatures (from CSV):")
+                print("Features (from CSV):")
                 for col in columns[:5]:
                     print(f"  {col}")
                 if len(columns) > 5:
@@ -5598,7 +5598,7 @@ def main():
         end_time = datetime.now()
 
         # Print results
-        print("\nProcessing complete!")
+        print("Processing complete!")
         print(f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
         print(f"Results saved to: {results['results_path']}")
         print(f"Training log saved to: {results['log_path']}")
@@ -5619,7 +5619,7 @@ def main():
         with open(conf_path, 'r') as f:
             config_dict = json.load(f)
 
-        print("\nDEBUG: Inverse DBNN Settings:")
+        print("DEBUG: Inverse DBNN Settings:")
         for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
             value = config_dict.get('training_params', {}).get(param, 0.1)
             print(f"- {param}: {value}")
@@ -5664,7 +5664,7 @@ def main():
             return
 
     else:
-        print("\nNo datasets found in data folder")
+        print("No datasets found in data folder")
 if __name__ == "__main__":
     print("DBNN Dataset Processor")
     print("=" * 40)
