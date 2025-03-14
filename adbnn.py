@@ -1815,6 +1815,10 @@ class DBNN(GPUDBNN):
         self.training_log = pd.DataFrame()
         self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
 
+        # Add new attributes to track the best round
+        self.best_round = None  # Track the best round number
+        self.best_round_initial_conditions = None  # Save initial conditions of the best round
+
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
             raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
@@ -2950,6 +2954,18 @@ class DBNN(GPUDBNN):
                         print("No suitable new samples found. Training complete.")
                         break
 
+
+                if new_train_indices:
+                    # Reset to the best round's initial conditions
+                    if self.best_round_initial_conditions is not None:
+                        print(f"Resetting to initial conditions of best round {self.best_round}")
+                        self.current_W = self.best_round_initial_conditions['weights'].clone()
+                        self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
+                        self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
+                        self.bin_edges = self.best_round_initial_conditions['bin_edges']
+                        self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
+
+
                 # Update training and test sets with new samples
                 train_indices.extend(new_train_indices)
                 test_indices = list(set(test_indices) - set(new_train_indices))
@@ -4021,6 +4037,15 @@ class DBNN(GPUDBNN):
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
         """Training loop with proper weight handling and enhanced progress tracking"""
         print("Starting training..." , end="\r", flush=True)
+        # Store initial conditions at the start of training
+        if self.best_round_initial_conditions is None:
+            self.best_round_initial_conditions = {
+                'weights': self.current_W.clone(),
+                'likelihood_params': self.likelihood_params,
+                'feature_pairs': self.feature_pairs,
+                'bin_edges': self.bin_edges,
+                'gaussian_params': self.gaussian_params
+            }
 
 
         # Initialize progress bar for epochs
@@ -4142,6 +4167,17 @@ class DBNN(GPUDBNN):
             prev_train_error = train_error_rate
             prev_train_accuracy = train_accuracy
 
+            # Check if this is the best round so far
+            if train_accuracy > best_train_accuracy:
+                best_train_accuracy = train_accuracy
+                self.best_round = epoch
+                self.best_round_initial_conditions = {
+                    'weights': self.current_W.clone(),
+                    'likelihood_params': self.likelihood_params,
+                    'feature_pairs': self.feature_pairs,
+                    'bin_edges': self.bin_edges,
+                    'gaussian_params': self.gaussian_params
+                }
 
             # Update best model if improved
             if train_error_rate <= self.best_error:
@@ -4673,6 +4709,15 @@ class DBNN(GPUDBNN):
         try:
             # Set a flag to indicate we're printing metrics
             self._last_metrics_printed = True
+            # If this is a fresh training round, reset to the best round's initial conditions
+            if self.best_round_initial_conditions is not None:
+                print("Starting fresh training with best round's initial conditions")
+                self.current_W = self.best_round_initial_conditions['weights'].clone()
+                self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
+                self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
+                self.bin_edges = self.best_round_initial_conditions['bin_edges']
+                self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
+
 
             # Handle data preparation based on whether we're in adaptive training or final evaluation
             if self.in_adaptive_fit:
