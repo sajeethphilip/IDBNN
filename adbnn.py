@@ -3943,15 +3943,13 @@ class DBNN(GPUDBNN):
                 pass
 
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None):
-        """Print a color-coded confusion matrix with class-wise accuracy."""
-
-        # Convert all labels to strings
-        y_true = np.array([str(label) for label in y_true])
-        y_pred = np.array([str(label) for label in y_pred])
+        # Decode numeric labels back to original alphanumeric labels
+        y_true_labels = self.label_encoder.inverse_transform(y_true)
+        y_pred_labels = self.label_encoder.inverse_transform(y_pred)
 
         # Get unique classes from both true and predicted labels
-        unique_true = np.unique(y_true)
-        unique_pred = np.unique(y_pred)
+        unique_true = np.unique(y_true_labels)
+        unique_pred = np.unique(y_pred_labels)
 
         # Use provided class labels or get from label encoder
         if class_labels is None:
@@ -3968,22 +3966,12 @@ class DBNN(GPUDBNN):
         cm = np.zeros((n_classes, n_classes), dtype=int)
 
         # Fill confusion matrix
-        for t, p in zip(y_true, y_pred):
+        for t, p in zip(y_true_labels, y_pred_labels):
             if t in class_to_idx and p in class_to_idx:
                 cm[class_to_idx[t], class_to_idx[p]] += 1
 
-        # Calculate class-wise accuracy
-        class_accuracy = {}
-        for i in range(n_classes):
-            if cm[i].sum() > 0:  # Avoid division by zero
-                class_accuracy[i] = cm[i, i] / cm[i].sum()
-            else:
-                class_accuracy[i] = 0.0
-
-        # Print header
+        # Print confusion matrix with colors
         print(f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy:{Colors.ENDC}")
-
-        # Print class labels header
         print(f"{'Actual/Predicted':<15}", end='')
         for label in all_classes:
             print(f"{str(label):<8}", end='')
@@ -4006,7 +3994,7 @@ class DBNN(GPUDBNN):
                 print(f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
 
             # Print class accuracy with color based on performance
-            acc = class_accuracy[i]
+            acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
             if acc >= 0.9:
                 color = Colors.GREEN
             elif acc >= 0.7:
@@ -4023,30 +4011,6 @@ class DBNN(GPUDBNN):
             print("-" * (15 + 8 * n_classes + 10))
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
             print(f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
-
-        # Save confusion matrix to file
-        try:
-            plt.figure(figsize=(10, 8))
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt='d',
-                cmap='Blues',
-                xticklabels=all_classes,
-                yticklabels=all_classes
-            )
-            plt.title('Confusion Matrix')
-            plt.ylabel('True Label')
-            plt.xlabel('Predicted Label')
-
-            # Save with dataset name
-            if hasattr(self, 'dataset_name'):
-                plt.savefig(f'confusion_matrix_{self.dataset_name}.png')
-            else:
-                plt.savefig('confusion_matrix.png')
-            plt.close()
-        except Exception as e:
-            print(f"Warning: Could not save confusion matrix plot: {str(e)}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
         """Training loop with proper weight handling and enhanced progress tracking"""
