@@ -1410,7 +1410,7 @@ class InvertibleDBNN(nn.Module):
 
     def load_model(self, path: str):
         """Load the inverse model from a file."""
-        self.load_state_dict(torch.load(path, map_location=self.device, weights_only=True)))
+        self.load_state_dict(torch.load(path, map_location=self.device, weights_only=True))
         print(f"Model loaded from {path}")
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
