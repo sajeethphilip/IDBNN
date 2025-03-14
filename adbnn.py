@@ -143,120 +143,82 @@ class DatasetProcessor:
 
         return None
 
-    def process_dataset(self, config_path: str) -> Dict:
+    def process_dataset(self, file_path: str) -> None:
+        """Process dataset with proper path handling.
+
+        Args:
+            file_path: Path to the dataset file
         """
-        Process dataset according to configuration file specifications.
-        """
-        # Load and validate configuration
         try:
-            with open(config_path, 'r') as f:
-                config_text = f.read()
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-            # Remove comments starting with _comment
-            config_lines = [line for line in config_text.split('\n') if not '"_comment"' in line]
-            clean_config = '\n'.join(config_lines)
+            # Create main data directory if it doesn't exist
+            if not os.path.exists('data'):
+                os.makedirs('data')
 
-            self.data_config = json.loads(clean_config)
-        except Exception as e:
-            raise ValueError(f"Error reading configuration file: {str(e)}")
+            # Setup dataset folder structure
+            dataset_folder = os.path.join('data', base_name)
+            os.makedirs(dataset_folder, exist_ok=True)
 
-        # Ensure file_path is set
-        if not self.data_config.get('file_path'):
-            dataset_name = os.path.splitext(os.path.basename(config_path))[0]
-            default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-            if os.path.exists(default_path):
-                self.data_config['file_path'] = default_path
-                print(f"Using default data file: {default_path}")
+            print(f"Processing dataset:")
+            print(f"Base name: {base_name}")
+            print(f"Dataset folder: {dataset_folder}")
+
+            # Define target CSV path
+            target_csv = os.path.join(dataset_folder, f"{base_name}.csv")
+
+            # If file exists at original path and isn't in dataset folder, copy it
+            if os.path.exists(file_path) and os.path.isfile(file_path) and file_path != target_csv:
+                try:
+                    import shutil
+                    shutil.copy2(file_path, target_csv)
+                    print(f"Copied dataset to: {target_csv}")
+                except Exception as e:
+                    print(f"Warning: Could not copy dataset: {str(e)}")
+
+            # If file doesn't exist in target location, try downloading from UCI
+            if not os.path.exists(target_csv):
+                print(f"File not found locally: {target_csv}")
+                print("Attempting to download from UCI repository...")
+                downloaded_path = self._download_from_uci(base_name.upper())
+                if downloaded_path:
+                    print(f"Successfully downloaded dataset to {downloaded_path}")
+                    # Ensure downloaded file is in the correct location
+                    if downloaded_path != target_csv:
+                        try:
+                            import shutil
+                            shutil.move(downloaded_path, target_csv)
+                        except Exception as e:
+                            print(f"Warning: Could not move downloaded file: {str(e)}")
+                else:
+                    print(f"Could not find or download dataset: {base_name}")
+                    return None
+
+            # Verify file exists before proceeding
+            if not os.path.exists(target_csv):
+                raise FileNotFoundError(f"Dataset file not found at {target_csv}")
+
+            # Process based on dataset structure
+            config = self._create_dataset_configs(dataset_folder, base_name)
+
+            if self._has_test_train_split(dataset_folder, base_name):
+                print("Found train/test split structure")
+                return self._handle_split_dataset(dataset_folder, base_name)
+            elif os.path.exists(target_csv):
+                print("Found single CSV file structure")
+                return self._handle_single_csv(dataset_folder, base_name, config)
+            elif self._is_compressed(file_path):
+                print("Found compressed file, extracting...")
+                extracted_path = self._decompress(file_path, dataset_folder)
+                return self.process_dataset(extracted_path)
             else:
-                raise ValueError(f"No data file found for {dataset_name}")
+                print(f"Could not determine dataset structure for {dataset_folder}")
+                return None
 
-        # Convert dictionary config to DBNNConfig object
-        config_params = {
-            'epochs': self.data_config.get('training_params', {}).get('epochs', Epochs),
-            'learning_rate': self.data_config.get('training_params', {}).get('learning_rate', LearningRate),
-            'model_type': self.data_config.get('modelType', 'Histogram'),
-            'enable_adaptive': self.data_config.get('training_params', {}).get('enable_adaptive', EnableAdaptive),
-            'batch_size': self.data_config.get('training_params', {}).get('batch_size', 128),
-            'training_data_dir': self.data_config.get('training_params', {}).get('training_save_path', 'training_data')
-        }
-        self.model_config = DBNNConfig(**config_params)
-
-        # Create output directory structure
-        dataset_name = os.path.splitext(os.path.basename(self.data_config['file_path']))[0]
-        output_dir = os.path.join(self.model_config.training_data_dir, dataset_name, 'Predictions')
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Update dataset name
-        self.dataset_name = dataset_name
-
-        # Load data using existing GPUDBNN method
-        self.data = self._load_dataset()
-
-        # Add row tracking
-        self.data['original_index'] = range(len(self.data))
-
-        # Extract features and target
-        if 'target_column' not in self.data_config:
-            self.data_config['target_column'] = 'target'  # Set default target column
-            print(f"Using default target column: 'target'")
-
-        X = self.data.drop(columns=[self.data_config['target_column']])
-        y = self.data[self.data_config['target_column']]
-
-        # Initialize training log
-        log_file = os.path.join(output_dir, f'{dataset_name}_log.csv')
-        self.training_log = pd.DataFrame(columns=[
-            'timestamp', 'round', 'train_size', 'test_size',
-            'train_loss', 'test_loss', 'train_accuracy', 'test_accuracy',
-            'training_time'
-        ])
-
-        # Initialize results DataFrame with original data
-        results_df = self.data.copy()
-
-        # Train model using existing GPUDBNN methods
-        if self.model_config.enable_adaptive:
-            results = self.adaptive_fit_predict(max_rounds=self.model_config.epochs)
-        else:
-            results = self.fit_predict()
-
-        # Preprocess features and convert to tensors
-        X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
-        y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
-
-        # Generate predictions and true labels
-        predictions = self.predict(X_tensor, batch_size=self.batch_size)
-        true_labels = y_tensor.cpu().numpy()
-
-        # Generate detailed predictions for this round
-        round_num = 0  # Assuming this is round 0
-        predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels, round_num, prefix="train")
-
-        # Append predictions to results DataFrame
-        results_df = pd.concat([results_df, predictions_df[[f'train_round_{round_num}', f'train_round_{round_num}_prob']]], axis=1)
-
-        # Save results
-        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-        results_df.to_csv(results_path, index=False)
-
-        # Save training log
-        self.training_log.to_csv(log_file, index=False)
-
-        # Count number of features actually used (excluding high cardinality and excluded features)
-        n_features = len(X.columns)
-        n_excluded = len(getattr(self, 'high_cardinality_columns', []))
-
-        return {
-            'results_path': results_path,
-            'log_path': log_file,
-            'n_samples': len(self.data),
-            'n_features': n_features,
-            'n_excluded': n_excluded,
-            'training_results': results
-        }
-
-
-
+        except Exception as e:
+            print(f"Error processing dataset: {str(e)}")
+            traceback.print_exc()
+            return None
 
     def _create_dataset_configs(self, folder_path: str, dataset_name: str) -> Dict:
        """Create or load both dataset and adaptive configs"""
@@ -2053,21 +2015,26 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels, round_num: int, prefix: str = "") -> pd.DataFrame:
-        """Generate detailed predictions with confidence metrics and metadata for a specific round."""
+    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
+        """Generate detailed predictions with confidence metrics and metadata."""
         # Ensure predictions and true_labels are on the CPU
-        predictions = predictions.cpu() if torch.is_tensor(predictions) else torch.tensor(predictions)
-        true_labels = true_labels.cpu() if torch.is_tensor(true_labels) else torch.tensor(true_labels)
+        predictions = predictions.cpu()
+        true_labels = true_labels.cpu()
 
         # Convert predictions to original class labels
         pred_labels = self.label_encoder.inverse_transform(predictions.numpy())
 
-        # Create a copy of the original dataset to preserve all columns
-        results_df = self.data.copy()
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'true_class': self.label_encoder.inverse_transform(true_labels.numpy()),
+            'predicted_class': pred_labels
+        })
 
-        # Add prediction columns for this round
-        results_df[f'{prefix}_round_{round_num}'] = pred_labels
-        results_df[f'{prefix}_round_{round_num}_prob'] = np.nan  # Initialize probability column
+        # Add metadata
+        results_df['dataset'] = prefix
+        results_df['rejected_columns'] = str(self.high_cardinality_columns)
+        results_df['feature_columns'] = str(self.feature_columns)
+        results_df['target_column'] = self.target_column
 
         # Compute probabilities in batches
         batch_size = self.batch_size
@@ -2097,8 +2064,45 @@ class DBNN(GPUDBNN):
             print("No probabilities were computed successfully")
             return None
 
-        # Add probabilities to the results DataFrame
-        results_df.loc[X.index, f'{prefix}_round_{round_num}_prob'] = probabilities.max(axis=1)
+        # Get actual classes used in training
+        unique_classes = np.unique(self.label_encoder.transform(self.data[self.target_column]))
+        n_classes = len(unique_classes)
+
+        # Verify probability array shape
+        if probabilities.shape[1] != n_classes:
+            print(f"Warning: Probability array shape ({probabilities.shape}) doesn't match number of classes ({n_classes})")
+            # Adjust probabilities array if necessary
+            if probabilities.shape[1] > n_classes:
+                probabilities = probabilities[:, :n_classes]
+            else:
+                # Pad with zeros if needed
+                pad_width = ((0, 0), (0, n_classes - probabilities.shape[1]))
+                probabilities = np.pad(probabilities, pad_width, mode='constant')
+
+        # Add probability columns for actual classes used in training
+        for i, class_idx in enumerate(unique_classes):
+            class_name = self.label_encoder.inverse_transform([class_idx])[0]
+            results_df[f'prob_{class_name}'] = probabilities[:, i]
+
+        # Add confidence metrics
+        results_df['max_probability'] = probabilities.max(axis=1)
+
+        # Calculate confidence threshold based on number of classes
+        confidence_threshold = 1.5 / n_classes
+
+        # Get true class probabilities
+        true_indices = self.label_encoder.transform(results_df['true_class'])
+        true_probs = probabilities[np.arange(len(true_indices)), true_indices]
+
+        # Add confidence metrics
+        correct_prediction = (results_df['predicted_class'] == results_df['true_class'])
+        prob_diff = results_df['max_probability'] - true_probs
+
+        results_df['confidence_verdict'] = np.where(
+            (prob_diff < confidence_threshold) & correct_prediction,
+            'High Confidence',
+            'Low Confidence'
+        )
 
         return results_df
 
