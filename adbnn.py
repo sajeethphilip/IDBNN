@@ -211,10 +211,8 @@ class DatasetProcessor:
             'training_time'
         ])
 
-        # Initialize prediction DataFrames for train, test, and combined
-        train_predictions_df = self.data.copy()
-        test_predictions_df = self.data.copy()
-        combined_predictions_df = self.data.copy()
+        # Initialize results DataFrame with original data
+        results_df = self.data.copy()
 
         # Train model using existing GPUDBNN methods
         if self.model_config.enable_adaptive:
@@ -230,21 +228,16 @@ class DatasetProcessor:
         predictions = self.predict(X_tensor, batch_size=self.batch_size)
         true_labels = y_tensor.cpu().numpy()
 
-        # Generate detailed predictions for each round
-        for round_num in range(self.model_config.epochs):
-            # Generate predictions for this round
-            train_predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels, round_num, prefix="train")
-            test_predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels, round_num, prefix="test")
-            combined_predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels, round_num, prefix="combined")
+        # Generate detailed predictions for this round
+        round_num = 0  # Assuming this is round 0
+        predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels, round_num, prefix="train")
+
+        # Append predictions to results DataFrame
+        results_df = pd.concat([results_df, predictions_df[[f'train_round_{round_num}', f'train_round_{round_num}_prob']]], axis=1)
 
         # Save results
-        train_results_path = os.path.join(output_dir, f'{dataset_name}_train_predictions.csv')
-        test_results_path = os.path.join(output_dir, f'{dataset_name}_test_predictions.csv')
-        combined_results_path = os.path.join(output_dir, f'{dataset_name}_combined_predictions.csv')
-
-        train_predictions_df.to_csv(train_results_path, index=False)
-        test_predictions_df.to_csv(test_results_path, index=False)
-        combined_predictions_df.to_csv(combined_results_path, index=False)
+        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
+        results_df.to_csv(results_path, index=False)
 
         # Save training log
         self.training_log.to_csv(log_file, index=False)
@@ -254,9 +247,7 @@ class DatasetProcessor:
         n_excluded = len(getattr(self, 'high_cardinality_columns', []))
 
         return {
-            'train_results_path': train_results_path,
-            'test_results_path': test_results_path,
-            'combined_results_path': combined_results_path,
+            'results_path': results_path,
             'log_path': log_file,
             'n_samples': len(self.data),
             'n_features': n_features,
@@ -2063,7 +2054,7 @@ class DBNN(GPUDBNN):
         }
 
     def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels, round_num: int, prefix: str = "") -> pd.DataFrame:
-        """Generate detailed predictions with confidence metrics and metadata."""
+        """Generate detailed predictions with confidence metrics and metadata for a specific round."""
         # Ensure predictions and true_labels are on the CPU
         predictions = predictions.cpu() if torch.is_tensor(predictions) else torch.tensor(predictions)
         true_labels = true_labels.cpu() if torch.is_tensor(true_labels) else torch.tensor(true_labels)
@@ -2071,17 +2062,43 @@ class DBNN(GPUDBNN):
         # Convert predictions to original class labels
         pred_labels = self.label_encoder.inverse_transform(predictions.numpy())
 
-        # Create results DataFrame
-        results_df = self.data.copy()  # Start with the original dataset
+        # Create a copy of the original dataset to preserve all columns
+        results_df = self.data.copy()
 
-        # Add predictions and probabilities for this round
-        results_df[f'round_{round_num}'] = ""  # Initialize prediction column
-        results_df[f'round_{round_num}_prob'] = ""  # Initialize probability column
+        # Add prediction columns for this round
+        results_df[f'{prefix}_round_{round_num}'] = pred_labels
+        results_df[f'{prefix}_round_{round_num}_prob'] = np.nan  # Initialize probability column
 
-        # Fill in predictions and probabilities for the rows used in this round
-        used_indices = self.train_indices if prefix == "train" else self.test_indices
-        results_df.loc[used_indices, f'round_{round_num}'] = pred_labels
-        results_df.loc[used_indices, f'round_{round_num}_prob'] = predictions.numpy().max(axis=1)
+        # Compute probabilities in batches
+        batch_size = self.batch_size
+        all_probabilities = []
+
+        for i in range(0, len(X), batch_size):
+            batch_end = min(i + batch_size, len(X))
+            batch_X = X[i:batch_end]
+
+            try:
+                if self.model_type == "Histogram":
+                    batch_probs, _ = self._compute_batch_posterior(batch_X)
+                elif self.model_type == "Gaussian":
+                    batch_probs, _ = self._compute_batch_posterior_std(batch_X)
+                else:
+                    raise ValueError(f"{self.model_type} is invalid")
+
+                all_probabilities.append(batch_probs.cpu().numpy())
+
+            except Exception as e:
+                print(f"Error computing probabilities for batch {i}: {str(e)}")
+                return None
+
+        if all_probabilities:
+            probabilities = np.vstack(all_probabilities)
+        else:
+            print("No probabilities were computed successfully")
+            return None
+
+        # Add probabilities to the results DataFrame
+        results_df.loc[X.index, f'{prefix}_round_{round_num}_prob'] = probabilities.max(axis=1)
 
         return results_df
 
