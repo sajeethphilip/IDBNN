@@ -1410,7 +1410,7 @@ class InvertibleDBNN(nn.Module):
 
     def load_model(self, path: str):
         """Load the inverse model from a file."""
-        self.load_state_dict(torch.load(path, map_location=self.device))
+        self.load_state_dict(torch.load(path, map_location=self.device, weights_only=True)))
         print(f"Model loaded from {path}")
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
@@ -1882,7 +1882,7 @@ class DBNN(GPUDBNN):
         X_processed = self._preprocess_data(X, is_training=True)
 
         # Convert to tensors on CPU first, then move to device
-        self.X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+        self.X_tensor =  X_processed.clone().detach().to(self.device)
         self.y_tensor = torch.tensor(y_encoded, dtype=torch.long).to(self.device)
 
         # Split data into training and testing sets
@@ -1983,8 +1983,17 @@ class DBNN(GPUDBNN):
         else:
             results = self.fit_predict()
 
+        # Preprocess features and convert to tensors
+        X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
+        y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
+
+        # Generate predictions and true labels
+        predictions = self.predict(X_tensor, batch_size=self.batch_size)
+        true_labels = y_tensor.cpu().numpy()
+
         # Generate detailed predictions
-        predictions_df = self._generate_detailed_predictions(X)
+        predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
+
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
@@ -2013,7 +2022,7 @@ class DBNN(GPUDBNN):
 
         # Create results DataFrame
         results_df = pd.DataFrame({
-            'true_class': self.label_encoder.inverse_transform(true_labels.cpu().numpy()),
+            'true_class': self.label_encoder.inverse_transform(true_labels),
             'predicted_class': pred_labels
         })
 
@@ -2736,7 +2745,7 @@ class DBNN(GPUDBNN):
 
             # Process features and initialize model components if needed
             X_processed = self._preprocess_data(X, is_training=True)
-            self.X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+            self.X_tensor =  X_processed.clone().detach().to(self.device)
             self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
             # Handle model state based on flags
@@ -3936,6 +3945,10 @@ class DBNN(GPUDBNN):
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None):
         """Print a color-coded confusion matrix with class-wise accuracy."""
 
+        # Convert all labels to strings
+        y_true = np.array([str(label) for label in y_true])
+        y_pred = np.array([str(label) for label in y_pred])
+
         # Get unique classes from both true and predicted labels
         unique_true = np.unique(y_true)
         unique_pred = np.unique(y_pred)
@@ -4791,10 +4804,14 @@ class DBNN(GPUDBNN):
             # Predictions for train set
             train_predictions = self.predict(X_train, batch_size=batch_size)
             train_results = self._generate_detailed_predictions(X_train, train_predictions, y_train, prefix="train")
+            # Print colored confusion matrix
+            self.print_colored_confusion_matrix(y_train.cpu().numpy(), train_predictions.cpu().numpy())
 
             # Predictions for test set
             test_predictions = self.predict(X_test, batch_size=batch_size)
             test_results = self._generate_detailed_predictions(X_test, test_predictions, y_test, prefix="test")
+            # Print colored confusion matrix
+            self.print_colored_confusion_matrix(y_test.cpu().numpy(), test_predictions.cpu().numpy())
 
             # Verify prediction size matches test set (existing code)
             if test_predictions.size(0) != y_test.size(0):
