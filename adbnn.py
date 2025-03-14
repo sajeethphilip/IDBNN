@@ -1809,7 +1809,7 @@ class DBNN(GPUDBNN):
             use_previous_model=config.use_previous_model,
             model_type=config.model_type  # Pass model type from config
         )
-
+        self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
