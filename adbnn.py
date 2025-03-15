@@ -2015,11 +2015,18 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
+    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray], prefix: str = "") -> pd.DataFrame:
         """Generate detailed predictions with confidence metrics and metadata."""
-        # Convert predictions and true_labels to CPU and then to NumPy arrays
-        predictions_cpu = predictions.cpu().numpy()
-        true_labels_cpu = true_labels.cpu().numpy()
+        # Ensure predictions and true_labels are on CPU and converted to NumPy arrays
+        if isinstance(predictions, torch.Tensor):
+            predictions_cpu = predictions.cpu().numpy()
+        else:
+            predictions_cpu = predictions  # Assume it's already a NumPy array
+
+        if isinstance(true_labels, torch.Tensor):
+            true_labels_cpu = true_labels.cpu().numpy()
+        else:
+            true_labels_cpu = true_labels  # Assume it's already a NumPy array
 
         # Convert numerical labels back to original class labels
         pred_labels = self.label_encoder.inverse_transform(predictions_cpu)
@@ -2053,7 +2060,10 @@ class DBNN(GPUDBNN):
                 else:
                     raise ValueError(f"{self.model_type} is invalid")
 
-                all_probabilities.append(batch_probs.cpu().numpy())
+                # Ensure batch_probs is on CPU
+                if isinstance(batch_probs, torch.Tensor):
+                    batch_probs = batch_probs.cpu().numpy()
+                all_probabilities.append(batch_probs)
 
             except Exception as e:
                 print(f"Error computing probabilities for batch {i}: {str(e)}")
