@@ -1353,24 +1353,24 @@ class InvertibleDBNN(nn.Module):
         """
         return self.inverse_model(class_probs)
 
-    def reconstruct_features(self, class_probs: torch.Tensor, original_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+    def reconstruct_features(self, predictions_df: pd.DataFrame, round_num: int = 0) -> torch.Tensor:
         """
-        Reconstruct features from classification probabilities.
+        Reconstruct features from the prediction probabilities in the specified round.
 
         Args:
-            class_probs (torch.Tensor): Classification probabilities (batch_size, n_classes).
-            original_features (Optional[torch.Tensor]): Original features for validation (batch_size, feature_dims).
+            predictions_df: DataFrame containing predictions.
+            round_num: Round number to use for reconstruction.
 
         Returns:
-            torch.Tensor: Reconstructed features (batch_size, feature_dims).
+            Reconstructed features as a tensor.
         """
-        reconstructed_features = self.forward(class_probs)
+        # Extract prediction probabilities for the specified round
+        pred_probs = predictions_df[f'round_{round_num}_pred'].apply(lambda x: np.array(eval(x))).values
+        pred_probs = torch.tensor(np.stack(pred_probs), dtype=torch.float32, device=self.device)
 
-        if original_features is not None:
-            # Calculate reconstruction error
-            reconstruction_error = torch.mean((reconstructed_features - original_features) ** 2)
-            print(f"Reconstruction Error: {reconstruction_error.item():.4f}")
-
+        # Reconstruct features using the inverse model
+        reconstructed_features = self.inverse_model(pred_probs)
         return reconstructed_features
 
     def train_inverse_model(self, class_probs: torch.Tensor, original_features: torch.Tensor, epochs: int = 100, lr: float = 0.001):
@@ -4880,15 +4880,14 @@ class DBNN(GPUDBNN):
 
     def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, output_file: str, true_labels: pd.Series = None, round_num: int = 0):
         """
-        Save predictions with proper class handling and probability computation.
-        Appends new columns for each round of predictions.
+        Save predictions in the specified format, appending new columns for each round.
 
         Args:
-            X: Input DataFrame with all original columns and rows.
+            X: Input DataFrame with all original features and rows.
             predictions: Predictions tensor from the model.
-            output_file: Output file path.
-            true_labels: True labels (optional).
-            round_num: Current round number (default: 0).
+            output_file: Path to save the predictions file.
+            true_labels: True labels (if available).
+            round_num: Current round number (used for column naming).
         """
         # Ensure predictions and true_labels are on CPU and converted to NumPy arrays
         if isinstance(predictions, torch.Tensor):
@@ -4901,89 +4900,38 @@ class DBNN(GPUDBNN):
         else:
             true_labels_cpu = true_labels  # Assume it's already a NumPy array or None
 
-        # Create a copy of the input DataFrame to preserve all columns and rows
+        # Create a clone of the input DataFrame to preserve all original columns and rows
         results_df = X.copy()
 
-        # Add columns for the current round's predictions and probabilities
-        results_df[f'round_{round_num}'] = [list(self.label_encoder.classes_)] * len(results_df)
-        results_df[f'round_{round_num}_pred'] = [None] * len(results_df)
-
-        # Compute probabilities in batches
-        batch_size = self.batch_size
-        all_probabilities = []
-
-        # Preprocess the input data for probability computation
-        X_tensor = self._preprocess_data(X, is_training=False)
-
-        for i in range(0, len(X_tensor), batch_size):
-            batch_end = min(i + batch_size, len(X_tensor))
-            batch_X = X_tensor[i:batch_end]
-
-            try:
-                if self.model_type == "Histogram":
-                    batch_probs, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    batch_probs, _ = self._compute_batch_posterior_std(batch_X)
-                else:
-                    raise ValueError(f"{self.model_type} is invalid")
-
-                # Ensure batch_probs is on CPU
-                if isinstance(batch_probs, torch.Tensor):
-                    batch_probs = batch_probs.cpu().numpy()
-                all_probabilities.append(batch_probs)
-
-            except Exception as e:
-                print(f"Error computing probabilities for batch {i}: {str(e)}")
-                return None
-
-        if all_probabilities:
-            probabilities = np.vstack(all_probabilities)
-        else:
-            print("No probabilities were computed successfully")
-            return None
-
-        # Update the predictions and probabilities for the current round
-        # Ensure predictions_cpu and probabilities align with results_df.index
-        for idx in results_df.index:
-            if idx < len(predictions_cpu):
-                results_df.at[idx, f'round_{round_num}'] = list(self.label_encoder.classes_)
-                results_df.at[idx, f'round_{round_num}_pred'] = probabilities[idx].tolist()
-
-        # Add true labels if available
+        # Add true_class column if true_labels are provided
         if true_labels_cpu is not None:
-            # Ensure true_labels_cpu aligns with results_df.index
-            if len(true_labels_cpu) == len(results_df):
-                results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_cpu)
-            else:
-                # If lengths don't match, align using the index
-                true_labels_series = pd.Series(true_labels_cpu, index=X.index[:len(true_labels_cpu)])
-                results_df['true_class'] = true_labels_series.map(lambda x: self.label_encoder.inverse_transform([x])[0] if pd.notna(x) else None)
+            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_cpu)
 
-        # Create the output directory if it doesn't exist
-        dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
-        output_dir = os.path.join('data', dataset_name, 'Predictions')
-        os.makedirs(output_dir, exist_ok=True)
+        # Convert predictions to class labels and probabilities
+        pred_labels = self.label_encoder.inverse_transform(predictions_cpu)
+        pred_probs = self._compute_batch_posterior(X)  # Get probabilities for all classes
 
-        # Save the predictions file in the new directory
-        output_path = os.path.join(output_dir, output_file)
+        # Add prediction columns for the current round
+        results_df[f'round_{round_num}'] = [list(self.label_encoder.classes_)] * len(results_df)
+        results_df[f'round_{round_num}_pred'] = pred_probs.tolist()
 
-        # Append to existing file if it exists
-        if os.path.exists(output_path):
-            existing_df = pd.read_csv(output_path, index_col=0)
+        # Update the predicted class for the current round
+        results_df[f'round_{round_num}_class'] = pred_labels
+
+        # If the file already exists, load it and append new columns
+        if os.path.exists(output_file):
+            existing_df = pd.read_csv(output_file)
             # Merge new predictions with existing data
-            for col in [f'round_{round_num}', f'round_{round_num}_pred']:
+            for col in [f'round_{round_num}', f'round_{round_num}_pred', f'round_{round_num}_class']:
                 existing_df[col] = results_df[col]
             results_df = existing_df
+        else:
+            # Create the output directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-        # Save the updated DataFrame
-        results_df.to_csv(output_path, index=True)
-        print(f"Saved predictions to {output_path}", end="\r", flush=True)
-
-        if true_labels is not None:
-            # Verification analysis
-            self.verify_classifications(X, true_labels, predictions)
-
-        return results_df
+        # Save the updated predictions file
+        results_df.to_csv(output_file, index=False)
+        print(f"Saved predictions for round {round_num} to {output_file}")
 
 
     #--------------------------------------------------------------------------------------------------------------
