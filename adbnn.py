@@ -2062,7 +2062,7 @@ class DBNN(GPUDBNN):
             DataFrame containing the complete input data, predictions, and posterior probabilities.
         """
         # Convert predictions to original class labels
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+        pred_labels = self.label_encoder.inverse_transform(predictions)
 
         # Handle input data (X) based on its type
         if isinstance(X, torch.Tensor):
@@ -4848,7 +4848,7 @@ class DBNN(GPUDBNN):
             # Save results if path is provided
             if save_path:
                 # Save all predictions
-                all_results.to_csv(f"{save_path}/all_predictions.csv", index=False)
+                #all_results.to_csv(f"{save_path}/all_predictions.csv", index=False)
 
                 # Save metadata
                 metadata = {
@@ -4897,6 +4897,21 @@ class DBNN(GPUDBNN):
 
             # Generate detailed predictions for the entire dataset
             all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+            # Save training predictions
+            train_results = self._generate_detailed_predictions(
+                self.data.iloc[self.train_indices],  # Subset of data for training
+                y_train_pred,  # Predictions for training data
+                y_train.cpu().numpy()  # True labels for training data
+            )
+            train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
+
+            # Save test predictions
+            test_results = self._generate_detailed_predictions(
+                self.data.iloc[self.test_indices],  # Subset of data for testing
+                y_test_pred,  # Predictions for test data
+                y_test.cpu().numpy()  # True labels for test data
+            )
+            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
 
             # Save results if path is provided
             if save_path:
@@ -4930,6 +4945,8 @@ class DBNN(GPUDBNN):
             # Prepare results
             results = {
                 'all_predictions': all_results,
+                'train_predictions': train_results,
+                'test_predictions': test_results,
                 'metadata': metadata,
                 'classification_report': classification_report(y_test_labels, y_test_pred_labels),
                 'confusion_matrix': confusion_matrix(y_test_labels, y_test_pred_labels),
