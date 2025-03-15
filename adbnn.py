@@ -2015,14 +2015,19 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
+     def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
         """Generate detailed predictions with confidence metrics and metadata."""
-        # Convert predictions to original class labels
-        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+        # Convert predictions and true_labels to CPU and then to NumPy arrays
+        predictions_cpu = predictions.cpu().numpy()
+        true_labels_cpu = true_labels.cpu().numpy()
+
+        # Convert numerical labels back to original class labels
+        pred_labels = self.label_encoder.inverse_transform(predictions_cpu)
+        true_labels_decoded = self.label_encoder.inverse_transform(true_labels_cpu)
 
         # Create results DataFrame
         results_df = pd.DataFrame({
-            'true_class': self.label_encoder.inverse_transform(true_labels),
+            'true_class': true_labels_decoded,
             'predicted_class': pred_labels
         })
 
