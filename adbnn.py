@@ -4996,32 +4996,21 @@ class DBNN(GPUDBNN):
 
 
 
-    def predict_and_save(self, save_path=None, batch_size: int = 32):
-        """Make predictions on data and save them using best model weights"""
+    def predict_and_save(self, save_path=None, batch_size: int = 32, max_rounds: int = 1):
+        """Make predictions on data and save them using best model weights."""
         try:
-            # First try to load existing model and components
-            weights_loaded = os.path.exists(self._get_weights_filename())
-            components_loaded = self._load_model_components()
-
-            if not (weights_loaded and components_loaded):
-                print("Complete model not found. Training required.", end="\r", flush=True)
-                results = self.fit_predict(batch_size=batch_size)
-                return results
-
             # Load the model weights and encoders
             self._load_best_weights()
             self._load_categorical_encoders()
 
-            # Explicitly use best weights for prediction
+            # Use best weights for prediction
             if self.best_W is None:
                 print("No best weights found. Training required.", end="\r", flush=True)
-                results = self.fit_predict(batch_size=batch_size)
+                results = self.fit_predict(batch_size=batch_size, save_path=save_path, max_rounds=max_rounds)
                 return results
 
             # Store current weights temporarily
             temp_W = self.current_W
-
-            # Use best weights for prediction
             self.current_W = self.best_W.clone()
 
             try:
@@ -5029,18 +5018,16 @@ class DBNN(GPUDBNN):
                 X = self.data.drop(columns=[self.target_column])
                 true_labels = self.data[self.target_column]
 
-                # Preprocess the data using the existing method
-                X_tensor = self._preprocess_data(X, is_training=False)
+                # Generate predictions for the specified number of rounds
+                results = self.save_predictions(
+                    X,  # Original data
+                    self.predict(self._preprocess_data(X, is_training=False), batch_size=batch_size),
+                    save_path,
+                    true_labels,
+                    round_num=0  # Start with round 0
+                )
 
-                # Make predictions
-                print(f"{Colors.BLUE}Predctions for saving data{Colors.ENDC}", end="\r", flush=True)
-                predictions = self.predict(X_tensor, batch_size=batch_size)
-
-                # Save predictions and metrics
-                if save_path:
-                    self.save_predictions(X, predictions, save_path, true_labels)
-
-                return predictions
+                return results
             finally:
                 # Restore current weights
                 self.current_W = temp_W
@@ -5048,8 +5035,7 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"Error during prediction process: {str(e)}")
             print("Falling back to training pipeline...")
-            history = self.adaptive_fit_predict(max_rounds=self.max_epochs, batch_size=batch_size)
-            results = self.fit_predict(batch_size=batch_size)
+            results = self.fit_predict(batch_size=batch_size, save_path=save_path, max_rounds=max_rounds)
             return results
 
 
