@@ -4984,7 +4984,6 @@ class DBNN(GPUDBNN):
             self.verify_classifications(X, true_labels, predictions)
 
         return results_df
-
 #--------------------------------------------------------------------------------------------------------------
 
     def _save_model_components(self):
