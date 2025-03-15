@@ -1844,6 +1844,7 @@ class DBNN(GPUDBNN):
             model_type=config.model_type  # Pass model type from config
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
+
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
@@ -4885,11 +4886,6 @@ class DBNN(GPUDBNN):
             print(f"Test Accuracy: {results['test_accuracy']:.4f}")
             self._save_model_components()
 
-            # Make predictions on the entire dataset
-            print(f"{Colors.YELLOW}Generating predictions for the entire dataset{Colors.ENDC}")
-            X_all = torch.cat([X_train, X_test], dim=0)
-            y_all = torch.cat([y_train, y_test], dim=0)
-            all_predictions = self.predict(X_all, batch_size=batch_size)
 
             # Extract predictions for training and test data using stored indices
             y_train_pred = all_predictions[self.train_indices].cpu().numpy()
