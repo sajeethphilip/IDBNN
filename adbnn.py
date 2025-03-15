@@ -4953,7 +4953,13 @@ class DBNN(GPUDBNN):
 
         # Add true labels if available
         if true_labels_cpu is not None:
-            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_cpu)
+            # Ensure true_labels_cpu is aligned with results_df.index
+            if len(true_labels_cpu) == len(results_df):
+                results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_cpu)
+            else:
+                # If lengths don't match, align using the index
+                true_labels_series = pd.Series(true_labels_cpu, index=X.index[:len(true_labels_cpu)])
+                results_df['true_class'] = true_labels_series.map(lambda x: self.label_encoder.inverse_transform([x])[0] if pd.notna(x) else None)
 
         # Create the output directory if it doesn't exist
         dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
