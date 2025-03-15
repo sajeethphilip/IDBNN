@@ -4758,6 +4758,8 @@ class DBNN(GPUDBNN):
             print(f"Traceback: {traceback.format_exc()}")
             raise
 
+#-----------------------------------
+
     def _get_model_components_filename(self):
         """Get filename for model components"""
         return os.path.join('Model', f'Best{self.model_type}_{self.dataset_name}_components.pkl')
@@ -4895,8 +4897,14 @@ class DBNN(GPUDBNN):
 
         if true_labels is not None and isinstance(true_labels, torch.Tensor):
             true_labels_cpu = true_labels.cpu().numpy()
+        elif true_labels is not None:
+            true_labels_cpu = true_labels  # Assume it's already a NumPy array or pandas Series
         else:
-            true_labels_cpu = true_labels  # Assume it's already a NumPy array or None
+            true_labels_cpu = None
+
+        # Verify alignment between X and predictions
+        if len(X) != len(predictions_cpu):
+            raise ValueError(f"Length mismatch: X has {len(X)} rows, but predictions has {len(predictions_cpu)} rows.")
 
         # Convert numerical predictions to class labels
         pred_labels = self.label_encoder.inverse_transform(predictions_cpu)
@@ -4909,8 +4917,10 @@ class DBNN(GPUDBNN):
         # Create a copy of the original DataFrame to preserve all columns
         results_df = X.copy()
 
-        # Add true labels if available
+        # Add true labels if available (ensure alignment)
         if true_labels_cpu is not None:
+            if len(true_labels_cpu) != len(results_df):
+                raise ValueError(f"Length mismatch: true_labels_cpu has {len(true_labels_cpu)} rows, but results_df has {len(results_df)} rows.")
             results_df['true_class'] = true_labels_cpu
 
         # Add predictions and posteriors for the current round
