@@ -4901,10 +4901,7 @@ class DBNN(GPUDBNN):
         else:
             true_labels_cpu = true_labels  # Assume it's already a NumPy array or None
 
-        # Convert numerical predictions to original class labels
-        pred_labels = self.label_encoder.inverse_transform(predictions_cpu)
-
-        # Create a copy of the input DataFrame to preserve all columns
+        # Create a copy of the input DataFrame to preserve all columns and rows
         results_df = X.copy()
 
         # Add columns for the current round's predictions and probabilities
@@ -4946,14 +4943,15 @@ class DBNN(GPUDBNN):
             return None
 
         # Update the predictions and probabilities for the current round
-        for idx in range(len(results_df)):
+        # Ensure predictions_cpu and probabilities align with results_df.index
+        for idx in results_df.index:
             if idx < len(predictions_cpu):
-                results_df.at[results_df.index[idx], f'round_{round_num}'] = list(self.label_encoder.classes_)
-                results_df.at[results_df.index[idx], f'round_{round_num}_pred'] = probabilities[idx].tolist()
+                results_df.at[idx, f'round_{round_num}'] = list(self.label_encoder.classes_)
+                results_df.at[idx, f'round_{round_num}_pred'] = probabilities[idx].tolist()
 
         # Add true labels if available
         if true_labels_cpu is not None:
-            # Ensure true_labels_cpu is aligned with results_df.index
+            # Ensure true_labels_cpu aligns with results_df.index
             if len(true_labels_cpu) == len(results_df):
                 results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_cpu)
             else:
@@ -4986,6 +4984,7 @@ class DBNN(GPUDBNN):
             self.verify_classifications(X, true_labels, predictions)
 
         return results_df
+
 #--------------------------------------------------------------------------------------------------------------
 
     def _save_model_components(self):
