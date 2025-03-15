@@ -2015,7 +2015,7 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-     def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
+    def _generate_detailed_predictions(self, X: torch.Tensor, predictions: torch.Tensor, true_labels: torch.Tensor, prefix: str = "") -> pd.DataFrame:
         """Generate detailed predictions with confidence metrics and metadata."""
         # Convert predictions and true_labels to CPU and then to NumPy arrays
         predictions_cpu = predictions.cpu().numpy()
