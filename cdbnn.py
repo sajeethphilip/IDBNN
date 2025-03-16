@@ -2081,8 +2081,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             for batch_idx, (inputs, labels, _) in enumerate(pbar):  # Ignore image_name
                 try:
                     # Move data to correct device
-                    if isinstance(inputs, (list, tuple)):
-                        inputs = inputs[0]
                     inputs = inputs.to(device)
                     labels = labels.to(device)
 
