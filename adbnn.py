@@ -4826,9 +4826,9 @@ class DBNN(GPUDBNN):
 
             # Save test predictions
             print("\033[K" + "Saving Test predictions", end='\r', flush=True)
-
-            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
             test_results = all_results.iloc[self.test_indices]
+            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
+
             # Save results if path is provided
             if save_path:
                 # Save all predictions
