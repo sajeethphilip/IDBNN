@@ -2078,8 +2078,10 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
             # Training loop
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (inputs, labels, _) in enumerate(pbar):  # Ignore image_name
+            for batch_idx, (inputs, labels, image_names) in enumerate(pbar):  # Unpack all three values
                 try:
+                    logger.debug(f"Batch {batch_idx}: Inputs shape={inputs.shape}, Labels shape={labels.shape}, Image Names={image_names}")
+
                     # Move data to correct device
                     inputs = inputs.to(device)
                     labels = labels.to(device)
@@ -2154,7 +2156,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 except Exception as e:
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                    continue
+                    logger.error(f"Batch data: Inputs shape={inputs.shape}, Labels shape={labels.shape}, Image Names={image_names}")
+                    raise
 
             # Calculate epoch average loss
             avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
@@ -4665,6 +4668,8 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         try:
             with torch.no_grad():
                 for inputs, labels, img_names in tqdm(loader, desc="Extracting features"):
+                    logger.debug(f"Processing batch: Inputs shape={inputs.shape}, Labels shape={labels.shape}, Image Names={img_names}")
+
                     # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
@@ -5039,6 +5044,7 @@ class CustomImageDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
+        logger.debug(f"Dataset item {idx}: Image={img_name}, Label={label}, Shape={image.shape}")
         return image, label, img_name  # Return image, label, and image name
 
 class DatasetProcessor:
@@ -6681,7 +6687,10 @@ def create_data_loaders(train_dataset: Dataset, test_dataset: Optional[Dataset],
         shuffle=True,
         num_workers=config['training']['num_workers']
     )
-
+    # Debug: Check the first batch from the DataLoader
+    first_batch = next(iter(train_loader))
+    logger.debug(f"First batch from DataLoader: Inputs shape={first_batch[0].shape}, Labels shape={first_batch[1].shape}, Image Names={first_batch[2]}")
+    #----------
     test_loader = None
     if test_dataset is not None:
         test_loader = DataLoader(
