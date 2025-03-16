@@ -4804,41 +4804,42 @@ class DBNN(GPUDBNN):
 
             combined_accuracy = len(X_all[y_all_pr == all_pr]) / len(X_all)
             if combined_accuracy > self.best_combined_accuracy:
-                print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                print("\033[K" + f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
-                print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print(" f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print(" f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
+                print(" f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
 
-            # Generate detailed predictions for the entire dataset
-            print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
 
             # Extract predictions for training and test data using stored indices
             y_train_pred = all_predictions[:len(y_train)]  # Predictions for training data
             y_test_pred = all_predictions[len(y_train):]   # Predictions for test data
 
-            # Save training predictions
-            print("\033[K" + "Saving Train predictions", end='\r', flush=True)
-            train_results = all_results.iloc[self.train_indices]
-            train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
-
-            # Save test predictions
-            print("\033[K" + "Saving Test predictions", end='\r', flush=True)
-            test_results = all_results.iloc[self.test_indices]
-            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
+               # Generate detailed predictions for the entire dataset
+                print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
+                all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+                train_results = all_results.iloc[self.train_indices]
+                test_results = all_results.iloc[self.test_indices]
+                # Filter failed examples (where predicted class != true class)
+                failed_examples = all_results[all_results['predicted_class'] != all_results['true_class']]
+                # Filter passed examples (where predicted class == true class)
+                passed_examples = all_results[all_results['predicted_class'] == all_results['true_class']]
 
             # Save results if path is provided
             if save_path:
+
+                # Save training predictions
+                print("\033[K" + "Saving Train predictions", end='\r', flush=True)
+                train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
+
+                # Save test predictions
+                print("\033[K" + "Saving Test predictions", end='\r', flush=True)
+                test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
+
                 # Save all predictions
                 print("\033[K" + "Saving Combined predictions", end='\r', flush=True)
                 all_results.to_csv(f"{save_path}/combined_predictions.csv", index=False)
-                # Filter failed examples (where predicted class != true class)
-                failed_examples = all_results[all_results['predicted_class'] != all_results['true_class']]
-
-                # Filter passed examples (where predicted class == true class)
-                passed_examples = all_results[all_results['predicted_class'] == all_results['true_class']]
 
                 # Save failed examples
                 print("\033[K" + "Saving Failed examples", end='\r', flush=True)
@@ -4847,6 +4848,7 @@ class DBNN(GPUDBNN):
                 # Save passed examples
                 print("\033[K" + "Saving Passed examples", end='\r', flush=True)
                 passed_examples.to_csv(f"{save_path}/passed_examples.csv", index=False)
+
                 # Save metadata
                 print("\033[K" + "Saving Metadata", end='\r', flush=True)
                 metadata = {
