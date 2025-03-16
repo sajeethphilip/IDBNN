@@ -4772,15 +4772,7 @@ class DBNN(GPUDBNN):
                 y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
                 # Split data
-                # Get consistent train-test split
-                X_train, X_test, y_train, y_test = self._get_train_test_split(
-                    X_tensor, y_tensor)
-
-                # Convert split data back to tensors
-                X_train = torch.from_numpy(X_train).to(self.device, dtype=torch.float32)
-                X_test = torch.from_numpy(X_test).to(self.device, dtype=torch.float32)
-                y_train = torch.from_numpy(y_train).to(self.device, dtype=torch.long)
-                y_test = torch.from_numpy(y_test).to(self.device, dtype=torch.long)
+                X_train, X_test, y_train, y_test = self._get_train_test_split(X_tensor, y_tensor)
 
             # Verify tensor sizes match before training
             if X_train.size(0) != y_train.size(0) or X_test.size(0) != y_test.size(0):
@@ -4798,84 +4790,22 @@ class DBNN(GPUDBNN):
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
             all_predictions = self.predict(X_all, batch_size=batch_size)
+
             # Ensure all tensors are on the same device (GPU)
             all_pr = all_predictions.to(self.device)  # Move predictions to GPU
             y_all_pr = y_all.to(self.device)  # Ensure y_all is on GPU (though it likely already is)
 
-            combined_accuracy=len(X_all[y_all_pr==all_pr])/len(X_all)
-            if combined_accuracy>self.best_combined_accuracy:
+            combined_accuracy = len(X_all[y_all_pr == all_pr]) / len(X_all)
+            if combined_accuracy > self.best_combined_accuracy:
                 print(f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 print(f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
                 print(f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                self.best_combined_accuracy=combined_accuracy
+                self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
 
             # Generate detailed predictions for the entire dataset
             all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
-
-            # Save results if path is provided
-            if save_path:
-                # Save all predictions
-                #all_results.to_csv(f"{save_path}/all_predictions.csv", index=False)
-
-                # Save metadata
-                metadata = {
-                    'rejected_columns': self.high_cardinality_columns,
-                    'feature_columns': self.feature_columns,
-                    'target_column': self.target_column,
-                    'preprocessing_details': {
-                        'cardinality_threshold': self.cardinality_threshold,
-                        'cardinality_tolerance': self.cardinality_tolerance,
-                        'categorical_columns': list(self.categorical_encoders.keys())
-                    }
-                }
-                with open(f"{save_path}/metadata.json", 'w') as f:
-                    json.dump(metadata, f, indent=4)
-
-            # Calculate metrics for test set
-            y_test_cpu = y_test.cpu().numpy()
-            y_pred_cpu = all_predictions[self.test_indices].cpu().numpy()
-
-            # Convert numerical labels back to original classes
-            y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
-            y_pred_labels = self.label_encoder.inverse_transform(y_pred_cpu)
-
-            # Prepare results
-            results = {
-                'all_predictions': all_results,
-                'metadata': metadata,
-                'classification_report': classification_report(y_test_labels, y_pred_labels),
-                'confusion_matrix': confusion_matrix(y_test_labels, y_pred_labels),
-                'error_rates': error_rates,
-                'test_accuracy': (y_pred_cpu == y_test_cpu).mean()
-            }
-
-            print(f"Test Accuracy: {results['test_accuracy']:.4f}                            ")
-            #self._save_model_components()
-
-
-            # Extract predictions for training and test data using stored indices
-            y_train_pred = all_predictions[self.train_indices].cpu().numpy()
-            y_test_pred = all_predictions[self.test_indices].cpu().numpy()
-
-            # Generate detailed predictions for the entire dataset
-            all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
-            # Save training predictions
-            train_results = self._generate_detailed_predictions(
-                self.data.iloc[self.train_indices],  # Subset of data for training
-                y_train_pred,  # Predictions for training data
-                y_train.cpu().numpy()  # True labels for training data
-            )
-            train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
-
-            # Save test predictions
-            test_results = self._generate_detailed_predictions(
-                self.data.iloc[self.test_indices],  # Subset of data for testing
-                y_test_pred,  # Predictions for test data
-                y_test.cpu().numpy()  # True labels for test data
-            )
-            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
 
             # Save results if path is provided
             if save_path:
@@ -4903,39 +4833,34 @@ class DBNN(GPUDBNN):
             # Convert numerical labels back to original classes
             y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
             y_train_labels = self.label_encoder.inverse_transform(y_train_cpu)
-            y_test_pred_labels = self.label_encoder.inverse_transform(y_test_pred)
-            y_train_pred_labels = self.label_encoder.inverse_transform(y_train_pred)
+            y_test_pred_labels = self.label_encoder.inverse_transform(all_predictions[self.test_indices].cpu().numpy())
+            y_train_pred_labels = self.label_encoder.inverse_transform(all_predictions[self.train_indices].cpu().numpy())
 
             # Prepare results
             results = {
                 'all_predictions': all_results,
-                'train_predictions': train_results,
-                'test_predictions': test_results,
                 'metadata': metadata,
                 'classification_report': classification_report(y_test_labels, y_test_pred_labels),
                 'confusion_matrix': confusion_matrix(y_test_labels, y_test_pred_labels),
                 'error_rates': error_rates,
-                'test_accuracy': (y_test_pred == y_test_cpu).mean(),
-                'train_accuracy': (y_train_pred == y_train_cpu).mean()
+                'test_accuracy': (y_test_pred_labels == y_test_labels).mean(),
+                'train_accuracy': (y_train_pred_labels == y_train_labels).mean()
             }
-
 
             # Generate point-colored confusion matrices for train, test, and combined data
             print(f"{Colors.BOLD}Generating Confusion Matrices:{Colors.ENDC}")
 
             # Confusion matrix for training data
-            self.print_colored_confusion_matrix(y_train_cpu, y_train_pred, header="Training Data")
+            self.print_colored_confusion_matrix(y_train_cpu, y_train_pred_labels, header="Training Data")
 
             # Confusion matrix for test data
-            self.print_colored_confusion_matrix(y_test_cpu, y_test_pred, header="Test Data")
+            self.print_colored_confusion_matrix(y_test_cpu, y_test_pred_labels, header="Test Data")
 
             # Confusion matrix for combined data
             y_all_cpu = y_all.cpu().numpy()
             self.print_colored_confusion_matrix(y_all_cpu, all_predictions.cpu().numpy(), header="Combined Data")
 
             return results
-
-
 
         except Exception as e:
             DEBUG.log(f"Error in fit_predict: {str(e)}")
