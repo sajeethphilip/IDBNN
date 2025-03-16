@@ -731,13 +731,14 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: Optional[List[str]] = None):
         """
         Universal feature saving method for all autoencoder variants.
 
         Args:
             feature_dict: Dictionary containing features and related information
             output_path: Path to save the CSV file
+            image_names: List of image names to include as the first column
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -745,6 +746,11 @@ class BaseAutoencoder(nn.Module):
             # Determine which features to save
             feature_columns = []
             data_dict = {}
+
+            # Add image names if provided
+            if image_names is not None:
+                data_dict['image_name'] = image_names
+                feature_columns.append('image_name')
 
             # Process embeddings
             if 'embeddings' in feature_dict:
