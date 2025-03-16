@@ -4851,7 +4851,7 @@ class DBNN(GPUDBNN):
                 all_results.to_csv(f"{save_path}/combined_predictions.csv", index=False)
 
                 # Save metadata
-                 print("Saving Metadata                        ",end='\r',flush=True)
+                print("Saving Metadata                        ",end='\r',flush=True)
                 metadata = {
                     'rejected_columns': self.high_cardinality_columns,
                     'feature_columns': self.feature_columns,
