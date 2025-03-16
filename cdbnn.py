@@ -5599,8 +5599,12 @@ class DatasetProcessor:
             image_files = sorted([f for f in os.listdir(class_path)
                                 if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)])
 
-            # Random split
-            random.shuffle(image_files)  # If you want to maintain the sorted order, remove this line
+            # Shuffle filenames and their corresponding data together
+            # Use a fixed random seed for reproducibility
+            random.seed(42)  # Set a seed for consistent shuffling
+            random.shuffle(image_files)  # Shuffle the filenames
+
+            # Split into train and test sets
             split_idx = int((1 - test_size) * len(image_files))
             train_files = image_files[:split_idx]
             test_files = image_files[split_idx:]
