@@ -4854,7 +4854,11 @@ class DBNN(GPUDBNN):
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
             all_predictions = self.predict(X_all, batch_size=batch_size)
-            combined_accuracy=len(X_all[y_all==all_predictions])/len(X_all)
+            # Ensure all tensors are on the same device (GPU)
+            all_pr = all_predictions.to(self.device)  # Move predictions to GPU
+            y_all_pr = y_all.to(self.device)  # Ensure y_all is on GPU (though it likely already is)
+
+            combined_accuracy=len(X_all[y_all_pr==all_pr])/len(X_all)
             if combined_accuracy>self.best_combined_accuracy:
                 print(f"The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}")
                 self.best_combined_accuracy=combined_accuracy
