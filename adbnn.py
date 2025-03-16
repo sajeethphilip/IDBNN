@@ -4812,6 +4812,7 @@ class DBNN(GPUDBNN):
                 self._save_best_weights()
 
             # Generate detailed predictions for the entire dataset
+            print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
             all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
 
             # Extract predictions for training and test data using stored indices
