@@ -4836,7 +4836,7 @@ class DBNN(GPUDBNN):
             train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
 
             # Save test predictions
-             print("Saving Test predcitions",end='\r',flush=True)
+            print("Saving Test predcitions",end='\r',flush=True)
             test_results = self._generate_detailed_predictions(
                 self.data.iloc[self.test_indices],  # Subset of data for testing
                 y_test_pred,  # Predictions for test data
