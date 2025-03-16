@@ -2973,7 +2973,6 @@ class DBNN(GPUDBNN):
                     if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
                         print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                         print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
-                        print("\033[K" +f"Best test accuracy achieved: {best_test_accuracy:.4f}")
                         print("\033[K" +"Stopping adaptive training.")
                         break
 
