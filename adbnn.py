@@ -1856,6 +1856,10 @@ class DBNN(GPUDBNN):
         self.best_combined_accuracy = 0.00
         self.best_model_weights = None
 
+        self.global_mean = None  # Store global mean
+        self.global_std = None   # Store global standard deviation
+        self.global_stats_computed = False  # Flag to track if stats are computed
+
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
             raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
@@ -3174,10 +3178,12 @@ class DBNN(GPUDBNN):
         else:
             X = X.clone().detach()
 
-        if is_training:
-            DEBUG.log(" Training mode preprocessing")
-            self.compute_global_statistics(X)
-            self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+        if is_training and not self.global_stats_computed:
+            DEBUG.log(" Training mode preprocessing - computing global statistics")
+            self.compute_global_statistics(X)  # Compute global stats only once
+            self.global_stats_computed = True  # Mark stats as computed
+        elif is_training:
+            DEBUG.log(" Training mode preprocessing - using precomputed global statistics")
 
             # Step 1: Remove high cardinality columns
             cardinality_threshold = self._calculate_cardinality_threshold()
@@ -3236,9 +3242,10 @@ class DBNN(GPUDBNN):
 
                     # Scale the batch
                     if is_training:
-                        X_scaled[i:batch_end] = self.scaler.fit_transform(batch_X)
+                        X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
                     else:
-                        X_scaled[i:batch_end] = self.scaler.transform(batch_X)
+                        X_scaled[i:batch_end] =  (batch_X - self.global_mean) / self.global_std
+
 
                 DEBUG.log(f" Scaling successful")
             except Exception as e:
