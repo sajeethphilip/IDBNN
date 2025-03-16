@@ -243,35 +243,25 @@ Best Overall Accuracy till now is: 94.27%
 Training accuracy: 1.0000         
 Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
+Saved model and data due to improved training accuracy
+Total samples selected: 403
+Resetting to initial conditions of best round None
+Added 403 new samples to training set
+Round 2/20
+Training set size: 407
+Test set size: 12225
+Training epochs:   0%|                                                                                                                                     | 0/1000 [00:00<?, ?it/s Prediction batches: 100%|███████████████████████████████████████████████████| 13/13 [00:05<00:00,  2.53it/s]
+Training epochs:   0%|                                                         | 1/1000 [00:10<2:49:29, 10.18s/it, train_err=0.9902 (best: 0.9902), train_acc=0.0098 (best: 0.0098) Prediction batches: 100%|████████████████████████████████████████████████████| 13/13 [00:04<00:00,  2.60it/s]
+Training epochs:   0%|                                                        | 2/1000 [01:15<11:53:22, 42.89s/it, train_err=0.3317 (best: 0.3317), train_acc=0.6683 (best: 0.6683) Prediction batches: 100%|█████████████████████████████████████████████████████| 13/13 [00:04<00:00,  2.60it/s]
+Training epochs:   0%|▏                                                       | 3/1000 [01:45<10:11:59, 36.83s/it, train_err=0.2187 (best: 0.2187), train_acc=0.7813 (best: 0.7813) Prediction batches: 100%|██████████████████████████████████████████████████████| 13/13 [00:05<00:00,  2.52it/s]
+Training epochs:   0%|▏                                                        | 4/1000 [02:08<8:43:12, 31.52s/it, train_err=0.1941 (best: 0.1941), train_acc=0.8059 (best: 0.8059) Prediction batches: 100%|████████████████████████████████████████████████████████| 13/13 [00:05<00:00,  2.51it/s]
+Training epochs:   0%|▎                                                        | 5/1000 [02:30<7:45:45, 28.09s/it, train_err=0.1794 (best: 0.1794), train_acc=0.8206 (best: 0.8206)  Early stopping.
+Training epochs:   0%|▎                                                        | 5/1000 [02:30<8:20:41, 30.19s/it, train_err=0.1794 (best: 0.1794), train_acc=0.8206 (best: 0.8206)]
+Prediction batches: 100%|████████████████████████████████████████████████████████████████| 395/395 [02:34<00:00,  2.55it/s]
+---------------------------------------------------------------------------------------
+The best combined accuracy has improved from 0.9426852438252058 to 0.9690468651044966
+---------------------------------------------------------------------------------------
 
-
-
----------
-Confusion Matrix and Class-wise Accuracy for [Training Data]:
-Actual/Predicted0       1       Accuracy
------------------------------------------
-0              2       126       1.56%
-1              361     33        8.38%
------------------------------------------
-Overall Accuracy: 6.70%
-Best Overall Accuracy till now is: 89.94%
-Confusion Matrix and Class-wise Accuracy for [Test Data]:
-Actual/Predicted0       1       Accuracy
------------------------------------------
-0              10688   621      94.51%
-1              171     630      78.65%
------------------------------------------
-Overall Accuracy: 93.46%
-Best Overall Accuracy till now is: 89.94%
-Confusion Matrix and Class-wise Accuracy for [Combined Data]:
-Actual/Predicted0       1       Accuracy
------------------------------------------
-0              10690   747      93.47%
-1              532     663      55.48%
------------------------------------------
-Overall Accuracy: 89.87%
-Best Overall Accuracy till now is: 89.94%
-Training accuracy: 0.0670         
 
 
 ```
