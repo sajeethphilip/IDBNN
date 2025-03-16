@@ -4804,9 +4804,9 @@ class DBNN(GPUDBNN):
 
             combined_accuracy = len(X_all[y_all_pr == all_pr]) / len(X_all)
             if combined_accuracy > self.best_combined_accuracy:
-                print(f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                print( f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
-                print( f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print("\033[K" +  f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
+                print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
