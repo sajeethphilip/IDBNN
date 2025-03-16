@@ -2945,9 +2945,8 @@ class DBNN(GPUDBNN):
 
                 # Check training accuracy
                 print(f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
-                train_predictions = results['train_predictions']['predicted_class']
-                train_accuracy = (train_predictions == y_train.cpu().numpy()).mean()
-                print(f"Training accuracy: {train_accuracy:.4f}")
+                train_accuracy=results['train_accuracy']
+                print(f"Training accuracy: {train_accuracy:.4f}         ")
 
                 # Get test accuracy from results
                 test_accuracy = results['test_accuracy']
@@ -4034,7 +4033,7 @@ class DBNN(GPUDBNN):
             print("-" * (15 + 8 * n_classes + 10))
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
             print(f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
-            print(f"Best Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+            print(f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
         """Training loop with proper weight handling and enhanced progress tracking"""
