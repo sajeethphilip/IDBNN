@@ -4804,9 +4804,9 @@ class DBNN(GPUDBNN):
 
             combined_accuracy = len(X_all[y_all_pr == all_pr]) / len(X_all)
             if combined_accuracy > self.best_combined_accuracy:
-                print(" f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                print(" f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
-                print(" f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print(f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
+                print( f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
+                print( f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
@@ -4816,15 +4816,15 @@ class DBNN(GPUDBNN):
             y_train_pred = all_predictions[:len(y_train)]  # Predictions for training data
             y_test_pred = all_predictions[len(y_train):]   # Predictions for test data
 
-               # Generate detailed predictions for the entire dataset
-                print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-                all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
-                train_results = all_results.iloc[self.train_indices]
-                test_results = all_results.iloc[self.test_indices]
-                # Filter failed examples (where predicted class != true class)
-                failed_examples = all_results[all_results['predicted_class'] != all_results['true_class']]
-                # Filter passed examples (where predicted class == true class)
-                passed_examples = all_results[all_results['predicted_class'] == all_results['true_class']]
+           # Generate detailed predictions for the entire dataset
+            print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
+            all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+            train_results = all_results.iloc[self.train_indices]
+            test_results = all_results.iloc[self.test_indices]
+            # Filter failed examples (where predicted class != true class)
+            failed_examples = all_results[all_results['predicted_class'] != all_results['true_class']]
+            # Filter passed examples (where predicted class == true class)
+            passed_examples = all_results[all_results['predicted_class'] == all_results['true_class']]
 
             # Save results if path is provided
             if save_path:
