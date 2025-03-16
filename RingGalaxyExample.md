@@ -57,4 +57,6 @@ Learning Rates:
 2025-03-17 01:44:57,246 - INFO - Layer sizes: [32, 64, 128, 256, 256, 256]
 
 Ready to start training. Proceed? (y/n): y
+
+
 ```
