@@ -2781,6 +2781,11 @@ class DBNN(GPUDBNN):
             print("Adaptive learning is disabled. Using standard training.")
             return self.fit_predict(batch_size=batch_size)
 
+        # Record the start time
+        start_time = time.time()
+        start_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+        print(f"{Colors.BOLD}{Colors.BLUE}Adaptive training started at: {start_clock}{Colors.ENDC}")
+
         self.in_adaptive_fit = True
         train_indices = []
         test_indices = None
@@ -2940,8 +2945,8 @@ class DBNN(GPUDBNN):
 
                 # Check training accuracy
                 print(f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
+                train_predictions = results['train_predictions']['predicted_class']
+                train_accuracy = (train_predictions == y_train.cpu().numpy()).mean()
                 print(f"Training accuracy: {train_accuracy:.4f}")
 
                 # Get test accuracy from results
@@ -2978,20 +2983,28 @@ class DBNN(GPUDBNN):
                         print("Stopping adaptive training.")
                         break
 
-                # Evaluate test data
-                X_test = self.X_tensor[test_indices]
-                y_test = self.y_tensor[test_indices]
-                print(f"{Colors.YELLOW}Predctions on Test data{Colors.ENDC}", end="\r", flush=True)
-                test_predictions = self.predict(X_test, batch_size=batch_size)
+                # Evaluate test data using combined predictions from fit_predict
+                test_predictions = results['test_predictions']['predicted_class']
+                y_test = self.y_tensor[test_indices].cpu().numpy()
+
+                # Convert test_predictions to a NumPy array if it's a Pandas Series
+                if isinstance(test_predictions, pd.Series):
+                    test_predictions = test_predictions.to_numpy()
+
+                # Ensure test_predictions is numeric
+                if test_predictions.dtype == np.object_:
+                    # If predictions are class labels, convert them to numeric indices
+                    test_predictions = self.label_encoder.transform(test_predictions)
+                else:
+                    # If predictions are numeric but stored as object, cast to int64
+                    test_predictions = test_predictions.astype(np.int64)
 
                 # Only print test performance header if we didn't just print metrics in fit_predict
                 if not hasattr(self, '_last_metrics_printed') or not self._last_metrics_printed:
                     print(f"{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
-                    y_test_cpu = y_test.cpu().numpy()
-                    test_predictions_cpu = test_predictions.cpu().numpy()
                     # Generate classification report and confusion matrix
-                    classification_report_str = classification_report(y_test_cpu, y_pred_cpu)
-                    self.print_colored_confusion_matrix(y_test_cpu, test_predictions_cpu,header="Test Data")
+                    classification_report_str = classification_report(y_test, test_predictions)
+                    self.print_colored_confusion_matrix(y_test, test_predictions, header="Test Data")
 
                 # Reset the metrics printed flag
                 self._last_metrics_printed = False
@@ -3041,6 +3054,16 @@ class DBNN(GPUDBNN):
 
                 # Save the current split
                 self.save_last_split(train_indices, test_indices)
+
+            # Record the end time
+            end_time = time.time()
+            end_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
+            elapsed_time = end_time - start_time
+
+            # Print the timing information
+            print(f"{Colors.BOLD}{Colors.BLUE}Adaptive training started at: {start_clock}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{Colors.BLUE}Adaptive training ended at: {end_clock}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{Colors.BLUE}Total adaptive training time: {elapsed_time:.2f} seconds{Colors.ENDC}")
 
             self.in_adaptive_fit = False
             return {'train_indices': train_indices, 'test_indices': test_indices}
@@ -4781,7 +4804,7 @@ class DBNN(GPUDBNN):
 
             combined_accuracy=len(X_all[y_all_pr==all_pr])/len(X_all)
             if combined_accuracy>self.best_combined_accuracy:
-                print(f"The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}")
+                print(f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
                 self.best_combined_accuracy=combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
