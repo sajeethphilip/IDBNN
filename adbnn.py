@@ -1853,6 +1853,8 @@ class DBNN(GPUDBNN):
         # Add new attributes to track the best round
         self.best_round = None  # Track the best round number
         self.best_round_initial_conditions = None  # Save initial conditions of the best round
+        self.best_combined_accuracy = 0.00
+        self.best_model_weights = None
 
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
@@ -4092,6 +4094,14 @@ class DBNN(GPUDBNN):
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
         """Training loop with proper weight handling and enhanced progress tracking"""
         print("Starting training..." , end="\r", flush=True)
+        # Initialize best combined accuracy if not already set
+        if not hasattr(self, 'best_combined_accuracy'):
+            self.best_combined_accuracy = 0.0
+
+        # Initialize best model weights if not already set
+        if not hasattr(self, 'best_model_weights'):
+            self.best_model_weights = None
+
         # Store initial conditions at the start of training
         if self.best_round_initial_conditions is None:
             self.best_round_initial_conditions = {
@@ -4239,7 +4249,7 @@ class DBNN(GPUDBNN):
                 improvement = self.best_error - train_error_rate
                 self.best_error = train_error_rate
                 self.best_W = self.current_W.clone()  # Save current weights as best
-                self._save_best_weights()
+                #self._save_best_weights()   # move it to train_fit
 
                 if improvement <= 0.001:
                     patience_counter += 1
@@ -4261,17 +4271,19 @@ class DBNN(GPUDBNN):
             if self.save_plots:
                 # Reconstruct features from predictions
                 reconstructed_features = self.reconstruct_features(posteriors)
+                save_path=f"data/{self.dataset_name}/plots/epoch_{epoch+1}"
+                os.makedirs(save_path, exist_ok=True)
                 self._save_reconstruction_plots(
                     original_features=X_train.cpu().numpy(),
                     reconstructed_features=reconstructed_features.cpu().numpy(),
                     true_labels=y_train.cpu().numpy(),
-                    save_path=f"data/{self.dataset_name}/plots/{self.dataset_name}_epoch_{epoch+1}"
+                    save_path=save_path
                 )
 
 
         # Training complete
         epoch_pbar.close()
-        self._save_model_components()
+        #self._save_model_components()
         return self.current_W.cpu(), error_rates
 
     #---------------------------------Train InvertableDBNN on the fly ------------------------------------
@@ -4842,6 +4854,12 @@ class DBNN(GPUDBNN):
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
             all_predictions = self.predict(X_all, batch_size=batch_size)
+            combined_accuracy=len(X_all[y_all==all_predictions])/len(X_all)
+            if combined_accuracy>self.best_combined_accuracy:
+                print(f"The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}")
+                self.best_combined_accuracy=combined_accuracy
+                self._save_model_components()
+                self._save_best_weights()
 
             # Generate detailed predictions for the entire dataset
             all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
@@ -4884,7 +4902,7 @@ class DBNN(GPUDBNN):
             }
 
             print(f"Test Accuracy: {results['test_accuracy']:.4f}")
-            self._save_model_components()
+            #self._save_model_components()
 
 
             # Extract predictions for training and test data using stored indices
@@ -4953,7 +4971,7 @@ class DBNN(GPUDBNN):
 
             print(f"Training Accuracy: {results['train_accuracy']:.4f}")
             print(f"Test Accuracy: {results['test_accuracy']:.4f}")
-            self._save_model_components()
+            #self._save_model_components()
 
             # Generate point-colored confusion matrices for train, test, and combined data
             print(f"{Colors.BOLD}Generating Confusion Matrices:{Colors.ENDC}")
@@ -5218,7 +5236,7 @@ class DBNN(GPUDBNN):
         with open(components_file, 'wb') as f:
             pickle.dump(components, f)
 
-        print(f"Saved model components to {components_file}", end="\r", flush=True)
+        print(f"Saved model components to {components_file}")
         print(f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
         return True
 
