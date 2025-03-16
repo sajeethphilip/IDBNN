@@ -163,7 +163,7 @@ Number of classes in data = [0 1]
 
 [12632 rows x 130 columns]>
 [DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:
-- n_features: 128
+- n_features: 110
 - group_size: 2
 - max_combinations: 10000
 - bin_sizes: [21]
@@ -171,17 +171,40 @@ Number of classes in data = [0 1]
 [DEBUG] Loading cached feature combinations from data/galaxies/training_data/galaxies/feature_combinations.pkl
 ---------------------BEWARE!! Remove if you get Error on retraining------------------------
 [DEBUG] Loaded feature combinations: torch.Size([1830, 2])
-Dataset shape: torch.Size([12632, 128])
+Dataset shape: torch.Size([12632, 110])
 Bin sizes: [64]
 Loading previous model state
-Loaded best weights from Model/Best_Histogram_galaxies_weights.json
-Loading previous training data...
-Loaded 0 previous training samples
+No previous model found - starting fresh
+Initializing fresh model
+[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:
+- n_features: 110
+- group_size: 2
+- max_combinations: 10000
+- bin_sizes: [21]
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loading cached feature combinations from data/galaxies/training_data/galaxies/feature_combinations.pkl
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loaded feature combinations: torch.Size([1830, 2])
+Computing pairwise likelihoods...
+Processing feature pairs: 100%|██████████████████████████████████████████████████| 1830/1830 [00:01<00:00, 956.46it/s]
+[DEBUG] Weight initialization complete. Structure:
+- Number of classes: 2
+- Class 0: 1830 feature pairs
+- Class 1: 1830 feature pairs
 Initializing new training set with minimum samples
 Round 1/20
 Training set size: 4
 Test set size: 12628
-Training epochs:   0%|                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 0/1000 [00:00<?, ?it/s
+Training epochs:   0%|                                                                                                                                     | 0/1000 [00:00<?, ?it/s Prediction batches: 100%|█████████████████████████████████| 1/1 [00:00<00:00,  2.60it/s]
+Training epochs:   0%|                                                           | 1/1000 [00:00<13:24,  1.24it/s, train_err=0.0000 (best: 0.0000), train_acc=1.0000 (best: 1.0000)  Early stopping.
+Training epochs:   0%|                                                           | 1/1000 [00:00<13:24,  1.24it/s, train_err=0.0000 (best: 0.0000), train_acc=1.0000 (best: 1.0000)]
+Prediction batches: 100%|████████████████████████████████████████████| 395/395 [02:34<00:00,  2.55it/s]
+---------------------------------------------------------------------------------------
+The best combined accuracy has improved from 0.0 to 0.9426852438252058
+---------------------------------------------------------------------------------------
+Saved model components to Model/BestHistogram_galaxies_components.pkl
+Computing detailed predictions for the whole data
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 0/1000 [00:00<?, ?it/s
 Prediction batches: 100%|███████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  2.63it/s]
 Training epochs:   0%|▌                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 1/1000 [00:00<13:46,  1.21it/s, train_err=0.5000 (best: 0.5000), train_acc=0.5000 (best: 0.5000)
 Prediction batches: 100%|██████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  2.67it/s]
