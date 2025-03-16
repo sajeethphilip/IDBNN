@@ -4711,31 +4711,96 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
         return running_loss / len(val_loader), 100. * correct / total
 
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract features from data"""
-        self.feature_extractor.eval()
-        features = []
-        labels = []
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """
+        Universal feature extraction method for all autoencoder variants.
+        Handles both basic and enhanced feature extraction with proper device management.
+        """
+        self.eval()
+        all_embeddings = []
+        all_labels = []
+        all_filenames = []  # Initialize list to store filenames (if available)
 
         try:
             with torch.no_grad():
-                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                for batch in tqdm(loader, desc="Extracting features"):
+                    # Handle both (inputs, labels) and (inputs, labels, filenames)
+                    if len(batch) == 2:
+                        inputs, labels = batch
+                        filenames = None  # No filenames provided
+                    elif len(batch) == 3:
+                        inputs, labels, filenames = batch
+                    else:
+                        raise ValueError("Dataloader must yield tuples of (inputs, labels) or (inputs, labels, filenames)")
+
+                    # Move data to correct device
                     inputs = inputs.to(self.device)
-                    outputs = self.feature_extractor(inputs)
-                    features.append(outputs.cpu())
-                    labels.append(targets)
+                    labels = labels.to(self.device)
 
-                    # Cleanup
-                    del inputs, outputs
-                    if len(features) % 50 == 0:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    # Get embeddings
+                    if self.training_phase == 2 and hasattr(self, 'forward'):
+                        # Use full forward pass in phase 2 to get all enhancement features
+                        outputs = self(inputs)
+                        if isinstance(outputs, dict):
+                            embeddings = outputs['embedding']
+                        else:
+                            embeddings = outputs[0]
+                    else:
+                        # Basic embedding extraction
+                        embeddings = self.encode(inputs)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
 
-            return torch.cat(features), torch.cat(labels)
+                    # Store results (keeping on device for now)
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    if filenames is not None:
+                        all_filenames.extend(filenames)  # Store filenames if available
+
+                # Concatenate all results while still on device
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
+
+                # Initialize base feature dictionary
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels
+                }
+
+                # Add filenames to the feature dictionary if available
+                if all_filenames:
+                    feature_dict['filenames'] = all_filenames
+
+                # Add enhancement features if in phase 2
+                if self.training_phase == 2:
+                    # Add clustering information if enabled
+                    if self.use_kl_divergence:
+                        cluster_info = self.organize_latent_space(embeddings, labels)
+                        feature_dict.update(cluster_info)
+
+                    # Add classification information if enabled
+                    if self.use_class_encoding and hasattr(self, 'classifier'):
+                        class_logits = self.classifier(embeddings)
+                        feature_dict.update({
+                            'class_logits': class_logits,
+                            'class_predictions': class_logits.argmax(dim=1),
+                            'class_probabilities': F.softmax(class_logits, dim=1)
+                        })
+
+                    # Add specialized features for enhanced models
+                    if hasattr(self, 'get_enhancement_features'):
+                        enhancement_features = self.get_enhancement_features(embeddings)
+                        feature_dict.update(enhancement_features)
+
+                # Move all tensors to CPU for final output
+                for key in feature_dict:
+                    if isinstance(feature_dict[key], torch.Tensor):
+                        feature_dict[key] = feature_dict[key].cpu()
+
+                return feature_dict
 
         except Exception as e:
-            logger.error(f"Error extracting features: {str(e)}")
+            logger.error(f"Error during feature extraction: {str(e)}")
             raise
 
     def get_feature_shape(self) -> Tuple[int, ...]:
