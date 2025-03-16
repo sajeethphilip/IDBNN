@@ -203,14 +203,14 @@ Prediction batches: 100%|██████████████████�
 The best combined accuracy has improved from 0.0 to 0.9426852438252058
 ---------------------------------------------------------------------------------------
 Saved model components to Model/BestHistogram_galaxies_components.pkl
-Computing detailed predictions for the whole data
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 0/1000 [00:00<?, ?it/s
+Computing detailed predictions for the whole data   | 0/1000 [00:00<?, ?it/s
+
 Prediction batches: 100%|███████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  2.63it/s]
-Training epochs:   0%|▌                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 1/1000 [00:00<13:46,  1.21it/s, train_err=0.5000 (best: 0.5000), train_acc=0.5000 (best: 0.5000)
+Training epochs:   0%|▌    | 1/1000 [00:00<13:46,  1.21it/s, train_err=0.5000 (best: 0.5000), train_acc=0.5000 (best: 0.5000)
 Prediction batches: 100%|██████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  2.67it/s]
-Training epochs:   0%|█                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 2/1000 [00:02<26:12,  1.58s/it, train_err=0.2500 (best: 0.2500), train_acc=0.7500 (best: 0.7500)
+Training epochs:   0%|█   | 2/1000 [00:02<26:12,  1.58s/it, train_err=0.2500 (best: 0.2500), train_acc=0.7500 (best: 0.7500)
 Prediction batches: 100%|██████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00,  2.67it/s]
-Training epochs:   0%|█▌                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 3/1000 [00:04<26:43,  1.61s/it, train_err=0.2500 (best: 0.2500), train_acc=0.7500 (best: 0.7500) Prediction batches: 
+Training epochs:   0%|█▌  | 3/1000 [00:04<26:43,  1.61s/it, train_err=0.2500 (best: 0.2500), train_acc=0.7500 (best: 0.7500) Prediction batches: 
 ...
 ---------------------------------------------------------------------------------------
 The best combined accuracy has improved from 0.0 to 0.8993825205826472
@@ -261,6 +261,35 @@ Prediction batches: 100%|██████████████████�
 ---------------------------------------------------------------------------------------
 The best combined accuracy has improved from 0.9426852438252058 to 0.9690468651044966
 ---------------------------------------------------------------------------------------
+aved model components to Model/BestHistogram_galaxies_components.pkl
+Confusion Matrix and Class-wise Accuracy for [Training Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              169     23       88.02%
+1              50      165      76.74%
+-----------------------------------------
+Overall Accuracy: 82.06%
+Best Overall Accuracy till now is: 96.90%
+Confusion Matrix and Class-wise Accuracy for [Test Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11022   223      98.02%
+1              95      885      90.31%
+-----------------------------------------
+Overall Accuracy: 97.40%
+Best Overall Accuracy till now is: 96.90%
+Confusion Matrix and Class-wise Accuracy for [Combined Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11191   246      97.85%
+1              145     1050     87.87%
+-----------------------------------------
+Overall Accuracy: 96.90%
+Best Overall Accuracy till now is: 96.90%
+Training accuracy: 0.8206         
+Improved training accuracy to 0.8206
+Last testing data is saved to galaxies_Last_testing.csv
+Last training data is saved to galaxies_Last_training.csv
 
 
 
