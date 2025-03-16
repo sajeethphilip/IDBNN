@@ -4865,7 +4865,7 @@ class CustomImageDataset(Dataset):
         else:
             self.image_files = []
             self.labels = []
-            unique_labels = sorted(os.listdir(data_dir))
+            unique_labels = sorted(os.listdir(data_dir))  # Sort class directories
 
             for idx, label in enumerate(unique_labels):
                 self.label_encoder[label] = idx
@@ -4882,10 +4882,11 @@ class CustomImageDataset(Dataset):
             for class_name in unique_labels:
                 class_dir = os.path.join(data_dir, class_name)
                 if os.path.isdir(class_dir):
-                    for img_name in os.listdir(class_dir):
-                        if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                            self.image_files.append(os.path.join(class_dir, img_name))
-                            self.labels.append(self.label_encoder[class_name])
+                    # Sort image files by filename
+                    image_files = sorted([f for f in os.listdir(class_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+                    for img_name in image_files:
+                        self.image_files.append(os.path.join(class_dir, img_name))
+                        self.labels.append(self.label_encoder[class_name])
 
     def __len__(self):
         return len(self.image_files)
@@ -5577,7 +5578,6 @@ class DatasetProcessor:
 
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
-        """Create train/test split from source directory"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
@@ -5595,12 +5595,12 @@ class DatasetProcessor:
             os.makedirs(train_class_dir, exist_ok=True)
             os.makedirs(test_class_dir, exist_ok=True)
 
-            # Get all image files
-            image_files = [f for f in os.listdir(class_path)
-                         if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)]
+            # Get all image files and sort them by filename
+            image_files = sorted([f for f in os.listdir(class_path)
+                                if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)])
 
             # Random split
-            random.shuffle(image_files)
+            random.shuffle(image_files)  # If you want to maintain the sorted order, remove this line
             split_idx = int((1 - test_size) * len(image_files))
             train_files = image_files[:split_idx]
             test_files = image_files[split_idx:]
