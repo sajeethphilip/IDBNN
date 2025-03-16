@@ -4882,8 +4882,8 @@ class DBNN(GPUDBNN):
                 'classification_report': classification_report(y_test_labels, y_test_pred_labels),
                 'confusion_matrix': confusion_matrix(y_test_labels, y_test_pred_labels),
                 'error_rates': error_rates,
-                'test_accuracy': (y_test_pred == y_test_cpu).astype(float).mean().item(),  # Convert to float before mean
-                'train_accuracy': (y_train_pred == y_train_cpu).astype(float).mean().item()  # Convert to float before mean
+                'test_accuracy': (np.asarray(y_test_pred) ==np.asarray(y_test_cpu)).astype(float).mean().item(),  # Convert to float before mean
+                'train_accuracy': (np.asarray(y_train_pred) == np.asarray(y_train_cpu)).astype(float).mean().item()  # Convert to float before mean
             }
 
             # Generate point-colored confusion matrices for train, test, and combined data
