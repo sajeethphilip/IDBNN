@@ -222,4 +222,32 @@ Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
 
 
+---------
+Confusion Matrix and Class-wise Accuracy for [Training Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              2       126       1.56%
+1              361     33        8.38%
+-----------------------------------------
+Overall Accuracy: 6.70%
+Best Overall Accuracy till now is: 89.94%
+Confusion Matrix and Class-wise Accuracy for [Test Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              10688   621      94.51%
+1              171     630      78.65%
+-----------------------------------------
+Overall Accuracy: 93.46%
+Best Overall Accuracy till now is: 89.94%
+Confusion Matrix and Class-wise Accuracy for [Combined Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              10690   747      93.47%
+1              532     663      55.48%
+-----------------------------------------
+Overall Accuracy: 89.87%
+Best Overall Accuracy till now is: 89.94%
+Training accuracy: 0.0670         
+
+
 ```
