@@ -4821,22 +4821,14 @@ class DBNN(GPUDBNN):
 
             # Save training predictions
             print("\033[K" + "Saving Train predictions", end='\r', flush=True)
-            train_results = self._generate_detailed_predictions(
-                self.data.iloc[self.train_indices],  # Subset of data for training
-                y_train_pred,  # Predictions for training data
-                y_train.cpu().numpy()  # True labels for training data
-            )
+            train_results = all_results.iloc[self.train_indices]
             train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
 
             # Save test predictions
             print("\033[K" + "Saving Test predictions", end='\r', flush=True)
-            test_results = self._generate_detailed_predictions(
-                self.data.iloc[self.test_indices],  # Subset of data for testing
-                y_test_pred,  # Predictions for test data
-                y_test.cpu().numpy()  # True labels for test data
-            )
-            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
 
+            test_results.to_csv(f"{save_path}/test_predictions.csv", index=False)
+            test_results = all_results.iloc[self.test_indices]
             # Save results if path is provided
             if save_path:
                 # Save all predictions
