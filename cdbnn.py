@@ -1906,7 +1906,7 @@ class ModelFactory:
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
+    """Two-phase training implementation with checkpoint handling."""
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
 
@@ -1957,7 +1957,6 @@ def train_model(model: nn.Module, train_loader: DataLoader,
             history[f"phase2_{key}"] = value
 
     return history
-
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -2061,11 +2060,10 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic for each phase with enhanced checkpoint handling"""
+    """Training logic for each phase with enhanced checkpoint handling."""
     history = defaultdict(list)
     device = next(model.parameters()).device
 
-    # Get phase-specific metrics
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
@@ -2081,12 +2079,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
             # Training loop
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (data, labels) in enumerate(pbar):
+            for batch_idx, (inputs, labels, _) in enumerate(pbar):  # Ignore image_name
                 try:
                     # Move data to correct device
-                    if isinstance(data, (list, tuple)):
-                        data = data[0]
-                    data = data.to(device)
+                    if isinstance(inputs, (list, tuple)):
+                        inputs = inputs[0]
+                    inputs = inputs.to(device)
                     labels = labels.to(device)
 
                     # Zero gradients
@@ -2095,14 +2093,14 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     # Forward pass based on phase
                     if phase == 1:
                         # Phase 1: Only reconstruction
-                        embeddings = model.encode(data)
+                        embeddings = model.encode(inputs)
                         if isinstance(embeddings, tuple):
                             embeddings = embeddings[0]
                         reconstruction = model.decode(embeddings)
-                        loss = F.mse_loss(reconstruction, data)
+                        loss = F.mse_loss(reconstruction, inputs)
                     else:
                         # Phase 2: Include clustering and classification
-                        output = model(data)
+                        output = model(inputs)
                         if isinstance(output, dict):
                             reconstruction = output['reconstruction']
                             embedding = output['embedding']
@@ -2111,7 +2109,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                         # Calculate base loss
                         loss = loss_manager.calculate_loss(
-                            reconstruction, data,
+                            reconstruction, inputs,
                             config['dataset'].get('image_type', 'general')
                         )['loss']
 
@@ -2138,22 +2136,15 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss.backward()
                     optimizer.step()
 
-                    # Update running loss - handle possible NaN or inf
-                    current_loss = loss.item()
-                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
-                        running_loss += current_loss
+                    # Update running loss
+                    running_loss += loss.item()
 
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
-
-                    # Update progress bar with safe values
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
+                    # Update progress bar
+                    batch_loss = running_loss / (batch_idx + 1)
+                    pbar.set_postfix({'loss': f'{batch_loss:.4f}', 'best': f'{best_loss:.4f}'})
 
                     # Memory cleanup
-                    del data, loss
+                    del inputs, loss
                     if phase == 2:
                         del output
                     torch.cuda.empty_cache()
@@ -2162,14 +2153,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
                     continue
 
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
-            else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
-
-            # Record history
+            # Calculate epoch average loss
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Save checkpoint and check for best model
@@ -2188,6 +2173,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 loss=avg_loss,
                 is_best=is_best
             )
+
             # Early stopping check
             patience = config['training'].get('early_stopping', {}).get('patience', 5)
             if patience_counter >= patience:
@@ -3403,14 +3389,19 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         reconstruction_accuracy = 0.0
 
         with torch.no_grad():
-            for inputs, _ in val_loader:
-                inputs = inputs.to(self.device)
-                embedding, reconstruction = self.feature_extractor(inputs)
+            for inputs, labels, _ in val_loader:  # Ignore image_name
+                inputs = inputs.to(model.device)
+                labels = labels.to(model.device)
 
-                loss = self._calculate_loss(inputs, reconstruction, embedding)
+                # Forward pass
+                embedding, reconstruction = model(inputs)
+                loss = F.mse_loss(reconstruction, inputs)
+
+                # Update metrics
                 running_loss += loss.item()
                 reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
 
+                # Clean up
                 del inputs, embedding, reconstruction, loss
 
         return (running_loss / len(val_loader),
