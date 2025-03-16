@@ -4847,7 +4847,7 @@ class DBNN(GPUDBNN):
             # Save results if path is provided
             if save_path:
                 # Save all predictions
-                 print("Saving Combined predcitions",end='\r',flush=True)
+                print("Saving Combined predcitions",end='\r',flush=True)
                 all_results.to_csv(f"{save_path}/combined_predictions.csv", index=False)
 
                 # Save metadata
