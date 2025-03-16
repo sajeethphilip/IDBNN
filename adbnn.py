@@ -4167,9 +4167,9 @@ class DBNN(GPUDBNN):
                 'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
             })
 
-            print(f"Epoch {epoch + 1}/{self.max_epochs}:", end="\r", flush=True)
-            print(f"Training time: {Colors.highlight_time(training_time)} seconds", end="\r", flush=True)
-            print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})", end="\r", flush=True)
+            #print(f"Epoch {epoch + 1}/{self.max_epochs}:", end="\r", flush=True)
+            #print(f"Training time: {Colors.highlight_time(training_time)} seconds", end="\r", flush=True)
+            #print(f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})", end="\r", flush=True)
             #print(f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})", end="\r", flush=True)
 
             # Update previous values for next iteration
