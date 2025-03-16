@@ -4876,7 +4876,7 @@ class DBNN(GPUDBNN):
             y_train_pred_labels = self.label_encoder.inverse_transform(y_train_pred)
 
             # Prepare results
-             print("Preparing results of training",end='\r',flush=True)
+            print("Preparing results of training",end='\r',flush=True)
             results = {
                 'all_predictions': all_results,
                 'train_predictions': train_results,
