@@ -4834,7 +4834,19 @@ class DBNN(GPUDBNN):
                 # Save all predictions
                 print("\033[K" + "Saving Combined predictions", end='\r', flush=True)
                 all_results.to_csv(f"{save_path}/combined_predictions.csv", index=False)
+                # Filter failed examples (where predicted class != true class)
+                failed_examples = all_results[all_results['predicted_class'] != all_results['true_class']]
 
+                # Filter passed examples (where predicted class == true class)
+                passed_examples = all_results[all_results['predicted_class'] == all_results['true_class']]
+
+                # Save failed examples
+                print("\033[K" + "Saving Failed examples", end='\r', flush=True)
+                failed_examples.to_csv(f"{save_path}/failed_examples.csv", index=False)
+
+                # Save passed examples
+                print("\033[K" + "Saving Passed examples", end='\r', flush=True)
+                passed_examples.to_csv(f"{save_path}/passed_examples.csv", index=False)
                 # Save metadata
                 print("\033[K" + "Saving Metadata", end='\r', flush=True)
                 metadata = {
