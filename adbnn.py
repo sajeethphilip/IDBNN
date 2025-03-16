@@ -4920,9 +4920,6 @@ class DBNN(GPUDBNN):
                 'train_accuracy': (y_train_pred == y_train_cpu).mean()
             }
 
-            print(f"Training Accuracy: {results['train_accuracy']:.4f}")
-            print(f"Test Accuracy: {results['test_accuracy']:.4f}")
-            #self._save_model_components()
 
             # Generate point-colored confusion matrices for train, test, and combined data
             print(f"{Colors.BOLD}Generating Confusion Matrices:{Colors.ENDC}")
