@@ -63,6 +63,19 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+import os
+from glob import glob
+import pandas as pd
+
+def get_image_names(folder_path: str) -> List[str]:
+    """Get sorted list of image names from a folder."""
+    image_extensions = ('*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tiff')
+    image_names = []
+    for ext in image_extensions:
+        image_names.extend(glob(os.path.join(folder_path, ext)))
+    # Sort to ensure consistent order
+    image_names.sort()
+    return [os.path.basename(img_path) for img_path in image_names]
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -648,18 +661,84 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def save_features_with_image_names(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: List[str]):
         """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
+        Save features to CSV with image names as the first column.
+
+        Args:
+            feature_dict: Dictionary containing features and related information.
+            output_path: Path to save the CSV file.
+            image_names: List of image names corresponding to the data.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            # Determine which features to save
+            feature_columns = ['image_name']
+            data_dict = {'image_name': image_names}
+
+            # Process embeddings
+            if 'embeddings' in feature_dict:
+                embeddings = feature_dict['embeddings'].cpu().numpy()
+                for i in range(embeddings.shape[1]):
+                    col_name = f'feature_{i}'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = embeddings[:, i]
+
+            # Process labels/targets
+            if 'labels' in feature_dict:
+                data_dict['target'] = feature_dict['labels'].cpu().numpy()
+                feature_columns.append('target')
+
+            # Save in chunks to manage memory
+            chunk_size = 1000
+            total_samples = len(image_names)
+
+            for start_idx in range(0, total_samples, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_samples)
+
+                # Create chunk dictionary
+                chunk_dict = {
+                    col: data_dict[col][start_idx:end_idx]
+                    for col in feature_columns
+                }
+
+                # Save chunk to CSV
+                df = pd.DataFrame(chunk_dict)
+                mode = 'w' if start_idx == 0 else 'a'
+                header = start_idx == 0
+                df.to_csv(output_path, mode=mode, index=False, header=header)
+
+                # Clean up
+                del df, chunk_dict
+                gc.collect()
+
+            logger.info(f"Features saved to {output_path}")
+            logger.info(f"Total features saved: {len(feature_columns)}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
+
+    def extract_features(self, loader: DataLoader, output_path: Optional[str] = None) -> Dict[str, torch.Tensor]:
+        """
+        Extract features and save them to a CSV file with image names.
+
+        Args:
+            loader: DataLoader providing images, labels, and image names.
+            output_path: Path to save the CSV file. If None, only return the feature dictionary.
+
+        Returns:
+            Dictionary containing features and related information.
         """
         self.eval()
         all_embeddings = []
         all_labels = []
+        all_image_names = []
 
         try:
             with torch.no_grad():
-                for inputs, labels in tqdm(loader, desc="Extracting features"):
+                for inputs, labels, img_names in tqdm(loader, desc="Extracting features"):
                     # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
@@ -681,6 +760,7 @@ class BaseAutoencoder(nn.Module):
                     # Store results (keeping on device for now)
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
+                    all_image_names.extend(img_names)  # Collect image names
 
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
@@ -717,6 +797,10 @@ class BaseAutoencoder(nn.Module):
                 for key in feature_dict:
                     if isinstance(feature_dict[key], torch.Tensor):
                         feature_dict[key] = feature_dict[key].cpu()
+
+                # Save features to CSV if output_path is provided
+                if output_path:
+                    self.save_features_with_image_names(feature_dict, output_path, all_image_names)
 
                 return feature_dict
 
@@ -4853,7 +4937,7 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    """Custom dataset for loading images from directory structure"""
+    """Custom dataset for loading images from directory structure."""
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
@@ -4894,11 +4978,12 @@ class CustomImageDataset(Dataset):
         img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
+        img_name = os.path.basename(img_path)  # Extract image name
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, img_name  # Return image, label, and image name
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
@@ -5300,10 +5385,10 @@ class DatasetProcessor:
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
-        """Generate dataset-specific configuration"""
+        """Generate dataset-specific configuration including image_name."""
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
+            "column_names": ["image_name"] + [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -5322,7 +5407,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size":128,
+                "batch_size": 128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5350,7 +5435,6 @@ class DatasetProcessor:
                 "gen_samples": False
             }
         }
-
     def _generate_dbnn_config(self, main_config: Dict) -> Dict:
         """Generate DBNN-specific configuration"""
         return {
