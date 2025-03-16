@@ -3321,7 +3321,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             feature_dims=self.feature_dims
         ).to(self.device)
 
-    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+    def train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
         """Train one epoch with reconstruction visualization"""
         self.feature_extractor.train()
         running_loss = 0.0
@@ -3335,7 +3335,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
                    unit='batch', leave=False)
 
-        for batch_idx, (inputs, _) in enumerate(pbar):
+        for batch_idx, (inputs, _, _) in enumerate(pbar):  # Unpack all three values, ignore labels and image_names
             try:
                 inputs = inputs.to(self.device)
 
@@ -3378,6 +3378,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         pbar.close()
         return (running_loss / len(train_loader),
                 (reconstruction_accuracy / len(train_loader)) * 100)
+
 
     def _calculate_loss(self, inputs: torch.Tensor, reconstruction: torch.Tensor,
                       embedding: torch.Tensor) -> torch.Tensor:
