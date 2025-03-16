@@ -351,7 +351,7 @@ Improved training accuracy to 0.7610
 Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
 
-
+----------------Now there is no improvement, and the code runs till persistence is exhausted.
 
 
 ```
