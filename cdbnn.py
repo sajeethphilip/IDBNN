@@ -4802,7 +4802,6 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
-
     def get_feature_shape(self) -> Tuple[int, ...]:
         """Get shape of extracted features"""
         return (self.feature_dims,)

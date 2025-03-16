@@ -64,9 +64,13 @@ class TestFilenameTracking(unittest.TestCase):
         # Extract features
         feature_dict = self.model.extract_features(dataloader)
 
+        # Verify that filenames are included in the feature_dict
+        self.assertIn('filenames', feature_dict, "Filenames not found in feature_dict")
+        self.assertEqual(feature_dict['filenames'], self.filenames, "Filenames do not match expected order")
+
         # Save features to CSV
         output_csv = os.path.join(self.dataset_dir, "features.csv")
-        self.model.save_features(feature_dict, output_csv, image_names=self.filenames)
+        self.model.save_features(feature_dict, output_csv, image_names=feature_dict['filenames'])
 
         # Load the CSV file
         df = pd.read_csv(output_csv)
