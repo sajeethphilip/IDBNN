@@ -4851,7 +4851,7 @@ class DBNN(GPUDBNN):
                 'test_accuracy': (y_pred_cpu == y_test_cpu).mean()
             }
 
-            print(f"Test Accuracy: {results['test_accuracy']:.4f}")
+            print(f"Test Accuracy: {results['test_accuracy']:.4f}                            ")
             #self._save_model_components()
 
 
