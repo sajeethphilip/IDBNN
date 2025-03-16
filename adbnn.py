@@ -2954,25 +2954,20 @@ class DBNN(GPUDBNN):
                 # Check if we're improving overall
                 improved = False
                 if 'best_train_accuracy' not in locals():
-                    best_train_accuracy = train_accuracy
+                    best_train_accuracy = self.best_combined_accuracy
                     improved = True
-                elif train_accuracy > best_train_accuracy + improvement_threshold:
-                    best_train_accuracy = train_accuracy
+                elif self.best_combined_accuracy > best_train_accuracy + improvement_threshold:
+                    best_train_accuracy = self.best_combined_accuracy
                     improved = True
                     print("\033[K" +f"Improved training accuracy to {train_accuracy:.4f}")
-
-                if 'best_test_accuracy' not in locals():
-                    best_test_accuracy = test_accuracy
-                    improved = True
-                elif test_accuracy > best_test_accuracy + improvement_threshold:
-                    best_test_accuracy = test_accuracy
-                    improved = True
-                    print("\033[K" +f"Improved test accuracy to {test_accuracy:.4f}")
 
                 # Reset adaptive patience if improved
                 if improved:
                     adaptive_patience_counter = 0
-                else:
+                    # Save the last training and test data
+                    self.save_last_split(self.train_indices, self.test_indices)
+                    print("\033[K" + "Saved model and data due to improved training accuracy")
+               else:
                     adaptive_patience_counter += 1
                     print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
                     if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
@@ -2997,16 +2992,6 @@ class DBNN(GPUDBNN):
                 else:
                     # If predictions are numeric but stored as object, cast to int64
                     test_predictions = test_predictions.astype(np.int64)
-
-                # Only print test performance header if we didn't just print metrics in fit_predict
-                if not hasattr(self, '_last_metrics_printed') or not self._last_metrics_printed:
-                    print("\033[K" +f"{Colors.BLUE}Test Set Performance - Round {round_num + 1}{Colors.ENDC}")
-                    # Generate classification report and confusion matrix
-                    classification_report_str = classification_report(y_test, test_predictions)
-                    self.print_colored_confusion_matrix(y_test, test_predictions, header="Test Data")
-
-                # Reset the metrics printed flag
-                self._last_metrics_printed = False
 
                 # Check if we've achieved perfect accuracy
                 if train_accuracy == 1.0:
@@ -3051,8 +3036,6 @@ class DBNN(GPUDBNN):
                 test_indices = list(set(test_indices) - set(new_train_indices))
                 print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
 
-                # Save the current split
-                self.save_last_split(train_indices, test_indices)
 
             # Record the end time
             end_time = time.time()
