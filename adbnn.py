@@ -3759,8 +3759,8 @@ class DBNN(GPUDBNN):
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
         test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=False)
-        print("\033[K" +f"Last testing data is saved to {dataset_name}_Last_testing.csv")
-        print("\033[K" +f"Last training data is saved to {dataset_name}_Last_training.csv")
+        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to {dataset_name}_Last_testing.csv{Colors.ENDC}")
+        print("\033[K" +f"{Colors.GREEN}Last training data is saved to {dataset_name}_Last_training.csv{Colors.ENDC}")
 
     def load_last_known_split(self):
         """Load the last known good training/testing split with proper column alignment"""
