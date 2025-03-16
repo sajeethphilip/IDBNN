@@ -296,6 +296,61 @@ Training accuracy: 0.8206
 Improved training accuracy to 0.8206
 Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
+Saved model and data due to improved training accuracy
+Total samples selected: 49                                                           
+Resetting to initial conditions of best round None
+Added 49 new samples to training set
+Round 3/20
+Training set size: 456
+Test set size: 12176
+Training epochs:   0%|  | 0/1000 [00:00<?, ?it/s Prediction batches: 100%|█████████████████████████████████████████████████████| 15/15 [00:05<00:00,  2.51it/s]
+Training epochs:   0%|                                                         | 1/1000 [00:11<3:17:13, 11.85s/it, train_err=0.2675 (best: 0.2675),
+train_acc=0.7325 (best: 0.7325) Prediction batches: 100%|████████████████████████████████████████████| 15/15 [00:06<00:00,  2.50it/s]
+Training epochs:   0%|                                                         | 2/1000 [00:41<6:11:26, 22.33s/it, train_err=0.2566 (best: 0.2566),
+train_acc=0.7434 (best: 0.7434) Prediction batches: 100%|████████████████████████████████████████████| 15/15 [00:05<00:00,  2.51it/s]
+Training epochs:   0%|▏                                                        | 3/1000 [01:10<7:01:19, 25.36s/it, train_err=0.2500 (best: 0.2500),
+train_acc=0.7500 (best: 0.7500) Prediction batches: 100%|████████████████████████████████████████████| 15/15 [00:05<00:00,  2.52it/s]
+Training epochs:   0%|▏                                                        | 4/1000 [01:38<7:21:35, 26.60s/it, train_err=0.2390 (best: 0.2390),
+train_acc=0.7610 (best: 0.7610) Prediction batches: 100%|████████████████████████████████████████████| 15/15 [00:05<00:00,  2.58it/s]
+Training epochs:   0%|▎                                                        | 5/1000 [02:06<7:27:26, 26.98s/it, train_err=0.2390 (best: 0.2390),
+train_acc=0.7610 (best: 0.7610)  Early stopping.
+Training epochs:   0%|▎                                                        | 5/1000 [02:06<7:00:01, 25.33s/it, train_err=0.2390 (best: 0.2390),
+train_acc=0.7610 (best: 0.7610)]
+Prediction batches: 100%|███████████████████████████████████████████████████████████████████████| 395/395 [02:35<00:00,  2.54it/s]
+---------------------------------------------------------------------------------------
+The best combined accuracy has improved from 0.9690468651044966 to 0.9701551614946169
+---------------------------------------------------------------------------------------
+Saved model components to Model/BestHistogram_galaxies_components.pkl
+Saved model components to Model/BestHistogram_galaxies_components.pkl
+Confusion Matrix and Class-wise Accuracy for [Training Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              176     34       83.81%
+1              75      171      69.51%
+-----------------------------------------
+Overall Accuracy: 76.10%
+Best Overall Accuracy till now is: 97.02%
+Confusion Matrix and Class-wise Accuracy for [Test Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11022   205      98.17%
+1              63      886      93.36%
+-----------------------------------------
+Overall Accuracy: 97.80%
+Best Overall Accuracy till now is: 97.02%
+Confusion Matrix and Class-wise Accuracy for [Combined Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11198   239      97.91%
+1              138     1057     88.45%
+-----------------------------------------
+Overall Accuracy: 97.02%
+Best Overall Accuracy till now is: 97.02%
+Training accuracy: 0.7610         
+Improved training accuracy to 0.7610
+Last testing data is saved to galaxies_Last_testing.csv
+Last training data is saved to galaxies_Last_training.csv
+
 
 
 
