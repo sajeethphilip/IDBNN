@@ -220,29 +220,30 @@ Confusion Matrix and Class-wise Accuracy for [Training Data]:
 Actual/Predicted0       1       Accuracy
 -----------------------------------------
 0              2       0       100.00%
-1              1       1        50.00%
+1              0       2       100.00%
 -----------------------------------------
-Overall Accuracy: 75.00%
-Best Overall Accuracy till now is: 89.94%
+Overall Accuracy: 100.00%
+Best Overall Accuracy till now is: 94.27%
 Confusion Matrix and Class-wise Accuracy for [Test Data]:
 Actual/Predicted0       1       Accuracy
 -----------------------------------------
-0              10738   697      93.90%
-1              573     620      51.97%
+0              11055   380      96.68%
+1              344     849      71.17%
 -----------------------------------------
-Overall Accuracy: 89.94%
-Best Overall Accuracy till now is: 89.94%
+Overall Accuracy: 94.27%
+Best Overall Accuracy till now is: 94.27%
 Confusion Matrix and Class-wise Accuracy for [Combined Data]:
 Actual/Predicted0       1       Accuracy
 -----------------------------------------
-0              10740   697      93.91%
-1              574     621      51.97%
+0              11057   380      96.68%
+1              344     851      71.21%
 -----------------------------------------
-Overall Accuracy: 89.94%
-Best Overall Accuracy till now is: 89.94%
-Training accuracy: 0.7500
+Overall Accuracy: 94.27%
+Best Overall Accuracy till now is: 94.27%
+Training accuracy: 1.0000         
 Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
+
 
 
 ---------
