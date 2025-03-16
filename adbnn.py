@@ -4827,6 +4827,7 @@ class DBNN(GPUDBNN):
             y_test_pred = all_predictions[self.test_indices].cpu().numpy()
 
             # Save training predictions
+            print("Saving Train predcitions",end='\r',flush=True)
             train_results = self._generate_detailed_predictions(
                 self.data.iloc[self.train_indices],  # Subset of data for training
                 y_train_pred,  # Predictions for training data
@@ -4835,6 +4836,7 @@ class DBNN(GPUDBNN):
             train_results.to_csv(f"{save_path}/train_predictions.csv", index=False)
 
             # Save test predictions
+             print("Saving Test predcitions",end='\r',flush=True)
             test_results = self._generate_detailed_predictions(
                 self.data.iloc[self.test_indices],  # Subset of data for testing
                 y_test_pred,  # Predictions for test data
@@ -4845,9 +4847,11 @@ class DBNN(GPUDBNN):
             # Save results if path is provided
             if save_path:
                 # Save all predictions
+                 print("Saving Combined predcitions",end='\r',flush=True)
                 all_results.to_csv(f"{save_path}/combined_predictions.csv", index=False)
 
                 # Save metadata
+                 print("Saving Metadata                        ",end='\r',flush=True)
                 metadata = {
                     'rejected_columns': self.high_cardinality_columns,
                     'feature_columns': self.feature_columns,
@@ -4872,6 +4876,7 @@ class DBNN(GPUDBNN):
             y_train_pred_labels = self.label_encoder.inverse_transform(y_train_pred)
 
             # Prepare results
+             print("Preparing results of training",end='\r',flush=True)
             results = {
                 'all_predictions': all_results,
                 'train_predictions': train_results,
