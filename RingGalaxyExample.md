@@ -58,5 +58,27 @@ Learning Rates:
 
 Ready to start training. Proceed? (y/n): y
 
+2025-03-17 02:09:21,540 - INFO - Starting model training...
+2025-03-17 02:09:21,541 - INFO - Starting/Resuming Phase 1: Pure reconstruction training
+2025-03-17 02:09:21,543 - INFO - Initialized new unified checkpoint
+Phase 1 - Epoch 1: 100%|███████████████████████████████████████████████████████████████████████████████| 99/99 [00:24<00:00,  3.96it/s, loss=0.7696, best=inf]
+2025-03-17 02:09:46,751 - INFO - Saved state phase1 to unified checkpoint
+2025-03-17 02:09:46,752 - INFO - New best model for phase1 with loss: 0.7696
+2025-03-17 02:09:46,752 - INFO - Phase 1 - Epoch 1: Loss = 0.7696, Best = 0.7696
+Phase 1 - Epoch 2: 100%|████████████████████████████████████████████████████████████████████████████| 99/99 [00:25<00:00,  3.94it/s, loss=0.6646, best=0.7696]
+2025-03-17 02:10:12,640 - INFO - Saved state phase1 to unified checkpoint
+2025-03-17 02:10:12,640 - INFO - New best model for phase1 with loss: 0.6646
+2025-03-17 02:10:12,640 - INFO - Phase 1 - Epoch 2: Loss = 0.6646, Best = 0.6646
+Phase 1 - Epoch 3: 100%|████████████████████████████████████████████████████████████████████████████| 99/99 [00:24<00:00,  4.06it/s, loss=0.6643, best=0.6646]
+2025-03-17 02:10:37,445 - INFO - Saved state phase1 to unified checkpoint
+2025-03-17 02:10:37,446 - INFO - New best model for phase1 with loss: 0.6643
+2025-03-17 02:10:37,446 - INFO - Phase 1 - Epoch 3: Loss = 0.6643, Best = 0.6643
+Phase 1 - Epoch 4: 100%|████████████████████████████████████████████████████████████████████████████| 99/99 [00:23<00:00,  4.22it/s, loss=0.6637, best=0.6643]
+2025-03-17 02:11:01,334 - INFO - Saved state phase1 to unified checkpoint
+2025-03-17 02:11:01,335 - INFO - New best model for phase1 with loss: 0.6637
+2025-03-17 02:11:01,335 - INFO - Phase 1 - Epoch 4: Loss = 0.6637, Best = 0.6637
+....
+
+
 
 ```
