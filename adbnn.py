@@ -2967,7 +2967,7 @@ class DBNN(GPUDBNN):
                     # Save the last training and test data
                     self.save_last_split(self.train_indices, self.test_indices)
                     print("\033[K" + "Saved model and data due to improved training accuracy")
-               else:
+                else:
                     adaptive_patience_counter += 1
                     print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
                     if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
