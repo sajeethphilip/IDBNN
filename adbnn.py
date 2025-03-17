@@ -3161,7 +3161,7 @@ class DBNN(GPUDBNN):
         DEBUG.log(f" Detected categorical columns: {categorical_columns}")
         return categorical_columns
 
-     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
+    def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
         """Preprocess data with improved error handling and column consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
