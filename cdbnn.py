@@ -64,6 +64,70 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
+class PredictionManager:
+    def __init__(self, config: Dict):
+        self.config = config
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
+        self.model = self._load_model()
+
+    def _load_model(self) -> nn.Module:
+        """Load the pre-trained model"""
+        checkpoint_path = os.path.join(self.config['training']['checkpoint_dir'], f"{self.config['dataset']['name']}_best.pth")
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"No trained model found at {checkpoint_path}")
+
+        model = ModelFactory.create_model(self.config)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval()
+        return model.to(self.device)
+
+    def predict_new_images(self):
+        """Predict features for new images and save to CSV"""
+        # Ask for the directory containing new images
+        image_dir = input("Enter the path to the directory containing new images: ").strip()
+        if not os.path.exists(image_dir):
+            raise FileNotFoundError(f"Directory not found: {image_dir}")
+
+        # Load images
+        transform = self._get_transforms()
+        image_files = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        dataset = CustomImageDataset(image_dir, transform=transform)
+        dataloader = DataLoader(dataset, batch_size=self.config['training']['batch_size'], shuffle=False)
+
+        # Extract features and predictions
+        feature_dict = self.model.extract_features(dataloader)
+
+        # Save predictions to CSV
+        output_path = os.path.join(self.config['output']['csv_dir'], f"{self.config['dataset']['name']}_predictions.csv")
+        self.model.save_features(feature_dict, output_path, image_files)
+
+        print(f"Predictions saved to {output_path}")
+
+    def _get_transforms(self):
+        """Get transforms for new images"""
+        return transforms.Compose([
+            transforms.Resize(self.config['dataset']['input_size']),
+            transforms.ToTensor(),
+            transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
+        ])
+
+class FilenameEncoder:
+    def __init__(self):
+        self.filename_to_id = {}
+        self.id_to_filename = {}
+        self.current_id = 0
+
+    def encode(self, filename):
+        if filename not in self.filename_to_id:
+            self.filename_to_id[filename] = self.current_id
+            self.id_to_filename[self.current_id] = filename
+            self.current_id += 1
+        return self.filename_to_id[filename]
+
+    def decode(self, filename_id):
+        return self.id_to_filename.get(filename_id, "unknown")
+
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
 
@@ -411,8 +475,6 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
 #--------------------------
 
-
-#--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
         self.train_dataset = dataset
@@ -557,33 +619,30 @@ class BaseAutoencoder(nn.Module):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
         embedding = self.encode(x)
-        if isinstance(embedding, tuple):
-            embedding = embedding[0]
         reconstruction = self.decode(embedding)
 
-        if self.training_phase == 2:
-            # Return dictionary format in phase 2
-            output = {
-                'embedding': embedding,
-                'reconstruction': reconstruction
-            }
+        output = {
+            'embedding': embedding,
+            'reconstruction': reconstruction
+        }
 
+        if self.training_phase == 2:
+            # Add class-related outputs if class encoding is enabled
             if self.use_class_encoding and hasattr(self, 'classifier'):
                 class_logits = self.classifier(embedding)
                 output['class_logits'] = class_logits
                 output['class_predictions'] = class_logits.argmax(dim=1)
+                output['class_probabilities'] = F.softmax(class_logits, dim=1)
 
+            # Add clustering information if KL divergence is enabled
             if self.use_kl_divergence:
-                latent_info = self.organize_latent_space(embedding)
+                latent_info = self.organize_latent_space(embedding, labels)
                 output.update(latent_info)
 
-            return output
-        else:
-            # Return tuple format in phase 1
-            return embedding, reconstruction
+        return output
 
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
@@ -649,13 +708,14 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
-        """
+        """Extract features from data loader with filename encoding"""
         self.eval()
         all_embeddings = []
         all_labels = []
+        all_filenames = []
+
+        # Initialize filename encoder
+        filename_encoder = FilenameEncoder()
 
         try:
             with torch.no_grad():
@@ -682,6 +742,11 @@ class BaseAutoencoder(nn.Module):
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
 
+                    # Encode filenames if available
+                    if hasattr(loader.dataset, 'image_files'):
+                        batch_filenames = [loader.dataset.image_files[i] for i in range(len(inputs))]
+                        all_filenames.extend([filename_encoder.encode(fname) for fname in batch_filenames])
+
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
@@ -691,6 +756,10 @@ class BaseAutoencoder(nn.Module):
                     'embeddings': embeddings,
                     'labels': labels
                 }
+
+                # Add filename IDs if available
+                if all_filenames:
+                    feature_dict['filenames'] = torch.tensor(all_filenames, device=self.device)
 
                 # Add enhancement features if in phase 2
                 if self.training_phase == 2:
@@ -718,6 +787,10 @@ class BaseAutoencoder(nn.Module):
                     if isinstance(feature_dict[key], torch.Tensor):
                         feature_dict[key] = feature_dict[key].cpu()
 
+                # Decode filenames before returning
+                if 'filenames' in feature_dict:
+                    feature_dict['filenames'] = [filename_encoder.decode(fid) for fid in feature_dict['filenames'].tolist()]
+
                 return feature_dict
 
         except Exception as e:
@@ -731,13 +804,14 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: Optional[List[str]] = None):
         """
         Universal feature saving method for all autoencoder variants.
 
         Args:
             feature_dict: Dictionary containing features and related information
             output_path: Path to save the CSV file
+            image_names: List of image names to include as the first column
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -745,6 +819,11 @@ class BaseAutoencoder(nn.Module):
             # Determine which features to save
             feature_columns = []
             data_dict = {}
+
+            # Add image names if provided
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']
+                feature_columns.append('filename')
 
             # Process embeddings
             if 'embeddings' in feature_dict:
@@ -759,10 +838,28 @@ class BaseAutoencoder(nn.Module):
                 data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
 
-            # Process enhancement features if present
-            enhancement_features = self._get_enhancement_columns(feature_dict)
-            data_dict.update(enhancement_features)
-            feature_columns.extend(enhancement_features.keys())
+            # Process class probabilities if available
+            if 'class_probabilities' in feature_dict:
+                class_probs = feature_dict['class_probabilities'].cpu().numpy()
+                for i in range(class_probs.shape[1]):
+                    col_name = f'class_{i}_probability'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = class_probs[:, i]
+
+            # Process cluster probabilities if available
+            if 'cluster_probabilities' in feature_dict:
+                cluster_probs = feature_dict['cluster_probabilities'].cpu().numpy()
+                for i in range(cluster_probs.shape[1]):
+                    col_name = f'cluster_{i}_probability'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = cluster_probs[:, i]
+
+            # Process prediction confidence if available
+            if 'class_logits' in feature_dict:
+                logits = feature_dict['class_logits'].cpu().numpy()
+                confidence = softmax(logits, axis=1).max(axis=1)
+                data_dict['prediction_confidence'] = confidence
+                feature_columns.append('prediction_confidence')
 
             # Save in chunks to manage memory
             chunk_size = 1000
@@ -1814,7 +1911,23 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader,
+def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Ask user if they want to train or predict
+    mode = input("Choose mode: (1) Train (2) Predict [1]: ").strip() or "1"
+
+    if mode == "1":
+        # Proceed with training
+        history = _train_model(model, train_loader, config, loss_manager)
+        return history
+    elif mode == "2":
+        # Switch to prediction mode
+        prediction_manager = PredictionManager(config)
+        prediction_manager.predict_new_images()
+        return {}
+    else:
+        raise ValueError("Invalid mode selected. Choose 1 for Train or 2 for Predict.")
+def _train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
@@ -2249,7 +2362,7 @@ class PredictionManager:
         enhancement_modules = self.config['model'].get('enhancement_modules', {})
 
         outputs = []
-        batch_size = self.config['training'].get('batch_size', 32)
+        batch_size = self.config['training'].get('batch_size', 128)
 
         with torch.no_grad():
             for i in tqdm(range(0, len(features), batch_size), desc="Generating predictions"):
@@ -3854,7 +3967,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         # Generate reconstructions
         self.feature_extractor.eval()
         with torch.no_grad():
-            batch_size = 32
+            batch_size = 128
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i+batch_size].to(self.device)
                 reconstructions = self.feature_extractor.decode(batch)
@@ -4851,6 +4964,7 @@ class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
+        self.image_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
         self.label_encoder = {}
         self.reverse_encoder = {}
 
@@ -4862,6 +4976,8 @@ class CustomImageDataset(Dataset):
             unique_labels = sorted(os.listdir(data_dir))
 
             for idx, label in enumerate(unique_labels):
+                if label==None:
+                    label=-1
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
 
@@ -5293,11 +5409,21 @@ class DatasetProcessor:
             }
         }
 
-    def _generate_dataset_conf(self, feature_dims: int) -> Dict:
-        """Generate dataset-specific configuration"""
+    def _generate_dataset_conf(self, feature_dims: int, num_classes:int,num_clusters:int) -> Dict:
+        """Generate dataset-specific configuration with additional metrics"""
+
+        # Generate column names for class probabilities, cluster probabilities, and confidence
+        class_prob_columns = [f"class_{i}_probability" for i in range(num_classes)]
+        cluster_prob_columns = [f"cluster_{i}_probability" for i in range(num_clusters)]
+        confidence_column = ["prediction_confidence"]
+
+        # Combine all column names
+        all_columns = [f"feature_{i}" for i in range(feature_dims)] + ["target"] #+ \
+                      #class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
+
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
+            "column_names": all_columns,
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -5316,7 +5442,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size":128,
+                "batch_size": 128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5344,7 +5470,6 @@ class DatasetProcessor:
                 "gen_samples": False
             }
         }
-
     def _generate_dbnn_config(self, main_config: Dict) -> Dict:
         """Generate DBNN-specific configuration"""
         return {
@@ -5402,7 +5527,9 @@ class DatasetProcessor:
 
         # 2. Generate and handle dataset.conf using _generate_dataset_conf
         logger.info("Generating dataset configuration...")
-        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
+        num_classes = config['dataset'].get('num_classes', 10)
+        num_clusters = num_classes  # Assuming number of clusters equals number of classes
+        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'],num_classes,num_clusters)
         if os.path.exists(self.conf_path):
             try:
                 with open(self.conf_path, 'r') as f:
@@ -6087,7 +6214,7 @@ def print_usage():
     print("\nOptional Arguments:")
     print("  --encoder_type  Type of encoder ('cnn' or 'autoenc')")
     print("  --config        Path to configuration file (overrides other options)")
-    print("  --batch_size    Batch size for training (default: 32)")
+    print("  --batch_size    Batch size for training (default: 128)")
     print("  --epochs        Number of training epochs (default: 20)")
     print("  --workers       Number of data loading workers (default: 4)")
     print("  --learning_rate Learning rate (default: 0.001)")
@@ -6114,7 +6241,7 @@ def parse_arguments():
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
     parser.add_argument('--output-dir', type=str, default='data', help='output directory')
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
     parser.add_argument('--workers', type=int, default=4, help='number of workers')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
@@ -6182,7 +6309,7 @@ def get_interactive_args():
         print("Invalid encoder type. Please enter 'cnn' or 'autoenc'")
 
     # Optional parameters
-    default = last_args.get('batch_size', 32) if last_args else 32
+    default = last_args.get('batch_size', 128) if last_args else 128
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
     default = last_args.get('epochs', 20) if last_args else 20
@@ -6556,7 +6683,7 @@ def initialize_model_components(config: Dict, logger: logging.Logger) -> Tuple[n
 
 def get_training_confirmation(logger: logging.Logger) -> bool:
     """Get user confirmation for training"""
-    if input("\nReady to start training. Proceed? (y/n): ").lower() != 'y':
+    if input("\nReady to start training. Proceed? (y/n): ").lower() == 'n':
         logger.info("Training cancelled by user")
         return False
     return True
