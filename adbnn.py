@@ -1457,6 +1457,7 @@ class GPUDBNN:
                  n_bins_per_dim: int = 20, model_type: str = "Histogram"):
         """Initialize GPUDBNN with support for continued training with fresh data"""
         # Existing initialization code...
+        self.filename_column = "filename"  # Name of the filename column
         self.non_numeric_encoders = {}  # Dictionary to store encoders for non-numeric columns
         self.non_numeric_columns = []   # List to store non-numeric column names
         # Set dataset_name and model type first
@@ -2089,8 +2090,9 @@ class DBNN(GPUDBNN):
 
             results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
 
-        # Decode non-numeric columns
-        results_df = self._decode_non_numeric_features(results_df)
+        # Add the filename column back to the results
+        if hasattr(self, 'filenames'):
+            results_df[self.filename_column] = self.filenames
 
         # Preprocess features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
@@ -3159,7 +3161,7 @@ class DBNN(GPUDBNN):
         DEBUG.log(f" Detected categorical columns: {categorical_columns}")
         return categorical_columns
 
-    def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
+     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
         """Preprocess data with improved error handling and column consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
@@ -3177,7 +3179,13 @@ class DBNN(GPUDBNN):
         else:
             X = X.clone().detach()
 
-        # Step 1: Identify and encode non-numeric columns
+        # Step 1: Identify and exclude the filename column from feature processing
+        if self.filename_column in X.columns:
+            self.filenames = X[self.filename_column].copy()  # Store filenames for later use
+            X = X.drop(columns=[self.filename_column])  # Exclude filename from feature processing
+            DEBUG.log(f"Excluded filename column: {self.filename_column}")
+
+        # Step 2: Identify and encode non-numeric columns
         if is_training:
             self.non_numeric_columns = [col for col in X.columns
                                        if col != self.target_column and
@@ -3187,7 +3195,7 @@ class DBNN(GPUDBNN):
             # Encode non-numeric columns
             X = self._encode_non_numeric_features(X, is_training)
 
-        # Step 2: Handle high cardinality columns (only during training)
+        # Step 3: Handle high cardinality columns (only during training)
         if is_training:
             self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
             cardinality_threshold = self._calculate_cardinality_threshold()
@@ -3206,7 +3214,7 @@ class DBNN(GPUDBNN):
                 if self.high_cardinality_columns:
                     DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
 
-        # Step 3: Handle categorical features
+        # Step 4: Handle categorical features
         DEBUG.log("Starting categorical encoding")
         try:
             if isinstance(X, pd.DataFrame):
@@ -3220,7 +3228,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error in categorical encoding: {str(e)}")
             raise
 
-        # Step 4: Convert to numpy and check for issues
+        # Step 5: Convert to numpy and check for issues
         try:
             if isinstance(X_encoded, pd.DataFrame):
                 X_numpy = X_encoded.to_numpy()
@@ -3233,7 +3241,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
-        # Step 5: Scale the features using precomputed global statistics
+        # Step 6: Scale the features using precomputed global statistics
         try:
             X_scaled = np.zeros_like(X_numpy)
             batch_size = 1024  # Adjust based on available memory
@@ -3257,10 +3265,10 @@ class DBNN(GPUDBNN):
                 stds[stds == 0] = 1
                 X_scaled = (X_numpy - means) / stds
 
-        # Step 6: Convert scaled data to a PyTorch tensor
+        # Step 7: Convert scaled data to a PyTorch tensor
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
 
-        # Step 7: Compute feature pairs and bin edges (only during training)
+        # Step 8: Compute feature pairs and bin edges (only during training)
         if is_training:
             remaining_feature_indices = list(range(len(self.feature_columns))) if self.feature_columns else list(range(X_scaled.shape[1]))
             DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
