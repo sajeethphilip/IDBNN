@@ -314,21 +314,22 @@ class DatasetConfig:
     def load_config(dataset_name: str) -> Dict:
         """Enhanced configuration loading with URL handling and comment removal"""
         if not dataset_name or not isinstance(dataset_name, str):
-            print("\033[K" +"Error: Invalid dataset name provided.")
+            print("\033[K" + "Error: Invalid dataset name provided.")
             return None
 
-        config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
+        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
 
         try:
             # Check if configuration file exists
             if not os.path.exists(config_path):
-                print("\033[K" +f"Configuration file {config_path} not found.")
-                print("\033[K" +f"Creating default configuration for {dataset_name}")
+                print("\033[K" + f"Configuration file {config_path} not found.")
+                print("\033[K" + f"Creating default configuration for {dataset_name}")
                 return DatasetConfig.create_default_config(dataset_name)
 
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
+
             # Remove comments and parse
             def remove_comments(json_str):
                 lines = []
@@ -356,9 +357,17 @@ class DatasetConfig:
             # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
             config = json.loads(clean_config)
+
             # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
+
+            # Preserve compute_device if it exists in the config
+            if 'training_params' in config and 'compute_device' in config['training_params']:
+                validated_config['training_params']['compute_device'] = config['training_params']['compute_device']
+            else:
+                # Use default compute_device if not specified
+                validated_config['training_params']['compute_device'] = Train_device
 
             # Handle file path
             if validated_config.get('file_path'):
@@ -367,14 +376,14 @@ class DatasetConfig:
                     alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                     if os.path.exists(alt_path):
                         validated_config['file_path'] = alt_path
-                        print("\033[K" +f"Using data file: {alt_path}")
+                        print("\033[K" + f"Using data file: {alt_path}")
 
             # If still no file path, try default location
             if not validated_config.get('file_path'):
                 default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if os.path.exists(default_path):
                     validated_config['file_path'] = default_path
-                    print("\033[K" +f"Using default data file: {default_path}")
+                    print("\033[K" + f"Using default data file: {default_path}")
 
             # If URL, handle download
             if DatasetConfig.is_url(validated_config.get('file_path', '')):
@@ -382,17 +391,17 @@ class DatasetConfig:
                 local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
                 if not os.path.exists(local_path):
-                    print("\033[K" +f"Downloading dataset from {url}")
+                    print("\033[K" + f"Downloading dataset from {url}")
                     if not DatasetConfig.download_dataset(url, local_path):
-                        print("\033[K" +f"Failed to download dataset from {url}")
+                        print("\033[K" + f"Failed to download dataset from {url}")
                         return None
-                    print("\033[K" +f"Downloaded dataset to {local_path}")
+                    print("\033[K" + f"Downloaded dataset to {local_path}")
 
                 validated_config['file_path'] = local_path
 
             # Verify data file exists
             if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
-                print("\033[K" +f"Warning: Data file not found")
+                print("\033[K" + f"Warning: Data file not found")
                 return None
 
             # If no column names provided, try to infer from CSV header
@@ -401,13 +410,13 @@ class DatasetConfig:
                     df = pd.read_csv(validated_config['file_path'], nrows=0)
                     validated_config['column_names'] = df.columns.tolist()
                 except Exception as e:
-                    print("\033[K" +f"Warning: Could not infer column names: {str(e)}")
+                    print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
                     return None
 
             return validated_config
 
         except Exception as e:
-            print("\033[K" +f"Error loading configuration for {dataset_name}: {str(e)}")
+            print("\033[K" + f"Error loading configuration for {dataset_name}: {str(e)}")
             traceback.print_exc()
             return None
 
