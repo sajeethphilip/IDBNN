@@ -1008,7 +1008,7 @@ class GPUDBNN:
         # Set dataset_name and model type first
         self.dataset_name = dataset_name
         self.model_type = model_type  # Store model type as instance variable
-        self.device = Train_device
+        self.device = device if device else Train_device
         self.computation_cache = ComputationCache(self.device)
         # Initialize train/test indices
         self.train_indices = []
@@ -1334,7 +1334,7 @@ class DBNNConfig:
         self.use_previous_model = kwargs.get('use_previous_model', True)
 
         # Device configuration
-        self.device = kwargs.get('compute_device', 'auto')
+        self.device = kwargs.get('device', 'auto')
         print('--'*60+self.device)
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
