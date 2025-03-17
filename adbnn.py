@@ -208,6 +208,7 @@ class DatasetProcessor:
 
         self.org_data=self.data.copy()
         self.data=self.data.drop(columns not in [self.data_config['column_names']])
+        print(self.data)
         X = self.data.drop(columns=[self.data_config['target_column']])
         y = self.data[self.data_config['target_column']]
 
