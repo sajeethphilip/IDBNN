@@ -206,6 +206,8 @@ class DatasetProcessor:
             self.data_config['target_column'] = 'target'  # Set default target column
             print("\033[K" +f"Using default target column: 'target'")
 
+        self.org_data=self.data.copy()
+        self.data=self.data.drop(columns not in [self.data_config['column_names']])
         X = self.data.drop(columns=[self.data_config['target_column']])
         y = self.data[self.data_config['target_column']]
 
