@@ -196,8 +196,9 @@ class DatasetProcessor:
         self.dataset_name = dataset_name
 
         # Load data using existing GPUDBNN method
-        self.data = self._load_dataset()
-
+        Original_data=self._load_dataset()
+        X_Orig =Original_data.drop(columns=[self.data_config['target_column']])
+        self.data = Original_data.drop(columns not in [self.data_config['column_names']])
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
 
@@ -232,7 +233,8 @@ class DatasetProcessor:
         true_labels = y_tensor.cpu().numpy()
 
         # Generate detailed predictions using the original DataFrame (X)
-        predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
+        #predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(X_Orig, predictions, true_labels)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
