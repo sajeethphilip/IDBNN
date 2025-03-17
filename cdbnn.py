@@ -64,6 +64,22 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
+class FilenameEncoder:
+    def __init__(self):
+        self.filename_to_id = {}
+        self.id_to_filename = {}
+        self.current_id = 0
+
+    def encode(self, filename):
+        if filename not in self.filename_to_id:
+            self.filename_to_id[filename] = self.current_id
+            self.id_to_filename[self.current_id] = filename
+            self.current_id += 1
+        return self.filename_to_id[filename]
+
+    def decode(self, filename_id):
+        return self.id_to_filename.get(filename_id, "unknown")
+
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
 
@@ -649,13 +665,14 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
-        """
+        """Extract features from data loader with filename encoding"""
         self.eval()
         all_embeddings = []
         all_labels = []
+        all_filenames = []
+
+        # Initialize filename encoder
+        filename_encoder = FilenameEncoder()
 
         try:
             with torch.no_grad():
@@ -682,6 +699,11 @@ class BaseAutoencoder(nn.Module):
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
 
+                    # Encode filenames if available
+                    if hasattr(loader.dataset, 'image_files'):
+                        batch_filenames = [loader.dataset.image_files[i] for i in range(len(inputs))]
+                        all_filenames.extend([filename_encoder.encode(fname) for fname in batch_filenames])
+
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
@@ -691,6 +713,10 @@ class BaseAutoencoder(nn.Module):
                     'embeddings': embeddings,
                     'labels': labels
                 }
+
+                # Add filename IDs if available
+                if all_filenames:
+                    feature_dict['filenames'] = torch.tensor(all_filenames, device=self.device)
 
                 # Add enhancement features if in phase 2
                 if self.training_phase == 2:
@@ -717,6 +743,10 @@ class BaseAutoencoder(nn.Module):
                 for key in feature_dict:
                     if isinstance(feature_dict[key], torch.Tensor):
                         feature_dict[key] = feature_dict[key].cpu()
+
+                # Decode filenames before returning
+                if 'filenames' in feature_dict:
+                    feature_dict['filenames'] = [filename_encoder.decode(fid) for fid in feature_dict['filenames'].tolist()]
 
                 return feature_dict
 
@@ -748,9 +778,9 @@ class BaseAutoencoder(nn.Module):
             data_dict = {}
 
             # Add image names if provided
-            if image_names is not None:
-                data_dict['image_name'] = image_names
-                feature_columns.append('image_name')
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']
+                feature_columns.append('filename')
 
             # Process embeddings
             if 'embeddings' in feature_dict:
@@ -802,7 +832,6 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error saving features: {str(e)}")
             raise
-
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
         enhancement_dict = {}
