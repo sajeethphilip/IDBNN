@@ -342,7 +342,7 @@ class DatasetProcessor:
             "target_column": df.columns[-1],
             "likelihood_config": {
                 "feature_group_size": 2,
-                "max_combinations": 10000,
+                "max_combinations": 100000,
                 "bin_sizes": [20]
             },
             "active_learning": {
@@ -653,7 +653,7 @@ class DatasetConfig:
         "has_header": True,
         "likelihood_config": {
             "feature_group_size": 2,
-            "max_combinations": 10000,
+            "max_combinations": 100000,
             "bin_sizes": [20]
         },
         "active_learning": {
