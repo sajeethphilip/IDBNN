@@ -2234,10 +2234,10 @@ class PredictionManager:
 
             if self.config.get('execution_flags', {}).get('invert_DBNN', False):
                 csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
-                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv')
+                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv'))
             else:
                 csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
-                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv')
+                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv'))
 
 
         if not os.path.exists(csv_path):
