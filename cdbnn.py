@@ -5465,7 +5465,7 @@ class DatasetProcessor:
 
         # 2. Generate and handle dataset.conf using _generate_dataset_conf
         logger.info("Generating dataset configuration...")
-        num_classes = self.config['dataset'].get('num_classes', 10)
+        num_classes = config['dataset'].get('num_classes', 10)
         num_clusters = num_classes  # Assuming number of clusters equals number of classes
         dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'],num_classes,num_clusters)
         if os.path.exists(self.conf_path):
