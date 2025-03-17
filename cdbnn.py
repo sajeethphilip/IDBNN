@@ -6683,7 +6683,7 @@ def initialize_model_components(config: Dict, logger: logging.Logger) -> Tuple[n
 
 def get_training_confirmation(logger: logging.Logger) -> bool:
     """Get user confirmation for training"""
-    if input("\nReady to start training. Proceed? (y/n): ").lower() != 'y':
+    if input("\nReady to start training. Proceed? (y/n): ").lower() == 'n':
         logger.info("Training cancelled by user")
         return False
     return True
