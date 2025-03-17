@@ -4960,8 +4960,8 @@ class CustomImageDataset(Dataset):
             unique_labels = sorted(os.listdir(data_dir))
 
             for idx, label in enumerate(unique_labels):
-                if self.label==None:
-                    self.label=-1
+                if label==None:
+                    label=-1
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
 
