@@ -1017,7 +1017,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         return df
 
     # Return DataFrame with only the columns to keep
-    print("\033[K" +f"Keeping only these features: {valid_columns}")
+    #print("\033[K" +f"Keeping only these features: {valid_columns}")
     return df[valid_columns]
 #-------------------------------------------------
 class ComputationCache:
@@ -2057,30 +2057,47 @@ class DBNN(GPUDBNN):
         }
 
     def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
-        """Generate detailed predictions with confidence metrics and metadata."""
+        """
+        Generate detailed predictions with confidence metrics and metadata.
+
+        Args:
+            X: Input data (can be a Pandas DataFrame or PyTorch tensor).
+            predictions: Tensor containing the predicted class labels.
+            true_labels: Tensor or NumPy array containing the true labels (optional).
+
+        Returns:
+            DataFrame containing the complete input data, predictions, and posterior probabilities.
+        """
         # Convert predictions to original class labels
         pred_labels = self.label_encoder.inverse_transform(predictions)
 
         # Handle input data (X) based on its type
         if isinstance(X, torch.Tensor):
-            # If X is a tensor, we need to get the original indices
-            original_indices = self.data.index.values  # Use existing index
+            # Convert tensor to NumPy array, copy it, and then back to a DataFrame
+            X_np = X.cpu().numpy()  # Move tensor to CPU and convert to NumPy
+            results_df = pd.DataFrame(X_np, columns=[f'feature_{i}' for i in range(X_np.shape[1])])
         elif isinstance(X, pd.DataFrame):
             # If X is already a DataFrame, just copy it
-            original_indices = X.index.values  # Use existing index
+            results_df = X.copy()
         else:
             raise TypeError(f"Unsupported input type for X: {type(X)}. Expected Pandas DataFrame or PyTorch tensor.")
 
-        # Create a DataFrame with the original data
-        results_df = self.original_data.loc[original_indices].copy()  # Use index to locate rows
-
-        # Add predictions and true labels if provided
+        # Add predictions
         results_df['predicted_class'] = pred_labels
 
+        # Add true labels if provided
         if true_labels is not None:
-            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels)
+            # Handle true_labels based on its type
+            if isinstance(true_labels, torch.Tensor):
+                true_labels_np = true_labels.cpu().numpy()  # Convert tensor to NumPy array
+            elif isinstance(true_labels, np.ndarray):
+                true_labels_np = true_labels  # Use as-is
+            else:
+                raise TypeError(f"Unsupported type for true_labels: {type(true_labels)}. Expected PyTorch tensor or NumPy array.")
 
-        # Compute probabilities and add them to the results
+            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+
+        # Preprocess features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
         if isinstance(X_processed, torch.Tensor):
             X_tensor = X_processed.clone().detach().to(self.device)
@@ -2115,10 +2132,22 @@ class DBNN(GPUDBNN):
             print("\033[K" +"No probabilities were computed successfully", end="\r", flush=True)
             return None
 
-        # Add probability columns for each valid class
+        # Ensure we're only using valid class indices
         valid_classes = self.label_encoder.classes_
         n_classes = len(valid_classes)
 
+        # Verify probability array shape matches number of classes
+        if all_probabilities.shape[1] != n_classes:
+            print("\033[K" +f"Warning: Probability array shape ({all_probabilities.shape}) doesn't match number of classes ({n_classes})")
+            # Adjust probabilities array if necessary
+            if all_probabilities.shape[1] > n_classes:
+                all_probabilities = all_probabilities[:, :n_classes]
+            else:
+                # Pad with zeros if needed
+                pad_width = ((0, 0), (0, n_classes - all_probabilities.shape[1]))
+                all_probabilities = np.pad(all_probabilities, pad_width, mode='constant')
+
+        # Add probability columns for each valid class
         for i, class_name in enumerate(valid_classes):
             if i < all_probabilities.shape[1]:  # Safety check
                 results_df[f'prob_{class_name}'] = all_probabilities[:, i]
@@ -2203,6 +2232,7 @@ class DBNN(GPUDBNN):
                     DEBUG.log(" Filtering features based on config")
                     df = _filter_features_from_config(df, self.config)
                     DEBUG.log(f" Shape after filtering: {df.shape}")
+
                 # Handle target column
                 target_column = self.config.get('target_column')
 
@@ -2216,7 +2246,7 @@ class DBNN(GPUDBNN):
                     target_column = cols[target_column]
                     self.config['target_column'] = target_column
                     DEBUG.log(f" Using target column: {target_column}")
-
+                input("Pass1")
                 if target_column not in df.columns:
                     raise ValueError(f"Target column '{target_column}' not found in dataset")
 
@@ -3726,11 +3756,11 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=True)
+        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=False)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=True)
+        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=False)
         print("\033[K" +f"{Colors.GREEN}Last testing data is saved to {dataset_name}_Last_testing.csv{Colors.ENDC}")
         print("\033[K" +f"{Colors.GREEN}Last training data is saved to {dataset_name}_Last_training.csv{Colors.ENDC}")
 
