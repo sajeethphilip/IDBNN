@@ -649,70 +649,57 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Universal feature extraction method with filename handling"""
+        """
+        Universal feature extraction method for all autoencoder variants.
+        Handles both basic and enhanced feature extraction with proper device management.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_filenames = []
-        filename_to_label = {}
-        label_counter = 0
 
         try:
             with torch.no_grad():
-                for inputs, labels, filenames in tqdm(loader, desc="Extracting features"):
+                for inputs, labels in tqdm(loader, desc="Extracting features"):
                     # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Create temporary labels for filenames
-                    temp_labels = []
-                    for filename in filenames:
-                        if filename not in filename_to_label:
-                            filename_to_label[filename] = label_counter
-                            label_counter += 1
-                        temp_labels.append(filename_to_label[filename])
-                    temp_labels = torch.tensor(temp_labels, device=self.device)
-
                     # Get embeddings
                     if self.training_phase == 2 and hasattr(self, 'forward'):
+                        # Use full forward pass in phase 2 to get all enhancement features
                         outputs = self(inputs)
                         if isinstance(outputs, dict):
                             embeddings = outputs['embedding']
                         else:
                             embeddings = outputs[0]
                     else:
+                        # Basic embedding extraction
                         embeddings = self.encode(inputs)
                         if isinstance(embeddings, tuple):
                             embeddings = embeddings[0]
 
-                    # Store results
+                    # Store results (keeping on device for now)
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
-                    all_filenames.append(temp_labels)
 
-                # Concatenate all results
+                # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
-                filenames = torch.cat(all_filenames)
 
-                # Initialize feature dictionary
+                # Initialize base feature dictionary
                 feature_dict = {
-                    'filenames': filenames,
                     'embeddings': embeddings,
                     'labels': labels
                 }
 
-                # Save filename mapping
-                mapping_path = os.path.join(os.path.dirname(self.checkpoint_path), 'filename_mapping.json')
-                with open(mapping_path, 'w') as f:
-                    json.dump(filename_to_label, f, indent=4)
-
                 # Add enhancement features if in phase 2
                 if self.training_phase == 2:
+                    # Add clustering information if enabled
                     if self.use_kl_divergence:
                         cluster_info = self.organize_latent_space(embeddings, labels)
                         feature_dict.update(cluster_info)
 
+                    # Add classification information if enabled
                     if self.use_class_encoding and hasattr(self, 'classifier'):
                         class_logits = self.classifier(embeddings)
                         feature_dict.update({
@@ -721,6 +708,7 @@ class BaseAutoencoder(nn.Module):
                             'class_probabilities': F.softmax(class_logits, dim=1)
                         })
 
+                    # Add specialized features for enhanced models
                     if hasattr(self, 'get_enhancement_features'):
                         enhancement_features = self.get_enhancement_features(embeddings)
                         feature_dict.update(enhancement_features)
@@ -743,8 +731,15 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
-        """Universal feature saving method with filename handling"""
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: Optional[List[str]] = None):
+        """
+        Universal feature saving method for all autoencoder variants.
+
+        Args:
+            feature_dict: Dictionary containing features and related information
+            output_path: Path to save the CSV file
+            image_names: List of image names to include as the first column
+        """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -752,14 +747,14 @@ class BaseAutoencoder(nn.Module):
             feature_columns = []
             data_dict = {}
 
-            # Add filename labels as first column
-            if 'filenames' in feature_dict:
-                data_dict['filename_label'] = feature_dict['filenames'].numpy()
-                feature_columns.append('filename_label')
+            # Add image names if provided
+            if image_names is not None:
+                data_dict['image_name'] = image_names
+                feature_columns.append('image_name')
 
             # Process embeddings
             if 'embeddings' in feature_dict:
-                embeddings = feature_dict['embeddings'].numpy()
+                embeddings = feature_dict['embeddings'].cpu().numpy()
                 for i in range(embeddings.shape[1]):
                     col_name = f'feature_{i}'
                     feature_columns.append(col_name)
@@ -767,7 +762,7 @@ class BaseAutoencoder(nn.Module):
 
             # Process labels/targets
             if 'labels' in feature_dict:
-                data_dict['target'] = feature_dict['labels'].numpy()
+                data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
 
             # Process enhancement features if present
@@ -1827,6 +1822,7 @@ class ModelFactory:
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
 
@@ -1877,6 +1873,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
             history[f"phase2_{key}"] = value
 
     return history
+
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -2232,15 +2229,11 @@ class PredictionManager:
 
             if self.config.get('execution_flags', {}).get('invert_DBNN', False):
                 csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
-                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv'))
             else:
                 csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
-                mapping_path = os.path.join(base_dir, s.path.join(base_dir, 'reconstructed_input.csv'))
-
 
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
-        replace_filename_labels_with_actual_names(csv_path, mapping_path)
 
         # Load and process CSV
         df = pd.read_csv(csv_path)
@@ -3547,7 +3540,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         labels = []
 
         with torch.no_grad():
-            for images,inputs, targets in dataloader:
+            for inputs, targets in dataloader:
                 if len(embeddings) * inputs.size(0) >= num_samples:
                     break
 
@@ -3960,7 +3953,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         reconstructed_images = []
 
         with torch.no_grad():
-            for images, labels, filenames  in dataloader:
+            for images, _ in dataloader:
                 if len(original_images) >= num_samples:
                     break
 
@@ -4866,9 +4859,6 @@ class CustomImageDataset(Dataset):
         self.transform = transform
         self.label_encoder = {}
         self.reverse_encoder = {}
-        self.image_files = []  # Store full paths
-        self.labels = []
-        self.filenames = []  # Store just the filenames
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -4896,7 +4886,6 @@ class CustomImageDataset(Dataset):
                         if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                             self.image_files.append(os.path.join(class_dir, img_name))
                             self.labels.append(self.label_encoder[class_name])
-                            self.filenames.append(img_name)
 
     def __len__(self):
         return len(self.image_files)
@@ -4905,12 +4894,11 @@ class CustomImageDataset(Dataset):
         img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
-        filename = self.filenames[idx]
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label, filename
+        return image, label
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
@@ -6013,31 +6001,7 @@ def setup_logging(log_dir: str = 'logs') -> logging.Logger:
     logger.info(f"Logging setup complete. Log file: {log_file}")
     return logger
 
-def replace_filename_labels_with_actual_names(csv_path: str, mapping_path: str):
-    """Replace temporary filename labels with actual filenames"""
-    try:
-        # Load the mapping
-        with open(mapping_path, 'r') as f:
-            filename_mapping = json.load(f)
 
-        # Create reverse mapping
-        label_to_filename = {v: k for k, v in filename_mapping.items()}
-
-        # Load the CSV
-        df = pd.read_csv(csv_path)
-
-        # Replace the filename labels
-        if 'filename_label' in df.columns:
-            df['filename'] = df['filename_label'].map(label_to_filename)
-            df.drop(columns=['filename_label'], inplace=True)
-            df.to_csv(csv_path, index=False)
-            logger.info(f"Replaced filename labels with actual names in {csv_path}")
-        else:
-            logger.warning(f"No filename_label column found in {csv_path}")
-
-    except Exception as e:
-        logger.error(f"Error replacing filename labels: {str(e)}")
-        raise
 
 
 def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
