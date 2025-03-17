@@ -795,10 +795,28 @@ class BaseAutoencoder(nn.Module):
                 data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
 
-            # Process enhancement features if present
-            enhancement_features = self._get_enhancement_columns(feature_dict)
-            data_dict.update(enhancement_features)
-            feature_columns.extend(enhancement_features.keys())
+            # Process class probabilities if available
+            if 'class_probabilities' in feature_dict:
+                class_probs = feature_dict['class_probabilities'].cpu().numpy()
+                for i in range(class_probs.shape[1]):
+                    col_name = f'class_{i}_probability'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = class_probs[:, i]
+
+            # Process cluster probabilities if available
+            if 'cluster_probabilities' in feature_dict:
+                cluster_probs = feature_dict['cluster_probabilities'].cpu().numpy()
+                for i in range(cluster_probs.shape[1]):
+                    col_name = f'cluster_{i}_probability'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = cluster_probs[:, i]
+
+            # Process prediction confidence if available
+            if 'class_logits' in feature_dict:
+                logits = feature_dict['class_logits'].cpu().numpy()
+                confidence = softmax(logits, axis=1).max(axis=1)
+                data_dict['prediction_confidence'] = confidence
+                feature_columns.append('prediction_confidence')
 
             # Save in chunks to manage memory
             chunk_size = 1000
@@ -832,6 +850,7 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error saving features: {str(e)}")
             raise
+
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
         enhancement_dict = {}
@@ -5329,10 +5348,22 @@ class DatasetProcessor:
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
-        """Generate dataset-specific configuration"""
+        """Generate dataset-specific configuration with additional metrics"""
+        num_classes = self.config['dataset'].get('num_classes', 10)
+        num_clusters = num_classes  # Assuming number of clusters equals number of classes
+
+        # Generate column names for class probabilities, cluster probabilities, and confidence
+        class_prob_columns = [f"class_{i}_probability" for i in range(num_classes)]
+        cluster_prob_columns = [f"cluster_{i}_probability" for i in range(num_clusters)]
+        confidence_column = ["prediction_confidence"]
+
+        # Combine all column names
+        all_columns = ["filename"] + [f"feature_{i}" for i in range(feature_dims)] + \
+                      class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
+
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
+            "column_names": all_columns,
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -5351,7 +5382,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size":128,
+                "batch_size": 128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5379,7 +5410,6 @@ class DatasetProcessor:
                 "gen_samples": False
             }
         }
-
     def _generate_dbnn_config(self, main_config: Dict) -> Dict:
         """Generate DBNN-specific configuration"""
         return {
