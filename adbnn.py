@@ -32,7 +32,7 @@ import traceback  # Add to provide debug
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
-Train_device = 'cpu'# 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
+Train_device ='cuda' if torch.cuda.is_available() else 'cpu'  # Default device
 Trials = 100  # Number of epochs to wait for improvement in training
 cardinality_threshold =0.9
 cardinality_tolerance=4 #Use when the features are likely to be extremly diverse and deciimal values;4 means, precison restricted to 4 decimal places
@@ -277,7 +277,7 @@ class DatasetConfig:
             "test_fraction": 0.2,
             "n_bins_per_dim": 20,
             "enable_adaptive": True,
-            "compute_device":  existing_config.get('training_params', {}).get('compute_device', Train_device),  # Preserve existing value
+            "compute_device": "auto",
             "invert_DBNN": True,
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
@@ -314,22 +314,21 @@ class DatasetConfig:
     def load_config(dataset_name: str) -> Dict:
         """Enhanced configuration loading with URL handling and comment removal"""
         if not dataset_name or not isinstance(dataset_name, str):
-            print("\033[K" + "Error: Invalid dataset name provided.")
+            print("\033[K" +"Error: Invalid dataset name provided.")
             return None
 
-        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+        config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
 
         try:
             # Check if configuration file exists
             if not os.path.exists(config_path):
-                print("\033[K" + f"Configuration file {config_path} not found.")
-                print("\033[K" + f"Creating default configuration for {dataset_name}")
+                print("\033[K" +f"Configuration file {config_path} not found.")
+                print("\033[K" +f"Creating default configuration for {dataset_name}")
                 return DatasetConfig.create_default_config(dataset_name)
 
             # Read and parse configuration
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-
             # Remove comments and parse
             def remove_comments(json_str):
                 lines = []
@@ -357,17 +356,9 @@ class DatasetConfig:
             # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
             config = json.loads(clean_config)
-
             # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
-
-            # Preserve compute_device if it exists in the config
-            if 'training_params' in config and 'compute_device' in config['training_params']:
-                validated_config['training_params']['compute_device'] = config['training_params']['compute_device']
-            else:
-                # Use default compute_device if not specified
-                validated_config['training_params']['compute_device'] = Train_device
 
             # Handle file path
             if validated_config.get('file_path'):
@@ -376,14 +367,14 @@ class DatasetConfig:
                     alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                     if os.path.exists(alt_path):
                         validated_config['file_path'] = alt_path
-                        print("\033[K" + f"Using data file: {alt_path}")
+                        print("\033[K" +f"Using data file: {alt_path}")
 
             # If still no file path, try default location
             if not validated_config.get('file_path'):
                 default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if os.path.exists(default_path):
                     validated_config['file_path'] = default_path
-                    print("\033[K" + f"Using default data file: {default_path}")
+                    print("\033[K" +f"Using default data file: {default_path}")
 
             # If URL, handle download
             if DatasetConfig.is_url(validated_config.get('file_path', '')):
@@ -391,17 +382,17 @@ class DatasetConfig:
                 local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
                 if not os.path.exists(local_path):
-                    print("\033[K" + f"Downloading dataset from {url}")
+                    print("\033[K" +f"Downloading dataset from {url}")
                     if not DatasetConfig.download_dataset(url, local_path):
-                        print("\033[K" + f"Failed to download dataset from {url}")
+                        print("\033[K" +f"Failed to download dataset from {url}")
                         return None
-                    print("\033[K" + f"Downloaded dataset to {local_path}")
+                    print("\033[K" +f"Downloaded dataset to {local_path}")
 
                 validated_config['file_path'] = local_path
 
             # Verify data file exists
             if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
-                print("\033[K" + f"Warning: Data file not found")
+                print("\033[K" +f"Warning: Data file not found")
                 return None
 
             # If no column names provided, try to infer from CSV header
@@ -410,13 +401,13 @@ class DatasetConfig:
                     df = pd.read_csv(validated_config['file_path'], nrows=0)
                     validated_config['column_names'] = df.columns.tolist()
                 except Exception as e:
-                    print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
+                    print("\033[K" +f"Warning: Could not infer column names: {str(e)}")
                     return None
 
             return validated_config
 
         except Exception as e:
-            print("\033[K" + f"Error loading configuration for {dataset_name}: {str(e)}")
+            print("\033[K" +f"Error loading configuration for {dataset_name}: {str(e)}")
             traceback.print_exc()
             return None
 
@@ -1017,7 +1008,7 @@ class GPUDBNN:
         # Set dataset_name and model type first
         self.dataset_name = dataset_name
         self.model_type = model_type  # Store model type as instance variable
-        self.device = device if device else Train_device
+        self.device = Train_device
         self.computation_cache = ComputationCache(self.device)
         # Initialize train/test indices
         self.train_indices = []
@@ -1344,7 +1335,6 @@ class DBNNConfig:
 
         # Device configuration
         self.device = kwargs.get('device', 'auto')
-        print('--'*60+self.device)
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -1399,11 +1389,8 @@ class DBNN(GPUDBNN):
             random_state=config.random_seed,
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
-            model_type=config.model_type,  # Pass model type from config
-            device=config.device  # Pass device from config
+            model_type=config.model_type  # Pass model type from config
         )
-        global Train_device
-        Train_device=config.device
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
         # Store model configuration
@@ -1557,9 +1544,8 @@ class DBNN(GPUDBNN):
         self.dataset_name = dataset_name
 
          # Load data using existing GPUDBNN method
-        Original_data=self._load_dataset()
-        X_Orig =Original_data.drop(columns=[self.data_config['target_column']])
-        self.data = Original_data[self.data_config['column_names']]
+        self.data =self._load_dataset()
+        self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
 
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
@@ -1597,7 +1583,7 @@ class DBNN(GPUDBNN):
 
         # Generate detailed predictions
         #predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
-        predictions_df = self._generate_detailed_predictions(X_Orig, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(self.X_Orig, predictions, true_labels)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
@@ -1781,6 +1767,7 @@ class DBNN(GPUDBNN):
                 # This allows us to read the actual headers from the file
                 DEBUG.log(f" Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
+                self.Original_data=df.copy()
 
                 if df is None or df.empty:
                     raise ValueError(f"Empty dataset loaded from {file_path}")
@@ -4363,7 +4350,7 @@ class DBNN(GPUDBNN):
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+            all_results = self._generate_detailed_predictions(self.X_Orig, all_predictions, y_all)
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
