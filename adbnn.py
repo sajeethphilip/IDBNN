@@ -1334,7 +1334,7 @@ class DBNNConfig:
         self.use_previous_model = kwargs.get('use_previous_model', True)
 
         # Device configuration
-        self.device = kwargs.get('device', 'auto')
+        self.device = kwargs.get('compute_device', 'auto')
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
