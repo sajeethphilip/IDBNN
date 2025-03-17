@@ -64,6 +64,54 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
+class PredictionManager:
+    def __init__(self, config: Dict):
+        self.config = config
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
+        self.model = self._load_model()
+
+    def _load_model(self) -> nn.Module:
+        """Load the pre-trained model"""
+        checkpoint_path = os.path.join(self.config['training']['checkpoint_dir'], f"{self.config['dataset']['name']}_best.pth")
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"No trained model found at {checkpoint_path}")
+
+        model = ModelFactory.create_model(self.config)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval()
+        return model.to(self.device)
+
+    def predict_new_images(self):
+        """Predict features for new images and save to CSV"""
+        # Ask for the directory containing new images
+        image_dir = input("Enter the path to the directory containing new images: ").strip()
+        if not os.path.exists(image_dir):
+            raise FileNotFoundError(f"Directory not found: {image_dir}")
+
+        # Load images
+        transform = self._get_transforms()
+        image_files = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        dataset = CustomImageDataset(image_dir, transform=transform)
+        dataloader = DataLoader(dataset, batch_size=self.config['training']['batch_size'], shuffle=False)
+
+        # Extract features and predictions
+        feature_dict = self.model.extract_features(dataloader)
+
+        # Save predictions to CSV
+        output_path = os.path.join(self.config['output']['csv_dir'], f"{self.config['dataset']['name']}_predictions.csv")
+        self.model.save_features(feature_dict, output_path, image_files)
+
+        print(f"Predictions saved to {output_path}")
+
+    def _get_transforms(self):
+        """Get transforms for new images"""
+        return transforms.Compose([
+            transforms.Resize(self.config['dataset']['input_size']),
+            transforms.ToTensor(),
+            transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
+        ])
+
 class FilenameEncoder:
     def __init__(self):
         self.filename_to_id = {}
@@ -427,8 +475,6 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
 #--------------------------
 
-
-#--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
         self.train_dataset = dataset
@@ -573,33 +619,30 @@ class BaseAutoencoder(nn.Module):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
         embedding = self.encode(x)
-        if isinstance(embedding, tuple):
-            embedding = embedding[0]
         reconstruction = self.decode(embedding)
 
-        if self.training_phase == 2:
-            # Return dictionary format in phase 2
-            output = {
-                'embedding': embedding,
-                'reconstruction': reconstruction
-            }
+        output = {
+            'embedding': embedding,
+            'reconstruction': reconstruction
+        }
 
+        if self.training_phase == 2:
+            # Add class-related outputs if class encoding is enabled
             if self.use_class_encoding and hasattr(self, 'classifier'):
                 class_logits = self.classifier(embedding)
                 output['class_logits'] = class_logits
                 output['class_predictions'] = class_logits.argmax(dim=1)
+                output['class_probabilities'] = F.softmax(class_logits, dim=1)
 
+            # Add clustering information if KL divergence is enabled
             if self.use_kl_divergence:
-                latent_info = self.organize_latent_space(embedding)
+                latent_info = self.organize_latent_space(embedding, labels)
                 output.update(latent_info)
 
-            return output
-        else:
-            # Return tuple format in phase 1
-            return embedding, reconstruction
+        return output
 
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
@@ -4905,6 +4948,7 @@ class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
+        self.image_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
         self.label_encoder = {}
         self.reverse_encoder = {}
 
@@ -4916,6 +4960,8 @@ class CustomImageDataset(Dataset):
             unique_labels = sorted(os.listdir(data_dir))
 
             for idx, label in enumerate(unique_labels):
+                if self.label==None:
+                    self.label=-1
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
 
