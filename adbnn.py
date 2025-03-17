@@ -1456,7 +1456,9 @@ class GPUDBNN:
                  fresh: bool = False, use_previous_model: bool = True,
                  n_bins_per_dim: int = 20, model_type: str = "Histogram"):
         """Initialize GPUDBNN with support for continued training with fresh data"""
-
+        # Existing initialization code...
+        self.non_numeric_encoders = {}  # Dictionary to store encoders for non-numeric columns
+        self.non_numeric_columns = []   # List to store non-numeric column names
         # Set dataset_name and model type first
         self.dataset_name = dataset_name
         self.model_type = model_type  # Store model type as instance variable
@@ -2057,17 +2059,7 @@ class DBNN(GPUDBNN):
         }
 
     def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
-        """
-        Generate detailed predictions with confidence metrics and metadata.
-
-        Args:
-            X: Input data (can be a Pandas DataFrame or PyTorch tensor).
-            predictions: Tensor containing the predicted class labels.
-            true_labels: Tensor or NumPy array containing the true labels (optional).
-
-        Returns:
-            DataFrame containing the complete input data, predictions, and posterior probabilities.
-        """
+        """Generate detailed predictions with confidence metrics and metadata."""
         # Convert predictions to original class labels
         pred_labels = self.label_encoder.inverse_transform(predictions)
 
@@ -2096,6 +2088,9 @@ class DBNN(GPUDBNN):
                 raise TypeError(f"Unsupported type for true_labels: {type(true_labels)}. Expected PyTorch tensor or NumPy array.")
 
             results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+
+        # Decode non-numeric columns
+        results_df = self._decode_non_numeric_features(results_df)
 
         # Preprocess features for probability computation
         X_processed = self._preprocess_data(X, is_training=False)
@@ -3182,13 +3177,15 @@ class DBNN(GPUDBNN):
         else:
             X = X.clone().detach()
 
-        # Step 1: Compute global statistics only once during training
-        if is_training and not self.global_stats_computed:
-            DEBUG.log("Training mode preprocessing - computing global statistics")
-            self.compute_global_statistics(X)  # Compute global stats only once
-            self.global_stats_computed = True  # Mark stats as computed
-        elif is_training:
-            DEBUG.log("Training mode preprocessing - using precomputed global statistics")
+        # Step 1: Identify and encode non-numeric columns
+        if is_training:
+            self.non_numeric_columns = [col for col in X.columns
+                                       if col != self.target_column and
+                                       not pd.api.types.is_numeric_dtype(X[col])]
+            DEBUG.log(f"Detected non-numeric columns: {self.non_numeric_columns}")
+
+            # Encode non-numeric columns
+            X = self._encode_non_numeric_features(X, is_training)
 
         # Step 2: Handle high cardinality columns (only during training)
         if is_training:
@@ -3282,6 +3279,31 @@ class DBNN(GPUDBNN):
 
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
+
+    def _encode_non_numeric_features(self, df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
+        """Encode non-numeric features (e.g., file names) into numeric indices."""
+        df_encoded = df.copy()
+        for col in self.non_numeric_columns:
+            if is_training:
+                # Create a new encoder for this column
+                unique_values = df[col].unique()
+                self.non_numeric_encoders[col] = {value: idx for idx, value in enumerate(unique_values)}
+
+            # Apply encoding
+            df_encoded[col] = df[col].map(self.non_numeric_encoders[col])
+
+        return df_encoded
+
+    def _decode_non_numeric_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Decode numeric indices back to original non-numeric values."""
+        df_decoded = df.copy()
+        for col in self.non_numeric_columns:
+            if col in self.non_numeric_encoders:
+                # Reverse the encoding mapping
+                reverse_mapping = {v: k for k, v in self.non_numeric_encoders[col].items()}
+                df_decoded[col] = df[col].map(reverse_mapping)
+
+        return df_decoded
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations, treating groups as unique sets."""
