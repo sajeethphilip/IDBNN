@@ -32,7 +32,7 @@ import traceback  # Add to provide debug
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
-Train_device ='cuda' if torch.cuda.is_available() else 'cpu'  # Default device
+Train_device = 'cpu' # 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
 Trials = 100  # Number of epochs to wait for improvement in training
 cardinality_threshold =0.9
 cardinality_tolerance=4 #Use when the features are likely to be extremly diverse and deciimal values;4 means, precison restricted to 4 decimal places
@@ -96,320 +96,8 @@ class DatasetProcessor:
         self.base_url = "https://archive.ics.uci.edu/ml/machine-learning-databases/"
         self.compressed_extensions = ['.zip', '.gz', '.tar', '.7z', '.rar']
         self.colors = Colors()
-    def _handle_single_csv(self, folder_path: str, base_name: str, config: Dict):
-        """Handle dataset with single CSV file and debug config processing"""
-        #print("DEBUGEntering _handle_single_csv")
-        # print(f"DEBUG:  Initial config: {json.dumps(config, indent=2) if config else 'None'}")
 
-        # Handle CSV paths
-        csv_paths = [
-            os.path.join(folder_path, f"{base_name}.csv"),
-            os.path.join(folder_path, base_name, f"{base_name}.csv")
-        ]
-        csv_path = next((path for path in csv_paths if os.path.exists(path)), None)
 
-        if not csv_path:
-            return None
-
-        return True
-
-    def _download_from_uci(self, dataset_name: str) -> Optional[str]:
-        """Download dataset from UCI repository"""
-        folder_path = os.path.join('data', dataset_name.lower())
-        os.makedirs(folder_path, exist_ok=True)
-
-        save_path = os.path.join(folder_path, f"{dataset_name.lower()}.csv")
-
-        # Try different UCI repository URL patterns
-        url_patterns = [
-            f"{self.base_url}/{dataset_name}/{dataset_name}.data",
-            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.data",
-            f"{self.base_url}/{dataset_name}/{dataset_name}.csv",
-            f"{self.base_url}/{dataset_name.lower()}/{dataset_name.lower()}.csv"
-        ]
-
-        for url in url_patterns:
-            try:
-                print("\033[K" +f"Trying URL: {url}")
-                response = requests.get(url)
-                if response.status_code == 200:
-                    with open(save_path, 'wb') as f:
-                        f.write(response.content)
-                    print("\033[K" +f"Successfully downloaded to {save_path}")
-                    return save_path
-            except Exception as e:
-                self.debug.log(f"Failed to download from {url}: {str(e)}")
-                continue
-
-        return None
-
-    def process_dataset(self, config_path: str) -> Dict:
-        """
-        Process dataset according to configuration file specifications.
-
-        Args:
-            config_path: Path to JSON configuration file.
-
-        Returns:
-            Dictionary containing processing results.
-        """
-        # Load and validate configuration
-        try:
-            with open(config_path, 'r') as f:
-                config_text = f.read()
-
-            # Remove comments starting with _comment
-            config_lines = [line for line in config_text.split('\n') if not '"_comment"' in line]
-            clean_config = '\n'.join(config_lines)
-
-            self.data_config = json.loads(clean_config)
-        except Exception as e:
-            raise ValueError(f"Error reading configuration file: {str(e)}")
-
-        # Ensure file_path is set
-        if not self.data_config.get('file_path'):
-            dataset_name = os.path.splitext(os.path.basename(config_path))[0]
-            default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-            if os.path.exists(default_path):
-                self.data_config['file_path'] = default_path
-                print("\033[K" +f"Using default data file: {default_path}")
-            else:
-                raise ValueError(f"No data file found for {dataset_name}")
-
-        # Convert dictionary config to DBNNConfig object
-        config_params = {
-            'epochs': self.data_config.get('training_params', {}).get('epochs', Epochs),
-            'learning_rate': self.data_config.get('training_params', {}).get('learning_rate', LearningRate),
-            'model_type': self.data_config.get('modelType', 'Histogram'),
-            'enable_adaptive': self.data_config.get('training_params', {}).get('enable_adaptive', EnableAdaptive),
-            'batch_size': self.data_config.get('training_params', {}).get('batch_size', 128),
-            'training_data_dir': self.data_config.get('training_params', {}).get('training_save_path', 'training_data')
-        }
-        self.model_config = DBNNConfig(**config_params)
-
-        # Create output directory structure
-        dataset_name = os.path.splitext(os.path.basename(self.data_config['file_path']))[0]
-        output_dir = os.path.join(self.model_config.training_data_dir, dataset_name)
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Update dataset name
-        self.dataset_name = dataset_name
-
-        # Load data using existing GPUDBNN method
-        Original_data=self._load_dataset()
-        X_Orig =Original_data.drop(columns=[self.data_config['target_column']])
-        self.data = Original_data.drop(columns not in [self.data_config['column_names']])
-        # Add row tracking
-        self.data['original_index'] = range(len(self.data))
-
-        # Extract features and target
-        if 'target_column' not in self.data_config:
-            self.data_config['target_column'] = 'target'  # Set default target column
-            print("\033[K" +f"Using default target column: 'target'")
-
-        X = self.data.drop(columns=[self.data_config['target_column']])
-        y = self.data[self.data_config['target_column']]
-
-        # Initialize training log
-        log_file = os.path.join(output_dir, f'{dataset_name}_log.csv')
-        self.training_log = pd.DataFrame(columns=[
-            'timestamp', 'round', 'train_size', 'test_size',
-            'train_loss', 'test_loss', 'train_accuracy', 'test_accuracy',
-            'training_time'
-        ])
-
-        # Train model using existing GPUDBNN methods
-        if self.model_config.enable_adaptive:
-            results = self.adaptive_fit_predict(max_rounds=self.model_config.epochs)
-        else:
-            results = self.fit_predict()
-
-        # Preprocess features and convert to tensors
-        X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
-        y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
-
-        # Generate predictions and true labels
-        predictions = self.predict(X_tensor, batch_size=self.batch_size)
-        true_labels = y_tensor.cpu().numpy()
-
-        # Generate detailed predictions using the original DataFrame (X)
-        #predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
-        predictions_df = self._generate_detailed_predictions(X_Orig, predictions, true_labels)
-
-        # Save results
-        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-        predictions_df.to_csv(results_path, index=False)
-
-        # Save training log
-        self.training_log.to_csv(log_file, index=False)
-
-        # Count number of features actually used (excluding high cardinality and excluded features)
-        n_features = len(X.columns)
-        n_excluded = len(getattr(self, 'high_cardinality_columns', []))
-
-        return {
-            'results_path': results_path,
-            'log_path': log_file,
-            'n_samples': len(self.data),
-            'n_features': n_features,
-            'n_excluded': n_excluded,
-            'training_results': results
-        }
-
-    def _create_dataset_configs(self, folder_path: str, dataset_name: str) -> Dict:
-       """Create or load both dataset and adaptive configs"""
-       dataset_config = self._create_or_load_dataset_config(folder_path, dataset_name)
-       adaptive_config = self._create_or_load_adaptive_config(folder_path, dataset_name)
-       return self._merge_configs(dataset_config, adaptive_config)
-
-    def _merge_configs(self, dataset_config: Dict, adaptive_config: Dict) -> Dict:
-       """Merge dataset and adaptive configs with adaptive taking precedence"""
-       merged = dataset_config.copy()
-       if 'training_params' in adaptive_config:
-           merged['training_params'].update(adaptive_config['training_params'])
-       if 'execution_flags' in adaptive_config:
-           merged['execution_flags'] = adaptive_config['execution_flags']
-       return merged
-
-    def _create_or_load_adaptive_config(self, folder_path: str, dataset_name: str) -> Dict:
-        """Create or load dataset-specific adaptive config"""
-        adaptive_path = os.path.join(folder_path, 'adaptive_dbnn.conf')
-        if os.path.exists(adaptive_path):
-            with open(adaptive_path, 'r') as f:
-                return json.load(f)
-
-        default_adaptive = {
-            "training_params": {
-                "trials": 100,
-                "cardinality_threshold": 0.9,
-                "cardinality_tolerance": 4,
-                "learning_rate": 0.001,
-                "random_seed": 42,
-                "epochs": 100,
-                "test_fraction": 0.2,
-                "enable_adaptive": True,
-                "modelType": "Histogram",
-                "compute_device": "auto",
-                "use_interactive_kbd": False,
-                "debug_enabled": True,
-                "Save_training_epochs": True,
-                "training_save_path": f"data/{dataset_name}"
-            },
-            "execution_flags": {
-                "train": True,
-                "train_only": False,
-                "predict": True,
-                "gen_samples": False,
-                "fresh_start": False,
-                "use_previous_model": True
-            }
-        }
-
-        with open(adaptive_path, 'w') as f:
-            json.dump(default_adaptive, f, indent=4)
-        return default_adaptive
-
-    def _create_or_load_dataset_config(self, folder_path: str, dataset_name: str) -> Dict:
-        """Create or load dataset-specific configuration"""
-        config_path = os.path.join(folder_path, f"{dataset_name}.conf")
-
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Check for duplicate entries and remove them
-            if "feature_group_size" in config and "likelihood_config" in config:
-                print("\033[K" +f"[WARNING] Duplicate entries found in {config_path}. Removing duplicates...")
-                # Remove the standalone entries
-                config.pop("feature_group_size", None)
-                config.pop("max_combinations", None)
-                config.pop("bin_sizes", None)
-
-                # Save the cleaned configuration
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=4)
-                print("\033[K" +f"[INFO] Configuration file cleaned and saved.")
-
-            return config
-
-        # Create default dataset config
-        csv_path = os.path.join(folder_path, f"{dataset_name}.csv")
-        df = pd.read_csv(csv_path, nrows=0)
-
-        default_config = {
-            "file_path": csv_path,
-            "column_names": df.columns.tolist(),
-            "separator": ",",
-            "has_header": True,
-            "target_column": df.columns[-1],
-            "likelihood_config": {
-                "feature_group_size": 2,
-                "max_combinations": 100000,
-                "bin_sizes": [20]
-            },
-            "active_learning": {
-                "tolerance": 1.0,
-                "cardinality_threshold_percentile": 95,
-                "strong_margin_threshold": 0.3,
-                "marginal_margin_threshold": 0.1,
-                "min_divergence": 0.1,
-                "max_class_addition_percent": 5  # Default value for m (5%)
-            },
-            "training_params": {
-                "Save_training_epochs": True,
-                "training_save_path": f"data/{dataset_name}"
-            },
-            "modelType": "Histogram"
-        }
-
-        with open(config_path, 'w') as f:
-            json.dump(default_config, f, indent=4)
-
-        return default_config
-    def _has_single_csv(self, folder_path: str, base_name: str) -> bool:
-        """Check if dataset has single CSV file"""
-        # Check both possible locations
-        csv_paths = [
-            os.path.join(folder_path, f"{base_name}.csv"),
-            os.path.join(folder_path, base_name, f"{base_name}.csv")
-        ]
-        exists = any(os.path.exists(path) for path in csv_paths)
-        if exists:
-            found_path = next(path for path in csv_paths if os.path.exists(path))
-            print("\033[K" +f"Found CSV file: {found_path}")
-        return exists
-
-    def _has_test_train_split(self, folder_path: str, base_name: str) -> bool:
-        """Check for train/test split in dataset folder structure"""
-        dataset_folder = os.path.join(folder_path, base_name)
-        train_path = os.path.join(dataset_folder, 'train')
-        test_path = os.path.join(dataset_folder, 'test')
-
-        # Check if both train and test folders exist
-        has_folders = os.path.exists(train_path) and os.path.exists(test_path)
-
-        if has_folders:
-            # Check for either dataset-named files or train.csv/test.csv
-            train_files = [
-                os.path.join(train_path, f"{base_name}.csv"),
-                os.path.join(train_path, "train.csv")
-            ]
-            test_files = [
-                os.path.join(test_path, f"{base_name}.csv"),
-                os.path.join(test_path, "test.csv")
-            ]
-
-            has_train = any(os.path.exists(f) for f in train_files)
-            has_test = any(os.path.exists(f) for f in test_files)
-
-            if has_train and has_test:
-                train_file = next(f for f in train_files if os.path.exists(f))
-                test_file = next(f for f in test_files if os.path.exists(f))
-                print("\033[K" +f"Found train file: {train_file}")
-                print("\033[K" +f"Found test file: {test_file}")
-                return True
-
-        return False
     def download_uci_dataset(self, dataset_name: str, url: str) -> str:
         """
         Download a dataset from the UCI repository.
@@ -437,113 +125,6 @@ class DatasetProcessor:
         print("\033[K" +f"Dataset saved to {dataset_path}.")
         return dataset_path
 
-    def extract_compressed_dataset(self, dataset_path: str, extract_dir: str) -> List[str]:
-        """
-        Extract a compressed dataset (zip, tar, etc.).
-
-        Args:
-            dataset_path: Path to the compressed dataset.
-            extract_dir: Directory to extract the dataset to.
-
-        Returns:
-            List of extracted file paths.
-        """
-        os.makedirs(extract_dir, exist_ok=True)
-        extracted_files = []
-
-        if dataset_path.endswith('.zip'):
-            with zipfile.ZipFile(dataset_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-                extracted_files = zip_ref.namelist()
-        elif dataset_path.endswith('.tar.gz') or dataset_path.endswith('.tar'):
-            with tarfile.open(dataset_path, 'r:*') as tar_ref:
-                tar_ref.extractall(extract_dir)
-                extracted_files = tar_ref.getnames()
-        else:
-            raise ValueError("Unsupported file format. Only .zip and .tar.gz are supported.")
-
-        print("\033[K" +f"Extracted {len(extracted_files)} files to {extract_dir}.")
-        return [os.path.join(extract_dir, f) for f in extracted_files]
-
-    def load_dataset(self, dataset_path: str, delimiter: str = ',', header: Optional[int] = 0) -> pd.DataFrame:
-        """
-        Load a dataset from a file.
-
-        Args:
-            dataset_path: Path to the dataset file.
-            delimiter: Delimiter used in the dataset file.
-            header: Row number to use as the column names.
-
-        Returns:
-            Loaded DataFrame.
-        """
-        print("\033[K" +f"Loading dataset from {dataset_path}...")
-        try:
-            df = pd.read_csv(dataset_path, delimiter=delimiter, header=header)
-            print("\033[K" +f"Dataset loaded with {df.shape[0]} rows and {df.shape[1]} columns.")
-            return df
-        except Exception as e:
-            print("\033[K" +f"Error loading dataset: {str(e)}")
-            raise
-
-    def create_config_file(self, dataset_name: str, target_column: str, column_names: List[str], **kwargs) -> str:
-        """
-        Create a configuration file for a dataset.
-
-        Args:
-            dataset_name: Name of the dataset.
-            target_column: Name of the target column.
-            column_names: List of column names.
-            **kwargs: Additional configuration parameters.
-
-        Returns:
-            Path to the created configuration file.
-        """
-        config = {
-            "file_path": os.path.join(self.data_dir, f"{dataset_name}.csv"),
-            "column_names": column_names,
-            "target_column": target_column,
-            **kwargs
-        }
-
-        config_path = os.path.join(self.config_dir, f"{dataset_name}.conf")
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-
-        print("\033[K" +f"Configuration file created at {config_path}.")
-        return config_path
-
-    def preprocess_dataset(self, df: pd.DataFrame, target_column: str, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """
-        Preprocess a dataset by splitting it into training and testing sets and scaling the features.
-
-        Args:
-            df: Input DataFrame.
-            target_column: Name of the target column.
-            test_size: Proportion of the dataset to include in the test split.
-            random_state: Random seed for reproducibility.
-
-        Returns:
-            Tuple containing X_train, X_test, y_train, y_test.
-        """
-        print("\033[K" +"Preprocessing dataset...")
-        X = df.drop(columns=[target_column])
-        y = df[target_column]
-
-        # Encode categorical labels
-        label_encoder = LabelEncoder()
-        y_encoded = label_encoder.fit_transform(y)
-
-        # Split the dataset
-        X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=test_size, random_state=random_state)
-
-        # Scale the features
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
-
-        print("\033[K" +"Dataset preprocessing complete.")
-        return X_train, X_test, y_train, y_test
 
     def search_uci_repository(self, query: str) -> List[Dict[str, str]]:
         """
@@ -563,41 +144,6 @@ class DatasetProcessor:
         print("\033[K" +f"Found {len(datasets)} datasets matching query '{query}'.")
         return datasets
 
-    def download_and_process_uci_dataset(self, dataset_name: str, target_column: str, **kwargs) -> Tuple[pd.DataFrame, str]:
-        """
-        Download and process a dataset from the UCI repository.
-
-        Args:
-            dataset_name: Name of the dataset.
-            target_column: Name of the target column.
-            **kwargs: Additional arguments for dataset processing.
-
-        Returns:
-            Tuple containing the processed DataFrame and the path to the configuration file.
-        """
-        # Search for the dataset
-        datasets = self.search_uci_repository(dataset_name)
-        if not datasets:
-            raise ValueError(f"No datasets found matching '{dataset_name}'.")
-
-        # Download the first matching dataset
-        dataset_info = datasets[0]
-        dataset_url = dataset_info['url']
-        dataset_path = self.download_uci_dataset(dataset_name, dataset_url)
-
-        # Extract if necessary
-        if dataset_path.endswith('.zip') or dataset_path.endswith('.tar.gz'):
-            extract_dir = os.path.join(self.data_dir, dataset_name)
-            extracted_files = self.extract_compressed_dataset(dataset_path, extract_dir)
-            dataset_path = extracted_files[0]  # Assume the first file is the main dataset
-
-        # Load the dataset
-        df = self.load_dataset(dataset_path, **kwargs)
-
-        # Create configuration file
-        config_path = self.create_config_file(dataset_name, target_column, df.columns.tolist())
-
-        return df, config_path
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -1997,8 +1543,10 @@ class DBNN(GPUDBNN):
         # Update dataset name
         self.dataset_name = dataset_name
 
-        # Load data using existing GPUDBNN method
-        self.data = self._load_dataset()
+         # Load data using existing GPUDBNN method
+        Original_data=self._load_dataset()
+        X_Orig =Original_data.drop(columns=[self.data_config['target_column']])
+        self.data = Original_data[self.data_config['column_names']]
 
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
@@ -2035,8 +1583,8 @@ class DBNN(GPUDBNN):
         true_labels = y_tensor.cpu().numpy()
 
         # Generate detailed predictions
-        predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
-
+        #predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(X_Orig, predictions, true_labels)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
