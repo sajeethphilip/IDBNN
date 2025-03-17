@@ -2232,7 +2232,7 @@ class DBNN(GPUDBNN):
                     DEBUG.log(" Filtering features based on config")
                     df = _filter_features_from_config(df, self.config)
                     DEBUG.log(f" Shape after filtering: {df.shape}")
-
+                print(df)
                 # Handle target column
                 target_column = self.config.get('target_column')
 
