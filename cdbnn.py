@@ -1827,7 +1827,6 @@ class ModelFactory:
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
 
@@ -1878,7 +1877,6 @@ def train_model(model: nn.Module, train_loader: DataLoader,
             history[f"phase2_{key}"] = value
 
     return history
-
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
