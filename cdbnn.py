@@ -5347,7 +5347,7 @@ class DatasetProcessor:
             }
         }
 
-    def _generate_dataset_conf(self, feature_dims: int, num_classes:int,num_clusters,int) -> Dict:
+    def _generate_dataset_conf(self, feature_dims: int, num_classes:int,num_clusters:int) -> Dict:
         """Generate dataset-specific configuration with additional metrics"""
 
         # Generate column names for class probabilities, cluster probabilities, and confidence
