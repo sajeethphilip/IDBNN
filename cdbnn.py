@@ -5347,10 +5347,8 @@ class DatasetProcessor:
             }
         }
 
-    def _generate_dataset_conf(self, feature_dims: int) -> Dict:
+    def _generate_dataset_conf(self, feature_dims: int, num_classes:int,num_clusters,int) -> Dict:
         """Generate dataset-specific configuration with additional metrics"""
-        num_classes = self.config['dataset'].get('num_classes', 10)
-        num_clusters = num_classes  # Assuming number of clusters equals number of classes
 
         # Generate column names for class probabilities, cluster probabilities, and confidence
         class_prob_columns = [f"class_{i}_probability" for i in range(num_classes)]
@@ -5467,7 +5465,9 @@ class DatasetProcessor:
 
         # 2. Generate and handle dataset.conf using _generate_dataset_conf
         logger.info("Generating dataset configuration...")
-        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
+        num_classes = self.config['dataset'].get('num_classes', 10)
+        num_clusters = num_classes  # Assuming number of clusters equals number of classes
+        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'],num_classes,num_clusters)
         if os.path.exists(self.conf_path):
             try:
                 with open(self.conf_path, 'r') as f:
