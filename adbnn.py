@@ -208,10 +208,8 @@ class DatasetProcessor:
 
         self.org_data=self.data.copy()
         self.data=self.data.drop(columns not in [self.data_config['column_names']])
-        print(self.data)
         X = self.data.drop(columns=[self.data_config['target_column']])
         y = self.data[self.data_config['target_column']]
-        input("Press Key")
         # Initialize training log
         log_file = os.path.join(output_dir, f'{dataset_name}_log.csv')
         self.training_log = pd.DataFrame(columns=[
