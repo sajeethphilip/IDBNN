@@ -1911,7 +1911,23 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader,
+def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Ask user if they want to train or predict
+    mode = input("Choose mode: (1) Train (2) Predict [1]: ").strip() or "1"
+
+    if mode == "1":
+        # Proceed with training
+        history = _train_model(model, train_loader, config, loss_manager)
+        return history
+    elif mode == "2":
+        # Switch to prediction mode
+        prediction_manager = PredictionManager(config)
+        prediction_manager.predict_new_images()
+        return {}
+    else:
+        raise ValueError("Invalid mode selected. Choose 1 for Train or 2 for Predict.")
+def _train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
