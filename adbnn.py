@@ -234,7 +234,7 @@ class DatasetProcessor:
 
         # Generate detailed predictions using the original DataFrame (X)
         X_org=self.org_data.copy()
-        predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(X_org, predictions, true_labels)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
