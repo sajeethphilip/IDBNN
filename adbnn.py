@@ -32,7 +32,7 @@ import traceback  # Add to provide debug
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
-Train_device = 'cpu' # 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
+Train_device = 'cpu'# 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
 Trials = 100  # Number of epochs to wait for improvement in training
 cardinality_threshold =0.9
 cardinality_tolerance=4 #Use when the features are likely to be extremly diverse and deciimal values;4 means, precison restricted to 4 decimal places
@@ -277,7 +277,7 @@ class DatasetConfig:
             "test_fraction": 0.2,
             "n_bins_per_dim": 20,
             "enable_adaptive": True,
-            "compute_device": Train_device,
+            "compute_device": self.device,
             "invert_DBNN": True,
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
@@ -1390,8 +1390,11 @@ class DBNN(GPUDBNN):
             random_state=config.random_seed,
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
-            model_type=config.model_type  # Pass model type from config
+            model_type=config.model_type,  # Pass model type from config
+            device=config.device  # Pass device from config
         )
+        global Train_device
+        Train_device=config.device
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
         # Store model configuration
