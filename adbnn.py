@@ -277,7 +277,7 @@ class DatasetConfig:
             "test_fraction": 0.2,
             "n_bins_per_dim": 20,
             "enable_adaptive": True,
-            "compute_device": self.device,
+            "compute_device":  existing_config.get('training_params', {}).get('compute_device', Train_device),  # Preserve existing value
             "invert_DBNN": True,
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
