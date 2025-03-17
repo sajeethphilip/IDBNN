@@ -2217,6 +2217,7 @@ class DBNN(GPUDBNN):
                 # DO NOT include 'names' parameter for the initial read
                 # This allows us to read the actual headers from the file
                 DEBUG.log(f" Reading CSV with parameters: {read_params}")
+                input(" Goinf to read data. Press Enter")
                 df = pd.read_csv(data, **read_params)
                 # Store the original data before any preprocessing
                 self.original_data = df.copy()
@@ -2232,7 +2233,9 @@ class DBNN(GPUDBNN):
                     DEBUG.log(" Filtering features based on config")
                     df = _filter_features_from_config(df, self.config)
                     DEBUG.log(f" Shape after filtering: {df.shape}")
+                input(" Goinfgto print data. Press Enter")
                 print(df)
+                input(" Printed data. Press Enter")
                 # Handle target column
                 target_column = self.config.get('target_column')
 
