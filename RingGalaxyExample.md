@@ -352,6 +352,74 @@ Last testing data is saved to galaxies_Last_testing.csv
 Last training data is saved to galaxies_Last_training.csv
 
 ----------------Now there is no improvement, and the code runs till persistence is exhausted.
+Finally...
+
+Confusion Matrix and Class-wise Accuracy for [Training Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              176     104      62.86%
+1              138     171      55.34%
+-----------------------------------------
+Overall Accuracy: 58.91%
+Best Overall Accuracy till now is: 97.02%
+Confusion Matrix and Class-wise Accuracy for [Test Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11021   136      98.78%
+1              0       886     100.00%
+-----------------------------------------
+Overall Accuracy: 98.87%
+Best Overall Accuracy till now is: 97.02%
+Confusion Matrix and Class-wise Accuracy for [Combined Data]:
+Actual/Predicted0       1       Accuracy
+-----------------------------------------
+0              11197   240      97.90%
+1              138     1057     88.45%
+-----------------------------------------
+Overall Accuracy: 97.01%
+Best Overall Accuracy till now is: 97.02%
+Training accuracy: 0.5891
+No significant overall improvement. Adaptive patience: 5/5
+No improvement in accuracy after 5 rounds of adding samples.
+Best training accuracy achieved: 0.9702
+Stopping adaptive training.
+Adaptive training started at: 2025-03-17 04:43:20
+Adaptive training ended at: 2025-03-17 05:46:11
+Total adaptive training time: 3770.87 seconds
+[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:
+- n_features: 110
+- group_size: 2
+- max_combinations: 10000
+- bin_sizes: [21]
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loading cached feature combinations from data/galaxies/training_data/galaxies/feature_combinations.pkl
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loaded feature combinations: torch.Size([1830, 2])
+Dataset shape: torch.Size([12632, 110])
+Bin sizes: [64]
+Prediction batches: 100%|████████████████████████████████████████████████████████████████| 25/25 [00:09<00:00,  2.58it/s]
+Processing complete!
+Time taken: 3937.5 seconds
+Results saved to: data/galaxies/training_data/galaxies/galaxies_predictions.csv
+Training log saved to: data/galaxies/training_data/galaxies/galaxies_log.csv
+Processed 12632 samples with 129 features
+Excluded 19 features
+Loaded best weights from Model/Best_Histogram_galaxies_weights.json
+Using device: cuda
+Using original data order (no shuffling required)
+Loaded best weights from Model/Best_Histogram_galaxies_weights.json
+Using original data order (no shuffling required)
+[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:
+- n_features: 110
+- group_size: 2
+- max_combinations: 10000
+- bin_sizes: [21]
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loading cached feature combinations from data/galaxies/training_data/galaxies/feature_combinations.pkl
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loaded feature combinations: torch.Size([1830, 2])
+Dataset shape: torch.Size([12632, 110])
+Bin sizes: [64]
 
 
 ```
