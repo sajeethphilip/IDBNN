@@ -5418,8 +5418,8 @@ class DatasetProcessor:
         confidence_column = ["prediction_confidence"]
 
         # Combine all column names
-        all_columns = [f"feature_{i}" for i in range(feature_dims)] + \
-                      class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
+        all_columns = [f"feature_{i}" for i in range(feature_dims)] + ["target"] #+ \
+                      #class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
 
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
