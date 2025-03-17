@@ -5418,7 +5418,7 @@ class DatasetProcessor:
         confidence_column = ["prediction_confidence"]
 
         # Combine all column names
-        all_columns = ["filename"] + [f"feature_{i}" for i in range(feature_dims)] + \
+        all_columns = [f"feature_{i}" for i in range(feature_dims)] + \
                       class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
 
         return {
