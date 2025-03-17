@@ -2218,8 +2218,6 @@ class DBNN(GPUDBNN):
                 # This allows us to read the actual headers from the file
                 DEBUG.log(f" Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
-                # Store the original data before any preprocessing
-                self.original_data = df.copy()
 
                 if df is None or df.empty:
                     raise ValueError(f"Empty dataset loaded from {file_path}")
@@ -2246,7 +2244,7 @@ class DBNN(GPUDBNN):
                     target_column = cols[target_column]
                     self.config['target_column'] = target_column
                     DEBUG.log(f" Using target column: {target_column}")
-                input("Pass1")
+
                 if target_column not in df.columns:
                     raise ValueError(f"Target column '{target_column}' not found in dataset")
 
