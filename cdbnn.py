@@ -63,6 +63,19 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+import os
+from glob import glob
+import pandas as pd
+
+def get_image_names(folder_path: str) -> List[str]:
+    """Get sorted list of image names from a folder."""
+    image_extensions = ('*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tiff')
+    image_names = []
+    for ext in image_extensions:
+        image_names.extend(glob(os.path.join(folder_path, ext)))
+    # Sort to ensure consistent order
+    image_names.sort()
+    return [os.path.basename(img_path) for img_path in image_names]
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -648,18 +661,83 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def save_features_with_image_names(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: List[str]):
         """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
+        Save features to CSV with image names as the first column.
+
+        Args:
+            feature_dict: Dictionary containing features and related information.
+            output_path: Path to save the CSV file.
+            image_names: List of image names corresponding to the data.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            # Determine which features to save
+            feature_columns = ['image_name']
+            data_dict = {'image_name': image_names}
+
+            # Process embeddings
+            if 'embeddings' in feature_dict:
+                embeddings = feature_dict['embeddings'].cpu().numpy()
+                for i in range(embeddings.shape[1]):
+                    col_name = f'feature_{i}'
+                    feature_columns.append(col_name)
+                    data_dict[col_name] = embeddings[:, i]
+
+            # Process labels/targets
+            if 'labels' in feature_dict:
+                data_dict['target'] = feature_dict['labels'].cpu().numpy()
+                feature_columns.append('target')
+
+            # Save in chunks to manage memory
+            chunk_size = 1000
+            total_samples = len(image_names)
+
+            for start_idx in range(0, total_samples, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_samples)
+
+                # Create chunk dictionary
+                chunk_dict = {
+                    col: data_dict[col][start_idx:end_idx]
+                    for col in feature_columns
+                }
+
+                # Save chunk to CSV
+                df = pd.DataFrame(chunk_dict)
+                mode = 'w' if start_idx == 0 else 'a'
+                header = start_idx == 0
+                df.to_csv(output_path, mode=mode, index=False, header=header)
+
+                # Clean up
+                del df, chunk_dict
+                gc.collect()
+
+            logger.info(f"Features saved to {output_path}")
+            logger.info(f"Total features saved: {len(feature_columns)}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
+    def extract_features(self, loader: DataLoader, output_path: Optional[str] = None) -> Dict[str, torch.Tensor]:
+        """
+        Extract features and save them to a CSV file with image names.
+
+        Args:
+            loader: DataLoader providing images, labels, and image names.
+            output_path: Path to save the CSV file. If None, only return the feature dictionary.
+
+        Returns:
+            Dictionary containing features and related information.
         """
         self.eval()
         all_embeddings = []
         all_labels = []
+        all_image_names = []
 
         try:
             with torch.no_grad():
-                for inputs, labels in tqdm(loader, desc="Extracting features"):
+                for inputs, labels, img_names in tqdm(loader, desc="Extracting features"):
                     # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
@@ -681,6 +759,7 @@ class BaseAutoencoder(nn.Module):
                     # Store results (keeping on device for now)
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
+                    all_image_names.extend(img_names)  # Collect image names
 
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
@@ -717,6 +796,10 @@ class BaseAutoencoder(nn.Module):
                 for key in feature_dict:
                     if isinstance(feature_dict[key], torch.Tensor):
                         feature_dict[key] = feature_dict[key].cpu()
+
+                # Save features to CSV if output_path is provided
+                if output_path:
+                    self.save_features_with_image_names(feature_dict, output_path, all_image_names)
 
                 return feature_dict
 
@@ -1820,7 +1903,12 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling."""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
+
     history = defaultdict(list)
 
     # Initialize starting epoch and phase
@@ -1854,7 +1942,8 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_m
             logger.info("Resuming Phase 2: Latent space organization")
 
         # Lower learning rate for fine-tuning
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
 
         phase2_history = _train_phase(
             model, train_loader, optimizer, loss_manager,
@@ -1867,156 +1956,6 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_m
             history[f"phase2_{key}"] = value
 
     return history
-
-
-def _train_phase(model: nn.Module, train_loader: DataLoader,
-                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
-                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    history = defaultdict(list)
-    device = next(model.parameters()).device
-
-    # Initialize unified checkpoint
-    checkpoint_manager = UnifiedCheckpoint(config)
-
-    # Load best loss from checkpoint
-    best_loss = checkpoint_manager.get_best_loss(phase, model)
-    patience_counter = 0
-
-    try:
-        for epoch in range(start_epoch, epochs):
-            model.train()
-            running_loss = 0.0
-            num_batches = len(train_loader)  # Get total number of batches
-
-            # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (data, labels, filenames) in enumerate(pbar):  # Unpack filenames
-                try:
-                    # Move data to correct device
-                    if isinstance(data, (list, tuple)):
-                        data = data[0]
-                    data = data.to(device)
-                    labels = labels.to(device)
-
-                    # Zero gradients
-                    optimizer.zero_grad()
-
-                    # Forward pass based on phase
-                    if phase == 1:
-                        # Phase 1: Only reconstruction
-                        embeddings = model.encode(data)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
-                        reconstruction = model.decode(embeddings)
-                        loss = F.mse_loss(reconstruction, data)
-                    else:
-                        # Phase 2: Include clustering and classification
-                        output = model(data)
-                        if isinstance(output, dict):
-                            reconstruction = output['reconstruction']
-                            embedding = output['embedding']
-                        else:
-                            embedding, reconstruction = output
-
-                        # Calculate base loss
-                        loss = loss_manager.calculate_loss(
-                            reconstruction, data,
-                            config['dataset'].get('image_type', 'general')
-                        )['loss']
-
-                        # Add KL divergence loss if enabled
-                        if model.use_kl_divergence:
-                            latent_info = model.organize_latent_space(embedding, labels)
-                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
-                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
-                                kl_loss = F.kl_div(
-                                    latent_info['cluster_probabilities'].log(),
-                                    latent_info['target_distribution'],
-                                    reduction='batchmean'
-                                )
-                                loss += kl_weight * kl_loss
-
-                        # Add classification loss if enabled
-                        if model.use_class_encoding and hasattr(model, 'classifier'):
-                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
-                            class_logits = model.classifier(embedding)
-                            class_loss = F.cross_entropy(class_logits, labels)
-                            loss += class_weight * class_loss
-
-                    # Backward pass and optimization
-                    loss.backward()
-                    optimizer.step()
-
-                    # Update running loss - handle possible NaN or inf
-                    current_loss = loss.item()
-                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
-                        running_loss += current_loss
-
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
-
-                    # Update progress bar with safe values
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
-
-                    # Memory cleanup
-                    del data, loss
-                    if phase == 2:
-                        del output
-                    torch.cuda.empty_cache()
-
-                except Exception as e:
-                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                    continue
-
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
-            else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
-
-            # Record history
-            history[f'phase{phase}_loss'].append(avg_loss)
-
-            # Save checkpoint and check for best model
-            is_best = avg_loss < best_loss
-            if is_best:
-                best_loss = avg_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-
-            checkpoint_manager.save_model_state(
-                model=model,
-                optimizer=optimizer,
-                phase=phase,
-                epoch=epoch,
-                loss=avg_loss,
-                is_best=is_best
-            )
-            # Early stopping check
-            patience = config['training'].get('early_stopping', {}).get('patience', 5)
-            if patience_counter >= patience:
-                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
-                break
-
-            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
-
-            # Clean up at end of epoch
-            pbar.close()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    except Exception as e:
-        logger.error(f"Error in training phase {phase}: {str(e)}")
-        raise
-
-    return history
-
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -2120,11 +2059,10 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic for each phase with enhanced checkpoint handling"""
+    """Training logic for each phase with enhanced checkpoint handling."""
     history = defaultdict(list)
     device = next(model.parameters()).device
 
-    # Get phase-specific metrics
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
@@ -2140,12 +2078,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
             # Training loop
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (data, labels) in enumerate(pbar):
+            for batch_idx, (inputs, labels, _) in enumerate(pbar):  # Ignore image_name
                 try:
                     # Move data to correct device
-                    if isinstance(data, (list, tuple)):
-                        data = data[0]
-                    data = data.to(device)
+                    if isinstance(inputs, (list, tuple)):
+                        inputs = inputs[0]
+                    inputs = inputs.to(device)
                     labels = labels.to(device)
 
                     # Zero gradients
@@ -2154,23 +2092,29 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     # Forward pass based on phase
                     if phase == 1:
                         # Phase 1: Only reconstruction
-                        embeddings = model.encode(data)
+                        embeddings = model.encode(inputs)
                         if isinstance(embeddings, tuple):
                             embeddings = embeddings[0]
                         reconstruction = model.decode(embeddings)
-                        loss = F.mse_loss(reconstruction, data)
+                        loss = F.mse_loss(reconstruction, inputs)
                     else:
                         # Phase 2: Include clustering and classification
-                        output = model(data)
+                        output = model(inputs)
+
+                        # Handle dictionary output
                         if isinstance(output, dict):
                             reconstruction = output['reconstruction']
                             embedding = output['embedding']
                         else:
-                            embedding, reconstruction = output
+                            # Handle tuple output (fallback)
+                            if isinstance(output, tuple):
+                                embedding, reconstruction = output
+                            else:
+                                raise ValueError("Unexpected output format from model")
 
                         # Calculate base loss
                         loss = loss_manager.calculate_loss(
-                            reconstruction, data,
+                            reconstruction, inputs,
                             config['dataset'].get('image_type', 'general')
                         )['loss']
 
@@ -2197,22 +2141,15 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss.backward()
                     optimizer.step()
 
-                    # Update running loss - handle possible NaN or inf
-                    current_loss = loss.item()
-                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
-                        running_loss += current_loss
+                    # Update running loss
+                    running_loss += loss.item()
 
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
-
-                    # Update progress bar with safe values
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
+                    # Update progress bar
+                    batch_loss = running_loss / (batch_idx + 1)
+                    pbar.set_postfix({'loss': f'{batch_loss:.4f}', 'best': f'{best_loss:.4f}'})
 
                     # Memory cleanup
-                    del data, loss
+                    del inputs, loss
                     if phase == 2:
                         del output
                     torch.cuda.empty_cache()
@@ -2221,14 +2158,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
                     continue
 
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
-            else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
-
-            # Record history
+            # Calculate epoch average loss
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Save checkpoint and check for best model
@@ -2247,6 +2178,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 loss=avg_loss,
                 is_best=is_best
             )
+
             # Early stopping check
             patience = config['training'].get('early_stopping', {}).get('patience', 5)
             if patience_counter >= patience:
@@ -3462,14 +3394,19 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         reconstruction_accuracy = 0.0
 
         with torch.no_grad():
-            for inputs, _ in val_loader:
-                inputs = inputs.to(self.device)
-                embedding, reconstruction = self.feature_extractor(inputs)
+            for inputs, labels, _ in val_loader:  # Ignore image_name
+                inputs = inputs.to(model.device)
+                labels = labels.to(model.device)
 
-                loss = self._calculate_loss(inputs, reconstruction, embedding)
+                # Forward pass
+                embedding, reconstruction = model(inputs)
+                loss = F.mse_loss(reconstruction, inputs)
+
+                # Update metrics
                 running_loss += loss.item()
                 reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
 
+                # Clean up
                 del inputs, embedding, reconstruction, loss
 
         return (running_loss / len(val_loader),
@@ -4711,28 +4648,25 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
         return running_loss / len(val_loader), 100. * correct / total
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def extract_features(self, loader: DataLoader, output_path: Optional[str] = None) -> Dict[str, torch.Tensor]:
         """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
+        Extract features and save them to a CSV file with image names as the first column.
+
+        Args:
+            loader: DataLoader providing images, labels, and image names.
+            output_path: Path to save the CSV file. If None, only return the feature dictionary.
+
+        Returns:
+            Dictionary containing features and related information.
         """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_filenames = []  # Initialize list to store filenames (if available)
+        all_image_names = []
 
         try:
             with torch.no_grad():
-                for batch in tqdm(loader, desc="Extracting features"):
-                    # Handle both (inputs, labels) and (inputs, labels, filenames)
-                    if len(batch) == 2:
-                        inputs, labels = batch
-                        filenames = None  # No filenames provided
-                    elif len(batch) == 3:
-                        inputs, labels, filenames = batch
-                    else:
-                        raise ValueError("Dataloader must yield tuples of (inputs, labels) or (inputs, labels, filenames)")
-
+                for inputs, labels, img_names in tqdm(loader, desc="Extracting features"):
                     # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
@@ -4754,8 +4688,7 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
                     # Store results (keeping on device for now)
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
-                    if filenames is not None:
-                        all_filenames.extend(filenames)  # Store filenames if available
+                    all_image_names.extend(img_names)  # Collect image names
 
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
@@ -4764,12 +4697,9 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
                 # Initialize base feature dictionary
                 feature_dict = {
                     'embeddings': embeddings,
-                    'labels': labels
+                    'labels': labels,
+                    'image_names': all_image_names  # Add image names to the feature dictionary
                 }
-
-                # Add filenames to the feature dictionary if available
-                if all_filenames:
-                    feature_dict['filenames'] = all_filenames
 
                 # Add enhancement features if in phase 2
                 if self.training_phase == 2:
@@ -4797,11 +4727,16 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
                     if isinstance(feature_dict[key], torch.Tensor):
                         feature_dict[key] = feature_dict[key].cpu()
 
+                # Save features to CSV if output_path is provided
+                if output_path:
+                    self.save_features_with_image_names(feature_dict, output_path, all_image_names)
+
                 return feature_dict
 
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
+
     def get_feature_shape(self) -> Tuple[int, ...]:
         """Get shape of extracted features"""
         return (self.feature_dims,)
@@ -5060,22 +4995,20 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
+    """Custom dataset for loading images from directory structure."""
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
         self.label_encoder = {}
         self.reverse_encoder = {}
-        self.filenames = []  # Store filenames
-        self.images = []     # Store image data
-        self.labels = []     # Store labels
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
         else:
-            # Sort class directories for consistency
+            self.image_files = []
+            self.labels = []
             unique_labels = sorted(os.listdir(data_dir))
 
-            # Create label encodings
             for idx, label in enumerate(unique_labels):
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
@@ -5088,31 +5021,27 @@ class CustomImageDataset(Dataset):
                     'id_to_label': self.reverse_encoder
                 }, f, indent=4)
 
-            # Load images and store filenames
             for class_name in unique_labels:
                 class_dir = os.path.join(data_dir, class_name)
                 if os.path.isdir(class_dir):
-                    # Sort image files by filename
-                    image_files = sorted([f for f in os.listdir(class_dir)
-                                        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
-                    for img_name in image_files:
-                        img_path = os.path.join(class_dir, img_name)
-                        self.filenames.append(img_name)  # Store filename
-                        self.images.append(img_path)     # Store image path
-                        self.labels.append(self.label_encoder[class_name])  # Store label
+                    for img_name in os.listdir(class_dir):
+                        if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                            self.image_files.append(os.path.join(class_dir, img_name))
+                            self.labels.append(self.label_encoder[class_name])
 
     def __len__(self):
-        return len(self.images)
+        return len(self.image_files)
 
     def __getitem__(self, idx):
-        img_path = self.images[idx]
+        img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
+        img_name = os.path.basename(img_path)  # Extract image name
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label, self.filenames[idx]  # Return filename along with image and label
+        return image, label, img_name  # Return image, label, and image name
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
@@ -5514,10 +5443,10 @@ class DatasetProcessor:
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
-        """Generate dataset-specific configuration"""
+        """Generate dataset-specific configuration including image_name."""
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
+            "column_names": ["image_name"] + [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -5536,7 +5465,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size":128,
+                "batch_size": 128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5564,7 +5493,6 @@ class DatasetProcessor:
                 "gen_samples": False
             }
         }
-
     def _generate_dbnn_config(self, main_config: Dict) -> Dict:
         """Generate DBNN-specific configuration"""
         return {
@@ -5791,6 +5719,7 @@ class DatasetProcessor:
 
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
+        """Create train/test split from source directory"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
@@ -5808,26 +5737,15 @@ class DatasetProcessor:
             os.makedirs(train_class_dir, exist_ok=True)
             os.makedirs(test_class_dir, exist_ok=True)
 
-            # Get all image files and sort them by filename
-            image_files = sorted([f for f in os.listdir(class_path)
-                                if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)])
+            # Get all image files
+            image_files = [f for f in os.listdir(class_path)
+                         if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)]
 
-            # Shuffle filenames and their corresponding data together
-            random.seed(42)  # Set a fixed random seed for reproducibility
-            random.shuffle(image_files)  # Shuffle the filenames
-
-            # Split into train and test sets
+            # Random split
+            random.shuffle(image_files)
             split_idx = int((1 - test_size) * len(image_files))
             train_files = image_files[:split_idx]
             test_files = image_files[split_idx:]
-
-            # Save shuffled filenames and labels to a CSV file
-            shuffled_data = {
-                'filename': image_files,
-                'label': [class_name] * len(image_files)
-            }
-            df = pd.DataFrame(shuffled_data)
-            df.to_csv(os.path.join(self.dataset_dir, f'shuffled_data_{class_name}.csv'), index=False)
 
             # Copy files
             for fname in train_files:
