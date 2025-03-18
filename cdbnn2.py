@@ -692,7 +692,7 @@ class BaseAutoencoder(nn.Module):
                 # Initialize base feature dictionary
                 feature_dict = {
                     'embeddings': embeddings,
-                    'labels': labels
+                    'labels': labels,
                     'indices': indices  # Include indices in the feature dictionary
                 }
 
