@@ -202,7 +202,7 @@ class DatasetConfig:
         "likelihood_config": {
             "feature_group_size": 2,
             "max_combinations": 100000,
-            "bin_sizes": [20]
+            "bin_sizes": [64]
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -275,7 +275,7 @@ class DatasetConfig:
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
-            "n_bins_per_dim": 20,
+            "n_bins_per_dim": 64,
             "enable_adaptive": True,
             "compute_device": "auto",
             "invert_DBNN": True,
@@ -1002,7 +1002,7 @@ class GPUDBNN:
                  max_epochs: int = Epochs, test_size: float = TestFraction,
                  random_state: int = TrainingRandomSeed, device: str = None,
                  fresh: bool = False, use_previous_model: bool = True,
-                 n_bins_per_dim: int = 20, model_type: str = "Histogram"):
+                 n_bins_per_dim: int = 64, model_type: str = "Histogram"):
         """Initialize GPUDBNN with support for continued training with fresh data"""
 
         # Set dataset_name and model type first
@@ -1324,7 +1324,7 @@ class DBNNConfig:
 
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
-        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 20)
+        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 64)
 
         # Execution flags
         self.train = kwargs.get('train', True)
@@ -2846,7 +2846,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
 
             # Compute bin edges using the preprocessed data (now a tensor)
-            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [64]))
             DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
 
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
@@ -2861,7 +2861,7 @@ class DBNN(GPUDBNN):
         # Get parameters directly from the root of the config file
         group_size = self.config.get('feature_group_size', 2)
         max_combinations = max_combinations or self.config.get('max_combinations', None)
-        bin_sizes = self.config.get('bin_sizes', [20])
+        bin_sizes = self.config.get('bin_sizes', [64])
 
         # Debug: Print parameters
         print("\033[K" +f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
@@ -2921,7 +2921,7 @@ class DBNN(GPUDBNN):
         n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [64])
         if len(bin_sizes) == 1:
             # If single bin size provided, use it for all dimensions
             n_bins = bin_sizes[0]
@@ -4722,7 +4722,7 @@ class DBNN(GPUDBNN):
                 self.categorical_encoders = components['categorical_encoders']
                 self.high_cardinality_columns = components.get('high_cardinality_columns', [])
                 self.weight_updater = components.get('weight_updater')
-                self.n_bins_per_dim = components.get('n_bins_per_dim', 20)
+                self.n_bins_per_dim = components.get('n_bins_per_dim', 64)
                 self.bin_edges = components.get('bin_edges')  # Load bin_edges
                 self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
                 print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
