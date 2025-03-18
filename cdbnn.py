@@ -64,100 +64,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
-class PredictionManager:
-    def __init__(self, config: Dict):
-        self.config = config
-        self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
-        self.model = self._load_model()
-
-    def _load_model(self) -> nn.Module:
-        """Load the pre-trained model"""
-        checkpoint_path = os.path.join(self.config['training']['checkpoint_dir'], f"{self.config['dataset']['name']}_unified.pth")
-
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"No trained model found at {checkpoint_path}")
-
-        # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        elif 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'])
-        else:
-            raise KeyError("Checkpoint does not contain 'state_dict' or 'model_state_dict'")
-
-        # Debug: Print checkpoint keys
-        print("Checkpoint keys:", checkpoint.keys())
-
-        # Create the model
-        model = ModelFactory.create_model(self.config)
-
-        # Debug: Print model architecture
-        print("Model architecture:", model)
-
-        # Load the state_dict
-        if 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'])
-        else:
-            raise KeyError("Checkpoint does not contain 'state_dict'")
-
-        model.eval()
-        return model.to(self.device)
-
-    def predict_new_images(self):
-        """Predict features for new images and save to CSV"""
-        # Ask for the directory containing new images
-        image_dir = input("Enter the path to the directory containing new images: ").strip()
-        if not os.path.exists(image_dir):
-            raise FileNotFoundError(f"Directory not found: {image_dir}")
-
-        # Load images
-        transform = self._get_transforms()
-        image_files = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
-        dataset = CustomImageDataset(image_dir, transform=transform)
-        dataloader = DataLoader(dataset, batch_size=self.config['training']['batch_size'], shuffle=False)
-
-        # Extract features and predictions
-        feature_dict = self.model.extract_features(dataloader)
-
-        # Save predictions to CSV
-        output_path = os.path.join(self.config['output']['csv_dir'], f"{self.config['dataset']['name']}_predictions.csv")
-        self.model.save_features(feature_dict, output_path, image_files)
-
-        print(f"Predictions saved to {output_path}")
-
-    def _get_transforms(self):
-        """Get transforms for new images"""
-        return transforms.Compose([
-            transforms.Resize(self.config['dataset']['input_size']),
-            transforms.ToTensor(),
-            transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
-        ])
-
-    def _get_transforms(self):
-        """Get transforms for new images"""
-        return transforms.Compose([
-            transforms.Resize(self.config['dataset']['input_size']),
-            transforms.ToTensor(),
-            transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
-        ])
-
-class FilenameEncoder:
-    def __init__(self):
-        self.filename_to_id = {}
-        self.id_to_filename = {}
-        self.current_id = 0
-
-    def encode(self, filename):
-        if filename not in self.filename_to_id:
-            self.filename_to_id[filename] = self.current_id
-            self.id_to_filename[self.current_id] = filename
-            self.current_id += 1
-        return self.filename_to_id[filename]
-
-    def decode(self, filename_id):
-        return self.id_to_filename.get(filename_id, "unknown")
-
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
 
@@ -505,6 +411,8 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
 #--------------------------
 
+
+#--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
         self.train_dataset = dataset
@@ -649,30 +557,33 @@ class BaseAutoencoder(nn.Module):
 
         return x
 
-    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
         embedding = self.encode(x)
+        if isinstance(embedding, tuple):
+            embedding = embedding[0]
         reconstruction = self.decode(embedding)
 
-        output = {
-            'embedding': embedding,
-            'reconstruction': reconstruction
-        }
-
         if self.training_phase == 2:
-            # Add class-related outputs if class encoding is enabled
+            # Return dictionary format in phase 2
+            output = {
+                'embedding': embedding,
+                'reconstruction': reconstruction
+            }
+
             if self.use_class_encoding and hasattr(self, 'classifier'):
                 class_logits = self.classifier(embedding)
                 output['class_logits'] = class_logits
                 output['class_predictions'] = class_logits.argmax(dim=1)
-                output['class_probabilities'] = F.softmax(class_logits, dim=1)
 
-            # Add clustering information if KL divergence is enabled
             if self.use_kl_divergence:
-                latent_info = self.organize_latent_space(embedding, labels)
+                latent_info = self.organize_latent_space(embedding)
                 output.update(latent_info)
 
-        return output
+            return output
+        else:
+            # Return tuple format in phase 1
+            return embedding, reconstruction
 
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
@@ -738,95 +649,47 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Extract features from data loader with filename encoding"""
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_filenames = []
-
-        # Initialize filename encoder
-        filename_encoder = FilenameEncoder()
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
 
         try:
             with torch.no_grad():
                 for inputs, labels in tqdm(loader, desc="Extracting features"):
-                    # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Get embeddings
-                    if self.training_phase == 2 and hasattr(self, 'forward'):
-                        # Use full forward pass in phase 2 to get all enhancement features
-                        outputs = self(inputs)
-                        if isinstance(outputs, dict):
-                            embeddings = outputs['embedding']
-                        else:
-                            embeddings = outputs[0]
-                    else:
-                        # Basic embedding extraction
-                        embeddings = self.encode(inputs)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
+                    # Get additional information (file_index and filename)
+                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
 
-                    # Store results (keeping on device for now)
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
+
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
+                    all_indices.extend(indices)  # Append file indices
+                    all_filenames.extend(filenames)  # Append filenames
 
-                    # Encode filenames if available
-                    if hasattr(loader.dataset, 'image_files'):
-                        batch_filenames = [loader.dataset.image_files[i] for i in range(len(inputs))]
-                        all_filenames.extend([filename_encoder.encode(fname) for fname in batch_filenames])
-
-                # Concatenate all results while still on device
+                # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
 
-                # Initialize base feature dictionary
                 feature_dict = {
                     'embeddings': embeddings,
-                    'labels': labels
+                    'labels': labels,
+                    'indices': all_indices,  # Include indices in the feature dictionary
+                    'filenames': all_filenames  # Include filenames in the feature dictionary
                 }
-
-                # Add filename IDs if available
-                if all_filenames:
-                    feature_dict['filenames'] = torch.tensor(all_filenames, device=self.device)
-
-                # Add enhancement features if in phase 2
-                if self.training_phase == 2:
-                    # Add clustering information if enabled
-                    if self.use_kl_divergence:
-                        cluster_info = self.organize_latent_space(embeddings, labels)
-                        feature_dict.update(cluster_info)
-
-                    # Add classification information if enabled
-                    if self.use_class_encoding and hasattr(self, 'classifier'):
-                        class_logits = self.classifier(embeddings)
-                        feature_dict.update({
-                            'class_logits': class_logits,
-                            'class_predictions': class_logits.argmax(dim=1),
-                            'class_probabilities': F.softmax(class_logits, dim=1)
-                        })
-
-                    # Add specialized features for enhanced models
-                    if hasattr(self, 'get_enhancement_features'):
-                        enhancement_features = self.get_enhancement_features(embeddings)
-                        feature_dict.update(enhancement_features)
-
-                # Move all tensors to CPU for final output
-                for key in feature_dict:
-                    if isinstance(feature_dict[key], torch.Tensor):
-                        feature_dict[key] = feature_dict[key].cpu()
-
-                # Decode filenames before returning
-                if 'filenames' in feature_dict:
-                    feature_dict['filenames'] = [filename_encoder.decode(fid) for fid in feature_dict['filenames'].tolist()]
 
                 return feature_dict
 
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
-
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -834,14 +697,13 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str, image_names: Optional[List[str]] = None):
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
         """
         Universal feature saving method for all autoencoder variants.
 
         Args:
             feature_dict: Dictionary containing features and related information
             output_path: Path to save the CSV file
-            image_names: List of image names to include as the first column
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -849,11 +711,6 @@ class BaseAutoencoder(nn.Module):
             # Determine which features to save
             feature_columns = []
             data_dict = {}
-
-            # Add image names if provided
-            if 'filenames' in feature_dict:
-                data_dict['filename'] = feature_dict['filenames']
-                feature_columns.append('filename')
 
             # Process embeddings
             if 'embeddings' in feature_dict:
@@ -868,28 +725,21 @@ class BaseAutoencoder(nn.Module):
                 data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
 
-            # Process class probabilities if available
-            if 'class_probabilities' in feature_dict:
-                class_probs = feature_dict['class_probabilities'].cpu().numpy()
-                for i in range(class_probs.shape[1]):
-                    col_name = f'class_{i}_probability'
-                    feature_columns.append(col_name)
-                    data_dict[col_name] = class_probs[:, i]
+            # Process file indices
+            if 'indices' in feature_dict:
+                data_dict['file_index'] = feature_dict['indices']
+                feature_columns.append('file_index')
 
-            # Process cluster probabilities if available
-            if 'cluster_probabilities' in feature_dict:
-                cluster_probs = feature_dict['cluster_probabilities'].cpu().numpy()
-                for i in range(cluster_probs.shape[1]):
-                    col_name = f'cluster_{i}_probability'
-                    feature_columns.append(col_name)
-                    data_dict[col_name] = cluster_probs[:, i]
+            # Process filenames (if available)
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']  # Already a list, no need for .cpu()
+                feature_columns.append('filename')
 
-            # Process prediction confidence if available
-            if 'class_logits' in feature_dict:
-                logits = feature_dict['class_logits'].cpu().numpy()
-                confidence = softmax(logits, axis=1).max(axis=1)
-                data_dict['prediction_confidence'] = confidence
-                feature_columns.append('prediction_confidence')
+
+            # Process enhancement features if present
+            enhancement_features = self._get_enhancement_columns(feature_dict)
+            data_dict.update(enhancement_features)
+            feature_columns.extend(enhancement_features.keys())
 
             # Save in chunks to manage memory
             chunk_size = 1000
@@ -1941,23 +1791,7 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
-    # Ask user if they want to train or predict
-    mode = input("Choose mode: (1) Train (2) Predict [1]: ").strip() or "1"
-
-    if mode == "1":
-        # Proceed with training
-        history = _train_model(model, train_loader, config, loss_manager)
-        return history
-    elif mode == "2":
-        # Switch to prediction mode
-        prediction_manager = PredictionManager(config)
-        prediction_manager.predict_new_images()
-        return {}
-    else:
-        raise ValueError("Invalid mode selected. Choose 1 for Train or 2 for Predict.")
-def _train_model(model: nn.Module, train_loader: DataLoader,
+def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
@@ -2261,7 +2095,312 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     return history
 
+class PredictionManager:
+    """Manages model prediction with unified checkpoint loading"""
 
+    def __init__(self, config: Dict):
+        self.config = config
+        self.checkpoint_manager = UnifiedCheckpoint(config)
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                                 and torch.cuda.is_available() else 'cpu')
+
+    def load_model_for_prediction(self) -> Tuple[nn.Module, Dict]:
+        """Load appropriate model configuration based on user input"""
+        # Get available configurations from checkpoint
+        available_configs = self._get_available_configurations()
+
+        if not available_configs:
+            raise ValueError("No trained models found in checkpoint")
+
+        # Show available configurations
+        print("\nAvailable Model Configurations:")
+        for idx, (key, config) in enumerate(available_configs.items(), 1):
+            print(f"{idx}. {key}")
+            if config.get('best') and config['best'].get('loss'):
+                print(f"   Best Loss: {config['best']['loss']:.4f}")
+            print(f"   Features: {self._get_config_description(config)}")
+
+        # Get user selection
+        while True:
+            try:
+                choice = int(input("\nSelect configuration (number): ")) - 1
+                if 0 <= choice < len(available_configs):
+                    selected_key = list(available_configs.keys())[choice]
+                    selected_config = available_configs[selected_key]
+                    break
+                print("Invalid selection. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
+
+        # Create and load model
+        model = self._create_model_from_config(selected_config)
+        state_dict = selected_config['best'] if selected_config.get('best') else selected_config['current']
+        model.load_state_dict(state_dict['state_dict'])
+        model.eval()
+
+        return model, selected_config
+
+    def _get_available_configurations(self) -> Dict:
+        """Get available model configurations from checkpoint"""
+        return self.checkpoint_manager.current_state['model_states']
+
+    def _get_config_description(self, config: Dict) -> str:
+        """Generate human-readable description of model configuration"""
+        features = []
+
+        if config['current']['config'].get('kl_divergence'):
+            features.append("KL Divergence")
+        if config['current']['config'].get('class_encoding'):
+            features.append("Class Encoding")
+
+        image_type = config['current']['config'].get('image_type')
+        if image_type and image_type != 'general':
+            features.append(f"{image_type.capitalize()} Enhancement")
+
+        return ", ".join(features) if features else "Basic Autoencoder"
+
+    def _create_model_from_config(self, config: Dict) -> nn.Module:
+        """Create model instance based on configuration"""
+        input_shape = (
+            self.config['dataset']['in_channels'],
+            self.config['dataset']['input_size'][0],
+            self.config['dataset']['input_size'][1]
+        )
+        feature_dims = self.config['model']['feature_dims']
+
+        # Set model configuration based on saved state
+        self.config['model']['autoencoder_config']['enhancements'].update({
+            'use_kl_divergence': config['current']['config']['kl_divergence'],
+            'use_class_encoding': config['current']['config']['class_encoding']
+        })
+
+        # Create appropriate model
+        image_type = config['current']['config']['image_type']
+        if image_type == 'astronomical':
+            model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, self.config)
+        elif image_type == 'medical':
+            model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, self.config)
+        elif image_type == 'agricultural':
+            model = AgriculturalPatternAutoencoder(input_shape, feature_dims, self.config)
+        else:
+            model = BaseAutoencoder(input_shape, feature_dims, self.config)
+
+        return model.to(self.device)
+
+    def predict_from_csv(self, csv_path: Optional[str] = None, output_dir: Optional[str] = None):
+        """Generate predictions from features in CSV"""
+        # Load model
+        model, config = self.load_model_for_prediction()
+        model.eval()  # Ensure model is in evaluation mode
+
+        # Determine input CSV path
+        if csv_path is None:
+            dataset_name = self.config['dataset']['name']
+            base_dir = os.path.join('data', dataset_name)
+
+            if self.config.get('execution_flags', {}).get('invert_DBNN', False):
+                csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
+            else:
+                csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
+
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+        # Load and process CSV
+        df = pd.read_csv(csv_path)
+        feature_cols = [col for col in df.columns if col.startswith('feature_')]
+        features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(self.device)
+
+        # Verify feature dimensions
+        expected_dims = self.config['model']['feature_dims']
+        if features.size(1) != expected_dims:
+            raise ValueError(f"Feature dimension mismatch: got {features.size(1)}, expected {expected_dims}")
+
+        # Set up output directory
+        if output_dir is None:
+            output_dir = os.path.join('data', self.config['dataset']['name'], 'predictions')
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get image type and enhancement modules
+        image_type = self.config['dataset'].get('image_type', 'general')
+        enhancement_modules = self.config['model'].get('enhancement_modules', {})
+
+        outputs = []
+        batch_size = self.config['training'].get('batch_size', 32)
+
+        with torch.no_grad():
+            for i in tqdm(range(0, len(features), batch_size), desc="Generating predictions"):
+                batch = features[i:i+batch_size]
+
+                try:
+                    if config['current']['phase'] == 1:
+                        # Phase 1: Direct decoding
+                        reconstruction = model.decode(batch)
+                        output = {'reconstruction': reconstruction}
+                    else:
+                        # Phase 2: Full forward pass with enhancements
+                        # First decode the features
+                        reconstruction = model.decode(batch)
+
+                        # Then run through full model if needed for enhancements
+                        if image_type != 'general' and image_type in enhancement_modules:
+                            enhanced_output = model(reconstruction)  # Get enhanced features
+                            output = {
+                                'reconstruction': enhanced_output['reconstruction'] if 'reconstruction' in enhanced_output else reconstruction,
+                                'embedding': enhanced_output.get('embedding', batch)
+                            }
+
+                            # Add enhancement-specific outputs
+                            if isinstance(model, AstronomicalStructurePreservingAutoencoder):
+                                output.update(self._apply_astronomical_enhancements(enhanced_output))
+                            elif isinstance(model, MedicalStructurePreservingAutoencoder):
+                                output.update(self._apply_medical_enhancements(enhanced_output))
+                            elif isinstance(model, AgriculturalPatternAutoencoder):
+                                output.update(self._apply_agricultural_enhancements(enhanced_output))
+                        else:
+                            output = {'reconstruction': reconstruction}
+
+                    outputs.append(self._process_output(output))
+
+                except Exception as e:
+                    logger.error(f"Error processing batch {i}: {str(e)}")
+                    raise
+
+        # Combine and save results
+        combined_output = self._combine_outputs(outputs)
+        self._save_predictions(combined_output, output_dir, config)
+
+    def _save_enhancement_outputs(self, predictions: Dict[str, np.ndarray], output_dir: str):
+        """Save enhancement-specific outputs"""
+        # Save astronomical features
+        if 'star_features' in predictions:
+            star_dir = os.path.join(output_dir, 'star_detection')
+            os.makedirs(star_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['star_features']):
+                img_path = os.path.join(star_dir, f'stars_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+        # Save medical features
+        if 'boundary_features' in predictions:
+            boundary_dir = os.path.join(output_dir, 'boundary_detection')
+            os.makedirs(boundary_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['boundary_features']):
+                img_path = os.path.join(boundary_dir, f'boundary_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+        # Save agricultural features
+        if 'texture_features' in predictions:
+            texture_dir = os.path.join(output_dir, 'texture_analysis')
+            os.makedirs(texture_dir, exist_ok=True)
+            for idx, feat in enumerate(predictions['texture_features']):
+                img_path = os.path.join(texture_dir, f'texture_{idx}.png')
+                self._save_feature_map(feat, img_path)
+
+    def _save_feature_map(self, feature_map: np.ndarray, path: str):
+        """Save feature map as image"""
+        # Normalize feature map to 0-255 range
+        feature_map = ((feature_map - feature_map.min()) /
+                      (feature_map.max() - feature_map.min() + 1e-8) * 255).astype(np.uint8)
+        Image.fromarray(feature_map).save(path)
+
+    def _process_output(self, output: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
+        """Process model output into numpy arrays"""
+        processed = {}
+        for key, value in output.items():
+            if isinstance(value, torch.Tensor):
+                processed[key] = value.detach().cpu().numpy()
+            else:
+                processed[key] = value
+        return processed
+
+    def _combine_outputs(self, outputs: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+        """Combine batched outputs"""
+        combined = {}
+        for key in outputs[0].keys():
+            combined[key] = np.concatenate([out[key] for out in outputs])
+        return combined
+
+    def _save_predictions(self, predictions: Dict[str, np.ndarray], output_dir: str, config: Dict):
+        """Save predictions with appropriate format based on configuration"""
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save reconstructions as images
+        if 'reconstruction' in predictions:
+            recon_dir = os.path.join(output_dir, 'reconstructions')
+            os.makedirs(recon_dir, exist_ok=True)
+
+            for idx, recon in enumerate(predictions['reconstruction']):
+                img = self._tensor_to_image(torch.tensor(recon))
+                img_path = os.path.join(recon_dir, f'reconstruction_{idx}.png')
+                Image.fromarray(img).save(img_path)
+
+        # Save enhancement-specific outputs
+        self._save_enhancement_outputs(predictions, output_dir)
+
+        # Save predictions to CSV
+        pred_path = os.path.join(output_dir, 'predictions.csv')
+        pred_dict = {}
+
+        # Add all numeric predictions to CSV
+        for key, value in predictions.items():
+            if isinstance(value, np.ndarray) and value.ndim <= 2:
+                if value.ndim == 1:
+                    pred_dict[key] = value
+                else:
+                    for i in range(value.shape[1]):
+                        pred_dict[f'{key}_{i}'] = value[:, i]
+
+        if pred_dict:
+            pd.DataFrame(pred_dict).to_csv(pred_path, index=False)
+
+        logger.info(f"Predictions saved to {output_dir}")
+
+    def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
+        """Convert tensor to image array with proper normalization"""
+        if tensor.dim() == 3:
+            tensor = tensor.permute(1, 2, 0)
+        tensor = tensor.cpu()
+
+        # Denormalize using dataset mean and std
+        mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
+        std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
+        tensor = tensor * std + mean
+
+        return (tensor.clamp(0, 1) * 255).numpy().astype(np.uint8)
+
+    def _apply_astronomical_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply astronomical-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'star_features' in output:
+                enhanced['star_features'] = output['star_features']
+            if 'galaxy_features' in output:
+                enhanced['galaxy_features'] = output['galaxy_features']
+        return enhanced
+
+    def _apply_medical_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply medical-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'boundary_features' in output:
+                enhanced['boundary_features'] = output['boundary_features']
+            if 'lesion_features' in output:
+                enhanced['lesion_features'] = output['lesion_features']
+        return enhanced
+
+    def _apply_agricultural_enhancements(self, output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply agricultural-specific enhancements"""
+        enhanced = {}
+        if 'reconstruction' in output:
+            enhanced['reconstruction'] = output['reconstruction']
+            if 'texture_features' in output:
+                enhanced['texture_features'] = output['texture_features']
+            if 'damage_features' in output:
+                enhanced['damage_features'] = output['damage_features']
+        return enhanced
+  #----------------------------------------------
 class ClusteringLoss(nn.Module):
     """Loss function for clustering in latent space using KL divergence"""
     def __init__(self, num_clusters: int, feature_dims: int, temperature: float = 1.0):
@@ -3692,7 +3831,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         # Generate reconstructions
         self.feature_extractor.eval()
         with torch.no_grad():
-            batch_size = 128
+            batch_size = 32
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i+batch_size].to(self.device)
                 reconstructions = self.feature_extractor.decode(batch)
@@ -4685,34 +4824,23 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    """Custom dataset for loading images from directory structure"""
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
-        self.image_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        self.image_files = []
+        self.labels = []
+        self.file_indices = []  # Store file indices
+        self.filenames = []  # Initialize filenames list
         self.label_encoder = {}
         self.reverse_encoder = {}
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
         else:
-            self.image_files = []
-            self.labels = []
             unique_labels = sorted(os.listdir(data_dir))
-
             for idx, label in enumerate(unique_labels):
-                if label==None:
-                    label=-1
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
-
-            # Save label encodings
-            encoding_file = os.path.join(data_dir, 'label_encodings.json')
-            with open(encoding_file, 'w') as f:
-                json.dump({
-                    'label_to_id': self.label_encoder,
-                    'id_to_label': self.reverse_encoder
-                }, f, indent=4)
 
             for class_name in unique_labels:
                 class_dir = os.path.join(data_dir, class_name)
@@ -4721,18 +4849,27 @@ class CustomImageDataset(Dataset):
                         if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                             self.image_files.append(os.path.join(class_dir, img_name))
                             self.labels.append(self.label_encoder[class_name])
+                            self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
+                            self.filenames.append(img_name)  # Populate filenames list
 
     def __len__(self):
         return len(self.image_files)
+
+    def get_additional_info(self, idx):
+        """Retrieve additional information (file_index and filename) for a given index."""
+        return self.file_indices[idx], self.filenames[idx]
 
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
+        file_index = self.file_indices[idx]  # Retrieve file index
+        filename = self.filenames[idx]  # Retrieve filename
 
         if self.transform:
             image = self.transform(image)
 
+        # Return only image and label during training
         return image, label
 
 class DatasetProcessor:
@@ -5134,21 +5271,11 @@ class DatasetProcessor:
             }
         }
 
-    def _generate_dataset_conf(self, feature_dims: int, num_classes:int,num_clusters:int) -> Dict:
-        """Generate dataset-specific configuration with additional metrics"""
-
-        # Generate column names for class probabilities, cluster probabilities, and confidence
-        class_prob_columns = [f"class_{i}_probability" for i in range(num_classes)]
-        cluster_prob_columns = [f"cluster_{i}_probability" for i in range(num_clusters)]
-        confidence_column = ["prediction_confidence"]
-
-        # Combine all column names
-        all_columns = [f"feature_{i}" for i in range(feature_dims)] + ["target"] #+ \
-                      #class_prob_columns + cluster_prob_columns + confidence_column + ["target"]
-
+    def _generate_dataset_conf(self, feature_dims: int) -> Dict:
+        """Generate dataset-specific configuration"""
         return {
             "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-            "column_names": all_columns,
+            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -5167,7 +5294,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size": 128,
+                "batch_size":128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -5195,6 +5322,7 @@ class DatasetProcessor:
                 "gen_samples": False
             }
         }
+
     def _generate_dbnn_config(self, main_config: Dict) -> Dict:
         """Generate DBNN-specific configuration"""
         return {
@@ -5252,9 +5380,7 @@ class DatasetProcessor:
 
         # 2. Generate and handle dataset.conf using _generate_dataset_conf
         logger.info("Generating dataset configuration...")
-        num_classes = config['dataset'].get('num_classes', 10)
-        num_clusters = num_classes  # Assuming number of clusters equals number of classes
-        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'],num_classes,num_clusters)
+        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
         if os.path.exists(self.conf_path):
             try:
                 with open(self.conf_path, 'r') as f:
@@ -5939,7 +6065,7 @@ def print_usage():
     print("\nOptional Arguments:")
     print("  --encoder_type  Type of encoder ('cnn' or 'autoenc')")
     print("  --config        Path to configuration file (overrides other options)")
-    print("  --batch_size    Batch size for training (default: 128)")
+    print("  --batch_size    Batch size for training (default: 32)")
     print("  --epochs        Number of training epochs (default: 20)")
     print("  --workers       Number of data loading workers (default: 4)")
     print("  --learning_rate Learning rate (default: 0.001)")
@@ -5966,7 +6092,7 @@ def parse_arguments():
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
     parser.add_argument('--output-dir', type=str, default='data', help='output directory')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
     parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
     parser.add_argument('--workers', type=int, default=4, help='number of workers')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
@@ -6034,7 +6160,7 @@ def get_interactive_args():
         print("Invalid encoder type. Please enter 'cnn' or 'autoenc'")
 
     # Optional parameters
-    default = last_args.get('batch_size', 128) if last_args else 128
+    default = last_args.get('batch_size', 32) if last_args else 32
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
     default = last_args.get('epochs', 20) if last_args else 20
