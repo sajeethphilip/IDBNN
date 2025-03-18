@@ -656,6 +656,7 @@ class BaseAutoencoder(nn.Module):
         self.eval()
         all_embeddings = []
         all_labels = []
+        all_indices = []  # Store file indices
 
         try:
             with torch.no_grad():
@@ -681,15 +682,18 @@ class BaseAutoencoder(nn.Module):
                     # Store results (keeping on device for now)
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
+                    all_indices.append(indices)  # Append file indices
 
                 # Concatenate all results while still on device
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
+                indices = torch.cat(all_indices)  # Concatenate indices
 
                 # Initialize base feature dictionary
                 feature_dict = {
                     'embeddings': embeddings,
                     'labels': labels
+                    'indices': indices  # Include indices in the feature dictionary
                 }
 
                 # Add enhancement features if in phase 2
@@ -758,6 +762,11 @@ class BaseAutoencoder(nn.Module):
             if 'labels' in feature_dict:
                 data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
+
+            # Process file indices
+            if 'indices' in feature_dict:
+                data_dict['file_index'] = feature_dict['indices'].cpu().numpy()
+                feature_columns.append('file_index')
 
             # Process enhancement features if present
             enhancement_features = self._get_enhancement_columns(feature_dict)
@@ -4847,31 +4856,22 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    """Custom dataset for loading images from directory structure"""
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
+        self.image_files = []
+        self.labels = []
+        self.file_indices = []  # Store file indices
         self.label_encoder = {}
         self.reverse_encoder = {}
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
         else:
-            self.image_files = []
-            self.labels = []
             unique_labels = sorted(os.listdir(data_dir))
-
             for idx, label in enumerate(unique_labels):
                 self.label_encoder[label] = idx
                 self.reverse_encoder[idx] = label
-
-            # Save label encodings
-            encoding_file = os.path.join(data_dir, 'label_encodings.json')
-            with open(encoding_file, 'w') as f:
-                json.dump({
-                    'label_to_id': self.label_encoder,
-                    'id_to_label': self.reverse_encoder
-                }, f, indent=4)
 
             for class_name in unique_labels:
                 class_dir = os.path.join(data_dir, class_name)
@@ -4880,6 +4880,7 @@ class CustomImageDataset(Dataset):
                         if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                             self.image_files.append(os.path.join(class_dir, img_name))
                             self.labels.append(self.label_encoder[class_name])
+                            self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
 
     def __len__(self):
         return len(self.image_files)
@@ -4888,11 +4889,12 @@ class CustomImageDataset(Dataset):
         img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
+        file_index = self.file_indices[idx]  # Retrieve file index
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, file_index  # Return file index along with image and label
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
