@@ -1503,18 +1503,18 @@ class DBNN(GPUDBNN):
         """
         # Load and validate configuration
         try:
+            dataset_name = os.path.splitext(os.path.basename(config_path))[0]
+            config_path = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
+            # Load or create the configuration file and update global variables
             with open(config_path, 'r') as f:
-                config_text = f.read()
-
+                    config_text = f.read()        # Ensure file_path is set
             # Remove comments starting with _comment
             config_lines = [line for line in config_text.split('\n') if not '"_comment"' in line]
             clean_config = '\n'.join(config_lines)
-
             self.data_config = json.loads(clean_config)
         except Exception as e:
             raise ValueError(f"Error reading configuration file: {str(e)}")
-        dataset_name = os.path.splitext(os.path.basename(config_path))[0]
-        # Ensure file_path is set
+
         if not self.data_config.get('file_path'):
             default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
             if os.path.exists(default_path):
@@ -1522,8 +1522,7 @@ class DBNN(GPUDBNN):
                 print("\033[K" +f"Using default data file: {default_path}")
             else:
                 raise ValueError(f"No data file found for {dataset_name}")
-        # Load or create the configuration file and update global variables
-        config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
+
         # Update global variables based on the configuration file
         global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
         Train_device = config.get("compute_device", Train_device)
