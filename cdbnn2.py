@@ -4824,6 +4824,7 @@ class CustomImageDataset(Dataset):
         self.image_files = []
         self.labels = []
         self.file_indices = []  # Store file indices
+        self.filenames = []  # Initialize filenames list
         self.label_encoder = {}
         self.reverse_encoder = {}
 
@@ -4843,6 +4844,7 @@ class CustomImageDataset(Dataset):
                             self.image_files.append(os.path.join(class_dir, img_name))
                             self.labels.append(self.label_encoder[class_name])
                             self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
+                            self.filenames.append(img_name)  # Populate filenames list
 
     def __len__(self):
         return len(self.image_files)
