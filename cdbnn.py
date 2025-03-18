@@ -79,6 +79,12 @@ class PredictionManager:
 
         # Load the checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        elif 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
+        else:
+            raise KeyError("Checkpoint does not contain 'state_dict' or 'model_state_dict'")
 
         # Debug: Print checkpoint keys
         print("Checkpoint keys:", checkpoint.keys())

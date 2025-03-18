@@ -4931,6 +4931,69 @@ from typing import List, Tuple
 import pandas as pd
 from datetime import datetime
 
+import json
+import os
+
+def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
+    """
+    Load the configuration file if it exists, or create a default one if it doesn't.
+    Update global variables based on the configuration file.
+
+    Args:
+        config_path: Path to the configuration file.
+
+    Returns:
+        Dictionary containing the configuration.
+    """
+    default_config = {
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "trials": 100,
+        "cardinality_threshold": 0.9,
+        "cardinality_tolerance": 4,
+        "learning_rate": 0.1,
+        "random_seed": 42,
+        "epochs": 1000,
+        "test_fraction": 0.2,
+        "train": True,
+        "train_only": False,
+        "predict": True,
+        "gen_samples": False,
+        "enable_adaptive": True,
+        "nokbd": False,
+        "display": None
+    }
+
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        print(f"Loaded configuration from {config_path}")
+    else:
+        config = default_config
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        print(f"Created default configuration file at {config_path}")
+
+    # Update global variables based on the configuration file
+    global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+
+    Train_device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    Trials = config.get("trials", 100)
+    cardinality_threshold = config.get("cardinality_threshold", 0.9)
+    cardinality_tolerance = config.get("cardinality_tolerance", 4)
+    LearningRate = config.get("learning_rate", 0.1)
+    TrainingRandomSeed = config.get("random_seed", 42)
+    Epochs = config.get("epochs", 1000)
+    TestFraction = config.get("test_fraction", 0.2)
+    Train = config.get("train", True)
+    Train_only = config.get("train_only", False)
+    Predict = config.get("predict", True)
+    Gen_Samples = config.get("gen_samples", False)
+    EnableAdaptive = config.get("enable_adaptive", True)
+    nokbd = config.get("nokbd", False)
+    display = config.get("display", None)
+
+    return config
+
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     """
     Recursively find all matching .conf and .csv files in the data directory structure.
@@ -5232,7 +5295,14 @@ def main():
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
                         required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
     args = parser.parse_args()
+    # Load or create the configuration file and update global variables
+    config = load_or_create_config()
 
+    # Now the global variables are updated based on the configuration file
+    print(f"Using device: {Train_device}")
+    print(f"Learning rate: {LearningRate}")
+    print(f"Epochs: {Epochs}")
+    print(f"Enable Adaptive: {EnableAdaptive}")
     processor = DatasetProcessor()
     parser.print_help()
     if not args.file_path:
