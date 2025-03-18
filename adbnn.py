@@ -1527,6 +1527,7 @@ class DBNN(GPUDBNN):
         # Update global variables based on the configuration file
         global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
         Train_device = config.get("compute_device", Train_device)
+        print('_'*60+f"The train device is set as {Train_device}")
         self.device=Train_device
         Trials = config.get("trials", Trials)
         cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
