@@ -649,85 +649,47 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """
-        Universal feature extraction method for all autoencoder variants.
-        Handles both basic and enhanced feature extraction with proper device management.
-        """
         self.eval()
         all_embeddings = []
         all_labels = []
         all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
 
         try:
             with torch.no_grad():
                 for inputs, labels in tqdm(loader, desc="Extracting features"):
-                    # Move data to correct device
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Get embeddings
-                    if self.training_phase == 2 and hasattr(self, 'forward'):
-                        # Use full forward pass in phase 2 to get all enhancement features
-                        outputs = self(inputs)
-                        if isinstance(outputs, dict):
-                            embeddings = outputs['embedding']
-                        else:
-                            embeddings = outputs[0]
-                    else:
-                        # Basic embedding extraction
-                        embeddings = self.encode(inputs)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
+                    # Get additional information (file_index and filename)
+                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
 
-                    # Store results (keeping on device for now)
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
+
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
-                    all_indices.append(indices)  # Append file indices
+                    all_indices.extend(indices)  # Append file indices
+                    all_filenames.extend(filenames)  # Append filenames
 
-                # Concatenate all results while still on device
+                # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
-                indices = torch.cat(all_indices)  # Concatenate indices
 
-                # Initialize base feature dictionary
                 feature_dict = {
                     'embeddings': embeddings,
                     'labels': labels,
-                    'indices': indices  # Include indices in the feature dictionary
+                    'indices': all_indices,  # Include indices in the feature dictionary
+                    'filenames': all_filenames  # Include filenames in the feature dictionary
                 }
-
-                # Add enhancement features if in phase 2
-                if self.training_phase == 2:
-                    # Add clustering information if enabled
-                    if self.use_kl_divergence:
-                        cluster_info = self.organize_latent_space(embeddings, labels)
-                        feature_dict.update(cluster_info)
-
-                    # Add classification information if enabled
-                    if self.use_class_encoding and hasattr(self, 'classifier'):
-                        class_logits = self.classifier(embeddings)
-                        feature_dict.update({
-                            'class_logits': class_logits,
-                            'class_predictions': class_logits.argmax(dim=1),
-                            'class_probabilities': F.softmax(class_logits, dim=1)
-                        })
-
-                    # Add specialized features for enhanced models
-                    if hasattr(self, 'get_enhancement_features'):
-                        enhancement_features = self.get_enhancement_features(embeddings)
-                        feature_dict.update(enhancement_features)
-
-                # Move all tensors to CPU for final output
-                for key in feature_dict:
-                    if isinstance(feature_dict[key], torch.Tensor):
-                        feature_dict[key] = feature_dict[key].cpu()
 
                 return feature_dict
 
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
-
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -4885,16 +4847,22 @@ class CustomImageDataset(Dataset):
     def __len__(self):
         return len(self.image_files)
 
+    def get_additional_info(self, idx):
+        """Retrieve additional information (file_index and filename) for a given index."""
+        return self.file_indices[idx], self.filenames[idx]
+
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
         image = Image.open(img_path).convert('RGB')
         label = self.labels[idx]
         file_index = self.file_indices[idx]  # Retrieve file index
+        filename = self.filenames[idx]  # Retrieve filename
 
         if self.transform:
             image = self.transform(image)
 
-        return image, label, file_index  # Return file index along with image and label
+        # Return only image and label during training
+        return image, label
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
