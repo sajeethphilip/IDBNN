@@ -5313,13 +5313,6 @@ def main():
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
                         required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
     args = parser.parse_args()
-
-
-    # Now the global variables are updated based on the configuration file
-    print(f"Using device: {Train_device}")
-    print(f"Learning rate: {LearningRate}")
-    print(f"Epochs: {Epochs}")
-    print(f"Enable Adaptive: {EnableAdaptive}")
     processor = DatasetProcessor()
     parser.print_help()
     if not args.file_path:
