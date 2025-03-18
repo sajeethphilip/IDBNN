@@ -1526,7 +1526,8 @@ class DBNN(GPUDBNN):
         config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
         # Update global variables based on the configuration file
         global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
-        Train_device = config.get("device", Train_device)
+        Train_device = config.get("compute_device", Train_device)
+        self.device=Train_device
         Trials = config.get("trials", Trials)
         cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
         cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
