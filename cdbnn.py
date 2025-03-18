@@ -112,6 +112,14 @@ class PredictionManager:
             transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
         ])
 
+    def _get_transforms(self):
+        """Get transforms for new images"""
+        return transforms.Compose([
+            transforms.Resize(self.config['dataset']['input_size']),
+            transforms.ToTensor(),
+            transforms.Normalize(self.config['dataset']['mean'], self.config['dataset']['std'])
+        ])
+
 class FilenameEncoder:
     def __init__(self):
         self.filename_to_id = {}
