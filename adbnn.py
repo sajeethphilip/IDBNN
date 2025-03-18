@@ -5297,6 +5297,24 @@ def main():
     args = parser.parse_args()
     # Load or create the configuration file and update global variables
     config = load_or_create_config()
+    # Update global variables based on the configuration file
+    global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+    Train_device = config.get("device", Train_device)
+    Trials = config.get("trials", Trials)
+    cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
+    cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
+    LearningRate = config.get("learning_rate", LearningRate)
+    TrainingRandomSeed = config.get("random_seed", TrainingRandomSeed)
+    Epochs = config.get("epochs", Epochs)
+    TestFraction = config.get("test_fraction", TestFraction)
+    Train = config.get("train", Train)
+    Train_only = config.get("train_only", Train_only)
+    Predict = config.get("predict", Predict)
+    Gen_Samples = config.get("gen_samples", Gen_Samples)
+    EnableAdaptive = config.get("enable_adaptive", EnableAdaptive)
+    nokbd = config.get("nokbd", nokbd)
+    display = config.get("display", display)
+
 
     # Now the global variables are updated based on the configuration file
     print(f"Using device: {Train_device}")
