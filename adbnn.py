@@ -1513,10 +1513,9 @@ class DBNN(GPUDBNN):
             self.data_config = json.loads(clean_config)
         except Exception as e:
             raise ValueError(f"Error reading configuration file: {str(e)}")
-
+        dataset_name = os.path.splitext(os.path.basename(config_path))[0]
         # Ensure file_path is set
         if not self.data_config.get('file_path'):
-            dataset_name = os.path.splitext(os.path.basename(config_path))[0]
             default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
             if os.path.exists(default_path):
                 self.data_config['file_path'] = default_path
