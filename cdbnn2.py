@@ -727,8 +727,14 @@ class BaseAutoencoder(nn.Module):
 
             # Process file indices
             if 'indices' in feature_dict:
-                data_dict['file_index'] = feature_dict['indices'].cpu().numpy()
+                data_dict['file_index'] = feature_dict['indices']
                 feature_columns.append('file_index')
+
+            # Process filenames (if available)
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']  # Already a list, no need for .cpu()
+                feature_columns.append('filename')
+
 
             # Process enhancement features if present
             enhancement_features = self._get_enhancement_columns(feature_dict)
