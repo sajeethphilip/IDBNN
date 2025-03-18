@@ -2100,17 +2100,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     else:
                         # Phase 2: Include clustering and classification
                         output = model(inputs)
-
-                        # Handle dictionary output
                         if isinstance(output, dict):
                             reconstruction = output['reconstruction']
                             embedding = output['embedding']
                         else:
-                            # Handle tuple output (fallback)
-                            if isinstance(output, tuple):
-                                embedding, reconstruction = output
-                            else:
-                                raise ValueError("Unexpected output format from model")
+                            embedding, reconstruction = output
 
                         # Calculate base loss
                         loss = loss_manager.calculate_loss(
