@@ -32,7 +32,7 @@ import traceback  # Add to provide debug
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
-Train_device =None # 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
+Train_device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
 Trials = 100  # Number of epochs to wait for improvement in training
 cardinality_threshold =0.9
 cardinality_tolerance=4 #Use when the features are likely to be extremly diverse and deciimal values;4 means, precison restricted to 4 decimal places
