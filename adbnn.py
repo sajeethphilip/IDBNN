@@ -1505,7 +1505,6 @@ class DBNN(GPUDBNN):
         try:
             with open(config_path, 'r') as f:
                 config_text = f.read()
-            print(config_text)
             # Remove comments starting with _comment
             config_lines = [line for line in config_text.split('\n') if not '"_comment"' in line]
             clean_config = '\n'.join(config_lines)
