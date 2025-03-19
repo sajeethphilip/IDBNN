@@ -3290,10 +3290,29 @@ class BaseFeatureExtractor(ABC):
                    (f", Test Loss {test_loss:.4f}, Acc {test_acc:.2f}%"
                     if test_loss is not None else ""))
 
-    @abstractmethod
+
     def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract features from data loader"""
-        pass
+        """
+        Extract features from the dataset using the autoencoder.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Extracted features and corresponding labels.
+        """
+        self.feature_extractor.eval()
+        all_embeddings = []
+        all_labels = []
+
+        with torch.no_grad():
+            for inputs, labels in tqdm(loader, desc="Extracting features"):
+                inputs = inputs.to(self.device)
+                embeddings, _ = self.feature_extractor(inputs)
+                all_embeddings.append(embeddings.cpu())
+                all_labels.append(labels)
+
+        return torch.cat(all_embeddings), torch.cat(all_labels)
 
 import torch
 import torch.nn as nn
