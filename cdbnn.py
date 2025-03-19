@@ -6334,7 +6334,7 @@ def get_interactive_args():
     if args.mode == 'predict':
         # Set default model path
         dataset_name = Path(args.data).stem if args.data else 'dataset'
-        default_model = os.path.join('Model', f"{dataset_name}_best.pth")
+        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
