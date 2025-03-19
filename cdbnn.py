@@ -6215,13 +6215,10 @@ def parse_arguments():
         return get_interactive_args()
 
     parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
-    parser.add_argument('--mode', choices=['train', 'predict', 'invertdbnn'], default='train',
-                        help='operation mode: train, predict, or invertdbnn')
+    parser.add_argument('--mode', choices=['train', 'predict'], default='train')
     parser.add_argument('--data', type=str, help='dataset name/path')
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom',
-                        help='type of dataset: torchvision or custom')
-    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn',
-                        help='type of encoder: cnn or autoenc')
+    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
+    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
     parser.add_argument('--output-dir', type=str, default='data', help='output directory')
@@ -6232,7 +6229,6 @@ def parse_arguments():
     parser.add_argument('--cpu', action='store_true', help='force CPU usage')
     parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
     parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
-    parser.add_argument('--output-csv', type=str, help='output CSV for predictions')
 
     return parser.parse_args()
 
@@ -6514,80 +6510,28 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
     return new_config
 
 def main():
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    logger = logging.getLogger(__name__)
+    # Get user arguments interactively
+    args = get_interactive_args()
 
-    try:
-        # Get user inputs with defaults
-        encoder_type = input("Enter encoder type (cnn/autoenc) [cnn]: ") or "cnn"
-        batch_size = int(input("Enter batch size [128]: ") or 128)
-        num_epochs = int(input("Enter number of epochs [20]: ") or 20)
-        output_dir = input("Enter output directory [data]: ") or "data"
-        data_path = input("Enter path to dataset (file or directory): ")
+    # Load configuration
+    config = load_config(args.config) if args.config else generate_default_config(args.data)
 
-        # Initialize dataset processor
-        processor = DatasetProcessor(datafile=data_path, output_dir=output_dir)
+    # Initialize model
+    model = ModelFactory.create_model(config)
 
-        # Process the dataset
-        train_dir, test_dir = processor.process()
+    if args.mode == 'train':
+        # Train mode
+        train_mode(config)
+    elif args.mode == 'predict':
+        # Predict mode
+        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
+        predict_mode(config, model, args.data, args.output_csv)
+    elif args.mode == 'invertdbnn':
+        # InvertDBNN mode
+        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
+        invertDBNN_mode(config, model, args.input_csv, args.output_dir)
 
-        # Generate configuration files
-        config = processor.generate_default_config(train_dir)
 
-        # Update config with user inputs
-        config['model']['encoder_type'] = encoder_type
-        config['training']['batch_size'] = batch_size
-        config['training']['epochs'] = num_epochs
-
-        # Create data loaders
-        train_transform = processor.get_transforms(config, is_train=True)
-        test_transform = processor.get_transforms(config, is_train=False)
-
-        train_dataset = CustomImageDataset(train_dir, transform=train_transform)
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=config['training']['num_workers']
-        )
-
-        test_loader = None
-        if test_dir:
-            test_dataset = CustomImageDataset(test_dir, transform=test_transform)
-            test_loader = DataLoader(
-                test_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=config['training']['num_workers']
-            )
-
-        # Initialize feature extractor
-        feature_extractor = get_feature_extractor(config)
-
-        # Train the model
-        logger.info("Starting training...")
-        history = feature_extractor.train(train_loader, test_loader)
-
-        # Save final model
-        model_path = os.path.join(output_dir, "final_model.pth")
-        feature_extractor.save_model(model_path)
-        logger.info(f"Model saved to {model_path}")
-
-        # Plot training history
-        history_path = os.path.join(output_dir, "training_history.png")
-        feature_extractor.plot_training_history(history_path)
-
-        # Clean up temporary files
-        processor.cleanup()
-
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
