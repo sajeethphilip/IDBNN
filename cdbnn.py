@@ -6520,43 +6520,48 @@ def main():
     # Initialize DatasetProcessor
     dataset_processor = DatasetProcessor(datafile=args.data, datatype=args.data_type, output_dir=args.output_dir)
 
-    # Load or generate configuration
-    if args.config:
-        config = load_config(args.config)
-    else:
-        # Generate default configuration using DatasetProcessor
-        config = dataset_processor.generate_default_config(args.data)
+    try:
+        # Load or generate configuration
+        if args.config:
+            config = load_config(args.config)
+        else:
+            # Generate default configuration using DatasetProcessor
+            config = dataset_processor.generate_default_config(args.data)
 
-    # Set additional configuration parameters from command-line arguments
-    config['training']['batch_size'] = args.batch_size
-    config['training']['epochs'] = args.epochs
-    config['training']['num_workers'] = args.workers
-    config['model']['learning_rate'] = args.learning_rate
-    config['execution_flags']['use_gpu'] = not args.cpu
-    config['execution_flags']['debug_mode'] = args.debug
-    config['execution_flags']['invert_DBNN'] = args.invert_dbnn
+        # Set additional configuration parameters from command-line arguments
+        config['training']['batch_size'] = args.batch_size
+        config['training']['epochs'] = args.epochs
+        config['training']['num_workers'] = args.workers
+        config['model']['learning_rate'] = args.learning_rate
+        config['execution_flags']['use_gpu'] = not args.cpu
+        config['execution_flags']['debug_mode'] = args.debug
+        config['execution_flags']['invert_DBNN'] = args.invert_dbnn
 
-    # Initialize model
-    model = ModelFactory.create_model(config)
+        # Initialize model
+        model = ModelFactory.create_model(config)
 
-    # Execute based on mode
-    if args.mode == 'train':
-        # Train mode
-        train_mode(config)
-    elif args.mode == 'predict':
-        # Predict mode
-        if not args.output_csv:
-            raise ValueError("Output CSV path is required for predict mode.")
-        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-        predict_mode(config, model, args.data, args.output_csv)
-    elif args.mode == 'invertdbnn':
-        # InvertDBNN mode
-        if not args.input_csv or not args.output_dir:
-            raise ValueError("Input CSV and output directory are required for invertdbnn mode.")
-        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-        invertDBNN_mode(config, model, args.input_csv, args.output_dir)
-    else:
-        raise ValueError(f"Invalid mode: {args.mode}")
+        # Execute based on mode
+        if args.mode == 'train':
+            # Train mode
+            train_mode(config)
+        elif args.mode == 'predict':
+            # Predict mode
+            if not args.output_csv:
+                raise ValueError("Output CSV path is required for predict mode.")
+            model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
+            predict_mode(config, model, args.data, args.output_csv)
+        elif args.mode == 'invertdbnn':
+            # InvertDBNN mode
+            if not args.input_csv or not args.output_dir:
+                raise ValueError("Input CSV and output directory are required for invertdbnn mode.")
+            model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
+            invertDBNN_mode(config, model, args.input_csv, args.output_dir)
+        else:
+            raise ValueError(f"Invalid mode: {args.mode}")
+
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        sys.exit(1)
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
