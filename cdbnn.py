@@ -87,7 +87,7 @@ class PredictionManager:
     def _load_model(self) -> nn.Module:
         """Load the trained model from the checkpoint."""
         dataset_name = self.config['dataset']['name']
-        model_path = os.path.join('Model', f"{dataset_name}_best.pth")
+        model_path = os.path.join('data', f"{dataset_name}/checkpoints/{dataset_name}_unified.pth")
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
