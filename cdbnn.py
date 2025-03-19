@@ -6532,11 +6532,11 @@ def main():
             with open(config_path, 'r') as f:
                 config = json.load(f)
 
+            # Set the device in the config
+            config['execution_flags']['use_gpu'] = not args.cpu
+
             # Initialize the PredictionManager
-            predictor = PredictionManager(
-                config=config,
-                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
-            )
+            predictor = PredictionManager(config=config)
 
             # Load the model
             predictor.load_model(args.model_path)
