@@ -92,7 +92,6 @@ class PredictionManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
-
         # Determine the model type from the config
         encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
         if encoder_type == 'cnn':
@@ -103,14 +102,21 @@ class PredictionManager:
             raise ValueError(f"Unsupported encoder type: {encoder_type}")
 
         # Load the checkpoint
-        checkpoint = torch.load(model_path, map_location=self.device)
-        if 'state_dict' not in checkpoint:
-            raise ValueError(f"Checkpoint file is missing 'state_dict' key: {model_path}")
+        try:
+            checkpoint = torch.load(model_path, map_location=self.device)
 
-        # Load the model state
-        model.load_state_dict(checkpoint['state_dict'])
-        model.eval()
-        return model
+            # Handle case where checkpoint only contains weights
+            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                # Full checkpoint with state_dict
+                model.load_state_dict(checkpoint['state_dict'])
+            else:
+                # Checkpoint only contains weights
+                model.load_state_dict(checkpoint)
+
+            model.eval()
+            return model
+        except Exception as e:
+            raise ValueError(f"Error loading model checkpoint: {str(e)}")
 
     def predict_images(self, input_dir: str, output_csv: str = None) -> None:
         """
