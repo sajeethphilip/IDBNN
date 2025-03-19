@@ -105,19 +105,15 @@ class PredictionManager:
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
 
-            # Handle custom checkpoint format with multiple phases
+            # Handle custom checkpoint format used during training
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
-                # Extract the correct state_dict based on the phase
-                model_states = checkpoint['model_states']
-
-                # Check if phase2 is available
-                if 'phase2_current' in model_states:
-                    state_dict = model_states['phase2_current']['state_dict']
-                elif 'phase1_current' in model_states:
-                    state_dict = model_states['phase1_current']['state_dict']
+                # Extract the state_dict from the latest phase
+                if 'phase2_current' in checkpoint['model_states']:
+                    state_dict = checkpoint['model_states']['phase2_current']['state_dict']
+                elif 'phase1_current' in checkpoint['model_states']:
+                    state_dict = checkpoint['model_states']['phase1_current']['state_dict']
                 else:
-                    # Fallback to the first available state
-                    state_dict = next(iter(model_states.values()))['state_dict']
+                    raise ValueError("Checkpoint does not contain valid phase states.")
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                 # Standard checkpoint format
                 state_dict = checkpoint['state_dict']
