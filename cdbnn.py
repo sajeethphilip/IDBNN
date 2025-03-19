@@ -92,8 +92,6 @@ class PredictionManager:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        # Load the checkpoint
-        checkpoint = torch.load(model_path, map_location=self.device)
 
         # Determine the model type from the config
         encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
@@ -103,6 +101,9 @@ class PredictionManager:
             model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
         else:
             raise ValueError(f"Unsupported encoder type: {encoder_type}")
+
+        # Load the checkpoint
+        checkpoint = torch.load(model_path, map_location=self.device)
 
         # Load the model state
         model.load_state_dict(checkpoint['state_dict'])
