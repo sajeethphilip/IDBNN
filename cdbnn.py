@@ -4561,6 +4561,11 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
             try:
                 logger.info(f"Loading checkpoint from {checkpoint_path}")
 
+                # Debug: Ensure model is initialized
+                if not hasattr(self, 'feature_extractor') or self.feature_extractor is None:
+                    logger.error("Model (feature_extractor) is not initialized. Initializing now...")
+                    self.feature_extractor = self._create_model()
+
                 # Determine the appropriate device for loading
                 if torch.cuda.is_available():
                     map_location = self.device  # Use GPU if available
@@ -4569,6 +4574,11 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
                 # Load checkpoint with weights_only=True for security
                 checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+
+                # Debug: Verify checkpoint contents
+                if 'state_dict' not in checkpoint:
+                    logger.error("Checkpoint does not contain 'state_dict'. Cannot load model.")
+                    raise KeyError("Checkpoint missing 'state_dict'")
 
                 # Load model state
                 self.feature_extractor.load_state_dict(checkpoint['state_dict'])
