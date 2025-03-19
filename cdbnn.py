@@ -104,6 +104,8 @@ class PredictionManager:
 
         # Load the checkpoint
         checkpoint = torch.load(model_path, map_location=self.device)
+        if 'state_dict' not in checkpoint:
+            raise ValueError(f"Checkpoint file is missing 'state_dict' key: {model_path}")
 
         # Load the model state
         model.load_state_dict(checkpoint['state_dict'])
@@ -118,6 +120,12 @@ class PredictionManager:
             input_dir (str): Directory containing new images.
             output_csv (str, optional): Path to save the output CSV file. Defaults to None.
         """
+        # Check if input_dir is a zip file
+        if input_dir.lower().endswith('.zip'):
+            dataset_processor = DatasetProcessor()
+            input_dir = dataset_processor._extract_archive(input_dir)
+            logger.info(f"Extracted images from zip file to: {input_dir}")
+
         if not os.path.exists(input_dir):
             raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
