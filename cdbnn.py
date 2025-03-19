@@ -654,6 +654,7 @@ class BaseAutoencoder(nn.Module):
         all_labels = []
         all_indices = []  # Store file indices
         all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
 
         try:
             with torch.no_grad():
@@ -664,6 +665,8 @@ class BaseAutoencoder(nn.Module):
                     # Get additional information (file_index and filename)
                     indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
                     filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                    # Get actual class names using reverse_encoder
+                    class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
 
                     embeddings = self.encode(inputs)
                     if isinstance(embeddings, tuple):
@@ -673,6 +676,7 @@ class BaseAutoencoder(nn.Module):
                     all_labels.append(labels)
                     all_indices.extend(indices)  # Append file indices
                     all_filenames.extend(filenames)  # Append filenames
+                    all_class_names.extend(class_names)  # Append actual class names
 
                 # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
@@ -683,6 +687,7 @@ class BaseAutoencoder(nn.Module):
                     'labels': labels,
                     'indices': all_indices,  # Include indices in the feature dictionary
                     'filenames': all_filenames  # Include filenames in the feature dictionary
+                    'class_names': all_class_names  # Include actual class names
                 }
 
                 return feature_dict
@@ -735,6 +740,10 @@ class BaseAutoencoder(nn.Module):
                 data_dict['filename'] = feature_dict['filenames']  # Already a list, no need for .cpu()
                 feature_columns.append('filename')
 
+            # Process actual class names
+            if 'class_names' in feature_dict:
+                data_dict['class_name'] = feature_dict['class_names']  # Already a list, no need for .cpu()
+                feature_columns.append('class_name')
 
             # Process enhancement features if present
             enhancement_features = self._get_enhancement_columns(feature_dict)
