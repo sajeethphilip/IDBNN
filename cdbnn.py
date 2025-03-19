@@ -6525,7 +6525,7 @@ def main():
         # Get user inputs with defaults
         encoder_type = input("Enter encoder type (cnn/autoenc) [cnn]: ") or "cnn"
         batch_size = int(input("Enter batch size [128]: ") or 128)
-        num_epochs = int(input("Enter number of epochs [20]: ") or 20)  # Fixed missing parenthesis
+        num_epochs = int(input("Enter number of epochs [20]: ") or 20)
         output_dir = input("Enter output directory [data]: ") or "data"
         data_path = input("Enter path to dataset (file or directory): ")
 
@@ -6588,7 +6588,6 @@ def main():
         logger.error(f"An error occurred: {str(e)}")
         logger.error(traceback.format_exc())
         sys.exit(1)
-
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
