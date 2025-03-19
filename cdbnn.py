@@ -6544,6 +6544,7 @@ def main():
                 input_dir=args.input_dir,
                 output_csv=args.output_csv
             )
+
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
         elif args.mode == 'reconstruct':
