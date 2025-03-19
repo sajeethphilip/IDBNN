@@ -105,10 +105,17 @@ class PredictionManager:
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
 
-            # Handle custom checkpoint format
+            # Handle custom checkpoint format with multiple phases
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
-                # Extract the correct state_dict from the custom checkpoint
-                state_dict = checkpoint['model_states']['phase1_current']['state_dict']
+                # Determine which phase to load
+                if 'phase2_current' in checkpoint['model_states']:
+                    # Load phase 2 if available
+                    state_dict = checkpoint['model_states']['phase2_current']['state_dict']
+                elif 'phase1_current' in checkpoint['model_states']:
+                    # Fallback to phase 1
+                    state_dict = checkpoint['model_states']['phase1_current']['state_dict']
+                else:
+                    raise ValueError("Checkpoint does not contain valid phase states.")
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                 # Standard checkpoint format
                 state_dict = checkpoint['state_dict']
@@ -156,7 +163,8 @@ class PredictionManager:
         # Prepare data structure for predictions
         predictions = {
             'filename': [],
-            'features': []
+            'features_phase1': [],
+            'features_phase2': []
         }
 
         # Process each image
@@ -167,16 +175,28 @@ class PredictionManager:
                 image = Image.open(image_path).convert('RGB')
                 image_tensor = transform(image).unsqueeze(0).to(self.device)
 
-                # Extract features using the model
+                # Extract features using the model (phase 1)
                 with torch.no_grad():
                     if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                        embedding, _ = self.model(image_tensor)
+                        embedding_phase1, _ = self.model(image_tensor)
                     else:
-                        embedding = self.model(image_tensor)
+                        embedding_phase1 = self.model(image_tensor)
+
+                # Extract features using the model (phase 2)
+                if hasattr(self.model, 'set_training_phase'):
+                    self.model.set_training_phase(2)  # Switch to phase 2
+                    with torch.no_grad():
+                        if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
+                            embedding_phase2, _ = self.model(image_tensor)
+                        else:
+                            embedding_phase2 = self.model(image_tensor)
+                else:
+                    embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
                 # Store results
                 predictions['filename'].append(filename)
-                predictions['features'].append(embedding.cpu().numpy().flatten())
+                predictions['features_phase1'].append(embedding_phase1.cpu().numpy().flatten())
+                predictions['features_phase2'].append(embedding_phase2.cpu().numpy().flatten())
 
             except Exception as e:
                 print(f"Error processing image {filename}: {str(e)}")
