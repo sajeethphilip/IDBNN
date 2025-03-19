@@ -1798,110 +1798,8 @@ class ModelFactory:
             logger.error(f"Error creating model: {str(e)}")
             raise
 
-def predict_with_model(model: nn.Module, config: Dict, input_dir: str, output_dir: str):
-    """Use the trained model to generate CSV files for input images with unknown labels"""
-    model.eval()
-    os.makedirs(output_dir, exist_ok=True)
 
-    # Create a dataset for the input images
-    transform = transforms.Compose([
-        transforms.Resize(tuple(config['dataset']['input_size'])),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=config['dataset']['mean'], std=config['dataset']['std'])
-    ])
-
-    dataset = CustomImageDataset(input_dir, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=config['training']['batch_size'], shuffle=False)
-
-    # Extract features and save to CSV
-    feature_dict = model.extract_features(dataloader)
-    output_csv_path = os.path.join(output_dir, f"{config['dataset']['name']}_predictions.csv")
-    model.save_features(feature_dict, output_csv_path)
-
-    # Generate configuration files
-    config_manager = ConfigManager(output_dir)
-    config_manager.generate_default_config(input_dir)
-
-    logger.info(f"Predictions saved to {output_csv_path}")
-    logger.info(f"Configuration files saved to {output_dir}")
 # Update the training loop to handle the new feature dictionary format
-def get_data_loaders(config: Dict) -> Tuple[DataLoader, Optional[DataLoader]]:
-    """Get data loaders for training and validation."""
-    train_dataset = CustomImageDataset(
-        config['dataset']['train_dir'],
-        transform=get_transforms(config, is_train=True)
-    )
-    val_dataset = CustomImageDataset(
-        config['dataset']['test_dir'],
-        transform=get_transforms(config, is_train=False)
-    ) if config['dataset'].get('test_dir') else None
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=True,
-        num_workers=config['training']['num_workers']
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=False,
-        num_workers=config['training']['num_workers']
-    ) if val_dataset else None
-
-    return train_loader, val_loader
-
-def train_mode(config: Dict):
-    """Train mode: Train the model in two phases (reconstruction and classification)."""
-    # Load dataset
-    train_loader, val_loader = get_data_loaders(config)
-
-    # Initialize model
-    model = ModelFactory.create_model(config)
-    loss_manager = EnhancedLossManager(config)
-
-    # Train the model
-    history = train_model(model, train_loader, config, loss_manager)
-
-    # Save the trained model
-    model.save_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-    logger.info("Training completed and model saved.")
-def predict_mode(config: Dict, model: nn.Module, input_dir: str, output_csv: str):
-    """Predict mode: Generate CSV files for input images with unknown labels."""
-    # Load dataset without labels
-    dataset = CustomImageDataset(input_dir, transform=get_transforms(config, is_train=False))
-    loader = DataLoader(dataset, batch_size=config['training']['batch_size'], shuffle=False)
-
-    # Extract features
-    feature_dict = model.extract_features(loader)
-
-    # Save features to CSV
-    model.save_features(feature_dict, output_csv)
-    logger.info(f"Predictions saved to {output_csv}")
-
-def invertDBNN_mode(config: Dict, model: nn.Module, input_csv: str, output_dir: str):
-    """InvertDBNN mode: Reconstruct images from CSV file."""
-    # Load CSV file
-    df = pd.read_csv(input_csv)
-    feature_cols = [col for col in df.columns if col.startswith('feature_')]
-    features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(model.device)
-
-    # Reconstruct images
-    model.eval()
-    with torch.no_grad():
-        reconstructions = model.decode(features)
-
-    # Save reconstructed images
-    os.makedirs(output_dir, exist_ok=True)
-    for idx, recon in enumerate(reconstructions):
-        class_name = df.iloc[idx]['class_name'] if 'class_name' in df.columns else 'unknown'
-        filename = df.iloc[idx]['filename'] if 'filename' in df.columns else f'reconstruction_{idx}.png'
-        class_dir = os.path.join(output_dir, class_name)
-        os.makedirs(class_dir, exist_ok=True)
-        img_path = os.path.join(class_dir, filename)
-        model.save_reconstructed_image(recon, img_path)
-        logger.info(f"Saved reconstructed image to {img_path}")
-
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
@@ -3522,25 +3420,13 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                     logger.error(f"Error processing feature vector {idx}: {str(e)}")
 
     def save_reconstructed_image(self, tensor: torch.Tensor, path: str):
-        """Save reconstructed tensor as image with proper normalization.
-
-        Args:
-            tensor (torch.Tensor): The reconstructed image tensor with shape [C, H, W].
-            path (str): The path where the image will be saved.
-
-        Raises:
-            ValueError: If the tensor is not in the expected format.
-            Exception: If there is an error during image saving.
-        """
+        """Save reconstructed tensor as image with proper normalization"""
         try:
             tensor = tensor.detach().cpu()
 
-            # Verify tensor shape
-            if len(tensor.shape) != 3:
-                raise ValueError(f"Expected tensor with shape [C, H, W], got {tensor.shape}")
-
-            # Get the number of channels
-            num_channels = tensor.size(0)
+            # Verify channel count
+            if tensor.size(0) != self.config['dataset']['in_channels']:
+                raise ValueError(f"Expected {self.config['dataset']['in_channels']} channels, got {tensor.size(0)}")
 
             # Move to [H, W, C] for image saving
             tensor = tensor.permute(1, 2, 0)
@@ -3548,13 +3434,6 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             # Get normalization parameters
             mean = torch.tensor(self.config['dataset']['mean'], dtype=tensor.dtype)
             std = torch.tensor(self.config['dataset']['std'], dtype=tensor.dtype)
-
-            # Ensure mean and std match the number of channels
-            if len(mean) != num_channels or len(std) != num_channels:
-                raise ValueError(
-                    f"Mismatch in number of channels: tensor has {num_channels} channels, "
-                    f"but mean/std have {len(mean)}/{len(std)} values."
-                )
 
             # Reshape for broadcasting
             mean = mean.view(1, 1, -1)
@@ -3565,8 +3444,8 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             tensor = (tensor.clamp(0, 1) * 255).to(torch.uint8)
 
             # Handle single-channel case
-            if num_channels == 1:
-                tensor = tensor.squeeze(-1)  # Remove the last dimension for grayscale images
+            if tensor.shape[-1] == 1:
+                tensor = tensor.squeeze(-1)
 
             # Save image
             img = Image.fromarray(tensor.numpy())
@@ -6248,19 +6127,10 @@ def load_last_args():
         return None
 
 def get_interactive_args():
-    """Get arguments interactively with invert DBNN support and new modes."""
+    """Get arguments interactively with invert DBNN support"""
     last_args = load_last_args()
     args = argparse.Namespace()
-
-    # Get mode (train/predict/invertDBNN)
-    while True:
-        default = last_args.get('mode', 'train') if last_args else 'train'
-        prompt = f"\nEnter mode (train/predict/invertDBNN) [{default}]: "
-        mode = input(prompt).strip().lower() or default
-        if mode in ['train', 'predict', 'invertdbnn']:
-            args.mode = mode
-            break
-        print("Invalid mode. Please enter 'train', 'predict', or 'invertDBNN'.")
+    args.mode = input("\nEnter mode (train/predict) [train]: ").strip().lower() or 'train'
 
     # Get data type
     while True:
@@ -6277,19 +6147,16 @@ def get_interactive_args():
     prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
     args.data = input(prompt).strip() or default
 
-    # Ask about invert DBNN (only for predict mode)
-    if args.mode == 'predict':
-        default_invert = last_args.get('invert_dbnn', True) if last_args else True
-        invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
-        args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
+    # Ask about invert DBNN
+    default_invert = last_args.get('invert_dbnn', True) if last_args else True
+    invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
+    args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
 
-        # If in predict mode and invert DBNN is enabled, ask for input CSV
-        if args.invert_dbnn:
-            default_csv = last_args.get('input_csv', '') if last_args else ''
-            prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
-            args.input_csv = input(prompt).strip() or default_csv
-    else:
-        args.invert_dbnn = False  # Disable invert DBNN for train and invertDBNN modes
+    # If in predict mode and invert DBNN is enabled, ask for input CSV
+    if args.mode == 'predict' and args.invert_dbnn:
+        default_csv = last_args.get(f'input_csv', '') if last_args else ''
+        prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
+        args.input_csv = input(prompt).strip() or default_csv
 
     # Get encoder type
     while True:
@@ -6318,19 +6185,8 @@ def get_interactive_args():
     args.debug = last_args.get('debug', False) if last_args else False
     args.config = last_args.get('config', None) if last_args else None
 
-    # Additional arguments for invertDBNN mode
-    if args.mode == 'invertdbnn':
-        default_csv = last_args.get('input_csv', '') if last_args else ''
-        prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
-        args.input_csv = input(prompt).strip() or default_csv
-
-        default_output_dir = last_args.get('output_dir', 'data/reconstructed_images') if last_args else 'data/reconstructed_images'
-        prompt = f"Enter output directory for reconstructed images [{default_output_dir}]: "
-        args.output_dir = input(prompt).strip() or default_output_dir
-
     save_last_args(args)
     return args
-
 def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
     checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
@@ -6508,29 +6364,28 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
         return existing_config
     return new_config
-
 def main():
-    # Get user arguments interactively
-    args = get_interactive_args()
+    """Main function for CDBNN processing with enhancement configurations"""
+    args = None
+    try:
+        # Setup logging and parse arguments
+        logger = setup_logging()
+        args = parse_arguments()
 
-    # Load configuration
-    config = load_config(args.config) if args.config else generate_default_config(args.data)
+        # Process based on mode
+        if args.mode == 'train':
+            return handle_training_mode(args, logger)
+        elif args.mode == 'predict':
+            return handle_prediction_mode(args, logger)
+        else:
+            logger.error(f"Invalid mode: {args.mode}")
+            return 1
 
-    # Initialize model
-    model = ModelFactory.create_model(config)
-
-    if args.mode == 'train':
-        # Train mode
-        train_mode(config)
-    elif args.mode == 'predict':
-        # Predict mode
-        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-        predict_mode(config, model, args.data, args.output_csv)
-    elif args.mode == 'invertdbnn':
-        # InvertDBNN mode
-        model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-        invertDBNN_mode(config, model, args.input_csv, args.output_dir)
-
+    except Exception as e:
+        logger.error(f"Error in main process: {str(e)}")
+        if args and args.debug:
+            traceback.print_exc()
+        return 1
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
