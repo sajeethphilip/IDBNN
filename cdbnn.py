@@ -84,14 +84,8 @@ class PredictionManager:
         """
         self.model_path = model_path
         self.config = config
-        self.device = self._get_device()
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model = self._load_model()
-
-    def _get_device(self) -> str:
-        """Determine the device to use based on the config and availability."""
-        use_gpu = self.config['execution_flags'].get('use_gpu', True)
-        return 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
-
 
     def _load_model(self) -> nn.Module:
         """Load the trained model from the checkpoint."""
