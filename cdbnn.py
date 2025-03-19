@@ -104,6 +104,8 @@ class PredictionManager:
         else:
             raise ValueError(f"Unsupported encoder type: {encoder_type}")
 
+        # Create the model using the existing factory function
+        model = get_feature_extractor(self.config, self.device)
         # Load the model state
         model.load_state_dict(checkpoint['state_dict'])
         model.eval()
@@ -6276,28 +6278,30 @@ def get_interactive_args():
     prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
     args.data = input(prompt).strip() or default
 
+    # Set default paths for predict mode
+    if args.mode == 'predict':
+        dataset_name = Path(args.data).stem  # Extract dataset name from path
+        default_model_path = os.path.join('Model', f"{dataset_name}_best.pth")
+        default_output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+
+        # Get model path
+        prompt = f"Enter path to trained model [{default_model_path}]: "
+        args.model_path = input(prompt).strip() or default_model_path
+
+        # Get input directory
+        default_input_dir = os.path.join('data', dataset_name, 'predict')
+        prompt = f"Enter directory containing new images [{default_input_dir}]: "
+        args.input_dir = input(prompt).strip() or default_input_dir
+
+        # Get output CSV path
+        prompt = f"Enter output CSV path [{default_output_csv}]: "
+        args.output_csv = input(prompt).strip() or default_output_csv
+
     # Ask about invert DBNN (only for train/reconstruct modes)
     if args.mode in ['train', 'reconstruct']:
         default_invert = last_args.get('invert_dbnn', True) if last_args else True
         invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
         args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
-
-    # If in predict mode, ask for model path and input directory
-    if args.mode == 'predict':
-        # Get model path
-        default_model = last_args.get('model_path', '') if last_args else ''
-        prompt = f"Enter path to trained model [{default_model}]: "
-        args.model_path = input(prompt).strip() or default_model
-
-        # Get input directory
-        default_input = last_args.get('input_dir', '') if last_args else ''
-        prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_dir = input(prompt).strip() or default_input
-
-        # Get output CSV path
-        default_output = last_args.get('output_csv', 'predictions.csv') if last_args else 'predictions.csv'
-        prompt = f"Enter output CSV path [{default_output}]: "
-        args.output_csv = input(prompt).strip() or default_output
 
     # If in reconstruct mode and invert DBNN is enabled, ask for input CSV
     elif args.mode == 'reconstruct' and args.invert_dbnn:
@@ -6335,6 +6339,7 @@ def get_interactive_args():
 
     save_last_args(args)
     return args
+
 def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
     checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
