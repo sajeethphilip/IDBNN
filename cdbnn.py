@@ -6531,11 +6531,6 @@ def main():
         model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
         invertDBNN_mode(config, model, args.input_csv, args.output_dir)
 
-    except Exception as e:
-        logger.error(f"Error in main process: {str(e)}")
-        if args and args.debug:
-            traceback.print_exc()
-        return 1
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
