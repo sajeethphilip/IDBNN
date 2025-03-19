@@ -6521,7 +6521,7 @@ def main():
         args = parse_arguments()
 
         # Process based on mode
-         if args.mode == 'predict':
+        if args.mode == 'predict':
             # Load the config
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
