@@ -73,7 +73,7 @@ from tqdm import tqdm
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
-    def __init__(self, model_path: str, config: Dict, device: str = None):
+    def __init__(self, model_path: str, config: Dict):
         """
         Initialize the PredictionManager.
 
