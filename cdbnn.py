@@ -6514,55 +6514,80 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
     return new_config
 
 def main():
-    # Get user arguments
-    args = parse_arguments()
-
-    # Initialize DatasetProcessor
-    dataset_processor = DatasetProcessor(datafile=args.data, datatype=args.data_type, output_dir=args.output_dir)
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
 
     try:
-        # Load or generate configuration
-        if args.config:
-            config = load_config(args.config)
-        else:
-            # Generate default configuration using DatasetProcessor
-            config = dataset_processor.generate_default_config(args.data)
+        # Get user inputs with defaults
+        encoder_type = input("Enter encoder type (cnn/autoenc) [cnn]: ") or "cnn"
+        batch_size = int(input("Enter batch size [128]: ") or 128
+        num_epochs = int(input("Enter number of epochs [20]: ") or 20
+        output_dir = input("Enter output directory [data]: ") or "data"
+        data_path = input("Enter path to dataset (file or directory): ")
 
-        # Set additional configuration parameters from command-line arguments
-        config['training']['batch_size'] = args.batch_size
-        config['training']['epochs'] = args.epochs
-        config['training']['num_workers'] = args.workers
-        config['model']['learning_rate'] = args.learning_rate
-        config['execution_flags']['use_gpu'] = not args.cpu
-        config['execution_flags']['debug_mode'] = args.debug
-        config['execution_flags']['invert_DBNN'] = args.invert_dbnn
+        # Initialize dataset processor
+        processor = DatasetProcessor(datafile=data_path, output_dir=output_dir)
 
-        # Initialize model
-        model = ModelFactory.create_model(config)
+        # Process the dataset
+        train_dir, test_dir = processor.process()
 
-        # Execute based on mode
-        if args.mode == 'train':
-            # Train mode
-            train_mode(config)
-        elif args.mode == 'predict':
-            # Predict mode
-            if not args.output_csv:
-                raise ValueError("Output CSV path is required for predict mode.")
-            model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-            predict_mode(config, model, args.data, args.output_csv)
-        elif args.mode == 'invertdbnn':
-            # InvertDBNN mode
-            if not args.input_csv or not args.output_dir:
-                raise ValueError("Input CSV and output directory are required for invertdbnn mode.")
-            model.load_model(os.path.join(config['training']['checkpoint_dir'], 'model.pth'))
-            invertDBNN_mode(config, model, args.input_csv, args.output_dir)
-        else:
-            raise ValueError(f"Invalid mode: {args.mode}")
+        # Generate configuration files
+        config = processor.generate_default_config(train_dir)
+
+        # Update config with user inputs
+        config['model']['encoder_type'] = encoder_type
+        config['training']['batch_size'] = batch_size
+        config['training']['epochs'] = num_epochs
+
+        # Create data loaders
+        train_transform = processor.get_transforms(config, is_train=True)
+        test_transform = processor.get_transforms(config, is_train=False)
+
+        train_dataset = CustomImageDataset(train_dir, transform=train_transform)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=config['training']['num_workers']
+        )
+
+        test_loader = None
+        if test_dir:
+            test_dataset = CustomImageDataset(test_dir, transform=test_transform)
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=config['training']['num_workers']
+            )
+
+        # Initialize feature extractor
+        feature_extractor = get_feature_extractor(config)
+
+        # Train the model
+        logger.info("Starting training...")
+        history = feature_extractor.train(train_loader, test_loader)
+
+        # Save final model
+        model_path = os.path.join(output_dir, "final_model.pth")
+        feature_extractor.save_model(model_path)
+        logger.info(f"Model saved to {model_path}")
+
+        # Plot training history
+        history_path = os.path.join(output_dir, "training_history.png")
+        feature_extractor.plot_training_history(history_path)
+
+        # Clean up temporary files
+        processor.cleanup()
 
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
+        logger.error(traceback.format_exc())
         sys.exit(1)
-
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
