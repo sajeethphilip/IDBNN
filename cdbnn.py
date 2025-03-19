@@ -130,7 +130,7 @@ class PredictionManager:
         except Exception as e:
             raise ValueError(f"Error loading model checkpoint: {str(e)}")
 
-    def predict_images(self, input_dir: str, output_csv: str = None) -> None:
+    def  predict_images(self, input_dir: str, output_csv: str = None) -> None:
         """
         Predict features for images in the input directory and save results to a CSV file.
 
