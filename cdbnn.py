@@ -682,12 +682,11 @@ class BaseAutoencoder(nn.Module):
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
 
-
                 feature_dict = {
                     'embeddings': embeddings,
                     'labels': labels,
                     'indices': all_indices,  # Include indices in the feature dictionary
-                    'filenames': all_filenames  # Include filenames in the feature dictionary
+                    'filenames': all_filenames,  # Include filenames in the feature dictionary
                     'class_names': all_class_names  # Include actual class names
                 }
 
