@@ -63,6 +63,125 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+import os
+import torch
+import pandas as pd
+from torchvision import transforms
+from PIL import Image
+from tqdm import tqdm
+
+class PredictionManager:
+    """Manages prediction on new images using a trained model."""
+
+    def __init__(self, model_path: str, config: Dict, device: str = None):
+        """
+        Initialize the PredictionManager.
+
+        Args:
+            model_path (str): Path to the trained model checkpoint.
+            config (Dict): Configuration dictionary.
+            device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
+        """
+        self.model_path = model_path
+        self.config = config
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = self._load_model()
+
+    def _load_model(self) -> nn.Module:
+        """Load the trained model from the checkpoint."""
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Model file not found: {self.model_path}")
+
+        # Load the checkpoint
+        checkpoint = torch.load(self.model_path, map_location=self.device)
+
+        # Determine the model type from the config
+        encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
+        if encoder_type == 'cnn':
+            model = CNNFeatureExtractor(self.config, self.device)
+        elif encoder_type == 'autoenc':
+            model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
+        else:
+            raise ValueError(f"Unsupported encoder type: {encoder_type}")
+
+        # Load the model state
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval()
+        return model
+
+    def predict_images(self, input_dir: str, output_csv: str) -> None:
+        """
+        Predict features for images in the input directory and save results to a CSV file.
+
+        Args:
+            input_dir (str): Directory containing new images.
+            output_csv (str): Path to save the output CSV file.
+        """
+        if not os.path.exists(input_dir):
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+        # Get the image transform from the config
+        transform = self._get_transforms()
+
+        # Process images
+        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_dir}")
+
+        # Prepare data structure for predictions
+        predictions = {
+            'filename': [],
+            'features': []
+        }
+
+        # Process each image
+        for filename in tqdm(image_files, desc="Predicting features"):
+            try:
+                # Load and transform the image
+                image_path = os.path.join(input_dir, filename)
+                image = Image.open(image_path).convert('RGB')
+                image_tensor = transform(image).unsqueeze(0).to(self.device)
+
+                # Extract features using the model
+                with torch.no_grad():
+                    if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
+                        embedding, _ = self.model(image_tensor)
+                    else:
+                        embedding = self.model(image_tensor)
+
+                # Store results
+                predictions['filename'].append(filename)
+                predictions['features'].append(embedding.cpu().numpy().flatten())
+
+            except Exception as e:
+                print(f"Error processing image {filename}: {str(e)}")
+                continue
+
+        # Save predictions to CSV
+        self._save_predictions(predictions, output_csv)
+
+    def _get_transforms(self) -> transforms.Compose:
+        """Get the image transforms based on the config."""
+        return transforms.Compose([
+            transforms.Resize(tuple(self.config['dataset']['input_size'])),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=self.config['dataset']['mean'],
+                std=self.config['dataset']['std']
+            )
+        ])
+
+    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+        """Save predictions to a CSV file."""
+        # Convert features to a DataFrame
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features'][0]))]
+        df = pd.DataFrame(predictions['features'], columns=feature_cols)
+        df.insert(0, 'filename', predictions['filename'])
+
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+        print(f"Predictions saved to {output_csv}")
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -3008,7 +3127,8 @@ class BaseFeatureExtractor(ABC):
             'fresh_start': False,
             'train': True,
             'train_only': False,
-            'predict': True
+            'predict': False,
+            'reconstruct':True
         })
 
         # Likelihood configuration
@@ -6094,7 +6214,7 @@ def parse_arguments():
         return get_interactive_args()
 
     parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
-    parser.add_argument('--mode', choices=['train', 'predict'], default='train')
+    parser.add_argument('--mode', choices=['train', 'reconstruct','predict'], default='train')
     parser.add_argument('--data', type=str, help='dataset name/path')
     parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
     parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
@@ -6130,7 +6250,16 @@ def get_interactive_args():
     """Get arguments interactively with invert DBNN support"""
     last_args = load_last_args()
     args = argparse.Namespace()
-    args.mode = input("\nEnter mode (train/predict) [train]: ").strip().lower() or 'train'
+
+    # Get mode (train/reconstruct/predict)
+    while True:
+        default = last_args.get('mode', 'train') if last_args else 'train'
+        prompt = f"\nEnter mode (train/reconstruct/predict) [{default}]: "
+        mode = input(prompt).strip().lower() or default
+        if mode in ['train', 'reconstruct', 'predict']:
+            args.mode = mode
+            break
+        print("Invalid mode. Please enter 'train', 'reconstruct', or 'predict'")
 
     # Get data type
     while True:
@@ -6147,14 +6276,32 @@ def get_interactive_args():
     prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
     args.data = input(prompt).strip() or default
 
-    # Ask about invert DBNN
-    default_invert = last_args.get('invert_dbnn', True) if last_args else True
-    invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
-    args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
+    # Ask about invert DBNN (only for train/reconstruct modes)
+    if args.mode in ['train', 'reconstruct']:
+        default_invert = last_args.get('invert_dbnn', True) if last_args else True
+        invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
+        args.invert_dbnn = invert_response == 'y' if invert_response else default_invert
 
-    # If in predict mode and invert DBNN is enabled, ask for input CSV
-    if args.mode == 'predict' and args.invert_dbnn:
-        default_csv = last_args.get(f'input_csv', '') if last_args else ''
+    # If in predict mode, ask for model path and input directory
+    if args.mode == 'predict':
+        # Get model path
+        default_model = last_args.get('model_path', '') if last_args else ''
+        prompt = f"Enter path to trained model [{default_model}]: "
+        args.model_path = input(prompt).strip() or default_model
+
+        # Get input directory
+        default_input = last_args.get('input_dir', '') if last_args else ''
+        prompt = f"Enter directory containing new images [{default_input}]: "
+        args.input_dir = input(prompt).strip() or default_input
+
+        # Get output CSV path
+        default_output = last_args.get('output_csv', 'predictions.csv') if last_args else 'predictions.csv'
+        prompt = f"Enter output CSV path [{default_output}]: "
+        args.output_csv = input(prompt).strip() or default_output
+
+    # If in reconstruct mode and invert DBNN is enabled, ask for input CSV
+    elif args.mode == 'reconstruct' and args.invert_dbnn:
+        default_csv = last_args.get('input_csv', '') if last_args else ''
         prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
         args.input_csv = input(prompt).strip() or default_csv
 
@@ -6172,8 +6319,9 @@ def get_interactive_args():
     default = last_args.get('batch_size', 32) if last_args else 32
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
-    default = last_args.get('epochs', 20) if last_args else 20
-    args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
+    if args.mode == 'train':
+        default = last_args.get('epochs', 20) if last_args else 20
+        args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
 
     default = last_args.get('output_dir', 'data') if last_args else 'data'
     args.output_dir = input(f"Enter output directory [{default}]: ").strip() or default
@@ -6373,9 +6521,27 @@ def main():
         args = parse_arguments()
 
         # Process based on mode
-        if args.mode == 'train':
+         if args.mode == 'predict':
+            # Load the config
+            config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Initialize the PredictionManager
+            predictor = PredictionManager(
+                model_path=args.model_path,
+                config=config,
+                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
+            )
+
+            # Perform predictions
+            predictor.predict_images(
+                input_dir=args.input_dir,
+                output_csv=args.output_csv
+            )
+        elif args.mode == 'train':
             return handle_training_mode(args, logger)
-        elif args.mode == 'predict':
+        elif args.mode == 'reconstruct':
             return handle_prediction_mode(args, logger)
         else:
             logger.error(f"Invalid mode: {args.mode}")
