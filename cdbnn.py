@@ -107,15 +107,17 @@ class PredictionManager:
 
             # Handle custom checkpoint format with multiple phases
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
-                # Determine which phase to load
-                if 'phase2_current' in checkpoint['model_states']:
-                    # Load phase 2 if available
-                    state_dict = checkpoint['model_states']['phase2_current']['state_dict']
-                elif 'phase1_current' in checkpoint['model_states']:
-                    # Fallback to phase 1
-                    state_dict = checkpoint['model_states']['phase1_current']['state_dict']
+                # Extract the correct state_dict based on the phase
+                model_states = checkpoint['model_states']
+
+                # Check if phase2 is available
+                if 'phase2_current' in model_states:
+                    state_dict = model_states['phase2_current']['state_dict']
+                elif 'phase1_current' in model_states:
+                    state_dict = model_states['phase1_current']['state_dict']
                 else:
-                    raise ValueError("Checkpoint does not contain valid phase states.")
+                    # Fallback to the first available state
+                    state_dict = next(iter(model_states.values()))['state_dict']
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                 # Standard checkpoint format
                 state_dict = checkpoint['state_dict']
@@ -1805,17 +1807,9 @@ class UnifiedCheckpoint:
         return "_".join(components)
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
-                        phase: int, epoch: int, loss: float, is_best: bool = False):
-        """Save current model state to unified checkpoint"""
+                         phase: int, epoch: int, loss: float, is_best: bool = False):
+        """Save current model state to unified checkpoint."""
         state_key = self.get_state_key(phase, model)
-
-        # Get existing state or create new one
-        if state_key not in self.current_state['model_states']:
-            self.current_state['model_states'][state_key] = {
-                'current': None,
-                'best': None,
-                'history': []
-            }
 
         # Prepare state dictionary
         state_dict = {
@@ -1832,31 +1826,21 @@ class UnifiedCheckpoint:
             }
         }
 
-        # Update current state
-        self.current_state['model_states'][state_key]['current'] = state_dict
+        # Update model_states in the checkpoint
+        if state_key not in self.current_state['model_states']:
+            self.current_state['model_states'][state_key] = {
+                'current': None,
+                'best': None,
+                'history': []
+            }
 
-        # Update best state if applicable
+        self.current_state['model_states'][state_key]['current'] = state_dict
         if is_best:
             self.current_state['model_states'][state_key]['best'] = state_dict
-
-        # Add to history (keeping last 5 states)
-        self.current_state['model_states'][state_key]['history'].append({
-            'epoch': epoch,
-            'loss': loss,
-            'timestamp': datetime.now().isoformat()
-        })
-        self.current_state['model_states'][state_key]['history'] = \
-            self.current_state['model_states'][state_key]['history'][-5:]
-
-        # Update metadata
-        self.current_state['metadata']['last_updated'] = datetime.now().isoformat()
 
         # Save checkpoint
         torch.save(self.current_state, self.checkpoint_path)
         logger.info(f"Saved state {state_key} to unified checkpoint")
-
-        if is_best:
-            logger.info(f"New best model for {state_key} with loss: {loss:.4f}")
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
