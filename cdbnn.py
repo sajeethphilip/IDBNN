@@ -6534,10 +6534,12 @@ def main():
 
             # Initialize the PredictionManager
             predictor = PredictionManager(
-                model_path=args.model_path,
                 config=config,
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
+
+            # Load the model
+            predictor.load_model(args.model_path)
 
             # Perform predictions
             predictor.predict_images(
