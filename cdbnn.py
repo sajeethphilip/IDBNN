@@ -1798,6 +1798,32 @@ class ModelFactory:
             logger.error(f"Error creating model: {str(e)}")
             raise
 
+def predict_with_model(model: nn.Module, config: Dict, input_dir: str, output_dir: str):
+    """Use the trained model to generate CSV files for input images with unknown labels"""
+    model.eval()
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create a dataset for the input images
+    transform = transforms.Compose([
+        transforms.Resize(tuple(config['dataset']['input_size'])),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=config['dataset']['mean'], std=config['dataset']['std'])
+    ])
+
+    dataset = CustomImageDataset(input_dir, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=config['training']['batch_size'], shuffle=False)
+
+    # Extract features and save to CSV
+    feature_dict = model.extract_features(dataloader)
+    output_csv_path = os.path.join(output_dir, f"{config['dataset']['name']}_predictions.csv")
+    model.save_features(feature_dict, output_csv_path)
+
+    # Generate configuration files
+    config_manager = ConfigManager(output_dir)
+    config_manager.generate_default_config(input_dir)
+
+    logger.info(f"Predictions saved to {output_csv_path}")
+    logger.info(f"Configuration files saved to {output_dir}")
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
@@ -6364,28 +6390,79 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
         return existing_config
     return new_config
+
 def main():
-    """Main function for CDBNN processing with enhancement configurations"""
-    args = None
-    try:
-        # Setup logging and parse arguments
-        logger = setup_logging()
-        args = parse_arguments()
+    parser = argparse.ArgumentParser(description="Train, predict, or invert DBNN using the autoencoder model")
+    parser.add_argument('--mode', type=str, choices=['train', 'invertDBNN', 'predict'], required=True,
+                        help="Mode: train, invertDBNN (reconstruct images from CSV), or predict (generate CSV from images)")
+    parser.add_argument('--input_dir', type=str, help="Input directory for prediction or invertDBNN mode")
+    parser.add_argument('--output_dir', type=str, default="output", help="Output directory for prediction or invertDBNN mode")
+    parser.add_argument('--config', type=str, default="config.json", help="Path to configuration file")
+    args = parser.parse_args()
 
-        # Process based on mode
-        if args.mode == 'train':
-            return handle_training_mode(args, logger)
-        elif args.mode == 'predict':
-            return handle_prediction_mode(args, logger)
-        else:
-            logger.error(f"Invalid mode: {args.mode}")
-            return 1
+    # Load configuration
+    with open(args.config, 'r') as f:
+        config = json.load(f)
 
-    except Exception as e:
-        logger.error(f"Error in main process: {str(e)}")
-        if args and args.debug:
-            traceback.print_exc()
-        return 1
+    # Initialize model
+    model = ModelFactory.create_model(config)
+
+    if args.mode == 'train':
+        # Load dataset
+        train_dir = config['dataset']['train_dir']
+        transform = transforms.Compose([
+            transforms.Resize(tuple(config['dataset']['input_size'])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=config['dataset']['mean'], std=config['dataset']['std'])
+        ])
+        train_dataset = CustomImageDataset(train_dir, transform=transform)
+        train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=True)
+
+        # Train model
+        loss_manager = EnhancedLossManager(config)
+        train_model(model, train_loader, config, loss_manager)
+
+    elif args.mode == 'invertDBNN':
+        if not args.input_dir:
+            raise ValueError("Input directory must be specified for invertDBNN mode")
+
+        # Reconstruct images from CSV (invert DBNN)
+        invert_dbnn(model, config, args.input_dir, args.output_dir)
+
+    elif args.mode == 'predict':
+        if not args.input_dir:
+            raise ValueError("Input directory must be specified for prediction mode")
+
+        # Predict with model (generate CSV from images)
+        predict_with_model(model, config, args.input_dir, args.output_dir)
+
+def invert_dbnn(model: nn.Module, config: Dict, input_dir: str, output_dir: str):
+    """Reconstruct images from CSV files (invert DBNN)"""
+    model.eval()
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load CSV file
+    csv_path = os.path.join(input_dir, f"{config['dataset']['name']}.csv")
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    feature_cols = [col for col in df.columns if col.startswith('feature_')]
+    features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(model.device)
+
+    # Reconstruct images
+    with torch.no_grad():
+        for i in tqdm(range(0, len(features), config['training']['batch_size']), desc="Reconstructing images"):
+            batch = features[i:i + config['training']['batch_size']]
+            reconstructions = model.decode(batch)
+
+            # Save reconstructed images
+            for j, reconstruction in enumerate(reconstructions):
+                idx = i + j
+                img_path = os.path.join(output_dir, f"reconstruction_{idx}.png")
+                save_reconstructed_image(reconstruction, img_path, config)
+
+    logger.info(f"Reconstructed images saved to {output_dir}")
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
