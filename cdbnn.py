@@ -1798,7 +1798,32 @@ class ModelFactory:
             logger.error(f"Error creating model: {str(e)}")
             raise
 
+def predict_with_model(model: nn.Module, config: Dict, input_dir: str, output_dir: str):
+    """Use the trained model to generate CSV files for input images with unknown labels"""
+    model.eval()
+    os.makedirs(output_dir, exist_ok=True)
 
+    # Create a dataset for the input images
+    transform = transforms.Compose([
+        transforms.Resize(tuple(config['dataset']['input_size'])),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=config['dataset']['mean'], std=config['dataset']['std'])
+    ])
+
+    dataset = CustomImageDataset(input_dir, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=config['training']['batch_size'], shuffle=False)
+
+    # Extract features and save to CSV
+    feature_dict = model.extract_features(dataloader)
+    output_csv_path = os.path.join(output_dir, f"{config['dataset']['name']}_predictions.csv")
+    model.save_features(feature_dict, output_csv_path)
+
+    # Generate configuration files
+    config_manager = ConfigManager(output_dir)
+    config_manager.generate_default_config(input_dir)
+
+    logger.info(f"Predictions saved to {output_csv_path}")
+    logger.info(f"Configuration files saved to {output_dir}")
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
