@@ -1825,6 +1825,7 @@ def predict_with_model(model: nn.Module, config: Dict, input_dir: str, output_di
     logger.info(f"Predictions saved to {output_csv_path}")
     logger.info(f"Configuration files saved to {output_dir}")
 
+
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
@@ -6393,7 +6394,7 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Train, predict, or invert DBNN using the autoencoder model")
-    parser.add_argument('--mode', type=str, choices=['train', 'invertDBNN', 'predict'], required=True,
+    parser.add_argument('--mode', type=str, choices=['train', 'invertDBNN', 'predict'],
                         help="Mode: train, invertDBNN (reconstruct images from CSV), or predict (generate CSV from images)")
     parser.add_argument('--input_dir', type=str, help="Input directory for prediction or invertDBNN mode")
     parser.add_argument('--output_dir', type=str, default="output", help="Output directory for prediction or invertDBNN mode")
@@ -6407,8 +6408,51 @@ def main():
     # Initialize model
     model = ModelFactory.create_model(config)
 
-    if args.mode == 'train':
-        # Load dataset
+    # If no command-line arguments are provided, switch to interactive mode
+    if not any(vars(args).values()):
+        interactive_mode(model, config)
+    else:
+        # Command-line mode
+        if args.mode == 'train':
+            # Load dataset
+            train_dir = config['dataset']['train_dir']
+            transform = transforms.Compose([
+                transforms.Resize(tuple(config['dataset']['input_size'])),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=config['dataset']['mean'], std=config['dataset']['std'])
+            ])
+            train_dataset = CustomImageDataset(train_dir, transform=transform)
+            train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=True)
+
+            # Train model
+            loss_manager = EnhancedLossManager(config)
+            train_model(model, train_loader, config, loss_manager)
+
+        elif args.mode == 'invertDBNN':
+            if not args.input_dir:
+                raise ValueError("Input directory must be specified for invertDBNN mode")
+
+            # Reconstruct images from CSV (invert DBNN)
+            invert_dbnn(model, config, args.input_dir, args.output_dir)
+
+        elif args.mode == 'predict':
+            if not args.input_dir:
+                raise ValueError("Input directory must be specified for prediction mode")
+
+            # Predict with model (generate CSV from images)
+            predict_with_model(model, config, args.input_dir, args.output_dir)
+
+def interactive_mode(model: nn.Module, config: Dict):
+    """Interactive mode for training, inverting DBNN, or predicting."""
+    print("\nWelcome to the interactive mode!")
+    print("Choose an option:")
+    print("1. Train the model")
+    print("2. Invert DBNN (reconstruct images from CSV)")
+    print("3. Predict (generate CSV from images)")
+    choice = input("Enter your choice (1/2/3): ").strip()
+
+    if choice == '1':
+        # Train the model
         train_dir = config['dataset']['train_dir']
         transform = transforms.Compose([
             transforms.Resize(tuple(config['dataset']['input_size'])),
@@ -6422,19 +6466,21 @@ def main():
         loss_manager = EnhancedLossManager(config)
         train_model(model, train_loader, config, loss_manager)
 
-    elif args.mode == 'invertDBNN':
-        if not args.input_dir:
-            raise ValueError("Input directory must be specified for invertDBNN mode")
+    elif choice == '2':
+        # Invert DBNN (reconstruct images from CSV)
+        input_dir = input("Enter the input directory containing the CSV file: ").strip()
+        output_dir = input("Enter the output directory for reconstructed images (default: output): ").strip() or "output"
+        invert_dbnn(model, config, input_dir, output_dir)
 
-        # Reconstruct images from CSV (invert DBNN)
-        invert_dbnn(model, config, args.input_dir, args.output_dir)
+    elif choice == '3':
+        # Predict (generate CSV from images)
+        input_dir = input("Enter the input directory containing the images: ").strip()
+        output_dir = input("Enter the output directory for the CSV file (default: output): ").strip() or "output"
+        predict_with_model(model, config, input_dir, output_dir)
 
-    elif args.mode == 'predict':
-        if not args.input_dir:
-            raise ValueError("Input directory must be specified for prediction mode")
+    else:
+        print("Invalid choice. Exiting.")
 
-        # Predict with model (generate CSV from images)
-        predict_with_model(model, config, args.input_dir, args.output_dir)
 
 def invert_dbnn(model: nn.Module, config: Dict, input_dir: str, output_dir: str):
     """Reconstruct images from CSV files (invert DBNN)"""
@@ -6463,6 +6509,8 @@ def invert_dbnn(model: nn.Module, config: Dict, input_dir: str, output_dir: str)
                 save_reconstructed_image(reconstruction, img_path, config)
 
     logger.info(f"Reconstructed images saved to {output_dir}")
+
+
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
