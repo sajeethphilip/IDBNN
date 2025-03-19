@@ -87,7 +87,7 @@ class PredictionManager:
     def _load_model(self) -> nn.Module:
         """Load the trained model from the checkpoint."""
         dataset_name = self.config['dataset']['name']
-        model_path = os.path.join('data', f"{dataset_name}/checkpoints/{dataset_name}_unified.pth")
+        model_path = f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth"
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
@@ -2844,7 +2844,18 @@ class BaseFeatureExtractor(ABC):
         # Initialize common parameters
         self.feature_dims = self.config['model']['feature_dims']
         self.learning_rate = self.config['model'].get('learning_rate', 0.001)
+        self.feature_extractor = self._create_model()
+        # Initialize optimizer if not created during checkpoint loading
+        if not hasattr(self, 'optimizer'):
+            self.optimizer = self._initialize_optimizer()
+            logger.info(f"Initialized {self.optimizer.__class__.__name__} optimizer")
 
+        # Initialize scheduler
+        self.scheduler = None
+        if self.config['model'].get('scheduler'):
+            self.scheduler = self._initialize_scheduler()
+            if self.scheduler:
+                logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
         # Initialize training metrics
         self.best_accuracy = 0.0
         self.best_loss = float('inf')
@@ -2857,29 +2868,37 @@ class BaseFeatureExtractor(ABC):
         self.log_dir = os.path.join('Traininglog', self.config['dataset']['name'])
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Initialize model
-        self.feature_extractor = self._create_model()
 
         # Load checkpoint or initialize optimizer
         if not self.config['execution_flags'].get('fresh_start', False):
             self._load_from_checkpoint()
 
-        # Initialize optimizer if not created during checkpoint loading
-        if not hasattr(self, 'optimizer'):
-            self.optimizer = self._initialize_optimizer()
-            logger.info(f"Initialized {self.optimizer.__class__.__name__} optimizer")
 
-        # Initialize scheduler
-        self.scheduler = None
-        if self.config['model'].get('scheduler'):
-            self.scheduler = self._initialize_scheduler()
-            if self.scheduler:
-                logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
 
     @abstractmethod
     def _create_model(self) -> nn.Module:
         """Create and return the feature extraction model"""
         pass
+
+    def load_state_dict(self, state_dict: Dict):
+        """Load model state from a state dictionary."""
+        self.feature_extractor.load_state_dict(state_dict)
+        self.feature_extractor.eval()
+
+    def save_checkpoint(self, path: str, is_best: bool = False):
+        """Save model checkpoint."""
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config
+        }
+        torch.save(checkpoint, path)
+        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {path}")
+
 
     def _initialize_optimizer(self) -> torch.optim.Optimizer:
         """Initialize optimizer based on configuration"""
