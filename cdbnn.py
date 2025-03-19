@@ -105,14 +105,19 @@ class PredictionManager:
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
 
-            # Handle case where checkpoint only contains weights
-            if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                # Full checkpoint with state_dict
-                model.load_state_dict(checkpoint['state_dict'])
+            # Handle custom checkpoint format
+            if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
+                # Extract the correct state_dict from the custom checkpoint
+                state_dict = checkpoint['model_states']['phase1_current']['state_dict']
+            elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                # Standard checkpoint format
+                state_dict = checkpoint['state_dict']
             else:
-                # Checkpoint only contains weights
-                model.load_state_dict(checkpoint)
+                # Assume the checkpoint is the state_dict itself
+                state_dict = checkpoint
 
+            # Load the state_dict into the model
+            model.load_state_dict(state_dict)
             model.eval()
             return model
         except Exception as e:
