@@ -2554,7 +2554,7 @@ class DBNN(GPUDBNN):
                 print("\033[K" +f"Test set size: {len(test_indices)}")
 
                 # Reset model to initial state for fresh training
-                self.reset_to_initial_state()
+                #self.reset_to_initial_state()
 
                 # Save indices for this epoch
                 self.save_epoch_data(round_num, train_indices, test_indices)
