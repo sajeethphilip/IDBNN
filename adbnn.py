@@ -2533,8 +2533,6 @@ class DBNN(GPUDBNN):
 
             # Continue with training loop...
             for round_num in range(max_rounds):
-                # Reset the model state for fresh training
-                self.reset_model_state()
 
                 print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                 print("\033[K" +f"Training set size: {len(train_indices)}")
