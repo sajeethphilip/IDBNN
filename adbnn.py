@@ -2148,7 +2148,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
             DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
             DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-            print(f" Batch size updated to- Optimal batch size: {optimal_batch_size}")
+            print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
 
             return optimal_batch_size
 
