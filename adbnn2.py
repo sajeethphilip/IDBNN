@@ -2220,6 +2220,8 @@ class DBNN(GPUDBNN):
                 # This allows us to read the actual headers from the file
                 DEBUG.log(f" Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
+                self.Original_data=df.copy()
+
 
                 if df is None or df.empty:
                     raise ValueError(f"Empty dataset loaded from {file_path}")
