@@ -390,7 +390,7 @@ class DatasetConfig:
         "likelihood_config": {
             "feature_group_size": 2,
             "max_combinations": 10000,
-            "bin_sizes": [20]
+            "bin_sizes": [128]
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -1512,7 +1512,7 @@ class DBNNConfig:
 
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
-        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 20)
+        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 128)
 
         # Execution flags
         self.train = kwargs.get('train', True)
@@ -3031,7 +3031,7 @@ class DBNN(GPUDBNN):
         # Get parameters directly from the root of the config file
         group_size = self.config.get('feature_group_size', 2)
         max_combinations = max_combinations or self.config.get('max_combinations', None)
-        bin_sizes = self.config.get('bin_sizes', [20])
+        bin_sizes = self.config.get('bin_sizes', [128])
 
         # Debug: Print parameters
         print("\033[K" +f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
@@ -4893,7 +4893,7 @@ class DBNN(GPUDBNN):
                 self.categorical_encoders = components['categorical_encoders']
                 self.high_cardinality_columns = components.get('high_cardinality_columns', [])
                 self.weight_updater = components.get('weight_updater')
-                self.n_bins_per_dim = components.get('n_bins_per_dim', 20)
+                self.n_bins_per_dim = components.get('n_bins_per_dim', 128)
                 self.bin_edges = components.get('bin_edges')  # Load bin_edges
                 self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
                 print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
