@@ -2122,6 +2122,7 @@ class DBNN(GPUDBNN):
             optimal_batch_size: int
         """
         if not torch.cuda.is_available():
+            print(f"{Colors.RED} The GPU cuda library is unavailable. setting batch size to 128{Colors.ENDC}")
             return 128  # Default for CPU
 
         try:
