@@ -824,11 +824,16 @@ class BaseAutoencoder(nn.Module):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Get additional information (file_index and filename)
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
-                    # Get actual class names using reverse_encoder
-                    class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    # Check if dataset has get_additional_info method
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    else:
+                        # Provide default values if get_additional_info is not available
+                        indices = list(range(len(inputs)))
+                        filenames = [f"image_{i}.png" for i in indices]
+                        class_names = [str(label.item()) for label in labels]
 
                     embeddings = self.encode(inputs)
                     if isinstance(embeddings, tuple):
@@ -857,6 +862,7 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
+
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
