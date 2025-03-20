@@ -2411,7 +2411,7 @@ class DBNN(GPUDBNN):
 
         try:
             # Reset model to initial state for fresh training
-            self.reset_to_initial_state()
+            #self.reset_to_initial_state()
 
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
