@@ -2379,7 +2379,7 @@ class ReconstructionManager:
         enhancement_modules = self.config['model'].get('enhancement_modules', {})
 
         outputs = []
-        batch_size = self.config['training'].get('batch_size', 32)
+        batch_size = self.config['training'].get('batch_size', 128)
 
         with torch.no_grad():
             for i in tqdm(range(0, len(features), batch_size), desc="Generating predictions"):
@@ -3133,7 +3133,7 @@ class BaseFeatureExtractor(ABC):
         # Training configuration
         training = config.setdefault('training', {})
         training.update({
-            'batch_size': 32,
+            'batch_size': 128,
             'epochs': 20,
             'num_workers': min(4, os.cpu_count() or 1),
             'checkpoint_dir': os.path.join('Model', 'checkpoints'),
@@ -3143,7 +3143,7 @@ class BaseFeatureExtractor(ABC):
             'minimum_training_accuracy': 0.95,
             'cardinality_threshold': 0.9,
             'cardinality_tolerance': 4,
-            'n_bins_per_dim': 20,
+            'n_bins_per_dim': 128,
             'enable_adaptive': True,
             'invert_DBNN': False,
             'reconstruction_weight': 0.5,
@@ -3180,7 +3180,7 @@ class BaseFeatureExtractor(ABC):
         likelihood.update({
             'feature_group_size': 2,
             'max_combinations': 1000,
-            'bin_sizes': [20]
+            'bin_sizes': [128]
         })
 
         # Active learning configuration
@@ -4023,7 +4023,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         # Generate reconstructions
         self.feature_extractor.eval()
         with torch.no_grad():
-            batch_size = 32
+            batch_size = 128
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i+batch_size].to(self.device)
                 reconstructions = self.feature_extractor.decode(batch)
@@ -5424,7 +5424,7 @@ class DatasetProcessor:
                 }
             },
             "training": {
-                "batch_size": 32,
+                "batch_size": 128,
                 "epochs": 20,
                 "num_workers": min(4, os.cpu_count() or 1),
                 "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
@@ -5538,7 +5538,7 @@ class DatasetProcessor:
                 "minimum_training_accuracy": 0.95,
                 "cardinality_threshold": 0.9,
                 "cardinality_tolerance": 4,
-                "n_bins_per_dim": 20,
+                "n_bins_per_dim": 128,
                 "enable_adaptive": True,
                 "invert_DBNN": main_config['training'].get('invert_DBNN', False),
                 "reconstruction_weight": 0.5,
@@ -6267,7 +6267,7 @@ def print_usage():
     print("\nOptional Arguments:")
     print("  --encoder_type  Type of encoder ('cnn' or 'autoenc')")
     print("  --config        Path to configuration file (overrides other options)")
-    print("  --batch_size    Batch size for training (default: 32)")
+    print("  --batch_size    Batch size for training (default: 128)")
     print("  --epochs        Number of training epochs (default: 20)")
     print("  --workers       Number of data loading workers (default: 4)")
     print("  --learning_rate Learning rate (default: 0.001)")
@@ -6294,7 +6294,7 @@ def parse_arguments():
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
     parser.add_argument('--output-dir', type=str, default='data', help='output directory')
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
     parser.add_argument('--workers', type=int, default=4, help='number of workers')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
@@ -6391,7 +6391,7 @@ def get_interactive_args():
         print("Invalid encoder type. Please enter 'cnn' or 'autoenc'")
 
     # Optional parameters
-    default = last_args.get('batch_size', 32) if last_args else 32
+    default = last_args.get('batch_size', 128) if last_args else 128
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
     if args.mode == 'train':
