@@ -2373,9 +2373,6 @@ class DBNN(GPUDBNN):
                 batch_size=self.batch_size
             )
 
-        # Reset tracking variables
-        self.best_combined_accuracy = 0.0
-        self.best_round_initial_conditions = None
 
         DEBUG.log("Model reset to initial state.")
 
