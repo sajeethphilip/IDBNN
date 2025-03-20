@@ -6450,14 +6450,14 @@ def configure_enhancements(config: Dict) -> Dict:
     print("\nConfiguring Enhanced Autoencoder Features:")
 
     # KL Divergence configuration
-    if input("Enable KL divergence clustering? (y/n) [y]: ").lower() != 'y':
+    if input("Enable KL divergence clustering? (y/n) [n]: ").lower() != 'y':
         enhancements['use_kl_divergence'] = False
         enhancements['kl_divergence_weight'] = float(input("Enter KL divergence weight (0-1) [0.1]: ") or 0.1)
     else:
         enhancements['use_kl_divergence'] = True
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() != 'y':
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
         enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
