@@ -202,7 +202,7 @@ class DatasetConfig:
         "likelihood_config": {
             "feature_group_size": 2,
             "max_combinations": 100000,
-            "bin_sizes": [64]
+            "bin_sizes": [128]
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -1324,7 +1324,7 @@ class DBNNConfig:
 
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
-        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 64)
+        self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 128)
 
         # Execution flags
         self.train = kwargs.get('train', True)
@@ -1565,7 +1565,7 @@ class DBNN(GPUDBNN):
          # Load data using existing GPUDBNN method
         self.data =self._load_dataset()
         self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
-
+        self.batch_size=self._calculate_optimal_batch_size(self.data)
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
 
@@ -1673,7 +1673,7 @@ class DBNN(GPUDBNN):
             X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
 
         # Compute probabilities in batches
-        batch_size = 32
+        batch_size = 128
         all_probabilities = []
 
         for i in range(0, len(X_tensor), batch_size):
@@ -2140,7 +2140,7 @@ class DBNN(GPUDBNN):
             optimal_batch_size = int(available_memory / memory_per_sample)
 
             # Enforce minimum and maximum bounds
-            optimal_batch_size = max(32, min(optimal_batch_size, 512))
+            optimal_batch_size = max(32, min(optimal_batch_size, 2048))
 
             DEBUG.log(f" Memory Analysis:")
             DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
@@ -2343,7 +2343,7 @@ class DBNN(GPUDBNN):
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
                             load_epoch: int = None,
-                            batch_size: int = 32):
+                            batch_size: int = 128):
         """Modified adaptive training strategy with proper fresh start handling"""
         DEBUG.log(" Starting adaptive_fit_predict")
         if not EnableAdaptive:
@@ -2808,7 +2808,7 @@ class DBNN(GPUDBNN):
         # Step 5: Scale the features using precomputed global statistics
         try:
             X_scaled = np.zeros_like(X_numpy)
-            batch_size = 1024  # Adjust based on available memory
+            #batch_size = 1024  # Adjust based on available memory
 
             for i in range(0, len(X_numpy), batch_size):
                 batch_end = min(i + batch_size, len(X_numpy))
@@ -2846,7 +2846,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
 
             # Compute bin edges using the preprocessed data (now a tensor)
-            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [21]))
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
             DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
 
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
@@ -2861,7 +2861,7 @@ class DBNN(GPUDBNN):
         # Get parameters directly from the root of the config file
         group_size = self.config.get('feature_group_size', 2)
         max_combinations = max_combinations or self.config.get('max_combinations', None)
-        bin_sizes = self.config.get('bin_sizes', [21])
+        bin_sizes = self.config.get('bin_sizes', [128])
 
         # Debug: Print parameters
         print("\033[K" +f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
@@ -2921,7 +2921,7 @@ class DBNN(GPUDBNN):
         n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [21])
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         if len(bin_sizes) == 1:
             # If single bin size provided, use it for all dimensions
             n_bins = bin_sizes[0]
@@ -3218,7 +3218,7 @@ class DBNN(GPUDBNN):
                 n_bins_per_dim=self.n_bins_per_dim  # Number of Gaussian components
             )
 
-    def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 32):
+    def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
         """Vectorized weight updates with proper error handling"""
         n_failed = len(failed_cases)
         if n_failed == 0:
@@ -3381,7 +3381,7 @@ class DBNN(GPUDBNN):
         return None, None
 
 
-    def predict(self, X: torch.Tensor, batch_size: int = 32):
+    def predict(self, X: torch.Tensor, batch_size: int = 128):
         """
         Make predictions in batches using the best model weights.
         This function ensures all batches are processed and predictions are concatenated correctly.
@@ -3586,7 +3586,7 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
             print("\033[K" +f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
-    def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 32):
+    def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
         """Training loop with proper weight handling and enhanced progress tracking"""
         print("\033[K" +"Starting training..." , end="\r", flush=True)
         # Initialize best combined accuracy if not already set
@@ -4266,7 +4266,7 @@ class DBNN(GPUDBNN):
         return {c_id: posteriors[idx].item() for idx, c_id in enumerate(classes)}
 
 
-    def fit_predict(self, batch_size: int = 32, save_path: str = None):
+    def fit_predict(self, batch_size: int = 128, save_path: str = None):
         """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
         try:
             # Set a flag to indicate we're printing metrics
@@ -4599,7 +4599,7 @@ class DBNN(GPUDBNN):
             X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
 
         # Compute probabilities in batches
-        batch_size = 32
+        batch_size = 128
         all_probabilities = []
 
         for i in range(0, len(X_tensor), batch_size):
@@ -4733,7 +4733,7 @@ class DBNN(GPUDBNN):
 
 
 
-    def predict_and_save(self, save_path=None, batch_size: int = 32):
+    def predict_and_save(self, save_path=None, batch_size: int = 128):
         """Make predictions on data and save them using best model weights"""
         try:
             # First try to load existing model and components
@@ -4793,7 +4793,7 @@ class DBNN(GPUDBNN):
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
 
-def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 32):
+def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
     """Run benchmark using GPU-optimized implementation"""
     print("\033[K" +f"Running GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...", end="\r", flush=True)
 
