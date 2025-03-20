@@ -1861,7 +1861,7 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Optimized batch posterior with vectorized operations and handling of missing values"""
+        """Optimized batch posterior with vectorized operations"""
         # Ensure input features are on the correct device
         features = features.to(self.device)
 
@@ -1880,10 +1880,6 @@ class DBNN(GPUDBNN):
 
         # Pre-allocate tensors on the correct device
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
-
-        # Create a mask for missing values (NaN or infinite values)
-        missing_mask = torch.isnan(features) | torch.isinf(features)
-        valid_mask = ~missing_mask
 
         # Process all feature pairs at once
         feature_groups = torch.stack([
@@ -1907,6 +1903,7 @@ class DBNN(GPUDBNN):
             ])  # Shape: (2, batch_size)
             bin_indices_dict[group_idx] = indices
 
+
         # Process all classes simultaneously
         for group_idx in range(len(self.likelihood_params['feature_pairs'])):
             bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
@@ -1927,11 +1924,6 @@ class DBNN(GPUDBNN):
 
             # Gather probabilities for all samples and classes at once
             probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
-
-            # Mask out probabilities for samples with missing values
-            valid_samples = valid_mask[:, self.likelihood_params['feature_pairs'][group_idx]].all(dim=1)
-            probs[:, ~valid_samples] = epsilon  # Set invalid samples to epsilon to avoid log(0)
-
             log_likelihoods += torch.log(probs.t() + epsilon)
 
         # Compute posteriors efficiently
@@ -2742,7 +2734,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with improved error handling and column consistency, including handling missing values."""
+        """Preprocess data with improved error handling and column consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
         # Check if X is a DataFrame or a tensor
@@ -2758,11 +2750,6 @@ class DBNN(GPUDBNN):
             X = X.copy()
         else:
             X = X.clone().detach()
-
-        # Handle missing values in the data
-        if isinstance(X, pd.DataFrame):
-            # Fill missing values with the mean of the column (for numerical features)
-            X = X.fillna(X.mean())
 
         # Step 1: Compute global statistics only once during training
         if is_training and not self.global_stats_computed:
@@ -2821,11 +2808,13 @@ class DBNN(GPUDBNN):
         # Step 5: Scale the features using precomputed global statistics
         try:
             X_scaled = np.zeros_like(X_numpy)
-            batch_size = 1024  # Adjust based on available memory
+            #batch_size = 1024  # Adjust based on available memory
 
             for i in range(0, len(X_numpy), batch_size):
-                batch_X = X_numpy[i:i + batch_size]
-                batch_X = np.nan_to_num(batch_X, nan=np.nanmean(batch_X))  # Handle any remaining NaNs
+                batch_end = min(i + batch_size, len(X_numpy))
+                batch_X = X_numpy[i:batch_end]
+
+                # Scale the batch using precomputed global statistics
                 X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
 
             DEBUG.log("Scaling successful")
@@ -3156,17 +3145,13 @@ class DBNN(GPUDBNN):
         return posteriors, None
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Gaussian posterior computation focusing on relative class probabilities with handling of missing values"""
+        """Gaussian posterior computation focusing on relative class probabilities"""
         features = features.to(self.device)
         batch_size = len(features)
         n_classes = len(self.likelihood_params['classes'])
 
         # Initialize log likelihoods
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
-
-        # Create a mask for missing values (NaN or infinite values)
-        missing_mask = torch.isnan(features) | torch.isinf(features)
-        valid_mask = ~missing_mask
 
         # Process each feature pair
         for pair_idx, pair in enumerate(self.feature_pairs):
