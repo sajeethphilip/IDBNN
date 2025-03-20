@@ -2347,33 +2347,48 @@ class DBNN(GPUDBNN):
         plt.savefig(f"{save_path}_reconstruction_plots.png")
         plt.close()
 
-    def reset_model_state(self):
-        """Reset the model's state to start fresh training."""
-        DEBUG.log("Resetting model state for fresh training...")
+    def reset_to_initial_state(self):
+        """Reset the model's weights and parameters to their initial state."""
+        DEBUG.log("Resetting model to initial state for fresh training...")
 
-        # Reset weights and likelihood parameters
-        self.current_W = None
-        self.best_W = None
-        self.best_error = float('inf')
-        self.likelihood_params = None
-        self.feature_pairs = None
-        self.bin_edges = None
-        self.gaussian_params = None
+        # Reset weights to uniform priors
+        n_classes = len(self.label_encoder.classes_)
+        n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
+
+        if n_pairs > 0:
+            self.current_W = torch.full(
+                (n_classes, n_pairs),
+                0.1,  # Default uniform prior
+                device=self.device,
+                dtype=torch.float32
+            )
+            self.best_W = self.current_W.clone()
+            self.best_error = float('inf')
+
+        # Reset likelihood parameters (if applicable)
+        if self.model_type == "Histogram":
+            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+            )
+        elif self.model_type == "Gaussian":
+            self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+            )
 
         # Reset weight updater
-        self.weight_updater = None
+        if self.weight_updater is not None:
+            self.weight_updater = BinWeightUpdater(
+                n_classes=n_classes,
+                feature_pairs=self.feature_pairs,
+                n_bins_per_dim=self.n_bins_per_dim,
+                batch_size=self.batch_size
+            )
 
-        # Reset training indices and other tracking variables
-        self.train_indices = []
-        self.test_indices = None
+        # Reset tracking variables
         self.best_combined_accuracy = 0.0
         self.best_round_initial_conditions = None
 
-        # Clear cached computations
-        if hasattr(self, 'computation_cache'):
-            self.computation_cache = ComputationCache(self.device)
-
-        DEBUG.log("Model state reset complete.")
+        DEBUG.log("Model reset to initial state.")
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -2395,8 +2410,8 @@ class DBNN(GPUDBNN):
         test_indices = None
 
         try:
-            # Reset the model state for fresh training
-            self.reset_model_state()
+            # Reset model to initial state for fresh training
+            self.reset_to_initial_state()
 
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
@@ -2537,6 +2552,9 @@ class DBNN(GPUDBNN):
                 print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                 print("\033[K" +f"Training set size: {len(train_indices)}")
                 print("\033[K" +f"Test set size: {len(test_indices)}")
+
+                # Reset model to initial state for fresh training
+                self.reset_to_initial_state()
 
                 # Save indices for this epoch
                 self.save_epoch_data(round_num, train_indices, test_indices)
