@@ -463,7 +463,7 @@ class DatasetConfig:
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
-            "n_bins_per_dim": 20,
+            "n_bins_per_dim": 128,
             "enable_adaptive": True,
             "compute_device": "auto",
             "invert_DBNN": True,
@@ -1190,7 +1190,7 @@ class GPUDBNN:
                  max_epochs: int = Epochs, test_size: float = TestFraction,
                  random_state: int = TrainingRandomSeed, device: str = None,
                  fresh: bool = False, use_previous_model: bool = True,
-                 n_bins_per_dim: int = 20, model_type: str = "Histogram"):
+                 n_bins_per_dim: int = 128, model_type: str = "Histogram"):
         """Initialize GPUDBNN with support for continued training with fresh data"""
 
         # Set dataset_name and model type first
@@ -3016,7 +3016,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
 
             # Compute bin edges using the preprocessed data (now a tensor)
-            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [20]))
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
             DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
 
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
@@ -3091,7 +3091,7 @@ class DBNN(GPUDBNN):
         n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [20])
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         if len(bin_sizes) == 1:
             # If single bin size provided, use it for all dimensions
             n_bins = bin_sizes[0]
