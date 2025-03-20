@@ -2347,48 +2347,6 @@ class DBNN(GPUDBNN):
         plt.savefig(f"{save_path}_reconstruction_plots.png")
         plt.close()
 
-    def reset_to_initial_state(self):
-        """Reset the model's weights and parameters to their initial state."""
-        DEBUG.log("Resetting model to initial state for fresh training...")
-
-        # Reset weights to uniform priors
-        n_classes = len(self.label_encoder.classes_)
-        n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
-
-        if n_pairs > 0:
-            self.current_W = torch.full(
-                (n_classes, n_pairs),
-                0.1,  # Default uniform prior
-                device=self.device,
-                dtype=torch.float32
-            )
-            self.best_W = self.current_W.clone()
-            self.best_error = float('inf')
-
-        # Reset likelihood parameters (if applicable)
-        if self.model_type == "Histogram":
-            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-            )
-        elif self.model_type == "Gaussian":
-            self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-            )
-
-        # Reset weight updater
-        if self.weight_updater is not None:
-            self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
-                feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim,
-                batch_size=self.batch_size
-            )
-
-        # Reset tracking variables
-        self.best_combined_accuracy = 0.0
-        self.best_round_initial_conditions = None
-
-        DEBUG.log("Model reset to initial state.")
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -2410,9 +2368,6 @@ class DBNN(GPUDBNN):
         test_indices = None
 
         try:
-            # Reset model to initial state for fresh training
-            #self.reset_to_initial_state()
-
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
@@ -2420,7 +2375,6 @@ class DBNN(GPUDBNN):
             print("\033[K" +f" Initial data shape: X={X.shape}, y={len(y)}")
             print("\033[K" +f"Number of classes in data = {np.unique(y)}")
             print(self.data.head)
-
             # Initialize label encoder if not already done
             if not hasattr(self.label_encoder, 'classes_'):
                 self.label_encoder.fit(y)
@@ -2548,13 +2502,9 @@ class DBNN(GPUDBNN):
 
             # Continue with training loop...
             for round_num in range(max_rounds):
-
                 print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                 print("\033[K" +f"Training set size: {len(train_indices)}")
                 print("\033[K" +f"Test set size: {len(test_indices)}")
-
-                # Reset model to initial state for fresh training
-                #self.reset_to_initial_state()
 
                 # Save indices for this epoch
                 self.save_epoch_data(round_num, train_indices, test_indices)
