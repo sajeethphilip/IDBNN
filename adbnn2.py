@@ -197,6 +197,7 @@ class DatasetProcessor:
 
         # Load data using existing GPUDBNN method
         self.data = self._load_dataset()
+        self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
 
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
@@ -232,7 +233,8 @@ class DatasetProcessor:
         true_labels = y_tensor.cpu().numpy()
 
         # Generate detailed predictions using the original DataFrame (X)
-        predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
+        #predictions_df = self._generate_detailed_predictions(X, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(self.X_Orig, predictions, true_labels)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
@@ -3754,11 +3756,11 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=False)
+        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=True)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=False)
+        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=True)
         print("\033[K" +f"{Colors.GREEN}Last testing data is saved to {dataset_name}_Last_testing.csv{Colors.ENDC}")
         print("\033[K" +f"{Colors.GREEN}Last training data is saved to {dataset_name}_Last_training.csv{Colors.ENDC}")
 
@@ -4800,7 +4802,8 @@ class DBNN(GPUDBNN):
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+            #all_results = self._generate_detailed_predictions(self.data, all_predictions, y_all)
+            all_results = self._generate_detailed_predictions(self.X_Orig, all_predictions, y_all)
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
