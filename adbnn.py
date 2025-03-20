@@ -1565,7 +1565,7 @@ class DBNN(GPUDBNN):
          # Load data using existing GPUDBNN method
         self.data =self._load_dataset()
         self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
-        self.batch_size=self._calculate_optimal_batch_size(self.data)
+        self.batch_size=self._calculate_optimal_batch_size(len(self.data))
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
 
