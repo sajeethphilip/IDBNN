@@ -2125,37 +2125,33 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED} The GPU cuda library is unavailable. setting batch size to 128{Colors.ENDC}")
             return 128  # Default for CPU
 
-        try:
-            # Get total and reserved GPU memory
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            reserved_memory = torch.cuda.memory_reserved(0)
-            allocated_memory = torch.cuda.memory_allocated(0)
+        # Get total and reserved GPU memory
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        reserved_memory = torch.cuda.memory_reserved(0)
+        allocated_memory = torch.cuda.memory_allocated(0)
 
-            # Calculate available memory (leaving 20% as buffer)
-            available_memory = (total_memory - reserved_memory - allocated_memory) * 0.8
+        # Calculate available memory (leaving 20% as buffer)
+        available_memory = (total_memory - reserved_memory - allocated_memory) * 0.8
 
-            # Calculate memory needed per sample (with buffer for intermediate computations)
-            memory_per_sample = sample_tensor_size * 4  # Factor of 4 for intermediate computations
+        # Calculate memory needed per sample (with buffer for intermediate computations)
+        memory_per_sample = sample_tensor_size * 4  # Factor of 4 for intermediate computations
 
-            # Calculate optimal batch size
-            optimal_batch_size = int(available_memory / memory_per_sample)
+        # Calculate optimal batch size
+        optimal_batch_size = int(available_memory / memory_per_sample)
 
-            # Enforce minimum and maximum bounds
-            optimal_batch_size = max(32, min(optimal_batch_size, 2048))
+        # Enforce minimum and maximum bounds
+        optimal_batch_size = max(32, min(optimal_batch_size, 2048))
 
-            DEBUG.log(f" Memory Analysis:")
-            DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
-            DEBUG.log(f" - Reserved Memory: {reserved_memory / 1e9:.2f} GB")
-            DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
-            DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
-            DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-            print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
+        DEBUG.log(f" Memory Analysis:")
+        DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
+        DEBUG.log(f" - Reserved Memory: {reserved_memory / 1e9:.2f} GB")
+        DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
+        DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
+        DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
+        print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
 
-            return optimal_batch_size
+        return optimal_batch_size
 
-        except Exception as e:
-            DEBUG.log(f" Error calculating batch size: {str(e)}")
-            return 128  # Default fallback
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """
