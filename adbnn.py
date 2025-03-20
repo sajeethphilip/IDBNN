@@ -2347,6 +2347,33 @@ class DBNN(GPUDBNN):
         plt.savefig(f"{save_path}_reconstruction_plots.png")
         plt.close()
 
+    def reset_model_state(self):
+        """Reset the model's state to start fresh training."""
+        DEBUG.log("Resetting model state for fresh training...")
+
+        # Reset weights and likelihood parameters
+        self.current_W = None
+        self.best_W = None
+        self.best_error = float('inf')
+        self.likelihood_params = None
+        self.feature_pairs = None
+        self.bin_edges = None
+        self.gaussian_params = None
+
+        # Reset weight updater
+        self.weight_updater = None
+
+        # Reset training indices and other tracking variables
+        self.train_indices = []
+        self.test_indices = None
+        self.best_combined_accuracy = 0.0
+        self.best_round_initial_conditions = None
+
+        # Clear cached computations
+        if hasattr(self, 'computation_cache'):
+            self.computation_cache = ComputationCache(self.device)
+
+        DEBUG.log("Model state reset complete.")
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -2368,6 +2395,9 @@ class DBNN(GPUDBNN):
         test_indices = None
 
         try:
+            # Reset the model state for fresh training
+            self.reset_model_state()
+
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
@@ -2375,6 +2405,7 @@ class DBNN(GPUDBNN):
             print("\033[K" +f" Initial data shape: X={X.shape}, y={len(y)}")
             print("\033[K" +f"Number of classes in data = {np.unique(y)}")
             print(self.data.head)
+
             # Initialize label encoder if not already done
             if not hasattr(self.label_encoder, 'classes_'):
                 self.label_encoder.fit(y)
@@ -2502,6 +2533,9 @@ class DBNN(GPUDBNN):
 
             # Continue with training loop...
             for round_num in range(max_rounds):
+                # Reset the model state for fresh training
+                self.reset_model_state()
+
                 print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                 print("\033[K" +f"Training set size: {len(train_indices)}")
                 print("\033[K" +f"Test set size: {len(test_indices)}")
