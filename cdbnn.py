@@ -158,11 +158,8 @@ class PredictionManager:
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
             dataset = self._create_dataset(input_dir, transform)
-            logger.info(f"Dataset created with {len(dataset)} images.")
-            self.model.set_dataset(dataset)
-            logger.info("Dataset set in the model.")
-        else:
-            print("Model has no set_dataset")
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
+
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
             try:
@@ -174,18 +171,34 @@ class PredictionManager:
                 # Extract features using the model (phase 1)
                 with torch.no_grad():
                     if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                        embedding_phase1, _ = self.model(image_tensor)
+                        output = self.model(image_tensor)
+                        if isinstance(output, tuple):  # Handle tuple output
+                            embedding_phase1 = output[0]  # Extract the embedding tensor
+                        else:
+                            embedding_phase1 = output
                     else:
-                        embedding_phase1 = self.model(image_tensor)
+                        output = self.model(image_tensor)
+                        if isinstance(output, tuple):  # Handle tuple output
+                            embedding_phase1 = output[0]  # Extract the embedding tensor
+                        else:
+                            embedding_phase1 = output
 
                 # Extract features using the model (phase 2)
                 if hasattr(self.model, 'set_training_phase'):
                     self.model.set_training_phase(2)  # Switch to phase 2
                     with torch.no_grad():
                         if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                            embedding_phase2, _ = self.model(image_tensor)
+                            output = self.model(image_tensor)
+                            if isinstance(output, tuple):  # Handle tuple output
+                                embedding_phase2 = output[0]  # Extract the embedding tensor
+                            else:
+                                embedding_phase2 = output
                         else:
-                            embedding_phase2 = self.model(image_tensor)
+                            output = self.model(image_tensor)
+                            if isinstance(output, tuple):  # Handle tuple output
+                                embedding_phase2 = output[0]  # Extract the embedding tensor
+                            else:
+                                embedding_phase2 = output
                 else:
                     embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
