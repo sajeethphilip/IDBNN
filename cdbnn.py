@@ -157,9 +157,10 @@ class PredictionManager:
 
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
-            # Create a dataset with the images in the input directory
             dataset = self._create_dataset(input_dir, transform)
-            self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.info(f"Dataset created with {len(dataset)} images.")
+            self.model.set_dataset(dataset)
+            logger.info("Dataset set in the model.")
 
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
