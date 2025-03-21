@@ -896,31 +896,44 @@ class BaseAutoencoder(nn.Module):
                     col_name = f'feature_{i}'
                     feature_columns.append(col_name)
                     data_dict[col_name] = embeddings[:, i]
+            else:
+                raise ValueError("Mandatory field 'embeddings' is missing in feature_dict")
 
             # Process labels/targets
             if 'labels' in feature_dict:
                 data_dict['target'] = feature_dict['labels'].cpu().numpy()
                 feature_columns.append('target')
+            else:
+                raise ValueError("Mandatory field 'labels' is missing in feature_dict")
 
             # Process file indices
             if 'indices' in feature_dict:
                 data_dict['file_index'] = feature_dict['indices']
                 feature_columns.append('file_index')
 
-            # Process filenames (if available)
-            if 'filenames' in feature_dict:
-                data_dict['filename'] = feature_dict['filenames']  # Already a list, no need for .cpu()
-                feature_columns.append('filename')
+            # Process optional fields with placeholders if missing
+            optional_fields = {
+                'indices': 'unknown_index',  # Placeholder for missing indices
+                'filenames': 'unknown_filename',  # Placeholder for missing filenames
+                'class_names': 'unknown_class',  # Placeholder for missing class names
+            }
 
-            # Process actual class names
-            if 'class_names' in feature_dict:
-                data_dict['class_name'] = feature_dict['class_names']  # Already a list, no need for .cpu()
-                feature_columns.append('class_name')
+            for field, placeholder in optional_fields.items():
+                if field in feature_dict:
+                    data_dict[field] = feature_dict[field]  # Use actual data if available
+                else:
+                    # Use placeholder if field is missing
+                    data_dict[field] = [placeholder] * len(data_dict['target'])  # Match length of mandatory field
+                feature_columns.append(field)
+
+
 
             # Process enhancement features if present
-            enhancement_features = self._get_enhancement_columns(feature_dict)
-            data_dict.update(enhancement_features)
-            feature_columns.extend(enhancement_features.keys())
+            if hasattr(self, '_get_enhancement_columns'):
+                enhancement_features = self._get_enhancement_columns(feature_dict)
+                data_dict.update(enhancement_features)
+                feature_columns.extend(enhancement_features.keys())
+
 
             # Check that all arrays have the same length
             lengths = [len(data_dict[col]) for col in feature_columns]
