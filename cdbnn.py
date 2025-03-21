@@ -69,6 +69,7 @@ from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
 
+
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
