@@ -65,7 +65,6 @@ from tqdm import tqdm
 import os
 import torch
 import logging
-from typing import Dict, Optional
 from torch import nn
 from torchvision import transforms
 from PIL import Image
@@ -77,12 +76,12 @@ logger = logging.getLogger(__name__)
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
-    def __init__(self, config: Dict, device: str = None):
+    def __init__(self, config: dict, device: str = None):
         """
         Initialize the PredictionManager.
 
         Args:
-            config (Dict): Configuration dictionary.
+            config (dict): Configuration dictionary.
             device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
         """
         self.config = config
@@ -115,30 +114,30 @@ class PredictionManager:
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
 
+            # Ensure the checkpoint is a dictionary
+            if not isinstance(checkpoint, dict):
+                raise ValueError("Checkpoint is not a dictionary.")
+
             # Extract the state_dict based on the checkpoint structure
-            if isinstance(checkpoint, dict):
-                if 'model_states' in checkpoint:
-                    # Handle multi-phase training checkpoints
-                    if encoder_type == 'cnn':
-                        if 'phase1' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                        else:
-                            raise ValueError("Checkpoint does not contain phase1 state for CNN model.")
-                    elif encoder_type == 'autoenc':
-                        if 'phase2_kld' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
-                        elif 'phase1' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                        else:
-                            raise ValueError("Checkpoint does not contain valid phase states for Autoencoder model.")
-                elif 'state_dict' in checkpoint:
-                    # Standard checkpoint format
-                    state_dict = checkpoint['state_dict']
-                else:
-                    # Assume the checkpoint is the state_dict itself
-                    state_dict = checkpoint
+            if 'model_states' in checkpoint:
+                # Handle multi-phase training checkpoints
+                if encoder_type == 'cnn':
+                    if 'phase1' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
+                    else:
+                        raise ValueError("Checkpoint does not contain phase1 state for CNN model.")
+                elif encoder_type == 'autoenc':
+                    if 'phase2_kld' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
+                    elif 'phase1' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
+                    else:
+                        raise ValueError("Checkpoint does not contain valid phase states for Autoencoder model.")
+            elif 'state_dict' in checkpoint:
+                # Standard checkpoint format
+                state_dict = checkpoint['state_dict']
             else:
-                raise ValueError("Checkpoint is not a dictionary or state_dict.")
+                raise ValueError("Checkpoint does not contain a valid state_dict.")
 
             # Load the state_dict into the model
             model.load_state_dict(state_dict, strict=False)
@@ -177,8 +176,7 @@ class PredictionManager:
         # Prepare data structure for predictions
         predictions = {
             'filename': [],
-            'features_phase1': [],
-            'features_phase2': []
+            'features': []
         }
 
         # Process each image
@@ -189,28 +187,16 @@ class PredictionManager:
                 image = Image.open(image_path).convert('RGB')
                 image_tensor = transform(image).unsqueeze(0).to(self.device)
 
-                # Extract features using the model (phase 1)
+                # Extract features using the model
                 with torch.no_grad():
                     if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                        embedding_phase1, _ = self.model(image_tensor)
+                        embedding, _ = self.model(image_tensor)
                     else:
-                        embedding_phase1 = self.model(image_tensor)
-
-                # Extract features using the model (phase 2)
-                if hasattr(self.model, 'set_training_phase'):
-                    self.model.set_training_phase(2)  # Switch to phase 2
-                    with torch.no_grad():
-                        if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                            embedding_phase2, _ = self.model(image_tensor)
-                        else:
-                            embedding_phase2 = self.model(image_tensor)
-                else:
-                    embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
+                        embedding = self.model(image_tensor)
 
                 # Store results
                 predictions['filename'].append(filename)
-                predictions['features_phase1'].append(embedding_phase1.cpu().numpy().flatten())
-                predictions['features_phase2'].append(embedding_phase2.cpu().numpy().flatten())
+                predictions['features'].append(embedding.cpu().numpy().flatten())
 
             except Exception as e:
                 logger.error(f"Error processing image {filename}: {str(e)}")
@@ -230,11 +216,11 @@ class PredictionManager:
             )
         ])
 
-    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+    def _save_predictions(self, predictions: dict, output_csv: str) -> None:
         """Save predictions to a CSV file."""
         # Convert features to a DataFrame
-        feature_cols = [f'feature_{i}' for i in range(len(predictions['features_phase1'][0]))]
-        df = pd.DataFrame(predictions['features_phase1'], columns=feature_cols)
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features'][0]))]
+        df = pd.DataFrame(predictions['features'], columns=feature_cols)
         df.insert(0, 'filename', predictions['filename'])
 
         # Save to CSV
