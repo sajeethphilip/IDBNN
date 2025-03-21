@@ -247,7 +247,7 @@ class BaseEnhancementConfig:
                 'feature_weight': 0.1,
                 'enable_phase2': False,
                 'enhancements': {
-                    'use_kl_divergence': False,
+                    'use_kl_divergence': True,
                     'use_class_encoding': False,
                     'kl_divergence_weight': 0.1,
                     'classification_weight': 0.1,
@@ -3033,7 +3033,7 @@ class BaseFeatureExtractor(ABC):
         # Add autoencoder enhancement configuration
         autoencoder_config = model.setdefault('autoencoder_config', {})
         autoencoder_config.setdefault('enhancements', {
-            'use_kl_divergence': False,
+            'use_kl_divergence': True,
             'use_class_encoding': False,
             'kl_divergence_weight': 0.1,
             'classification_weight': 0.1,
@@ -5312,7 +5312,7 @@ class DatasetProcessor:
                     "patience": 5,
                     "enhancements": {
                         "enabled": True,
-                        "use_kl_divergence": False,
+                        "use_kl_divergence": True,
                         "use_class_encoding": False,
                         "kl_divergence_weight": 0.5,
                         "classification_weight": 0.5,
@@ -6456,11 +6456,11 @@ def configure_enhancements(config: Dict) -> Dict:
     print("\nConfiguring Enhanced Autoencoder Features:")
 
     # KL Divergence configuration
-    if input("Enable KL divergence clustering? (y/n) [n]: ").lower() != 'y':
-        enhancements['use_kl_divergence'] = False
+    if input("Enable KL divergence clustering? (y/n) [n]: ").lower() != 'n':
+        enhancements['use_kl_divergence'] = True
         enhancements['kl_divergence_weight'] = float(input("Enter KL divergence weight (0-1) [0.1]: ") or 0.1)
     else:
-        enhancements['use_kl_divergence'] = True
+        enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
     if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
