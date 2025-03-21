@@ -43,6 +43,10 @@ MNIST is a popular dataset that represents the raster images of numbers 0 to 9, 
 
 ![image](https://github.com/user-attachments/assets/d065aab4-41d1-4caf-b938-cd9a57dc3665)
 
+After the second round, the accuracy came to 100%
+![image](https://github.com/user-attachments/assets/33d01467-a6da-4c82-ac17-5bf953839012)
+
+
 Seeing the high accuracy, the code was subjected to validation by Deepseek and here is the verdict:
 ------------------------------------------------------------------------
 
