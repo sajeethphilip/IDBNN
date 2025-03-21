@@ -196,10 +196,25 @@ class PredictionManager:
                         embedding_phase1 = output  # Assume the output is a single tensor
 
                     # Convert to numpy array
-                    logger.debug("Converting embedding to numpy array...")
-                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
-                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
+                    #logger.debug("Converting embedding to numpy array...")
+                    #embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    #logger.debug(f"Embedding shape: {embedding_phase1.shape}")
+                    # Assuming embedding_phase1 is a dictionary
+                    if isinstance(embedding_phase1, dict):
+                        # Check if the dictionary contains the expected key
+                        if 'embedding' in embedding_phase1:
+                            embedding_tensor = embedding_phase1['embedding']
 
+                            # Ensure the tensor is on the CPU and convert to NumPy array
+                            if isinstance(embedding_tensor, torch.Tensor):
+                                embedding_array = embedding_tensor.cpu().numpy().flatten()
+                                logger.debug("Embedding successfully converted to numpy array.")
+                            else:
+                                logger.error("The 'embedding' key does not contain a tensor.")
+                        else:
+                            logger.error("The dictionary does not contain the 'embedding' key.")
+                    else:
+                        logger.error("embedding_phase1 is not a dictionary.")
                 # Extract features using the model (phase 2)
                 if hasattr(self.model, 'set_training_phase'):
                     logger.debug("Switching to phase 2...")
