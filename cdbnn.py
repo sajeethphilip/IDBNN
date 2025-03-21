@@ -157,6 +157,7 @@ class PredictionManager:
 
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
+            # Create a dataset with the images in the input directory
             dataset = self._create_dataset(input_dir, transform)
             self.model.set_dataset(dataset)  # Set the dataset before processing images
 
@@ -170,42 +171,38 @@ class PredictionManager:
 
                 # Extract features using the model (phase 1)
                 with torch.no_grad():
-                    if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                        output = self.model(image_tensor)
-                        if isinstance(output, tuple):  # Handle tuple output
-                            embedding_phase1 = output[0]  # Extract the embedding tensor
-                        else:
-                            embedding_phase1 = output
+                    output = self.model(image_tensor)
+
+                    # Handle tuple output (e.g., (embedding, reconstruction))
+                    if isinstance(output, tuple):
+                        embedding_phase1 = output[0]  # Assume the first element is the embedding
                     else:
-                        output = self.model(image_tensor)
-                        if isinstance(output, tuple):  # Handle tuple output
-                            embedding_phase1 = output[0]  # Extract the embedding tensor
-                        else:
-                            embedding_phase1 = output
+                        embedding_phase1 = output  # Assume the output is a single tensor
+
+                    # Convert to numpy array
+                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
 
                 # Extract features using the model (phase 2)
                 if hasattr(self.model, 'set_training_phase'):
                     self.model.set_training_phase(2)  # Switch to phase 2
                     with torch.no_grad():
-                        if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                            output = self.model(image_tensor)
-                            if isinstance(output, tuple):  # Handle tuple output
-                                embedding_phase2 = output[0]  # Extract the embedding tensor
-                            else:
-                                embedding_phase2 = output
+                        output = self.model(image_tensor)
+
+                        # Handle tuple output (e.g., (embedding, reconstruction))
+                        if isinstance(output, tuple):
+                            embedding_phase2 = output[0]  # Assume the first element is the embedding
                         else:
-                            output = self.model(image_tensor)
-                            if isinstance(output, tuple):  # Handle tuple output
-                                embedding_phase2 = output[0]  # Extract the embedding tensor
-                            else:
-                                embedding_phase2 = output
+                            embedding_phase2 = output  # Assume the output is a single tensor
+
+                        # Convert to numpy array
+                        embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
                 else:
                     embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
                 # Store results
                 predictions['filename'].append(filename)
-                predictions['features_phase1'].append(embedding_phase1.cpu().numpy().flatten())
-                predictions['features_phase2'].append(embedding_phase2.cpu().numpy().flatten())
+                predictions['features_phase1'].append(embedding_phase1)
+                predictions['features_phase2'].append(embedding_phase2)
 
             except Exception as e:
                 logger.error(f"Error processing image {filename}: {str(e)}")
@@ -213,7 +210,6 @@ class PredictionManager:
 
         # Save predictions to CSV
         self._save_predictions(predictions, output_csv)
-
     def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
         """
         Create a dataset from the images in the input directory.
