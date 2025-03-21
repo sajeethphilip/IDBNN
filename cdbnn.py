@@ -140,16 +140,8 @@ class PredictionManager:
             else:
                 raise ValueError("Checkpoint is not a dictionary or state_dict.")
 
-            # Debug: Print state_dict keys
-            logger.debug(f"State_dict keys: {state_dict.keys()}")
-
             # Load the state_dict into the model
-            if hasattr(model, 'load_state_dict'):
-                # Use strict=False to handle mismatched keys
-                model.load_state_dict(state_dict, strict=False)
-            else:
-                raise AttributeError("Model does not have a load_state_dict method.")
-
+            model.load_state_dict(state_dict, strict=False)
             model.eval()
             logger.info("Model loaded successfully.")
             return model
