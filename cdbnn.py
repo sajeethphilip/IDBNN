@@ -76,32 +76,29 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 class PredictionManager:
-    def __init__(self, config: Dict, device: str = 'cpu', model_checkpoint_path: Optional[str] = None):
+    def __init__(self, config: Dict, model_path: str, device: str = 'cpu'):
         """
-        Initialize the prediction manager with the given configuration, device, and model checkpoint path.
+        Initialize the prediction manager with the given configuration, model path, and device.
 
         Args:
             config (Dict): Configuration dictionary loaded from the JSON file.
+            model_path (str): Path to the trained model checkpoint.
             device (str): Device to use for inference ('cuda' or 'cpu').
-            model_checkpoint_path (str, optional): Path to the trained model checkpoint. If not provided,
-                                                   it will use the default path from the config.
         """
         self.config = config
         self.device = torch.device(device)
+        self.model_path = model_path
 
         # Load the trained model
-        self.model = self._load_model(model_checkpoint_path)
+        self.model = self._load_model()
         self.model.eval()  # Set the model to evaluation mode
 
         # Initialize transforms for preprocessing
         self.transform = self._get_transforms()
 
-    def _load_model(self, model_checkpoint_path: Optional[str] = None) -> torch.nn.Module:
+    def _load_model(self) -> torch.nn.Module:
         """
-        Load the trained model based on the configuration and checkpoint path.
-
-        Args:
-            model_checkpoint_path (str, optional): Path to the trained model checkpoint.
+        Load the trained model based on the configuration and model path.
 
         Returns:
             torch.nn.Module: The loaded model.
@@ -117,21 +114,13 @@ class PredictionManager:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        # Determine the checkpoint path
-        if model_checkpoint_path is None:
-            # Use the default path from the config
-            model_checkpoint_path = os.path.join(
-                self.config['training']['checkpoint_dir'],
-                f"{self.config['dataset']['name']}_unified.pth"
-            )
-
         # Load the model checkpoint
-        if os.path.exists(model_checkpoint_path):
-            checkpoint = torch.load(model_checkpoint_path, map_location=self.device)
+        if os.path.exists(self.model_path):
+            checkpoint = torch.load(self.model_path, map_location=self.device)
             model.load_state_dict(checkpoint['state_dict'])
-            logger.info(f"Loaded model checkpoint from {model_checkpoint_path}")
+            logger.info(f"Loaded model checkpoint from {self.model_path}")
         else:
-            raise FileNotFoundError(f"Model checkpoint not found at {model_checkpoint_path}")
+            raise FileNotFoundError(f"Model checkpoint not found at {self.model_path}")
 
         return model
 
