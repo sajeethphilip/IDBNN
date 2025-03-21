@@ -66,7 +66,7 @@ import os
 import json
 import torch
 import logging
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 import pandas as pd
@@ -76,54 +76,32 @@ logger = logging.getLogger(__name__)
 
 class PredictionManager:
     def __init__(self, config: Dict, device: str = 'cpu'):
-        """
-        Initialize the PredictionManager with the given configuration and device.
-
-        Args:
-            config (Dict): Configuration dictionary containing model and dataset settings.
-            device (str): Device to use for prediction ('cuda' or 'cpu').
-        """
+        """Initialize the prediction manager with the given configuration and device."""
         self.config = config
         self.device = torch.device(device)
+
+        # Load the model
         self.model = self._load_model()
         self.model.eval()  # Set the model to evaluation mode
 
+        # Initialize transforms
+        self.transform = self._get_transforms()
+
     def _load_model(self) -> nn.Module:
-        """
-        Load the trained model based on the configuration.
+        """Load the trained model based on the configuration."""
+        model_type = self.config['model'].get('encoder_type', 'autoenc').lower()
 
-        Returns:
-            nn.Module: The loaded model.
-        """
-        model_type = self.config['model'].get('encoder_type', 'autoenc')
         if model_type == 'autoenc':
-            model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
+            from cdbnn import EnhancedAutoEncoderFeatureExtractor
+            return EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
         elif model_type == 'cnn':
-            model = CNNFeatureExtractor(self.config, self.device)
+            from cdbnn import CNNFeatureExtractor
+            return CNNFeatureExtractor(self.config, self.device)
         else:
-            raise ValueError(f"Unknown model type: {model_type}")
-
-        # Load the model weights
-        checkpoint_dir = self.config['training']['checkpoint_dir']
-        dataset_name = self.config['dataset']['name']
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
-
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            model.load_state_dict(checkpoint['state_dict'])
-            logger.info(f"Loaded model weights from {checkpoint_path}")
-        else:
-            raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
-
-        return model.to(self.device)
+            raise ValueError(f"Unsupported model type: {model_type}")
 
     def _get_transforms(self) -> transforms.Compose:
-        """
-        Get the image transformations based on the configuration.
-
-        Returns:
-            transforms.Compose: The image transformation pipeline.
-        """
+        """Get the image transformations based on the configuration."""
         transform_list = [
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
@@ -132,80 +110,89 @@ class PredictionManager:
                 std=self.config['dataset']['std']
             )
         ]
+
+        # Handle grayscale conversion if needed
+        if self.config['dataset']['in_channels'] == 1:
+            transform_list.insert(1, transforms.Grayscale(num_output_channels=1))
+
         return transforms.Compose(transform_list)
 
     def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
-        """
-        Create a dataset from the input directory.
+        """Create a dataset from the input directory."""
+        class UnlabeledImageDataset(Dataset):
+            def __init__(self, image_dir, transform=None):
+                self.image_dir = image_dir
+                self.transform = transform
+                self.image_files = [
+                    os.path.join(image_dir, f) for f in os.listdir(image_dir)
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+                ]
 
-        Args:
-            input_dir (str): Directory containing the input images.
-            transform (transforms.Compose): Image transformation pipeline.
+            def __len__(self):
+                return len(self.image_files)
 
-        Returns:
-            Dataset: The created dataset.
-        """
-        return CustomImageDataset(data_dir=input_dir, transform=transform)
+            def __getitem__(self, idx):
+                img_path = self.image_files[idx]
+                image = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, os.path.basename(img_path)  # Return image and filename
 
-    def predict_images(self, input_dir: str, output_csv: str):
-        """
-        Predict the labels for the images in the input directory and save the results to a CSV file.
+        return UnlabeledImageDataset(input_dir, transform)
 
-        Args:
-            input_dir (str): Directory containing the input images.
-            output_csv (str): Path to save the output CSV file.
-        """
-        # Create the dataset and data loader
-        transform = self._get_transforms()
-        dataset = self._create_dataset(input_dir, transform)
-        dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=4)
+    def predict_images(self, input_dir: str, output_csv: str) -> None:
+        """Predict labels for images in the input directory and save results to CSV."""
+        # Create dataset
+        dataset = self._create_dataset(input_dir, self.transform)
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=self.config['training'].get('batch_size', 32),
+            shuffle=False, num_workers=self.config['training'].get('num_workers', 4)
+        )
 
-        # Perform predictions
+        # Prepare output data
         predictions = []
         filenames = []
+        embeddings = []
+
         with torch.no_grad():
-            for images, _ in tqdm(dataloader, desc="Predicting"):
+            for images, batch_filenames in tqdm(dataloader, desc="Predicting"):
                 images = images.to(self.device)
-                outputs = self.model(images)
-                _, preds = torch.max(outputs, 1)
-                predictions.extend(preds.cpu().numpy())
-                filenames.extend([dataset.image_files[i] for i in range(len(preds))])
 
-        # Save predictions to CSV
-        df = pd.DataFrame({
-            'filename': filenames,
-            'prediction': predictions
-        })
+                # Get model outputs
+                if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
+                    # For autoencoder models, get both embeddings and reconstructions
+                    embedding, reconstruction = self.model(images)
+                    embeddings.extend(embedding.cpu().numpy())
+                else:
+                    # For CNN models, just get the features
+                    embedding = self.model(images)
+                    embeddings.extend(embedding.cpu().numpy())
+
+                # Get predictions (if classification is enabled)
+                if hasattr(self.model, 'classifier'):
+                    logits = self.model.classifier(embedding)
+                    preds = torch.argmax(logits, dim=1).cpu().numpy()
+                    predictions.extend(preds)
+
+                filenames.extend(batch_filenames)
+
+        # Create DataFrame
+        data = {'filename': filenames}
+
+        # Add embeddings
+        for i in range(embeddings[0].shape[0]):
+            data[f'feature_{i}'] = [emb[i] for emb in embeddings]
+
+        # Add predictions if available
+        if predictions:
+            data['prediction'] = predictions
+
+        df = pd.DataFrame(data)
+
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         df.to_csv(output_csv, index=False)
-        logger.info(f"Predictions saved to {output_csv}")
-
-    def predict_csv(self, input_csv: str, output_csv: str):
-        """
-        Predict the labels for the feature vectors in the input CSV file and save the results to a CSV file.
-
-        Args:
-            input_csv (str): Path to the input CSV file containing feature vectors.
-            output_csv (str): Path to save the output CSV file.
-        """
-        # Load the input CSV file
-        df = pd.read_csv(input_csv)
-        feature_cols = [col for col in df.columns if col.startswith('feature_')]
-        features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(self.device)
-
-        # Perform predictions
-        predictions = []
-        with torch.no_grad():
-            for i in tqdm(range(0, len(features), 128), desc="Predicting"):
-                batch = features[i:i+128]
-                outputs = self.model(batch)
-                _, preds = torch.max(outputs, 1)
-                predictions.extend(preds.cpu().numpy())
-
-        # Save predictions to CSV
-        df['prediction'] = predictions
-        df.to_csv(output_csv, index=False)
-        logger.info(f"Predictions saved to {output_csv}")
-
+        logger.info(f"Saved predictions to {output_csv}")
 
 
 class BaseEnhancementConfig:
