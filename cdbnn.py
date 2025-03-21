@@ -142,11 +142,13 @@ class PredictionManager:
 
         # Get the image transform from the config
         transform = self._get_transforms()
+        logger.debug(f"Image transforms: {transform}")
 
         # Process images
         image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
         if not image_files:
             raise ValueError(f"No valid images found in {input_dir}")
+        logger.debug(f"Found {len(image_files)} images in {input_dir}")
 
         # Prepare data structure for predictions
         predictions = {
@@ -157,59 +159,87 @@ class PredictionManager:
 
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
-            # Create a dataset with the images in the input directory
+            logger.debug("Creating dataset...")
             dataset = self._create_dataset(input_dir, transform)
+            logger.debug(f"Dataset created with {len(dataset)} images.")
             self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.debug("Dataset set in the model.")
 
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
             try:
+                logger.debug(f"Processing image: {filename}")
+
                 # Load and transform the image
                 image_path = os.path.join(input_dir, filename)
                 image = Image.open(image_path).convert('RGB')
                 image_tensor = transform(image).unsqueeze(0).to(self.device)
+                logger.debug(f"Image tensor shape: {image_tensor.shape}")
 
                 # Extract features using the model (phase 1)
                 with torch.no_grad():
+                    logger.debug("Running model for phase 1...")
                     output = self.model(image_tensor)
+                    logger.debug(f"Model output type: {type(output)}")
 
                     # Handle tuple output (e.g., (embedding, reconstruction))
                     if isinstance(output, tuple):
+                        logger.debug("Model output is a tuple.")
+                        logger.debug(f"Tuple length: {len(output)}")
+                        logger.debug(f"First element type: {type(output[0])}")
                         embedding_phase1 = output[0]  # Assume the first element is the embedding
                     else:
+                        logger.debug("Model output is a single tensor.")
                         embedding_phase1 = output  # Assume the output is a single tensor
 
                     # Convert to numpy array
+                    logger.debug("Converting embedding to numpy array...")
                     embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
 
                 # Extract features using the model (phase 2)
                 if hasattr(self.model, 'set_training_phase'):
+                    logger.debug("Switching to phase 2...")
                     self.model.set_training_phase(2)  # Switch to phase 2
                     with torch.no_grad():
+                        logger.debug("Running model for phase 2...")
                         output = self.model(image_tensor)
+                        logger.debug(f"Model output type: {type(output)}")
 
                         # Handle tuple output (e.g., (embedding, reconstruction))
                         if isinstance(output, tuple):
+                            logger.debug("Model output is a tuple.")
+                            logger.debug(f"Tuple length: {len(output)}")
+                            logger.debug(f"First element type: {type(output[0])}")
                             embedding_phase2 = output[0]  # Assume the first element is the embedding
                         else:
+                            logger.debug("Model output is a single tensor.")
                             embedding_phase2 = output  # Assume the output is a single tensor
 
                         # Convert to numpy array
+                        logger.debug("Converting embedding to numpy array...")
                         embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
+                        logger.debug(f"Embedding shape: {embedding_phase2.shape}")
                 else:
+                    logger.debug("Phase 2 not enabled. Using phase 1 embeddings.")
                     embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
                 # Store results
                 predictions['filename'].append(filename)
                 predictions['features_phase1'].append(embedding_phase1)
                 predictions['features_phase2'].append(embedding_phase2)
+                logger.debug(f"Stored predictions for {filename}")
 
             except Exception as e:
                 logger.error(f"Error processing image {filename}: {str(e)}")
+                logger.error(traceback.format_exc())  # Log the full traceback
                 continue
 
         # Save predictions to CSV
+        logger.debug("Saving predictions to CSV...")
         self._save_predictions(predictions, output_csv)
+        logger.info(f"Predictions saved to {output_csv}")
+
     def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
         """
         Create a dataset from the images in the input directory.
