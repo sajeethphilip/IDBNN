@@ -155,13 +155,11 @@ class PredictionManager:
             'features_phase2': []
         }
 
-        # Create a dummy dataset for the model (if required)
+        # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
-            # Create a dummy dataset with one image to initialize cluster centers
-            dummy_image = Image.new('RGB', tuple(self.config['dataset']['input_size']), color='black')
-            dummy_image_tensor = transform(dummy_image).unsqueeze(0).to(self.device)
-            dummy_dataset = [(dummy_image_tensor, 0)]  # (image, label)
-            self.model.set_dataset(dummy_dataset)
+            # Create a dataset with the images in the input directory
+            dataset = self._create_dataset(input_dir, transform)
+            self.model.set_dataset(dataset)
 
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
@@ -200,6 +198,35 @@ class PredictionManager:
 
         # Save predictions to CSV
         self._save_predictions(predictions, output_csv)
+
+    def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
+        """
+        Create a dataset from the images in the input directory.
+
+        Args:
+            input_dir (str): Directory containing images.
+            transform (transforms.Compose): Transformations to apply to the images.
+
+        Returns:
+            Dataset: A PyTorch dataset containing the images.
+        """
+        class DummyDataset(Dataset):
+            def __init__(self, image_files, transform):
+                self.image_files = image_files
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.image_files)
+
+            def __getitem__(self, idx):
+                image_path = self.image_files[idx]
+                image = Image.open(image_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, 0  # Dummy label
+
+        image_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        return DummyDataset(image_files, transform)
 
     def _get_transforms(self) -> transforms.Compose:
         """Get the image transforms based on the config."""
