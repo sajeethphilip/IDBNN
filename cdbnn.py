@@ -106,13 +106,21 @@ class PredictionManager:
             checkpoint = torch.load(model_path, map_location=self.device)
 
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
-                # Extract the state_dict from the latest phase
-                if 'phase2_kld' in checkpoint['model_states']:
-                    state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
-                elif 'phase1' in checkpoint['model_states']:
-                    state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                else:
-                    raise ValueError("Checkpoint does not contain valid phase states.")
+                # Extract the state_dict based on the encoder type
+                if encoder_type == 'cnn':
+                    # For CNN, use the state_dict from phase1
+                    if 'phase1' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
+                    else:
+                        raise ValueError("Checkpoint does not contain phase1 state for CNN model.")
+                elif encoder_type == 'autoenc':
+                    # For Autoencoder, use the state_dict from phase2_kld if available, otherwise phase1
+                    if 'phase2_kld' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
+                    elif 'phase1' in checkpoint['model_states']:
+                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
+                    else:
+                        raise ValueError("Checkpoint does not contain valid phase states for Autoencoder model.")
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                 # Standard checkpoint format
                 state_dict = checkpoint['state_dict']
@@ -121,11 +129,13 @@ class PredictionManager:
                 state_dict = checkpoint
 
             # Load the state_dict into the model
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)  # Use strict=False to handle mismatched keys
             model.eval()
             return model
         except Exception as e:
             raise ValueError(f"Error loading model checkpoint: {str(e)}")
+
+
 
     def  predict_images(self, input_dir: str, output_csv: str = None) -> None:
         """
