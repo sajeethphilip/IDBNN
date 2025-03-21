@@ -1040,7 +1040,7 @@ class BaseAutoencoder(nn.Module):
             q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
-            if labels is not None:
+            if labels is not None and self.use_class_encoding:
                 # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(self.cluster_centers.size(0)):
