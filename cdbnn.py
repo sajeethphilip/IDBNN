@@ -108,9 +108,9 @@ class PredictionManager:
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
                 # Extract the state_dict from the latest phase
                 if 'phase2_kld' in checkpoint['model_states']:
-                    state_dict = checkpoint['model_states']['phase2_kld']['state_dict']
+                    state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
                 elif 'phase1' in checkpoint['model_states']:
-                    state_dict = checkpoint['model_states']['phase1']['state_dict']
+                    state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
                 else:
                     raise ValueError("Checkpoint does not contain valid phase states.")
             elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
