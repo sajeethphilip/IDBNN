@@ -33,9 +33,11 @@ In the paper "Automated Detection of Galactic Rings from Sloan Digital Sky Surve
 
 ![image](https://github.com/user-attachments/assets/2f46c442-82a8-4699-8d11-ad86995793a6)
 
-However, when adaptive learning is used, with just 471 training examples in 11 epochs, the DBNN classifier could achieve 100% accurate predcition on the entire image data.
+However, when adaptive learning is used, with just 471 training examples in 11 epochs, the DBNN classifier could achieve 100% accurate prediction on the entire image data. It may be noted that only two training examples were required from the majority class of non-ring galaxies, while it took about 469 samples from the Ring galaxy types. This is typical of the difference-boosting method, where the network seeks more profound differences (requiring more examples with differences) to learn all that contributes to their classification. The other significant advantage is the higher generalisation capability of the network due to its handpicking capability of decisive samples to train on. 
+
 ![image](https://github.com/user-attachments/assets/21ed0816-16f6-41aa-88e1-26cf0d336561)
 
+This result is not unique for ring, non-ring galaxy classification. The method has proved reliable in Quasar classification to Gravitational-wave detector glitch classification with better performance due to its intrinsic dependence on probability and lower susceptibility to fluctuations and noise in data.
 
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
 
