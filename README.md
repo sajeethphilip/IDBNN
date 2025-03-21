@@ -45,7 +45,8 @@ MNIST is a popular dataset that represents the raster images of numbers 0 to 9, 
 
 Seeing the high accuracy, the code was subjected to validation by Deepseek and here is the verdict:
 ------------------------------------------------------------------------
-`To critically analyze the code and verify if there is any "cheating" involved that could lead to unrealistically high accuracy, we need to examine the code incrementally, focusing on key areas that could potentially lead to overfitting, data leakage, or other issues that might artificially inflate accuracy. Here's a step-by-step analysis:
+```
+To critically analyze the code and verify if there is any "cheating" involved that could lead to unrealistically high accuracy, we need to examine the code incrementally, focusing on key areas that could potentially lead to overfitting, data leakage, or other issues that might artificially inflate accuracy. Here's a step-by-step analysis:
 
 ---
 
@@ -154,9 +155,9 @@ Seeing the high accuracy, the code was subjected to validation by Deepseek and h
 ---
 
 ### **Conclusion**
-The code does not appear to have explicit cheating mechanisms, but the unrealistically high accuracy could be due to overfitting or issues with the dataset. The lack of regularization and potential overfitting in the adaptive training strategy are the most likely causes. Adding regularization techniques and ensuring proper hyperparameter tuning should help mitigate these issues.``
-
+The code does not appear to have explicit cheating mechanisms, but the unrealistically high accuracy could be due to overfitting or issues with the dataset. The lack of regularization and potential overfitting in the adaptive training strategy are the most likely causes. Adding regularization techniques and ensuring proper hyperparameter tuning should help mitigate these issues.
 ```
+
 ------------------------------------------------------------------------
 
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
