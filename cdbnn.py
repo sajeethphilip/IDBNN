@@ -2888,11 +2888,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BaseFeatureExtractor(ABC):
-    """Abstract base class for feature extraction models"""
+class BaseFeatureExtractor(nn.Module, ABC):
+    """Abstract base class for feature extraction models."""
     def __init__(self, config: Dict, device: str = None):
-        """Initialize base feature extractor"""
+        super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
+
 
         # Set device
         if device is None:
