@@ -821,30 +821,33 @@ class BaseAutoencoder(nn.Module):
 
         try:
             with torch.no_grad():
-                for inputs, labels in tqdm(loader, desc="Extracting features"):
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc="Extracting features")):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Check if dataset has get_additional_info method
+                    # Get metadata if available, otherwise use placeholders
                     if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
                         indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
                         filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
                         class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
                     else:
-                        # Provide default values if get_additional_info is not available
-                        indices = list(range(len(inputs)))
-                        filenames = [f"image_{i}.png" for i in indices]
-                        class_names = [str(label.item()) for label in labels]
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
+                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
 
+                    # Extract embeddings
                     embeddings = self.encode(inputs)
                     if isinstance(embeddings, tuple):
                         embeddings = embeddings[0]
 
+                    # Append to lists
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
-                    all_indices.extend(indices)  # Append file indices
-                    all_filenames.extend(filenames)  # Append filenames
-                    all_class_names.extend(class_names)  # Append actual class names
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
 
                 # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
@@ -918,6 +921,11 @@ class BaseAutoencoder(nn.Module):
             enhancement_features = self._get_enhancement_columns(feature_dict)
             data_dict.update(enhancement_features)
             feature_columns.extend(enhancement_features.keys())
+
+            # Check that all arrays have the same length
+            lengths = [len(data_dict[col]) for col in feature_columns]
+            if len(set(lengths)) != 1:
+                raise ValueError(f"Mismatch in array lengths: {lengths}")
 
             # Save in chunks to manage memory
             chunk_size = 1000
