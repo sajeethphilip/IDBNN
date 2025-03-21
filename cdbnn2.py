@@ -520,7 +520,7 @@ class BaseAutoencoder(nn.Module):
         # Initialize enhancement components
         self.use_kl_divergence = (config['model']
                                  .get('autoencoder_config', {})
-                                 .get('enhancements', {})
+                                 .get('enhancements', True)
                                  .get('use_kl_divergence', True))
 
         self.use_class_encoding = (config['model']
@@ -1981,7 +1981,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         logger.info("Phase 1 already completed, skipping")
 
     # Phase 2: Latent space organization
-    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', False):
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
         if current_phase < 2:
             logger.info("Starting Phase 2: Latent space organization")
             model.set_training_phase(2)
@@ -2023,7 +2023,7 @@ def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> st
         # Add specialized enhancements
         if config['dataset'].get('image_type') != 'general':
             image_type = config['dataset']['image_type']
-            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', False):
+            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', True):
                 active_enhancements.append(image_type)
 
         if active_enhancements:
