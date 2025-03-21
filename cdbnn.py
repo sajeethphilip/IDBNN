@@ -129,12 +129,16 @@ class PredictionManager:
                 state_dict = checkpoint
 
             # Load the state_dict into the model
-            model.load_state_dict(state_dict, strict=False)  # Use strict=False to handle mismatched keys
+            if hasattr(model, 'load_state_dict'):
+                # Use strict=False to handle mismatched keys
+                model.load_state_dict(state_dict, strict=False)
+            else:
+                raise AttributeError("Model does not have a load_state_dict method.")
+
             model.eval()
             return model
         except Exception as e:
             raise ValueError(f"Error loading model checkpoint: {str(e)}")
-
 
 
     def  predict_images(self, input_dir: str, output_csv: str = None) -> None:
