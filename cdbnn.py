@@ -75,26 +75,22 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
 class PredictionManager:
-    def __init__(self, config: Dict, model_path: str, device: str = 'cpu'):
+    """Manages prediction on new images using a trained model."""
+
+    def __init__(self, config: Dict, device: str = None):
         """
-        Initialize the prediction manager with the given configuration, model path, and device.
+        Initialize the PredictionManager.
 
         Args:
-            config (Dict): Configuration dictionary loaded from the JSON file.
-            model_path (str): Path to the trained model checkpoint.
-            device (str): Device to use for inference ('cuda' or 'cpu').
+            config (Dict): Configuration dictionary.
+            device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
         """
         self.config = config
-        self.device = torch.device(device)
-        self.model_path = model_path
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
-        # Load the trained model
         self.model = self._load_model()
-        self.model.eval()  # Set the model to evaluation mode
-
-        # Initialize transforms for preprocessing
-        self.transform = self._get_transforms()
 
     def _load_model(self) -> nn.Module:
         """
@@ -131,120 +127,174 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def _get_transforms(self) -> transforms.Compose:
+    def predict_images(self, input_dir: str, output_csv: str = None):
         """
-        Get the image transformations based on the configuration.
+        Predict features for images in the input directory and save results to a CSV file.
+
+        Args:
+            input_dir (str): Directory containing new images.
+            output_csv (str, optional): Path to save the output CSV file. Defaults to None.
+        """
+        if not os.path.exists(input_dir):
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+        # Set default output CSV path if not provided
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+
+        # Get the image transform from the config
+        transform = self._get_transforms()
+        logger.debug(f"Image transforms: {transform}")
+
+        # Process images
+        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_dir}")
+        logger.debug(f"Found {len(image_files)} images in {input_dir}")
+
+        # Prepare data structure for predictions
+        predictions = {
+            'filename': [],
+            'features_phase1': [],
+            'features_phase2': []
+        }
+
+        # Create a dataset for the model (if required)
+        if hasattr(self.model, 'set_dataset'):
+            logger.debug("Creating dataset...")
+            dataset = self._create_dataset(input_dir, transform)
+            logger.debug(f"Dataset created with {len(dataset)} images.")
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.debug("Dataset set in the model.")
+
+        # Process each image
+        for filename in tqdm(image_files, desc="Predicting features"):
+            try:
+                logger.debug(f"Processing image: {filename}")
+
+                # Load and transform the image
+                image_path = os.path.join(input_dir, filename)
+                image = Image.open(image_path).convert('RGB')
+                image_tensor = transform(image).unsqueeze(0).to(self.device)
+                logger.debug(f"Image tensor shape: {image_tensor.shape}")
+
+                # Extract features using the model (phase 1)
+                with torch.no_grad():
+                    logger.debug("Running model for phase 1...")
+                    output = self.model(image_tensor)
+                    logger.debug(f"Model output type: {type(output)}")
+
+                    # Handle tuple output (e.g., (embedding, reconstruction))
+                    if isinstance(output, tuple):
+                        logger.debug("Model output is a tuple.")
+                        logger.debug(f"Tuple length: {len(output)}")
+                        logger.debug(f"First element type: {type(output[0])}")
+                        embedding_phase1 = output[0]  # Assume the first element is the embedding
+                    else:
+                        logger.debug("Model output is a single tensor.")
+                        embedding_phase1 = output  # Assume the output is a single tensor
+
+                    # Convert to numpy array
+                    logger.debug("Converting embedding to numpy array...")
+                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
+
+                # Extract features using the model (phase 2)
+                if hasattr(self.model, 'set_training_phase'):
+                    logger.debug("Switching to phase 2...")
+                    self.model.set_training_phase(2)  # Switch to phase 2
+                    with torch.no_grad():
+                        logger.debug("Running model for phase 2...")
+                        output = self.model(image_tensor)
+                        logger.debug(f"Model output type: {type(output)}")
+
+                        # Handle tuple output (e.g., (embedding, reconstruction))
+                        if isinstance(output, tuple):
+                            logger.debug("Model output is a tuple.")
+                            logger.debug(f"Tuple length: {len(output)}")
+                            logger.debug(f"First element type: {type(output[0])}")
+                            embedding_phase2 = output[0]  # Assume the first element is the embedding
+                        else:
+                            logger.debug("Model output is a single tensor.")
+                            embedding_phase2 = output  # Assume the output is a single tensor
+
+                        # Convert to numpy array
+                        logger.debug("Converting embedding to numpy array...")
+                        embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
+                        logger.debug(f"Embedding shape: {embedding_phase2.shape}")
+                else:
+                    logger.debug("Phase 2 not enabled. Using phase 1 embeddings.")
+                    embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
+
+                # Store results
+                predictions['filename'].append(filename)
+                predictions['features_phase1'].append(embedding_phase1)
+                predictions['features_phase2'].append(embedding_phase2)
+                logger.debug(f"Stored predictions for {filename}")
+
+            except Exception as e:
+                logger.error(f"Error processing image {filename}: {str(e)}")
+                logger.error(traceback.format_exc())  # Log the full traceback
+                continue
+
+        # Save predictions to CSV
+        logger.debug("Saving predictions to CSV...")
+        self._save_predictions(predictions, output_csv)
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
+        """
+        Create a dataset from the images in the input directory.
+
+        Args:
+            input_dir (str): Directory containing images.
+            transform (transforms.Compose): Transformations to apply to the images.
 
         Returns:
-            transforms.Compose: A composition of image transformations.
+            Dataset: A PyTorch dataset containing the images.
         """
-        transform_list = [
+        class DummyDataset(Dataset):
+            def __init__(self, image_files, transform):
+                self.image_files = image_files
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.image_files)
+
+            def __getitem__(self, idx):
+                image_path = self.image_files[idx]
+                image = Image.open(image_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, 0  # Dummy label
+
+        image_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        return DummyDataset(image_files, transform)
+
+    def _get_transforms(self) -> transforms.Compose:
+        """Get the image transforms based on the config."""
+        return transforms.Compose([
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=self.config['dataset']['mean'],
                 std=self.config['dataset']['std']
             )
-        ]
+        ])
 
-        # Handle grayscale conversion if needed
-        if self.config['dataset']['in_channels'] == 1:
-            transform_list.insert(1, transforms.Grayscale(num_output_channels=1))
-
-        return transforms.Compose(transform_list)
-
-    def _create_dataset(self, input_dir: str) -> Dataset:
-        """
-        Create a dataset from the input directory of unlabeled images.
-
-        Args:
-            input_dir (str): Path to the directory containing images.
-
-        Returns:
-            Dataset: A PyTorch dataset for the unlabeled images.
-        """
-        class UnlabeledImageDataset(Dataset):
-            def __init__(self, image_dir: str, transform: Optional[transforms.Compose] = None):
-                self.image_dir = image_dir
-                self.transform = transform
-                self.image_files = [
-                    os.path.join(image_dir, f) for f in os.listdir(image_dir)
-                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
-                ]
-
-            def __len__(self) -> int:
-                return len(self.image_files)
-
-            def __getitem__(self, idx: int):
-                img_path = self.image_files[idx]
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                return image, os.path.basename(img_path)  # Return image and filename
-
-        return UnlabeledImageDataset(input_dir, self.transform)
-
-    def predict_images(self, input_dir: str, output_csv: str) -> None:
-        """
-        Predict embeddings and/or labels for images in the input directory and save results to CSV.
-
-        Args:
-            input_dir (str): Path to the directory containing images.
-            output_csv (str): Path to save the output CSV file.
-        """
-        # Create dataset and dataloader
-        dataset = self._create_dataset(input_dir)
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=self.config['training'].get('batch_size', 32),
-            shuffle=False,
-            num_workers=self.config['training'].get('num_workers', 4)
-        )
-
-        # Prepare output data
-        filenames: List[str] = []
-        embeddings: List[List[float]] = []
-        predictions: List[int] = []
-
-        with torch.no_grad():
-            for images, batch_filenames in tqdm(dataloader, desc="Predicting"):
-                images = images.to(self.device)
-
-                # Get model outputs
-                if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                    # For autoencoder models, get embeddings
-                    embedding, _ = self.model(images)  # Ignore reconstruction
-                    embeddings.extend(embedding.cpu().numpy().tolist())
-                else:
-                    # For CNN models, get features
-                    embedding = self.model(images)
-                    embeddings.extend(embedding.cpu().numpy().tolist())
-
-                # Get predictions if a classifier is available
-                if hasattr(self.model, 'classifier'):
-                    logits = self.model.classifier(embedding)
-                    preds = torch.argmax(logits, dim=1).cpu().numpy().tolist()
-                    predictions.extend(preds)
-
-                filenames.extend(batch_filenames)
-
-        # Create DataFrame
-        data = {'filename': filenames}
-
-        # Add embeddings
-        for i in range(len(embeddings[0])):
-            data[f'feature_{i}'] = [emb[i] for emb in embeddings]
-
-        # Add predictions if available
-        if predictions:
-            data['prediction'] = predictions
-
-        df = pd.DataFrame(data)
+    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+        """Save predictions to a CSV file."""
+        # Convert features to a DataFrame
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features_phase1'][0]))]
+        df = pd.DataFrame(predictions['features_phase1'], columns=feature_cols)
+        df.insert(0, 'filename', predictions['filename'])
 
         # Save to CSV
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         df.to_csv(output_csv, index=False)
-        logger.info(f"Saved predictions to {output_csv}")
+        logger.info(f"Predictions saved to {output_csv}")
+        return model
 
 
 
