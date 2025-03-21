@@ -197,7 +197,7 @@ class PredictionManager:
 
                     # Convert to numpy array
                     logger.debug("Converting embedding to numpy array...")
-                    embedding_phase1 = embedding_phase1.numpy().flatten() # .cpu().numpy().flatten()
+                    embedding_phase1 = embedding_phase1.flatten() #.cpu().numpy().flatten()
                     logger.debug(f"Embedding shape: {embedding_phase1.shape}")
 
                 # Extract features using the model (phase 2)
