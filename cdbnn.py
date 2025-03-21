@@ -88,7 +88,7 @@ class PredictionManager:
         self.config = config
         self.device = torch.device(device)
         self.model_path = model_path
-
+        self.checkpoint_manager = UnifiedCheckpoint(config)
         # Load the trained model
         self.model = self._load_model()
         self.model.eval()  # Set the model to evaluation mode
