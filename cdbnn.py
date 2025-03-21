@@ -6707,7 +6707,6 @@ def main():
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
-                model_path=args.model_path,  # Pass the model_path argument
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
 
