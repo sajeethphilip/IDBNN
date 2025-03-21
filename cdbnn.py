@@ -146,6 +146,7 @@ class PredictionManager:
 
         # Process images
         image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        print(image_files)
         if not image_files:
             raise ValueError(f"No valid images found in {input_dir}")
         logger.debug(f"Found {len(image_files)} images in {input_dir}")
