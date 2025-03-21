@@ -155,6 +155,14 @@ class PredictionManager:
             'features_phase2': []
         }
 
+        # Create a dummy dataset for the model (if required)
+        if hasattr(self.model, 'set_dataset'):
+            # Create a dummy dataset with one image to initialize cluster centers
+            dummy_image = Image.new('RGB', tuple(self.config['dataset']['input_size']), color='black')
+            dummy_image_tensor = transform(dummy_image).unsqueeze(0).to(self.device)
+            dummy_dataset = [(dummy_image_tensor, 0)]  # (image, label)
+            self.model.set_dataset(dummy_dataset)
+
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
             try:
