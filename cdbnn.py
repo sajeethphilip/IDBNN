@@ -86,7 +86,6 @@ class PredictionManager:
         self.model = self._load_model()
 
     def _load_model(self) -> nn.Module:
-        """Load the trained model from the checkpoint."""
         dataset_name = self.config['dataset']['name']
         model_path = f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth"
 
@@ -106,7 +105,6 @@ class PredictionManager:
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
 
-            # Handle custom checkpoint format used during training
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
                 # Extract the state_dict from the latest phase
                 if 'phase2_kld' in checkpoint['model_states']:
