@@ -164,6 +164,8 @@ The code does not appear to have explicit cheating mechanisms, but the unrealist
 
 ------------------------------------------------------------------------
 
+This part of the document is OLD, but most of the revisions ensure backward compatibility.
+
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
 
 adbnn Algorithm
