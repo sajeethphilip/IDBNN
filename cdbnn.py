@@ -159,7 +159,7 @@ class PredictionManager:
         if hasattr(self.model, 'set_dataset'):
             # Create a dataset with the images in the input directory
             dataset = self._create_dataset(input_dir, transform)
-            self.model.set_dataset(dataset)
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
 
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
