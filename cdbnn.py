@@ -2941,9 +2941,10 @@ class BaseFeatureExtractor(nn.Module, ABC):
         """Create and return the feature extraction model"""
         pass
 
-    def load_state_dict(self, state_dict: Dict):
+    def load_state_dict(self, state_dict: Dict, strict: bool = True):
         """Load model state from a state dictionary."""
-        self.feature_extractor.load_state_dict(state_dict)
+        # Pass the strict parameter to the underlying model's load_state_dict
+        self.feature_extractor.load_state_dict(state_dict, strict=strict)
         self.feature_extractor.eval()
 
     def save_checkpoint(self, path: str, is_best: bool = False):
