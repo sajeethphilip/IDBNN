@@ -73,18 +73,6 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-import os
-import torch
-import logging
-from typing import Dict, Optional
-from torch import nn
-from torchvision import transforms
-from PIL import Image
-import pandas as pd
-from tqdm import tqdm
-
-logger = logging.getLogger(__name__)
-
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
@@ -98,6 +86,7 @@ class PredictionManager:
         """
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
     def _load_model(self) -> nn.Module:
@@ -107,69 +96,204 @@ class PredictionManager:
         Returns:
             nn.Module: The loaded model.
         """
-        dataset_name = self.config['dataset']['name']
-        model_path = f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth"
+        # Create the model based on the configuration
+        model = ModelFactory.create_model(self.config)
+        model.to(self.device)
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+        # Load the best model state from the checkpoint
+        checkpoint_path = self.checkpoint_manager.checkpoint_path
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-        # Determine the model type from the config
-        encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
-        if encoder_type == 'cnn':
-            model = CNNFeatureExtractor(self.config, self.device)
-        elif encoder_type == 'autoenc':
-            model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
-        else:
-            raise ValueError(f"Unsupported encoder type: {encoder_type}")
-
-        # Load the checkpoint
+        # Load the checkpoint with proper device mapping
         try:
-            checkpoint = torch.load(model_path, map_location=self.device)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.warning("CUDA not available. Falling back to CPU.")
+                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            else:
+                raise e
 
-            # Extract the state_dict based on the checkpoint structure
-            if isinstance(checkpoint, dict):
-                if 'model_states' in checkpoint:
-                    # Handle multi-phase training checkpoints
-                    if encoder_type == 'cnn':
-                        if 'phase1' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
+        # Extract the state dictionary
+        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+
+        # Load the state dictionary into the model
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        logger.info("Model loaded successfully.")
+        return model
+
+    def predict_images(self, input_dir: str, output_csv: str = None):
+        """
+        Predict features for images in the input directory and save results to a CSV file.
+
+        Args:
+            input_dir (str): Directory containing new images.
+            output_csv (str, optional): Path to save the output CSV file. Defaults to None.
+        """
+        if not os.path.exists(input_dir):
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+        # Set default output CSV path if not provided
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+
+        # Get the image transform from the config
+        transform = self._get_transforms()
+        logger.debug(f"Image transforms: {transform}")
+
+        # Process images
+        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_dir}")
+        logger.debug(f"Found {len(image_files)} images in {input_dir}")
+
+        # Prepare data structure for predictions
+        predictions = {
+            'filename': [],
+            'features_phase1': [],
+            'features_phase2': []
+        }
+
+        # Create a dataset for the model (if required)
+        if hasattr(self.model, 'set_dataset'):
+            logger.debug("Creating dataset...")
+            dataset = self._create_dataset(input_dir, transform)
+            logger.debug(f"Dataset created with {len(dataset)} images.")
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.debug("Dataset set in the model.")
+
+        # Process each image
+        for filename in tqdm(image_files, desc="Predicting features"):
+            try:
+                logger.debug(f"Processing image: {filename}")
+
+                # Load and transform the image
+                image_path = os.path.join(input_dir, filename)
+                image = Image.open(image_path).convert('RGB')
+                image_tensor = transform(image).unsqueeze(0).to(self.device)
+                logger.debug(f"Image tensor shape: {image_tensor.shape}")
+
+                # Extract features using the model (phase 1)
+                with torch.no_grad():
+                    logger.debug("Running model for phase 1...")
+                    output = self.model(image_tensor)
+                    logger.debug(f"Model output type: {type(output)}")
+
+                    # Handle tuple output (e.g., (embedding, reconstruction))
+                    if isinstance(output, tuple):
+                        logger.debug("Model output is a tuple.")
+                        logger.debug(f"Tuple length: {len(output)}")
+                        logger.debug(f"First element type: {type(output[0])}")
+                        embedding_phase1 = output[0]  # Assume the first element is the embedding
+                    else:
+                        logger.debug("Model output is a single tensor.")
+                        embedding_phase1 = output  # Assume the output is a single tensor
+
+                    # Convert to numpy array
+                    logger.debug("Converting embedding to numpy array...")
+                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
+
+                # Extract features using the model (phase 2)
+                if hasattr(self.model, 'set_training_phase'):
+                    logger.debug("Switching to phase 2...")
+                    self.model.set_training_phase(2)  # Switch to phase 2
+                    with torch.no_grad():
+                        logger.debug("Running model for phase 2...")
+                        output = self.model(image_tensor)
+                        logger.debug(f"Model output type: {type(output)}")
+
+                        # Handle tuple output (e.g., (embedding, reconstruction))
+                        if isinstance(output, tuple):
+                            logger.debug("Model output is a tuple.")
+                            logger.debug(f"Tuple length: {len(output)}")
+                            logger.debug(f"First element type: {type(output[0])}")
+                            embedding_phase2 = output[0]  # Assume the first element is the embedding
                         else:
-                            raise ValueError("Checkpoint does not contain phase1 state for CNN model.")
-                    elif encoder_type == 'autoenc':
-                        if 'phase2_kld' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
-                        elif 'phase1' in checkpoint['model_states']:
-                            state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                        else:
-                            raise ValueError("Checkpoint does not contain valid phase states for Autoencoder model.")
-                elif 'state_dict' in checkpoint:
-                    # Standard checkpoint format
-                    state_dict = checkpoint['state_dict']
+                            logger.debug("Model output is a single tensor.")
+                            embedding_phase2 = output  # Assume the output is a single tensor
+
+                        # Convert to numpy array
+                        logger.debug("Converting embedding to numpy array...")
+                        embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
+                        logger.debug(f"Embedding shape: {embedding_phase2.shape}")
                 else:
-                    # Assume the checkpoint is the state_dict itself
-                    state_dict = checkpoint
-            else:
-                raise ValueError("Checkpoint is not a dictionary or state_dict.")
+                    logger.debug("Phase 2 not enabled. Using phase 1 embeddings.")
+                    embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
-            # Debug: Print state_dict keys
-            logger.debug(f"State_dict keys: {state_dict.keys()}")
+                # Store results
+                predictions['filename'].append(filename)
+                predictions['features_phase1'].append(embedding_phase1)
+                predictions['features_phase2'].append(embedding_phase2)
+                logger.debug(f"Stored predictions for {filename}")
 
-            # Load the state_dict into the model
-            if hasattr(model, 'load_state_dict'):
-                # Use strict=False to handle mismatched keys
-                model.load_state_dict(state_dict, strict=False)
-            else:
-                raise AttributeError("Model does not have a load_state_dict method.")
+            except Exception as e:
+                logger.error(f"Error processing image {filename}: {str(e)}")
+                logger.error(traceback.format_exc())  # Log the full traceback
+                continue
 
-            model.eval()
-            logger.info("Model loaded successfully.")
-            return model
+        # Save predictions to CSV
+        logger.debug("Saving predictions to CSV...")
+        self._save_predictions(predictions, output_csv)
+        logger.info(f"Predictions saved to {output_csv}")
 
-        except Exception as e:
-            logger.error(f"Error loading model checkpoint: {str(e)}")
-            raise ValueError(f"Error loading model checkpoint: {str(e)}")
+    def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
+        """
+        Create a dataset from the images in the input directory.
 
-    def predict_images(self, input_dir: str, output_csv: str = None) -> None:
+        Args:
+            input_dir (str): Directory containing images.
+            transform (transforms.Compose): Transformations to apply to the images.
+
+        Returns:
+            Dataset: A PyTorch dataset containing the images.
+        """
+        class DummyDataset(Dataset):
+            def __init__(self, image_files, transform):
+                self.image_files = image_files
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.image_files)
+
+            def __getitem__(self, idx):
+                image_path = self.image_files[idx]
+                image = Image.open(image_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, 0  # Dummy label
+
+        image_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
+        return DummyDataset(image_files, transform)
+
+    def _get_transforms(self) -> transforms.Compose:
+        """Get the image transforms based on the config."""
+        return transforms.Compose([
+            transforms.Resize(tuple(self.config['dataset']['input_size'])),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=self.config['dataset']['mean'],
+                std=self.config['dataset']['std']
+            )
+        ])
+
+    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+        """Save predictions to a CSV file."""
+        # Convert features to a DataFrame
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features_phase1'][0]))]
+        df = pd.DataFrame(predictions['features_phase1'], columns=feature_cols)
+        df.insert(0, 'filename', predictions['filename'])
+
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+        logger.info(f"Predictions saved to {output_csv}")
+        return model
+
+    def predict_images(self, input_dir: str, output_csv: str = None):
         """
         Predict features for images in the input directory and save results to a CSV file.
 
