@@ -33,6 +33,8 @@ In the paper "Automated Detection of Galactic Rings from Sloan Digital Sky Surve
 
 ![image](https://github.com/user-attachments/assets/2f46c442-82a8-4699-8d11-ad86995793a6)
 
+However, when adaptive learning is used, with just 471 training examples in 11 epochs, the DBNN classifier could achieve 100% accurate predcition on the entire image data.
+![image](https://github.com/user-attachments/assets/21ed0816-16f6-41aa-88e1-26cf0d336561)
 
 
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
