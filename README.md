@@ -39,6 +39,11 @@ However, when adaptive learning is used, with just 471 training examples in 11 e
 
 This result is not unique for ring, non-ring galaxy classification. The method has proved reliable in Quasar classification to Gravitational-wave detector glitch classification with better performance due to its intrinsic dependence on probability and lower susceptibility to fluctuations and noise in data.
 
+MNIST is a popular dataset that represents the raster images of numbers 0 to 9, and from just a pair of randomly picked examples, DBNN generated the following result:
+
+![image](https://github.com/user-attachments/assets/d065aab4-41d1-4caf-b938-cd9a57dc3665)
+
+
 ![image](https://github.com/user-attachments/assets/fe1e97fe-a4f7-4e10-b433-6e00f5940a3b)
 
 adbnn Algorithm
