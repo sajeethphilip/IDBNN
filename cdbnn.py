@@ -245,10 +245,10 @@ class BaseEnhancementConfig:
                 'phase2_learning_rate': 0.005,
                 'reconstruction_weight': 1.0,
                 'feature_weight': 0.1,
-                'enable_phase2': True,
+                'enable_phase2': False,
                 'enhancements': {
                     'use_kl_divergence': True,
-                    'use_class_encoding': True,
+                    'use_class_encoding': False,
                     'kl_divergence_weight': 0.1,
                     'classification_weight': 0.1,
                     'clustering_temperature': 1.0,
@@ -378,7 +378,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
@@ -520,7 +520,7 @@ class BaseAutoencoder(nn.Module):
         # Initialize enhancement components
         self.use_kl_divergence = (config['model']
                                  .get('autoencoder_config', {})
-                                 .get('enhancements', {})
+                                 .get('enhancements', True)
                                  .get('use_kl_divergence', True))
 
         self.use_class_encoding = (config['model']
@@ -824,11 +824,16 @@ class BaseAutoencoder(nn.Module):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Get additional information (file_index and filename)
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
-                    # Get actual class names using reverse_encoder
-                    class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    # Check if dataset has get_additional_info method
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    else:
+                        # Provide default values if get_additional_info is not available
+                        indices = list(range(len(inputs)))
+                        filenames = [f"image_{i}.png" for i in indices]
+                        class_names = [str(label.item()) for label in labels]
 
                     embeddings = self.encode(inputs)
                     if isinstance(embeddings, tuple):
@@ -857,6 +862,7 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
+
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -2017,7 +2023,7 @@ def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> st
         # Add specialized enhancements
         if config['dataset'].get('image_type') != 'general':
             image_type = config['dataset']['image_type']
-            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', False):
+            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', True):
                 active_enhancements.append(image_type)
 
         if active_enhancements:
@@ -3028,7 +3034,7 @@ class BaseFeatureExtractor(ABC):
         autoencoder_config = model.setdefault('autoencoder_config', {})
         autoencoder_config.setdefault('enhancements', {
             'use_kl_divergence': True,
-            'use_class_encoding': True,
+            'use_class_encoding': False,
             'kl_divergence_weight': 0.1,
             'classification_weight': 0.1,
             'clustering_temperature': 1.0,
@@ -5307,7 +5313,7 @@ class DatasetProcessor:
                     "enhancements": {
                         "enabled": True,
                         "use_kl_divergence": True,
-                        "use_class_encoding": True,
+                        "use_class_encoding": False,
                         "kl_divergence_weight": 0.5,
                         "classification_weight": 0.5,
                         "clustering_temperature": 1.0,
@@ -6450,18 +6456,18 @@ def configure_enhancements(config: Dict) -> Dict:
     print("\nConfiguring Enhanced Autoencoder Features:")
 
     # KL Divergence configuration
-    if input("Enable KL divergence clustering? (y/n) [y]: ").lower() != 'n':
+    if input("Enable KL divergence clustering? (y/n) [n]: ").lower() != 'n':
         enhancements['use_kl_divergence'] = True
         enhancements['kl_divergence_weight'] = float(input("Enter KL divergence weight (0-1) [0.1]: ") or 0.1)
     else:
         enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
-        enhancements['use_class_encoding'] = True
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
+        enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
-        enhancements['use_class_encoding'] = False
+        enhancements['use_class_encoding'] = True
 
     # Clustering configuration
     if enhancements['use_kl_divergence']:
