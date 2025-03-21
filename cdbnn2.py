@@ -391,10 +391,10 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             self._configure_clustering_parameters(enhancements)
 
         # Phase 2 configuration
-        if input("Enable phase 2 training (clustering and fine-tuning)? (y/n) [y]: ").lower() != 'y':
-            self.config['model']['autoencoder_config']['enable_phase2'] = False
-        else:
+        if input("Enable phase 2 training (clustering and fine-tuning)? (y/n) [y]: ").lower() != 'n':
             self.config['model']['autoencoder_config']['enable_phase2'] = True
+        else:
+            self.config['model']['autoencoder_config']['enable_phase2'] = False
 
     def _configure_clustering_parameters(self, enhancements: Dict) -> None:
         """Configure clustering-specific parameters"""
