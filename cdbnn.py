@@ -101,10 +101,25 @@ class PredictionManager:
         model.to(self.device)
 
         # Load the best model state from the checkpoint
-        state_dict = self.checkpoint_manager.load_model_state(model, phase=2, load_best=True)
-        if state_dict is None:
-            raise ValueError("No valid model state found in the checkpoint.")
+        checkpoint_path = self.checkpoint_manager.checkpoint_path
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
+        # Load the checkpoint with proper device mapping
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.warning("CUDA not available. Falling back to CPU.")
+                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            else:
+                raise e
+
+        # Extract the state dictionary
+        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+
+        # Load the state dictionary into the model
+        model.load_state_dict(state_dict, strict=False)
         model.eval()
         logger.info("Model loaded successfully.")
         return model
