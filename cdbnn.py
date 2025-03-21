@@ -76,16 +76,17 @@ logger = logging.getLogger(__name__)
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
-    def __init__(self, config: dict, device: str = None):
+    def __init__(self, config: Dict, device: str = None):
         """
         Initialize the PredictionManager.
 
         Args:
-            config (dict): Configuration dictionary.
+            config (Dict): Configuration dictionary.
             device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
         """
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
     def _load_model(self) -> nn.Module:
@@ -95,136 +96,111 @@ class PredictionManager:
         Returns:
             nn.Module: The loaded model.
         """
-        dataset_name = self.config['dataset']['name']
-        model_path = f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth"
+        # Create the model based on the configuration
+        model = ModelFactory.create_model(self.config)
+        model.to(self.device)
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+        # Load the best model state from the checkpoint
+        state_dict = self.checkpoint_manager.load_model_state(model, phase=2, load_best=True)
+        if state_dict is None:
+            raise ValueError("No valid model state found in the checkpoint.")
 
-        # Determine the model type from the config
-        encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
-        if encoder_type == 'cnn':
-            model = CNNFeatureExtractor(self.config, self.device)
-        elif encoder_type == 'autoenc':
-            model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
-        else:
-            raise ValueError(f"Unsupported encoder type: {encoder_type}")
+        model.eval()
+        logger.info("Model loaded successfully.")
+        return model
 
-        # Load the checkpoint
-        try:
-            checkpoint = torch.load(model_path, map_location=self.device)
-
-            # Ensure the checkpoint is a dictionary
-            if not isinstance(checkpoint, dict):
-                raise ValueError("Checkpoint is not a dictionary.")
-
-            # Extract the state_dict based on the checkpoint structure
-            if 'model_states' in checkpoint:
-                # Handle multi-phase training checkpoints
-                if encoder_type == 'cnn':
-                    if 'phase1' in checkpoint['model_states']:
-                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                    else:
-                        raise ValueError("Checkpoint does not contain phase1 state for CNN model.")
-                elif encoder_type == 'autoenc':
-                    if 'phase2_kld' in checkpoint['model_states']:
-                        state_dict = checkpoint['model_states']['phase2_kld']['current']['state_dict']
-                    elif 'phase1' in checkpoint['model_states']:
-                        state_dict = checkpoint['model_states']['phase1']['current']['state_dict']
-                    else:
-                        raise ValueError("Checkpoint does not contain valid phase states for Autoencoder model.")
-            elif 'state_dict' in checkpoint:
-                # Standard checkpoint format
-                state_dict = checkpoint['state_dict']
-            else:
-                raise ValueError("Checkpoint does not contain a valid state_dict.")
-
-            # Load the state_dict into the model
-            model.load_state_dict(state_dict, strict=False)
-            model.eval()
-            logger.info("Model loaded successfully.")
-            return model
-
-        except Exception as e:
-            logger.error(f"Error loading model checkpoint: {str(e)}")
-            raise ValueError(f"Error loading model checkpoint: {str(e)}")
-
-    def predict_images(self, input_dir: str, output_csv: str = None) -> None:
+    def predict_from_csv(self, csv_path: str, output_dir: str = None):
         """
-        Predict features for images in the input directory and save results to a CSV file.
+        Generate predictions from feature vectors in a CSV file.
 
         Args:
-            input_dir (str): Directory containing new images.
-            output_csv (str, optional): Path to save the output CSV file. Defaults to None.
+            csv_path (str): Path to the CSV file containing feature vectors.
+            output_dir (str, optional): Directory to save the output predictions. Defaults to None.
         """
-        if not os.path.exists(input_dir):
-            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-        # Set default output CSV path if not provided
-        if output_csv is None:
-            dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+        # Load the CSV file
+        df = pd.read_csv(csv_path)
+        feature_cols = [col for col in df.columns if col.startswith('feature_')]
+        features = torch.tensor(df[feature_cols].values, dtype=torch.float32).to(self.device)
 
-        # Get the image transform from the config
-        transform = self._get_transforms()
+        # Verify feature dimensions
+        expected_dims = self.config['model']['feature_dims']
+        if features.size(1) != expected_dims:
+            raise ValueError(f"Feature dimension mismatch: got {features.size(1)}, expected {expected_dims}")
 
-        # Process images
-        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
-        if not image_files:
-            raise ValueError(f"No valid images found in {input_dir}")
+        # Set up output directory
+        if output_dir is None:
+            output_dir = os.path.join('data', self.config['dataset']['name'], 'predictions')
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Prepare data structure for predictions
+        # Generate predictions
+        self.model.eval()
         predictions = {
             'filename': [],
-            'features': []
+            'reconstruction': [],
+            'embedding': []
         }
 
-        # Process each image
-        for filename in tqdm(image_files, desc="Predicting features"):
-            try:
-                # Load and transform the image
-                image_path = os.path.join(input_dir, filename)
-                image = Image.open(image_path).convert('RGB')
-                image_tensor = transform(image).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            for idx, feature_vec in enumerate(tqdm(features, desc="Generating predictions")):
+                feature_vec = feature_vec.unsqueeze(0)  # Add batch dimension
+                embedding, reconstruction = self.model(feature_vec)
 
-                # Extract features using the model
-                with torch.no_grad():
-                    if isinstance(self.model, EnhancedAutoEncoderFeatureExtractor):
-                        embedding, _ = self.model(image_tensor)
-                    else:
-                        embedding = self.model(image_tensor)
+                # Save the reconstruction as an image
+                img_path = os.path.join(output_dir, f'reconstruction_{idx}.png')
+                self._save_reconstructed_image(reconstruction[0], img_path)
 
-                # Store results
-                predictions['filename'].append(filename)
-                predictions['features'].append(embedding.cpu().numpy().flatten())
-
-            except Exception as e:
-                logger.error(f"Error processing image {filename}: {str(e)}")
-                continue
+                # Store predictions
+                predictions['filename'].append(f'reconstruction_{idx}.png')
+                predictions['reconstruction'].append(reconstruction.cpu().numpy())
+                predictions['embedding'].append(embedding.cpu().numpy())
 
         # Save predictions to CSV
-        self._save_predictions(predictions, output_csv)
+        self._save_predictions(predictions, output_dir)
 
-    def _get_transforms(self) -> transforms.Compose:
-        """Get the image transforms based on the config."""
-        return transforms.Compose([
-            transforms.Resize(tuple(self.config['dataset']['input_size'])),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=self.config['dataset']['mean'],
-                std=self.config['dataset']['std']
-            )
-        ])
+    def _save_reconstructed_image(self, tensor: torch.Tensor, path: str):
+        """Save reconstructed tensor as an image with proper normalization."""
+        try:
+            tensor = tensor.detach().cpu()
 
-    def _save_predictions(self, predictions: dict, output_csv: str) -> None:
+            # Move to [H, W, C] for image saving
+            if len(tensor.shape) == 3:
+                tensor = tensor.permute(1, 2, 0)
+
+            # Denormalize using dataset mean and std
+            mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
+            std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
+            tensor = tensor * std + mean
+
+            # Convert to uint8
+            tensor = (tensor.clamp(0, 1) * 255).to(torch.uint8)
+
+            # Handle single-channel case
+            if tensor.shape[-1] == 1:
+                tensor = tensor.squeeze(-1)
+
+            # Save image
+            img = Image.fromarray(tensor.numpy())
+            img.save(path, quality=95, optimize=True)
+            logger.debug(f"Saved image to {path} with size {img.size}")
+
+        except Exception as e:
+            logger.error(f"Error saving reconstructed image: {str(e)}")
+            raise
+
+    def _save_predictions(self, predictions: Dict, output_dir: str):
         """Save predictions to a CSV file."""
-        # Convert features to a DataFrame
-        feature_cols = [f'feature_{i}' for i in range(len(predictions['features'][0]))]
-        df = pd.DataFrame(predictions['features'], columns=feature_cols)
-        df.insert(0, 'filename', predictions['filename'])
+        # Convert predictions to a DataFrame
+        df = pd.DataFrame({
+            'filename': predictions['filename'],
+            'reconstruction': [arr.tolist() for arr in predictions['reconstruction']],
+            'embedding': [arr.tolist() for arr in predictions['embedding']]
+        })
 
         # Save to CSV
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        output_csv = os.path.join(output_dir, 'predictions.csv')
         df.to_csv(output_csv, index=False)
         logger.info(f"Predictions saved to {output_csv}")
 
