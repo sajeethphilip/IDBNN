@@ -104,6 +104,8 @@ class PredictionManager:
         # Load the checkpoint
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
+            # Debug: Print checkpoint keys
+            print("Checkpoint keys:", checkpoint.keys())
 
             if isinstance(checkpoint, dict) and 'model_states' in checkpoint:
                 # Extract the state_dict based on the encoder type
@@ -127,6 +129,9 @@ class PredictionManager:
             else:
                 # Assume the checkpoint is the state_dict itself
                 state_dict = checkpoint
+
+            # Debug: Print state_dict keys
+            print("State_dict keys:", state_dict.keys())
 
             # Load the state_dict into the model
             if hasattr(model, 'load_state_dict'):
