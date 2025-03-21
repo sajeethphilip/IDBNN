@@ -96,32 +96,39 @@ class PredictionManager:
         # Initialize transforms for preprocessing
         self.transform = self._get_transforms()
 
-    def _load_model(self) -> torch.nn.Module:
+    def _load_model(self) -> nn.Module:
         """
-        Load the trained model based on the configuration and model path.
+        Load the trained model from the checkpoint.
 
         Returns:
-            torch.nn.Module: The loaded model.
+            nn.Module: The loaded model.
         """
-        model_type = self.config['model'].get('encoder_type', 'autoenc').lower()
+        # Create the model based on the configuration
+        model = ModelFactory.create_model(self.config)
+        model.to(self.device)
 
-        if model_type == 'autoenc':
-            from cdbnn import EnhancedAutoEncoderFeatureExtractor
-            model = EnhancedAutoEncoderFeatureExtractor(self.config, self.device)
-        elif model_type == 'cnn':
-            from cdbnn import CNNFeatureExtractor
-            model = CNNFeatureExtractor(self.config, self.device)
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}")
+        # Load the best model state from the checkpoint
+        checkpoint_path = self.checkpoint_manager.checkpoint_path
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-        # Load the model checkpoint
-        if os.path.exists(self.model_path):
-            checkpoint = torch.load(self.model_path, map_location=self.device)
-            model.load_state_dict(checkpoint['state_dict'])
-            logger.info(f"Loaded model checkpoint from {self.model_path}")
-        else:
-            raise FileNotFoundError(f"Model checkpoint not found at {self.model_path}")
+        # Load the checkpoint with proper device mapping
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.warning("CUDA not available. Falling back to CPU.")
+                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            else:
+                raise e
 
+        # Extract the state dictionary
+        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+
+        # Load the state dictionary into the model
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        logger.info("Model loaded successfully.")
         return model
 
     def _get_transforms(self) -> transforms.Compose:
