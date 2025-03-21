@@ -161,7 +161,8 @@ class PredictionManager:
             logger.info(f"Dataset created with {len(dataset)} images.")
             self.model.set_dataset(dataset)
             logger.info("Dataset set in the model.")
-
+        else:
+            print("Model has no set_dataset")
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
             try:
