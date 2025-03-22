@@ -6601,7 +6601,7 @@ def get_interactive_args():
     default = last_args.get('data', '') if last_args else ''
     prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
     args.data = input(prompt).strip() or default
-
+    input_path=args.data.copy()
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
