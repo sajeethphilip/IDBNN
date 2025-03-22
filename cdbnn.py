@@ -5135,6 +5135,9 @@ class CustomImageDataset(Dataset):
 
     def get_additional_info(self, idx):
         """Retrieve additional information (file_index and filename) for a given index."""
+        for idx in range(len(dataset)):
+            index, filename = dataset.get_additional_info(idx)
+            print(f"Sample {idx}: index={index}, filename={filename}")
         return self.file_indices[idx], self.filenames[idx]
 
     def __getitem__(self, idx):
