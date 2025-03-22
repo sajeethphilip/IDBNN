@@ -5397,7 +5397,7 @@ class DatasetProcessor:
                     if os.path.exists(dst):
                         shutil.rmtree(dst)
                     shutil.copytree(src, dst)
-                return train_dir, test_dir              # return train folder populated with both train and test data and the test folder for consistency.
+                return train_dir, None            # return train folder populated with both train and test data and the test folder for consistency.
 
             else:
                 # Normal processing with separate train and test folders
