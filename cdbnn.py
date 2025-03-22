@@ -5387,11 +5387,9 @@ class DatasetProcessor:
                 # Handle existing train directory
                 self._handle_existing_directory(train_dir)
                 # Merge train and test folders into a single train folder
-                if os.path.exists(train_dir):
-                    shutil.rmtree(train_dir)
-                os.makedirs(train_dir)
 
-                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                # Copy train data
+                shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
                 # Copy test data into train folder
                 for class_name in os.listdir(os.path.join(data_path, "test")):
                     src = os.path.join(data_path, "test", class_name)
