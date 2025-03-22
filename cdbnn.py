@@ -6846,9 +6846,14 @@ def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
     try:
-        # Setup logging and parse arguments
+        # Setup logging
         logger = setup_logging()
-        args = parse_arguments()
+
+        # Parse arguments (command-line or interactive)
+        if len(sys.argv) > 1:  # Command-line mode
+            args = parse_arguments()
+        else:  # Interactive mode
+            args = get_interactive_args()
 
         # Initialize DatasetProcessor
         dataset_processor = DatasetProcessor(datafile=args.data, datatype="custom", output_dir=args.output_dir)
