@@ -993,7 +993,10 @@ class BaseAutoencoder(nn.Module):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             # Access enable_adaptive from training_params
-            enable_adaptive = True # self.config['model'].get('enable_adaptive', True)
+            try:
+                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+             except:
+            enable_adaptive = True
             print(f"Enable Adaptive mode is {enable_adaptive} for Save Mode")
             if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
@@ -5396,7 +5399,10 @@ class DatasetProcessor:
         test_dir = os.path.join(self.dataset_dir, "test")
 
         # Access enable_adaptive from training_params
-        enable_adaptive = True #self.config['model'].get('enable_adaptive', True)
+        try:
+             enable_adaptive = self.config['model'].get('enable_adaptive', True)
+         except:
+        enable_adaptive = True
         print(f"Enable Adaptive mode is {enable_adaptive} in process custom")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
