@@ -5235,7 +5235,7 @@ class CustomImageDataset(Dataset):
         # Resize the image if it is smaller than 256x256
         if image.size[0] < 256 or image.size[1] < 256:
             image = image.resize((256, 256), Image.Resampling.LANCZOS)
-            print("Image resized",end='\r',flush=True)
+            print(f"Image resized to { image.size}",end='\r',flush=True)
         # Split larger images into 256x256 sliding windows
         if image.size[0] > 256 or image.size[1] > 256:
             windows = []
