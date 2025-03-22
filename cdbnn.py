@@ -6573,6 +6573,20 @@ def load_last_args():
         return None
 
 def get_interactive_args():
+    """Collect arguments interactively from the user."""
+    class Args:
+        def __init__(self):
+            self.mode = input("Enter mode (train/reconstruct/predict) [predict]: ") or "predict"
+            self.data = input("Enter dataset name/path: ")
+            self.input_dir = input("Enter input directory: ")
+            self.output_dir = input("Enter output directory [data]: ") or "data"
+            self.output_csv = input("Enter output CSV file path: ")
+            self.cpu = input("Use CPU only? (y/n) [n]: ").lower() == "y"
+            self.debug = input("Enable debug mode? (y/n) [n]: ").lower() == "y"
+
+    return Args()
+
+def get_interactive_args_old():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
     args = argparse.Namespace()
