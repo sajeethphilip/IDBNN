@@ -136,7 +136,7 @@ class PredictionManager:
         # Set default output CSV path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         # Get the image transform used during training
         transform = self._get_transforms()
