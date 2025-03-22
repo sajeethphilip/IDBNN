@@ -994,11 +994,11 @@ class BaseAutoencoder(nn.Module):
 
             # Access enable_adaptive from training_params
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
-            print(f"Enable Adaptive mode is {enable_adaptive}")
+            print(f"Enable Adaptive mode is {enable_adaptive} for Save Mode")
             if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
-                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_output_path = output_path
                 train_df.to_csv(train_output_path, index=False)
                 logger.info(f"Features saved to {train_output_path} (adaptive mode)")
             else:
@@ -5391,7 +5391,7 @@ class DatasetProcessor:
 
         # Access enable_adaptive from training_params
         enable_adaptive = self.config['model'].get('enable_adaptive', True)
-        print(f"Enable Adaptive mode is {enable_adaptive}")
+        print(f"Enable Adaptive mode is {enable_adaptive} in process custom")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
@@ -5403,13 +5403,7 @@ class DatasetProcessor:
 
                 # Copy train data
                 shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
-                # Copy test data into train folder
-                for class_name in os.listdir(os.path.join(data_path, "test")):
-                    src = os.path.join(data_path, "test", class_name)
-                    dst = os.path.join(train_dir, class_name)
-                    if os.path.exists(dst):
-                        shutil.rmtree(dst)
-                    shutil.copytree(src, dst)
+
                 return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
 
             else:
