@@ -5206,7 +5206,11 @@ class CustomImageDataset(Dataset):
 
         # Resize if image is smaller than target_size
         if h < self.target_size or w < self.target_size:
-            image_tensor = transforms.functional.resize(image_tensor, (self.target_size, self.target_size))
+            image_tensor = transforms.functional.resize(
+                image_tensor,
+                (self.target_size, self.target_size),
+                antialias=True  # Explicitly set antialias=True
+            )
             return image_tensor.unsqueeze(0)  # Add batch dimension
 
         # Split into sliding windows if image is larger than target_size
