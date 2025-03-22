@@ -5719,7 +5719,7 @@ class DatasetProcessor:
             "modelType": "Histogram",
             "feature_group_size": 2,
             "max_combinations": 10000,
-            "bin_sizes": [21],
+            "bin_sizes": [128],
             "active_learning": {
                 "tolerance": 1.0,
                 "cardinality_threshold_percentile": 95,
