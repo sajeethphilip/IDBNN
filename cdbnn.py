@@ -996,8 +996,8 @@ class BaseAutoencoder(nn.Module):
             try:
                  enable_adaptive = self.config['model'].get('enable_adaptive', True)
              except:
-            enable_adaptive = True
-            print(f"Enable Adaptive mode is {enable_adaptive} for Save Mode")
+                enable_adaptive = True
+                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
             if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
@@ -5402,8 +5402,8 @@ class DatasetProcessor:
         try:
              enable_adaptive = self.config['model'].get('enable_adaptive', True)
          except:
-        enable_adaptive = True
-        print(f"Enable Adaptive mode is {enable_adaptive} in process custom")
+            enable_adaptive = True
+            print(f"Enable Adaptive mode is set {enable_adaptive} in process custom")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
