@@ -5369,7 +5369,7 @@ class DatasetProcessor:
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
             # Check if adaptive_fit_predict is active
-            if self.config.get('adaptive_fit_predict', False):
+            if self.config.get('enable_adaptive', True):
                 # Merge train and test folders into a single train folder
                 if os.path.exists(train_dir):
                     shutil.rmtree(train_dir)
