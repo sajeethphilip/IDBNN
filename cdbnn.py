@@ -5235,6 +5235,22 @@ class CustomImageDataset(Dataset):
         # Resize the image if it is smaller than 256x256
         if image.size[0] < 256 or image.size[1] < 256:
             image = image.resize((256, 256), Image.Resampling.LANCZOS)
+        # Split larger images into 256x256 sliding windows
+        if image.size[0] > 256 or image.size[1] > 256:
+            windows = []
+            stride = 128  # 50% overlap (adjust as needed)
+            for y in range(0, image.size[1] - 256 + 1, stride):
+                for x in range(0, image.size[0] - 256 + 1, stride):
+                    window = image.crop((x, y, x + 256, y + 256))
+                    windows.append(window)
+
+            # Apply transformations to each window (if any)
+            if self.transform:
+                windows = [self.transform(window) for window in windows]
+
+            # Return windows and label
+            return windows, label
+
 
         if self.transform:
             image = self.transform(image)
