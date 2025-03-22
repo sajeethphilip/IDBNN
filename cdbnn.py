@@ -5143,7 +5143,8 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None, target_size: int = 256, overlap: float = 0.5):
+    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
+                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size
@@ -5155,6 +5156,10 @@ class CustomImageDataset(Dataset):
         self.label_encoder = {}
         self.reverse_encoder = {}
         self.preprocessed_images = []  # Store preprocessed images or paths
+
+        # Load config
+        self.config = config if config is not None else {}
+        self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -5177,35 +5182,10 @@ class CustomImageDataset(Dataset):
         # Preprocess all images during initialization
         self._preprocess_all_images()
 
-
-    def _preprocess_all_images(self):
-        """
-        Preprocess all images to ensure consistent shapes (256x256).
-        """
-        # Create a directory to store preprocessed images (if saving to disk)
-        self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
-        os.makedirs(self.preprocessed_dir, exist_ok=True)
-
-        # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc="Preprocessing images")):
-            image = Image.open(img_path).convert('RGB')
-            image_tensor = transforms.ToTensor()(image)
-
-            # Resize or window the image
-            preprocessed_tensors = self._preprocess_image(image_tensor)
-
-            # Save preprocessed images to disk (optional)
-            for i, tensor in enumerate(preprocessed_tensors):
-                save_path = os.path.join(self.preprocessed_dir, f"{self.filenames[idx]}_window{i}.pt")
-                torch.save(tensor, save_path)
-
-            # Store preprocessed tensors (or paths to the preprocessed images)
-            self.preprocessed_images.append(preprocessed_tensors)
-
     def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
         Preprocess an image tensor to ensure it is suitable for the CNN.
-        - If the image is smaller than target_size, resize it to target_size.
+        - If the image is smaller than target_size and resize_images is True, resize it to target_size.
         - If the image is larger than target_size, split it into sliding windows of target_size.
 
         Args:
@@ -5216,8 +5196,8 @@ class CustomImageDataset(Dataset):
         """
         _, h, w = image_tensor.shape
 
-        # Resize if image is smaller than target_size
-        if h < self.target_size or w < self.target_size:
+        # Resize if image is smaller than target_size and resize_images is True
+        if self.resize_images and (h < self.target_size or w < self.target_size):
             image_tensor = resize(image_tensor, (self.target_size, self.target_size), antialias=True)
             return image_tensor.unsqueeze(0)  # Add batch dimension
 
@@ -5237,6 +5217,31 @@ class CustomImageDataset(Dataset):
 
         # If image is already target_size, return as is
         return image_tensor.unsqueeze(0)
+
+
+    def _preprocess_all_images(self):
+        """
+        Preprocess all images to ensure consistent shapes (256x256).
+        """
+        # Create a directory to store preprocessed images (if saving to disk)
+        self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
+        os.makedirs(self.preprocessed_dir, exist_ok=True)
+
+        # Preprocess images with a progress bar
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {target_size}x{target_size}")):
+            image = Image.open(img_path).convert('RGB')
+            image_tensor = transforms.ToTensor()(image)
+
+            # Resize or window the image
+            preprocessed_tensors = self._preprocess_image(image_tensor)
+
+            # Save preprocessed images to disk (optional)
+            for i, tensor in enumerate(preprocessed_tensors):
+                save_path = os.path.join(self.preprocessed_dir, f"{self.filenames[idx]}_window{i}.pt")
+                torch.save(tensor, save_path)
+
+            # Store preprocessed tensors (or paths to the preprocessed images)
+            self.preprocessed_images.append(preprocessed_tensors)
 
     def __len__(self):
         return len(self.image_files)
@@ -5363,14 +5368,22 @@ class DatasetProcessor:
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
-            if os.path.exists(train_dir):
-                shutil.rmtree(train_dir)
-            if os.path.exists(test_dir):
-                shutil.rmtree(test_dir)
+            # Check if adaptive_fit_predict is active
+            if self.config.get('adaptive_fit_predict', False):
+                # Merge train and test folders into a single train folder
+                if os.path.exists(train_dir):
+                    shutil.rmtree(train_dir)
+                os.makedirs(train_dir)
 
-            shutil.copytree(os.path.join(data_path, "train"), train_dir)
-            shutil.copytree(os.path.join(data_path, "test"), test_dir)
-            return train_dir, test_dir
+                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                # Copy test data into train folder
+                for class_name in os.listdir(os.path.join(data_path, "test")):
+                    src = os.path.join(data_path, "test", class_name)
+                    dst = os.path.join(train_dir, class_name)
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                return train_dir, test_dir              # return train folder populated with both train and test data and the test folder for consistency.
 
         # Handle single directory with class subdirectories
         if not os.path.isdir(data_path):
@@ -5460,6 +5473,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
+                "resize_images": false,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
