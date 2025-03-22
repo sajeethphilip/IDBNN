@@ -995,7 +995,7 @@ class BaseAutoencoder(nn.Module):
             # Access enable_adaptive from training_params
             enable_adaptive = self.config['training_params'].get('enable_adaptive', True)
 
-            if adaptive_mode:
+            if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
                 train_output_path = output_path.replace(".csv", "_train.csv")
@@ -5410,7 +5410,7 @@ class DatasetProcessor:
                     if os.path.exists(dst):
                         shutil.rmtree(dst)
                     shutil.copytree(src, dst)
-                return train_dir, None            # return train folder populated with both train and test data and the test folder for consistency.
+                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
 
             else:
                 # Normal processing with separate train and test folders
