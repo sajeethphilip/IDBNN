@@ -5497,7 +5497,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": false,
+                "resize_images": False,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
