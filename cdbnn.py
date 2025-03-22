@@ -135,6 +135,7 @@ class PredictionManager:
             input_dir (str): Directory containing new images.
             output_csv (str, optional): Path to save the output CSV file. Defaults to None.
         """
+        # Ensure the input directory exists
         if not os.path.exists(input_dir):
             raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
@@ -143,61 +144,53 @@ class PredictionManager:
             dataset_name = self.config['dataset']['name']
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
-        # Get the image transform from the config (must match training preprocessing)
+        # Get the image transform used during training
         transform = self._get_transforms()
         logger.debug(f"Image transforms: {transform}")
 
-        # Collect all valid image files in the input directory
-        image_files = [
-            f for f in os.listdir(input_dir)
-            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
-        ]
+        # Find all valid image files in the input directory
+        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
         if not image_files:
             raise ValueError(f"No valid images found in {input_dir}")
         logger.debug(f"Found {len(image_files)} images in {input_dir}")
 
         # Prepare data structure for predictions
         predictions = {
-            'filename': [],        # Store image filenames
-            'features_phase1': [], # Store features from Phase 1
-            'features_phase2': []  # Store features from Phase 2 (if applicable)
+            'filename': [],  # Filename of the image
+            'features': []   # Extracted features (latent representation)
         }
 
         # Process each image
         for filename in tqdm(image_files, desc="Predicting features"):
             try:
+                logger.debug(f"Processing image: {filename}")
+
                 # Load and preprocess the image
                 image_path = os.path.join(input_dir, filename)
                 image = Image.open(image_path).convert('RGB')  # Ensure RGB format
                 image_tensor = transform(image).unsqueeze(0).to(self.device)  # Add batch dimension and move to device
+                logger.debug(f"Image tensor shape: {image_tensor.shape}")
 
                 # Extract features using the model
                 with torch.no_grad():
-                    if hasattr(self.model, 'encode'):  # Autoencoder model
-                        embedding_phase1 = self.model.encode(image_tensor)
-                        if isinstance(embedding_phase1, tuple):
-                            embedding_phase1 = embedding_phase1[0]  # Use the first element if output is a tuple
+                    logger.debug("Running model for feature extraction...")
+                    if hasattr(self.model, 'encode'):
+                        # Autoencoder model: Use the encoder to extract features
+                        embedding = self.model.encode(image_tensor)
+                        if isinstance(embedding, tuple):
+                            embedding = embedding[0]  # Handle tuple output (e.g., (embedding, reconstruction))
+                    else:
+                        # CNN model: Directly use the model to extract features
+                        embedding = self.model(image_tensor)
 
-                        # If Phase 2 is enabled, extract Phase 2 features
-                        if hasattr(self.model, 'set_training_phase'):
-                            self.model.set_training_phase(2)  # Switch to Phase 2
-                            embedding_phase2 = self.model.encode(image_tensor)
-                            if isinstance(embedding_phase2, tuple):
-                                embedding_phase2 = embedding_phase2[0]
-                        else:
-                            embedding_phase2 = embedding_phase1  # Fallback to Phase 1 features
-                    else:  # CNN model
-                        embedding_phase1 = self.model(image_tensor)
-                        embedding_phase2 = embedding_phase1  # CNN only has one set of features
-
-                    # Convert embeddings to numpy arrays and flatten
-                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
-                    embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
+                    # Convert embedding to numpy array and flatten
+                    embedding_np = embedding.cpu().numpy().flatten()
+                    logger.debug(f"Extracted features shape: {embedding_np.shape}")
 
                 # Store results
                 predictions['filename'].append(filename)
-                predictions['features_phase1'].append(embedding_phase1)
-                predictions['features_phase2'].append(embedding_phase2)
+                predictions['features'].append(embedding_np)
+                logger.debug(f"Stored predictions for {filename}")
 
             except Exception as e:
                 logger.error(f"Error processing image {filename}: {str(e)}")
@@ -205,7 +198,26 @@ class PredictionManager:
                 continue
 
         # Save predictions to CSV
+        logger.debug("Saving predictions to CSV...")
         self._save_predictions(predictions, output_csv)
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+        """
+        Save predictions to a CSV file.
+
+        Args:
+            predictions (Dict): Dictionary containing predictions.
+            output_csv (str): Path to save the CSV file.
+        """
+        # Convert features to a DataFrame
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features'][0]))]
+        df = pd.DataFrame(predictions['features'], columns=feature_cols)
+        df.insert(0, 'filename', predictions['filename'])
+
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
         logger.info(f"Predictions saved to {output_csv}")
 
 
@@ -249,18 +261,6 @@ class PredictionManager:
             )
         ])
 
-    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
-        """Save predictions to a CSV file."""
-        # Convert features to a DataFrame
-        feature_cols = [f'feature_{i}' for i in range(len(predictions['features_phase1'][0]))]
-        df = pd.DataFrame(predictions['features_phase1'], columns=feature_cols)
-        df.insert(0, 'filename', predictions['filename'])
-
-        # Save to CSV
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        df.to_csv(output_csv, index=False)
-        logger.info(f"Predictions saved to {output_csv}")
-        return model
 
 
 
