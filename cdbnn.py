@@ -5391,7 +5391,7 @@ class DatasetProcessor:
 
         # Access enable_adaptive from training_params
         enable_adaptive = self.config['training_params'].get('enable_adaptive', True)
-
+        print(f"Enable Adaptive mode is {enable_adaptive}")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
