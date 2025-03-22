@@ -7105,7 +7105,7 @@ def save_training_results(
     """Save training results and features"""
     # Save features
     output_path = os.path.join(data_dir, f"{data_name}.csv")
-    model.save_features(features_dict, output_path)
+    model.save_features(features_dict,features_dict, output_path)
 
     # Save training history if available
     if hasattr(model, 'history') and model.history:
