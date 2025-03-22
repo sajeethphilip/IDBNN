@@ -5277,7 +5277,7 @@ class DatasetProcessor:
     SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
 
     def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
-                 output_dir: str = "data"):
+                 output_dir: str = "data", config: Optional[Dict] = None):
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
