@@ -946,31 +946,32 @@ class BaseAutoencoder(nn.Module):
             # Process file indices
             if 'indices' in feature_dict:
                 data_dict['file_index'] = feature_dict['indices']
-                feature_columns.append('file_index')
+            else:
+                # Generate sequential indices if not provided
+                data_dict['file_index'] = list(range(len(data_dict['target'])))
+            feature_columns.append('file_index')
 
-            # Process optional fields with placeholders if missing
-            optional_fields = {
-                'indices': 'unknown_index',  # Placeholder for missing indices
-                'filenames': 'unknown_filename',  # Placeholder for missing filenames
-                'class_names': 'unknown_class',  # Placeholder for missing class names
-            }
+            # Process filenames
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']
+            else:
+                # Generate placeholder filenames if not provided
+                data_dict['filename'] = [f"image_{i}.png" for i in range(len(data_dict['target']))]
+            feature_columns.append('filename')
 
-            for field, placeholder in optional_fields.items():
-                if field in feature_dict:
-                    data_dict[field] = feature_dict[field]  # Use actual data if available
-                else:
-                    # Use placeholder if field is missing
-                    data_dict[field] = [placeholder] * len(data_dict['target'])  # Match length of mandatory field
-                feature_columns.append(field)
-
-
+            # Process class names
+            if 'class_names' in feature_dict:
+                data_dict['class_name'] = feature_dict['class_names']
+            else:
+                # Generate placeholder class names if not provided
+                data_dict['class_name'] = [f"class_{label}" for label in data_dict['target']]
+            feature_columns.append('class_name')
 
             # Process enhancement features if present
             if hasattr(self, '_get_enhancement_columns'):
                 enhancement_features = self._get_enhancement_columns(feature_dict)
                 data_dict.update(enhancement_features)
                 feature_columns.extend(enhancement_features.keys())
-
 
             # Check that all arrays have the same length
             lengths = [len(data_dict[col]) for col in feature_columns]
