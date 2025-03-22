@@ -862,7 +862,8 @@ class BaseAutoencoder(nn.Module):
                 for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc="Extracting features")):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
-
+                    # Get metadata if available, otherwise use placeholders
+                    dataset = loader.dataset  # Ensure dataset is accessible
                     # Get metadata if available, otherwise use placeholders
                     if hasattr(loader.dataset, 'get_additional_info'):
                         # Custom dataset with metadata
