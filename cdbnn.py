@@ -5175,7 +5175,6 @@ class CustomImageDataset(Dataset):
                             self.filenames.append(img_name)  # Populate filenames list
 
         # Preprocess all images during initialization
-        print("I am here")
         self._preprocess_all_images()
 
 
