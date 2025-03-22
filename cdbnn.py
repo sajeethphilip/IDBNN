@@ -1053,7 +1053,7 @@ class BaseAutoencoder(nn.Module):
                 data_dict[field] = features[field]
                 print(f"Found filed {data_dict[field]}")
             else:
-                data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
+                data_dict[field] = [f"unknown_{field}"]  #* len(data_dict['target'])
                 print(f"Dummy filed {data_dict[field]}")
         # Convert to DataFrame
         try:
