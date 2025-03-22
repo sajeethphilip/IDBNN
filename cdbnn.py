@@ -4402,7 +4402,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             logger.error(f"Error loading model: {str(e)}")
             raise
 
-class FeatureExtractorCNN_new(nn.Module):
+class FeatureExtractorCNN(nn.Module):
     """CNN-based feature extractor model with self-attention"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
@@ -4517,7 +4517,7 @@ class FeatureExtractorCNN_new(nn.Module):
 
         return x7
 
-class FeatureExtractorCNN(nn.Module):
+class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
         super().__init__()
