@@ -76,6 +76,134 @@ from torchvision.transforms.functional import resize
 
 logger = logging.getLogger(__name__)
 
+def get_default_config():
+    """Return a default configuration dictionary."""
+    return {
+        "dataset": {
+            "name": "custom_dataset",
+            "type": "custom",
+            "in_channels": 3,  # Default to RGB
+            "num_classes": 10,  # Default number of classes
+            "input_size": [256, 256],  # Default image size
+            "mean": [0.485, 0.456, 0.406],  # Default mean for RGB
+            "std": [0.229, 0.224, 0.225],  # Default std for RGB
+            "train_dir": "data/custom_dataset/train",
+            "test_dir": "data/custom_dataset/test",
+        },
+        "model": {
+            "encoder_type": "autoenc",  # Default to autoencoder
+            "feature_dims": 128,
+            "learning_rate": 0.001,
+            "optimizer": {
+                "type": "Adam",
+                "weight_decay": 0.0001,
+                "momentum": 0.9,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "epsilon": 1e-08,
+            },
+            "scheduler": {
+                "type": "ReduceLROnPlateau",
+                "factor": 0.1,
+                "patience": 10,
+                "min_lr": 1e-06,
+                "verbose": True,
+            },
+            "autoencoder_config": {
+                "reconstruction_weight": 1.0,
+                "feature_weight": 0.1,
+                "convergence_threshold": 0.001,
+                "min_epochs": 10,
+                "patience": 5,
+                "enhancements": {
+                    "enabled": True,
+                    "use_kl_divergence": True,
+                    "use_class_encoding": True,
+                },
+            },
+        },
+        "training": {
+            "batch_size": 128,
+            "epochs": 20,
+            "checkpoint_dir": "data/custom_dataset/checkpoints",
+            "early_stopping": {
+                "enabled": True,
+                "patience": 5,
+                "min_delta": 0.001,
+            },
+        },
+    }
+
+
+def extract_image_properties(data_path):
+    """
+    Extract image properties (size, channels) from the dataset.
+    Args:
+        data_path (str): Path to the dataset directory.
+    Returns:
+        tuple: (input_size, in_channels, num_classes)
+    """
+    # Find the first image in the dataset
+    image_files = []
+    for root, _, files in os.walk(data_path):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                image_files.append(os.path.join(root, file))
+                break
+        if image_files:
+            break
+
+    if not image_files:
+        raise ValueError(f"No images found in {data_path}")
+
+    # Open the first image to get properties
+    with Image.open(image_files[0]) as img:
+        width, height = img.size
+        channels = len(img.getbands())
+
+    # Detect number of classes (if dataset is organized by class folders)
+    class_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+    num_classes = len(class_dirs) if class_dirs else 1  # Default to 1 if no class folders
+
+    return (height, width), channels, num_classes
+
+def update_config_with_dataset_properties(config, data_path):
+    """
+    Update the configuration with dataset-specific properties.
+    Args:
+        config (dict): The default configuration.
+        data_path (str): Path to the dataset directory.
+    Returns:
+        dict: Updated configuration.
+    """
+    # Extract dataset properties
+    input_size, in_channels, num_classes = extract_image_properties(data_path)
+
+    # Update configuration
+    config["dataset"]["input_size"] = list(input_size)
+    config["dataset"]["in_channels"] = in_channels
+    config["dataset"]["num_classes"] = num_classes
+
+    # Update normalization parameters if needed
+    if in_channels == 1:
+        config["dataset"]["mean"] = [0.5]
+        config["dataset"]["std"] = [0.5]
+
+    return config
+
+
+def write_config_to_file(config, output_dir):
+    """
+    Write the configuration to a JSON file.
+    Args:
+        config (dict): The configuration dictionary.
+        output_dir (str): Directory to save the configuration file.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    config_path = os.path.join(output_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=4)
+    print(f"Configuration saved to {config_path}")
 
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
@@ -5392,6 +5520,10 @@ class DatasetProcessor:
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
         """Process custom dataset structure"""
+
+        # Ensure the configuration is ready
+        if not config:
+            raise ValueError("Configuration must be initialized before processing data.")
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
@@ -6832,7 +6964,21 @@ def main():
         logger = setup_logging()
         args = parse_arguments()
 
-        # Process based on mode
+        # Step 1: Start with default configuration
+        config = get_default_config()
+
+        # Step 2: Update configuration based on dataset properties
+        if args.mode in ['train', 'reconstruct']:
+            # For training and reconstruction, we need to process the dataset
+            data_path = args.input_dir if args.mode == 'train' else args.data
+            config = update_config_with_dataset_properties(config, data_path)
+
+            # Step 3: Write configuration to file
+            output_dir = os.path.join(args.output_dir, config["dataset"]["name"])
+            write_config_to_file(config, output_dir)
+            logger.info(f"Configuration saved to {output_dir}/config.json")
+
+        # Step 4: Process based on mode
         if args.mode == 'predict':
             # Load the config
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
@@ -6862,9 +7008,17 @@ def main():
             logger.info(f"Predictions saved to {args.output_csv}")
 
         elif args.mode == 'train':
-            return handle_training_mode(args, logger)
+            # Process the dataset and update the configuration
+            train_dir, test_dir = process_custom_dataset(args.input_dir, config)
+            logger.info(f"Dataset processed. Train directory: {train_dir}, Test directory: {test_dir}")
+
+            # Handle training mode
+            return handle_training_mode(args, logger, config)
+
         elif args.mode == 'reconstruct':
-            return handle_prediction_mode(args, logger)
+            # Handle reconstruction mode
+            return handle_prediction_mode(args, logger, config)
+
         else:
             logger.error(f"Invalid mode: {args.mode}")
             return 1
