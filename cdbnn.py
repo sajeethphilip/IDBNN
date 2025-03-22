@@ -6655,7 +6655,7 @@ def parse_arguments():
         return get_interactive_args()
 
     parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
-    parser.add_argument('--mode', choices=['train', 'reconstruct','predict'], default='train')
+    parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'], default='train')
     parser.add_argument('--data', type=str, help='dataset name/path')
     parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
     parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
@@ -6670,7 +6670,16 @@ def parse_arguments():
     parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
     parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
 
-    return parser.parse_args()
+    # Add input_dir argument
+    parser.add_argument('--input-dir', type=str, help='path to the input directory (required for train and predict modes)')
+
+    args = parser.parse_args()
+
+    # Validate mode-specific arguments
+    if args.mode in ['train', 'predict'] and not args.input_dir:
+        parser.error(f"--input-dir is required for {args.mode} mode")
+
+    return args
 
 
 def save_last_args(args):
@@ -6956,6 +6965,7 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
         return existing_config
     return new_config
+
 def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
@@ -7003,9 +7013,9 @@ def main():
             logger.info("Starting prediction process...")
             predictor.predict_images(
                 input_dir=args.input_dir,
-                output_csv=args.output_csv
+                output_csv=args.input_csv  # Use input_csv for output predictions
             )
-            logger.info(f"Predictions saved to {args.output_csv}")
+            logger.info(f"Predictions saved to {args.input_csv}")
 
         elif args.mode == 'train':
             # Process the dataset and update the configuration
