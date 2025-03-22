@@ -5171,58 +5171,58 @@ class CustomImageDataset(Dataset):
                             self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
                             self.filenames.append(img_name)  # Populate filenames list
 
-            # Preprocess all images during initialization
-            self._preprocess_all_images()
+        # Preprocess all images during initialization
+        self._preprocess_all_images()
 
-        def _preprocess_all_images(self):
-            """
-            Preprocess all images to ensure consistent shapes (256x256).
-            """
-            for img_path in self.image_files:
-                image = Image.open(img_path).convert('RGB')
-                image_tensor = transforms.ToTensor()(image)
+    def _preprocess_all_images(self):
+        """
+        Preprocess all images to ensure consistent shapes (256x256).
+        """
+        for img_path in self.image_files:
+            image = Image.open(img_path).convert('RGB')
+            image_tensor = transforms.ToTensor()(image)
 
-                # Resize or window the image
-                preprocessed_tensors = self._preprocess_image(image_tensor)
+            # Resize or window the image
+            preprocessed_tensors = self._preprocess_image(image_tensor)
 
-                # Store preprocessed tensors (or save to disk and store paths)
-                self.preprocessed_images.append(preprocessed_tensors)
+            # Store preprocessed tensors (or save to disk and store paths)
+            self.preprocessed_images.append(preprocessed_tensors)
 
-        def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
-            """
-            Preprocess an image tensor to ensure it is suitable for the CNN.
-            - If the image is smaller than target_size, resize it to target_size.
-            - If the image is larger than target_size, split it into sliding windows of target_size.
+    def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Preprocess an image tensor to ensure it is suitable for the CNN.
+        - If the image is smaller than target_size, resize it to target_size.
+        - If the image is larger than target_size, split it into sliding windows of target_size.
 
-            Args:
-                image_tensor (torch.Tensor): Input image tensor of shape (C, H, W).
+        Args:
+            image_tensor (torch.Tensor): Input image tensor of shape (C, H, W).
 
-            Returns:
-                torch.Tensor: Processed image tensor(s). If windowing is used, returns a batch of tensors.
-            """
-            _, h, w = image_tensor.shape
+        Returns:
+            torch.Tensor: Processed image tensor(s). If windowing is used, returns a batch of tensors.
+        """
+        _, h, w = image_tensor.shape
 
-            # Resize if image is smaller than target_size
-            if h < self.target_size or w < self.target_size:
-                image_tensor = transforms.functional.resize(image_tensor, (self.target_size, self.target_size))
-                return image_tensor.unsqueeze(0)  # Add batch dimension
+        # Resize if image is smaller than target_size
+        if h < self.target_size or w < self.target_size:
+            image_tensor = transforms.functional.resize(image_tensor, (self.target_size, self.target_size))
+            return image_tensor.unsqueeze(0)  # Add batch dimension
 
-            # Split into sliding windows if image is larger than target_size
-            if h > self.target_size or w > self.target_size:
-                stride = int(self.target_size * (1 - self.overlap))  # Stride based on overlap
-                windows = []
+        # Split into sliding windows if image is larger than target_size
+        if h > self.target_size or w > self.target_size:
+            stride = int(self.target_size * (1 - self.overlap))  # Stride based on overlap
+            windows = []
 
-                # Extract windows
-                for y in range(0, h - self.target_size + 1, stride):
-                    for x in range(0, w - self.target_size + 1, stride):
-                        window = image_tensor[:, y:y + self.target_size, x:x + self.target_size]
-                        windows.append(window)
+            # Extract windows
+            for y in range(0, h - self.target_size + 1, stride):
+                for x in range(0, w - self.target_size + 1, stride):
+                    window = image_tensor[:, y:y + self.target_size, x:x + self.target_size]
+                    windows.append(window)
 
-                # Stack windows into a batch
-                return torch.stack(windows)
+            # Stack windows into a batch
+            return torch.stack(windows)
 
-            # If image is already target_size, return as is
-            return image_tensor.unsqueeze(0)
+        # If image is already target_size, return as is
+        return image_tensor.unsqueeze(0)
     def __len__(self):
         return len(self.image_files)
 
