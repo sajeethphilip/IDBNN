@@ -63,61 +63,11 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
-import json
 import torch
-import logging
-from torch.utils.data import Dataset
+import pandas as pd
 from torchvision import transforms
 from PIL import Image
-import pandas as pd
 from tqdm import tqdm
-from typing import Dict, List, Optional
-
-logger = logging.getLogger(__name__)
-class Colors:
-    """ANSI color codes for terminal output"""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
-    @staticmethod
-    def color_value(current_value, previous_value=None, higher_is_better=True):
-        """Color a value based on whether it improved or declined"""
-        if previous_value is None:
-            return f"{current_value:.4f}"
-
-        if higher_is_better:
-            if current_value > previous_value:
-                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
-            elif current_value < previous_value:
-                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
-        else:  # lower is better
-            if current_value < previous_value:
-                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
-            elif current_value > previous_value:
-                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
-
-        return f"{current_value:.4f}"  # No color if equal
-
-    @staticmethod
-    def highlight_dataset(name):
-        """Highlight dataset name in red"""
-        return f"{Colors.RED}{name}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_time(time_value):
-        """Color time values based on threshold"""
-        if time_value < 10:
-            return f"{Colors.GREEN}{time_value:.2f}{Colors.ENDC}"
-        elif time_value < 30:
-            return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
-        else:
-            return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
 
 class PredictionManager:
@@ -304,7 +254,6 @@ class PredictionManager:
                 std=self.config['dataset']['std']
             )
         ])
-
 
 
 
@@ -893,7 +842,6 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Extract features from the dataset using the autoencoder."""
         self.eval()
         all_embeddings = []
         all_labels = []
@@ -906,8 +854,7 @@ class BaseAutoencoder(nn.Module):
                 for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc="Extracting features")):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
-                    # Get metadata if available, otherwise use placeholders
-                    dataset = loader.dataset  # Ensure dataset is accessible
+
                     # Get metadata if available, otherwise use placeholders
                     if hasattr(loader.dataset, 'get_additional_info'):
                         # Custom dataset with metadata
@@ -916,11 +863,9 @@ class BaseAutoencoder(nn.Module):
                         class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
                     else:
                         # Dataset without metadata (e.g., torchvision)
-                        # Generate consistent placeholders for indices, filenames, and class names
-                        start_idx = batch_idx * loader.batch_size
-                        indices = [start_idx + i for i in range(len(inputs))]
-                        filenames = [f"image_{idx}.png" for idx in indices]
-                        class_names = [f"class_{label.item()}" for label in labels]
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
+                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
 
                     # Extract embeddings
                     embeddings = self.encode(inputs)
@@ -937,11 +882,6 @@ class BaseAutoencoder(nn.Module):
                 # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
-
-                # Ensure all arrays have the same length
-                assert len(embeddings) == len(labels) == len(all_indices) == len(all_filenames) == len(all_class_names), \
-                    f"Mismatch in array lengths: embeddings={len(embeddings)}, labels={len(labels)}, " \
-                    f"indices={len(all_indices)}, filenames={len(all_filenames)}, class_names={len(all_class_names)}"
 
                 feature_dict = {
                     'embeddings': embeddings,
@@ -999,32 +939,31 @@ class BaseAutoencoder(nn.Module):
             # Process file indices
             if 'indices' in feature_dict:
                 data_dict['file_index'] = feature_dict['indices']
-            else:
-                # Generate sequential indices if not provided
-                data_dict['file_index'] = list(range(len(data_dict['target'])))
-            feature_columns.append('file_index')
+                feature_columns.append('file_index')
 
-            # Process filenames
-            if 'filenames' in feature_dict:
-                data_dict['filename'] = feature_dict['filenames']
-            else:
-                # Generate placeholder filenames if not provided
-                data_dict['filename'] = [f"image_{i}.png" for i in range(len(data_dict['target']))]
-            feature_columns.append('filename')
+            # Process optional fields with placeholders if missing
+            optional_fields = {
+                'indices': 'unknown_index',  # Placeholder for missing indices
+                'filenames': 'unknown_filename',  # Placeholder for missing filenames
+                'class_names': 'unknown_class',  # Placeholder for missing class names
+            }
 
-            # Process class names
-            if 'class_names' in feature_dict:
-                data_dict['class_name'] = feature_dict['class_names']
-            else:
-                # Generate placeholder class names if not provided
-                data_dict['class_name'] = [f"class_{label}" for label in data_dict['target']]
-            feature_columns.append('class_name')
+            for field, placeholder in optional_fields.items():
+                if field in feature_dict:
+                    data_dict[field] = feature_dict[field]  # Use actual data if available
+                else:
+                    # Use placeholder if field is missing
+                    data_dict[field] = [placeholder] * len(data_dict['target'])  # Match length of mandatory field
+                feature_columns.append(field)
+
+
 
             # Process enhancement features if present
             if hasattr(self, '_get_enhancement_columns'):
                 enhancement_features = self._get_enhancement_columns(feature_dict)
                 data_dict.update(enhancement_features)
                 feature_columns.extend(enhancement_features.keys())
+
 
             # Check that all arrays have the same length
             lengths = [len(data_dict[col]) for col in feature_columns]
@@ -3020,10 +2959,9 @@ class BaseFeatureExtractor(nn.Module, ABC):
         """Create and return the feature extraction model"""
         pass
 
-    def load_state_dict(self, state_dict: Dict, strict: bool = True):
+    def load_state_dict(self, state_dict: Dict):
         """Load model state from a state dictionary."""
-        # Pass the strict parameter to the underlying model's load_state_dict
-        self.feature_extractor.load_state_dict(state_dict, strict=strict)
+        self.feature_extractor.load_state_dict(state_dict)
         self.feature_extractor.eval()
 
     def save_checkpoint(self, path: str, is_best: bool = False):
@@ -5180,9 +5118,6 @@ class CustomImageDataset(Dataset):
 
     def get_additional_info(self, idx):
         """Retrieve additional information (file_index and filename) for a given index."""
-        for idx in range(len(dataset)):
-            index, filename = dataset.get_additional_info(idx)
-            print(f"Sample {idx}: index={index}, filename={filename}")
         return self.file_indices[idx], self.filenames[idx]
 
     def __getitem__(self, idx):
@@ -5191,8 +5126,6 @@ class CustomImageDataset(Dataset):
         label = self.labels[idx]
         file_index = self.file_indices[idx]  # Retrieve file index
         filename = self.filenames[idx]  # Retrieve filename
-        # Print class and filename for each sample
-        print("\033[K" +f"{Colors.GREEN}Processing file: {filename}, Class: {self.reverse_encoder[label]}{Colors.ENDC}",end='\r',flush=True)
 
         if self.transform:
             image = self.transform(image)
@@ -6735,21 +6668,11 @@ def main():
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
 
-            # Set the dataset (if required)
-            if hasattr(predictor.model, 'set_dataset'):
-                # Create a dataset with the images in the input directory
-                transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
-                predictor.model.set_dataset(dataset)  # Set the dataset in the model
-                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
-
             # Perform predictions
-            logger.info("Starting prediction process...")
             predictor.predict_images(
                 input_dir=args.input_dir,
                 output_csv=args.output_csv
             )
-            logger.info(f"Predictions saved to {args.output_csv}")
 
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
