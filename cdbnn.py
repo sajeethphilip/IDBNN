@@ -5281,6 +5281,7 @@ class DatasetProcessor:
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
+        self.config = config if config is not None else {}  # Initialize config
 
         if self.datatype == 'torchvision':
             self.dataset_name = self.datafile.lower()
