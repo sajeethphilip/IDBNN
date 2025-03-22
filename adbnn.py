@@ -5351,24 +5351,82 @@ def print_dataset_info(conf_path: str, csv_path: str):
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
     parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
-    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
-                        required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
+    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
+                        required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
+    parser.add_argument('--interactive', action='store_true', help="Enable interactive mode to modify settings.")
     args = parser.parse_args()
     processor = DatasetProcessor()
-    parser.print_help()
+
+    if args.interactive:
+        # Interactive mode to modify settings
+        print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Interactive Mode{Colors.ENDC}")
+
+        # Load or create the configuration file
+        config = load_or_create_config()
+
+        # Display current configuration
+        print("\033[K" +f"{Colors.BOLD}Current Configuration:{Colors.ENDC}")
+        print("\033[K" +f"- Device: {config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')}")
+        print("\033[K" +f"- Mode: {'Train' if config.get('train', True) else 'Predict'}")
+        print("\033[K" +f"- Learning Rate: {config.get('learning_rate', 0.1)}")
+        print("\033[K" +f"- Epochs: {config.get('epochs', 1000)}")
+        print("\033[K" +f"- Test Fraction: {config.get('test_fraction', 0.2)}")
+        print("\033[K" +f"- Enable Adaptive: {config.get('enable_adaptive', True)}")
+
+        # Prompt to modify mode
+        mode = input("\033[K" +f"{Colors.BOLD}Enter mode (train/train_predict/predict): {Colors.ENDC}").strip().lower()
+        while mode not in ['train', 'train_predict', 'predict']:
+            print("\033[K" +f"{Colors.RED}Invalid mode. Please enter 'train', 'train_predict', or 'predict'.{Colors.ENDC}")
+            mode = input("\033[K" +f"{Colors.BOLD}Enter mode (train/train_predict/predict): {Colors.ENDC}").strip().lower()
+
+        # Update configuration based on mode
+        if mode == 'train':
+            config['train'] = True
+            config['predict'] = False
+        elif mode == 'train_predict':
+            config['train'] = True
+            config['predict'] = True
+        elif mode == 'predict':
+            config['train'] = False
+            config['predict'] = True
+
+        # If in predict mode, prompt for input CSV file
+        if mode == 'predict':
+            csv_file = input("\033[K" +f"{Colors.BOLD}Enter path to input CSV file (or press Enter to use default): {Colors.ENDC}").strip()
+            if not csv_file:
+                # Use default CSV file if available
+                dataset_pairs = find_dataset_pairs()
+                if dataset_pairs:
+                    csv_file = dataset_pairs[0][2]  # Use the first found CSV file
+                    print("\033[K" +f"{Colors.YELLOW}Using default CSV file: {csv_file}{Colors.ENDC}")
+                else:
+                    print("\033[K" +f"{Colors.RED}No default CSV file found. Please provide a path.{Colors.ENDC}")
+                    return
+            config['file_path'] = csv_file
+
+        # Save updated configuration
+        with open('adaptive_dbnn.conf', 'w') as f:
+            json.dump(config, f, indent=4)
+
+        print("\033[K" +f"{Colors.GREEN}Configuration updated.{Colors.ENDC}")
+
+        # Set the mode and file_path for further processing
+        args.mode = mode
+        args.file_path = config.get('file_path', None)
+
     if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
         process_datasets()
 
-    elif args.mode !="invertDBNN":
+    elif args.mode != "invertDBNN" and args.mode != "predict":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
-        basename=args.file_path.split('/')[-1].split('.')[0]
-        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
-        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
-        # Save the label encoder after training
-       # Create DBNN instance with specific dataset name
+        basename = args.file_path.split('/')[-1].split('.')[0]
+        conf_path = os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path = os.path.join(f"data/{basename}/{basename}.csv")
+
+        # Create DBNN instance with specific dataset name
         model = DBNN(dataset_name=basename)
 
         # Optionally create an invertible model
@@ -5392,15 +5450,17 @@ def main():
         print("\033[K" +f"Excluded {results['n_excluded']} features")
         save_label_encoder(model.label_encoder, basename)
 
-    elif args.mode =="invertDBNN":
+    elif args.mode == "invertDBNN":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
-        basename=args.file_path.split('/')[-1].split('.')[0]
-        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
-        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        basename = args.file_path.split('/')[-1].split('.')[0]
+        conf_path = os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path = os.path.join(f"data/{basename}/{basename}.csv")
+
         # Invert DBNN mode
         model = DBNN(dataset_name=basename)
         model._load_model_components()
+
         # Load configuration
         with open(conf_path, 'r') as f:
             config_dict = json.load(f)
@@ -5416,9 +5476,6 @@ def main():
         try:
             label_encoder = load_label_encoder(basename)
             model.label_encoder = label_encoder
-
-            # Now you can safely access model.label_encoder.classes_
-            #print("\033[K" +f"Classes in label encoder: {model.label_encoder.classes_}")
 
             # Proceed with inverse model initialization
             inverse_model = InvertibleDBNN(
@@ -5448,6 +5505,33 @@ def main():
             print("\033[K" +f"Error: {str(e)}")
             print("\033[K" +"Please ensure the model has been trained before using invertDBNN mode.")
             return
+
+    elif args.mode == "predict":
+        # Predict mode
+        if not args.file_path:
+            print("\033[K" +f"{Colors.RED}No input CSV file provided for prediction.{Colors.ENDC}")
+            return
+
+        basename = args.file_path.split('/')[-1].split('.')[0]
+        conf_path = os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path = os.path.join(f"data/{basename}/{basename}.csv")
+
+        # Load the model and configuration
+        model = DBNN(dataset_name=basename)
+        model._load_model_components()
+
+        # Load the label encoder
+        try:
+            label_encoder = load_label_encoder(basename)
+            model.label_encoder = label_encoder
+        except FileNotFoundError as e:
+            print("\033[K" +f"Error: {str(e)}")
+            print("\033[K" +"Please ensure the model has been trained before using predict mode.")
+            return
+
+        # Make predictions
+        print("\033[K" +f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
+        model.predict_and_save(save_path=f"data/{basename}/Predictions", batch_size=128)
 
     else:
         print("\033[K" +"No datasets found in data folder")
