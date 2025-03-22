@@ -93,6 +93,44 @@ class PredictionManager:
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
+    def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
+        """Extract a compressed archive to a directory."""
+        if archive_path.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+        elif archive_path.endswith('.tar.gz') or archive_path.endswith('.tgz'):
+            with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                tar_ref.extractall(extract_dir)
+        elif archive_path.endswith('.tar'):
+            with tarfile.open(archive_path, 'r:') as tar_ref:
+                tar_ref.extractall(extract_dir)
+        else:
+            raise ValueError(f"Unsupported archive format: {archive_path}")
+        return extract_dir
+
+    def _get_image_files(self, input_path: str) -> List[str]:
+        """Get a list of image files from the input path."""
+        if os.path.isfile(input_path):
+            # Single image file
+            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                return [input_path]
+            # Compressed archive
+            elif input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+                extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                self._extract_archive(input_path, extract_dir)
+                return self._get_image_files(extract_dir)  # Recursively process extracted files
+        elif os.path.isdir(input_path):
+            # Directory of images
+            image_files = []
+            for root, _, files in os.walk(input_path):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        image_files.append(os.path.join(root, file))
+            return image_files
+        else:
+            raise ValueError(f"Invalid input path: {input_path}")
+
     def _load_model(self) -> nn.Module:
         """
         Load the trained model from the checkpoint.
@@ -128,16 +166,14 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def predict_images(self, input_dir: str, output_csv: str = None):
+    def predict_images(self, input_path: str, output_csv: str = None):
         """
-        Predict features for images in the input directory and save results to a CSV file.
-
-        Args:
-            input_dir (str): Directory containing new images.
-            output_csv (str, optional): Path to save the output CSV file. Defaults to None.
+        Predict features for images from the input path (file, directory, or archive).
         """
-        if not os.path.exists(input_dir):
-            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+        # Get list of image files
+        image_files = self._get_image_files(input_path)
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_path}")
 
         # Set default output CSV path if not provided
         if output_csv is None:
@@ -149,12 +185,6 @@ class PredictionManager:
         logger.debug(f"Image transforms: {transform}")
 
         # Process images
-        image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
-        if not image_files:
-            raise ValueError(f"No valid images found in {input_dir}")
-        logger.debug(f"Found {len(image_files)} images in {input_dir}")
-
-        # Prepare data structure for predictions
         predictions = {
             'filename': [],
             'features_phase1': [],
@@ -164,7 +194,7 @@ class PredictionManager:
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
             logger.debug("Creating dataset...")
-            dataset = self._create_dataset(input_dir, transform)
+            dataset = self._create_dataset(image_files, transform)
             logger.debug(f"Dataset created with {len(dataset)} images.")
             self.model.set_dataset(dataset)  # Set the dataset before processing images
             logger.debug("Dataset set in the model.")
@@ -175,8 +205,7 @@ class PredictionManager:
                 logger.debug(f"Processing image: {filename}")
 
                 # Load and transform the image
-                image_path = os.path.join(input_dir, filename)
-                image = Image.open(image_path).convert('RGB')
+                image = Image.open(filename).convert('RGB')
                 image_tensor = transform(image).unsqueeze(0).to(self.device)
                 logger.debug(f"Image tensor shape: {image_tensor.shape}")
 
@@ -197,25 +226,9 @@ class PredictionManager:
                         embedding_phase1 = output  # Assume the output is a single tensor
 
                     # Convert to numpy array
-                    #logger.debug("Converting embedding to numpy array...")
-                    #embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
-                    #logger.debug(f"Embedding shape: {embedding_phase1.shape}")
-                    # Assuming embedding_phase1 is a dictionary
-                    if isinstance(embedding_phase1, dict):
-                        # Check if the dictionary contains the expected key
-                        if 'embedding' in embedding_phase1:
-                            embedding_tensor = embedding_phase1['embedding']
+                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
 
-                            # Ensure the tensor is on the CPU and convert to NumPy array
-                            if isinstance(embedding_tensor, torch.Tensor):
-                                embedding_array = embedding_tensor.cpu().numpy().flatten()
-                                logger.debug("Embedding successfully converted to numpy array.")
-                            else:
-                                logger.error("The 'embedding' key does not contain a tensor.")
-                        else:
-                            logger.error("The dictionary does not contain the 'embedding' key.")
-                    else:
-                        logger.error("embedding_phase1 is not a dictionary.")
                 # Extract features using the model (phase 2)
                 if hasattr(self.model, 'set_training_phase'):
                     logger.debug("Switching to phase 2...")
@@ -236,15 +249,11 @@ class PredictionManager:
                             embedding_phase2 = output  # Assume the output is a single tensor
 
                         # Convert to numpy array
-                        logger.debug("Converting embedding to numpy array...")
                         embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
                         logger.debug(f"Embedding shape: {embedding_phase2.shape}")
-                else:
-                    logger.debug("Phase 2 not enabled. Using phase 1 embeddings.")
-                    embedding_phase2 = embedding_phase1  # Fallback to phase 1 if phase 2 is not available
 
                 # Store results
-                predictions['filename'].append(filename)
+                predictions['filename'].append(os.path.basename(filename))
                 predictions['features_phase1'].append(embedding_phase1)
                 predictions['features_phase2'].append(embedding_phase2)
                 logger.debug(f"Stored predictions for {filename}")
