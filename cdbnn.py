@@ -5147,7 +5147,7 @@ class CustomImageDataset(Dataset):
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        self.target_size = target_size
+        self.target_size = target_size  # Store target_size as an instance variable
         self.overlap = overlap
         self.image_files = []
         self.labels = []
@@ -5228,7 +5228,7 @@ class CustomImageDataset(Dataset):
         os.makedirs(self.preprocessed_dir, exist_ok=True)
 
         # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {target_size}x{target_size}")):
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {self.target_size}x{self.target_size}")):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
