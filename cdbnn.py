@@ -547,7 +547,7 @@ class BaseAutoencoder(nn.Module):
         self.checkpoint_dir = config['training']['checkpoint_dir']
         self.dataset_name = config['dataset']['name']
         self.checkpoint_path = os.path.join(self.checkpoint_dir,
-                                          f"{self.dataset_name}_unified.pth")
+                                          f"{self.dataset_name}_{self.model_type}_unified.pth")
 
         # Create network layers
         self.encoder_layers = self._create_encoder_layers()
@@ -1826,7 +1826,7 @@ class UnifiedCheckpoint:
         self.config = config
         self.checkpoint_dir = config['training']['checkpoint_dir']
         self.dataset_name = config['dataset']['name']
-        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_{self.model_type}_unified.pth")
         self.current_state = None
 
         # Create checkpoint directory if it doesn't exist
@@ -2021,6 +2021,9 @@ def train_model(model: nn.Module, train_loader: DataLoader,
     start_epoch = getattr(model, 'current_epoch', 0)
     current_phase = getattr(model, 'training_phase', 1)
 
+    # Initialize unified checkpoint
+    checkpoint_manager = UnifiedCheckpoint(config, model.model_type)  # Pass model type to checkpoint manager
+
     # Phase 1: Pure reconstruction (if not already completed)
     if current_phase == 1:
         logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
@@ -2102,6 +2105,7 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
     # Get unique identifier for this configuration
     identifier = _get_checkpoint_identifier(model, phase, config)
     dataset_name = config['dataset']['name']
+    model_type = model.model_type  # Get model type
 
     checkpoint = {
         'state_dict': model.state_dict(),
@@ -2120,12 +2124,12 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
     }
 
     # Always save latest checkpoint
-    latest_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_latest.pth")
+    latest_path = os.path.join(checkpoint_dir, f"{dataset_name}_{model_type}_{identifier}_latest.pth")  # Include model type in filename
     torch.save(checkpoint, latest_path)
 
     # Save phase-specific best model if applicable
     if is_best:
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{model_type}_{identifier}_best.pth")  # Include model type in filename
         torch.save(checkpoint, best_path)
         logger.info(f"Saved best model for {identifier} with loss: {loss:.4f}")
 
@@ -2138,7 +2142,7 @@ def load_best_checkpoint(model: nn.Module, phase: int, config: Dict) -> Optional
     checkpoint_dir = config['training']['checkpoint_dir']
     identifier = _get_checkpoint_identifier(model, phase, config)
     dataset_name = config['dataset']['name']
-    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{model_type}_{identifier}_best.pth")  # Include model type in filename
 
     if os.path.exists(best_path):
         logger.info(f"Loading best checkpoint for {identifier}")
@@ -2151,6 +2155,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
     """
     metrics = {}
     identifier = _get_checkpoint_identifier(model, phase, config)
+    model_type = model.model_type  # Get model type
 
     # Try to load existing best metrics
     checkpoint = load_best_checkpoint(model, phase, config)
@@ -2172,7 +2177,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     # Get phase-specific metrics
     # Initialize unified checkpoint
-    checkpoint_manager = UnifiedCheckpoint(config)
+    checkpoint_manager = UnifiedCheckpoint(config, model.model_type)  # Pass model type to checkpoint manager
 
     # Load best loss from checkpoint
     best_loss = checkpoint_manager.get_best_loss(phase, model)
@@ -2926,6 +2931,16 @@ class BaseFeatureExtractor(nn.Module, ABC):
                                      and torch.cuda.is_available() else 'cpu')
         else:
             self.device = device
+
+        self.model_type = self._get_model_type()  # Get model type (CNN or autoencoder)
+        self.checkpoint_manager = UnifiedCheckpoint(config, self.model_type)  # Pass model type to checkpoint manager
+
+    def _get_model_type(self) -> str:
+        """Determine the model type based on the configuration"""
+        encoder_type = self.config['model'].get('encoder_type', 'cnn').lower()
+        if encoder_type == 'autoenc':
+            return 'autoencoder'
+        return 'cnn'
 
         # Initialize common parameters
         self.feature_dims = self.config['model']['feature_dims']
@@ -3801,7 +3816,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         plt.close()
 
     def _load_from_checkpoint(self):
-        """Load model and training state from checkpoint"""
+        """Load model from checkpoint"""
         checkpoint_dir = self.config['training']['checkpoint_dir']
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -3811,7 +3826,25 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         if checkpoint_path and os.path.exists(checkpoint_path):
             try:
                 logger.info(f"Loading checkpoint from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+                # Debug: Ensure model is initialized
+                if not hasattr(self, 'feature_extractor') or self.feature_extractor is None:
+                    logger.error("Model (feature_extractor) is not initialized. Initializing now...")
+                    self.feature_extractor = self._create_model()
+
+                # Determine the appropriate device for loading
+                if torch.cuda.is_available():
+                    map_location = self.device  # Use GPU if available
+                else:
+                    map_location = torch.device('cpu')  # Fallback to CPU
+
+                # Load checkpoint with weights_only=True for security
+                checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+
+                # Debug: Verify checkpoint contents
+                if 'state_dict' not in checkpoint:
+                    logger.error("Checkpoint does not contain 'state_dict'. Cannot load model.")
+                    raise KeyError("Checkpoint missing 'state_dict'")
 
                 # Load model state
                 self.feature_extractor.load_state_dict(checkpoint['state_dict'])
@@ -3845,19 +3878,19 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
-        checkpoint_dir = self.config['training']['checkpoint_dir']
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+
         if not os.path.exists(checkpoint_dir):
             return None
 
-        dataset_name = self.config['dataset']['name']
-
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{self.model_type}_best.pth")  # Include model type in filename
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_{self.model_type}_checkpoint.pth")  # Include model type in filename
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -3880,7 +3913,8 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
         # Save latest checkpoint
         dataset_name = self.config['dataset']['name']
-        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+
+        filename = f"{dataset_name}_{self.model_type}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -4695,6 +4729,7 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         else:
             logger.info("No checkpoint found, starting from scratch")
             self.optimizer = self._initialize_optimizer()
+
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
         dataset_name = self.config['dataset']['name']
@@ -4704,12 +4739,12 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
             return None
 
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{self.model_type}_best.pth")  # Include model type in filename
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_{self.model_type}_checkpoint.pth")  # Include model type in filename
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -4732,7 +4767,7 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
         # Save latest checkpoint
         dataset_name = self.config['dataset']['name']
-        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        filename = f"{dataset_name}_{self.model_type}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -6420,7 +6455,7 @@ def get_interactive_args():
     if args.mode == 'predict':
         # Set default model path
         dataset_name = Path(args.data).stem if args.data else 'dataset'
-        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
+        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_{self.model_type}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
@@ -6480,7 +6515,7 @@ def get_interactive_args():
 
 def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
-    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
+    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_{self.model_type}_best.pth")
     if os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
