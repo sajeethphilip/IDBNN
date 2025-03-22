@@ -130,7 +130,6 @@ class PredictionManager:
     def predict_images(self, input_dir: str, output_csv: str = None):
         """
         Predict features for images in the input directory and save results to a CSV file.
-
         Args:
             input_dir (str): Directory containing new images.
             output_csv (str, optional): Path to save the output CSV file. Defaults to None.
