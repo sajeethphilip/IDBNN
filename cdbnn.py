@@ -1046,15 +1046,16 @@ class BaseAutoencoder(nn.Module):
         else:
             raise ValueError("Mandatory field 'labels' is missing in features")
 
-        # Process optional fields
+        '''# Process optional fields
         optional_fields = ['indices', 'filenames', 'class_names']
         for field in optional_fields:
             if field in features:
                 data_dict[field] = features[field]
                 print(f"Found filed {data_dict[field]}")
-            #else:
-            #    data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
-             #   print(f"Dummy filed {data_dict[field]}")
+            else:
+                data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
+                print(f"Dummy filed {data_dict[field]}")
+        '''
         # Convert to DataFrame
         try:
             data_frame=pd.DataFrame(data_dict)
