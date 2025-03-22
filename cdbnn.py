@@ -6572,7 +6572,7 @@ def load_last_args():
     except FileNotFoundError:
         return None
 
-def get_interactive_args_old():
+def get_interactive_args():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
     args = argparse.Namespace()
