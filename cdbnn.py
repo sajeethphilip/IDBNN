@@ -1051,11 +1051,16 @@ class BaseAutoencoder(nn.Module):
         for field in optional_fields:
             if field in features:
                 data_dict[field] = features[field]
+                print(f"Found filed {data_dict[field]}")
             else:
                 data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
-
+                print(f"Dummy filed {data_dict[field]}")
         # Convert to DataFrame
-        return pd.DataFrame(data_dict)
+        try:
+            data_frame=pd.DataFrame(data_dict)
+        except:
+            print("Failed creating dataframe")
+        return data_frame
 
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
