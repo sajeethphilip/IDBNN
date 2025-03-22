@@ -993,7 +993,7 @@ class BaseAutoencoder(nn.Module):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             # Access enable_adaptive from training_params
-            enable_adaptive = self.config['training_params'].get('enable_adaptive', True)
+            enable_adaptive = self.config['enhancements'].get('enable_adaptive', True)
             print(f"Enable Adaptive mode is {enable_adaptive}")
             if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
@@ -3143,6 +3143,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         autoencoder_config.setdefault('enhancements', {
             'use_kl_divergence': True,
             'use_class_encoding': False,
+            'enable_adaptive': True,  # Default value
             'kl_divergence_weight': 0.1,
             'classification_weight': 0.1,
             'clustering_temperature': 1.0,
@@ -5390,7 +5391,7 @@ class DatasetProcessor:
         test_dir = os.path.join(self.dataset_dir, "test")
 
         # Access enable_adaptive from training_params
-        enable_adaptive = self.config['training_params'].get('enable_adaptive', True)
+        enable_adaptive = self.config['enhancements'].get('enable_adaptive', True)
         print(f"Enable Adaptive mode is {enable_adaptive}")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
