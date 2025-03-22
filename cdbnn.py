@@ -982,7 +982,7 @@ class BaseAutoencoder(nn.Module):
 
     def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
         """
-        Save features for training and test sets separately.
+        Save features for training and test sets based on the adaptive flag.
 
         Args:
             train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
@@ -992,17 +992,29 @@ class BaseAutoencoder(nn.Module):
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Save training features
-            train_df = self._features_to_dataframe(train_features)
-            train_output_path = output_path.replace(".csv", "_train.csv")
-            train_df.to_csv(train_output_path, index=False)
-            logger.info(f"Training features saved to {train_output_path}")
+            # Check if adaptive mode is enabled
+            adaptive_mode = self.config.get('enable_adaptive', True)
 
-            # Save test features
-            test_df = self._features_to_dataframe(test_features)
-            test_output_path = output_path.replace(".csv", "_test.csv")
-            test_df.to_csv(test_output_path, index=False)
-            logger.info(f"Test features saved to {test_output_path}")
+            if adaptive_mode:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features)
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features)
+                test_df = self._features_to_dataframe(test_features)
+
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
+
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
 
         except Exception as e:
             logger.error(f"Error saving features: {str(e)}")
