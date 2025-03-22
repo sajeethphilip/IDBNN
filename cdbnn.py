@@ -5146,6 +5146,8 @@ class CustomImageDataset(Dataset):
         label = self.labels[idx]
         file_index = self.file_indices[idx]  # Retrieve file index
         filename = self.filenames[idx]  # Retrieve filename
+        # Print class and filename for each sample
+        print(f"Processing file: {filename}, Class: {self.reverse_encoder[label]}")
 
         if self.transform:
             image = self.transform(image)
