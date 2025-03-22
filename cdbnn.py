@@ -6572,20 +6572,6 @@ def load_last_args():
     except FileNotFoundError:
         return None
 
-def get_interactive_args():
-    """Collect arguments interactively from the user."""
-    class Args:
-        def __init__(self):
-            self.mode = input("Enter mode (train/reconstruct/predict) [predict]: ") or "predict"
-            self.data = input("Enter dataset name/path: ")
-            self.input_dir = input("Enter input directory: ")
-            self.output_dir = input("Enter output directory [data]: ") or "data"
-            self.output_csv = input("Enter output CSV file path: ")
-            self.cpu = input("Use CPU only? (y/n) [n]: ").lower() == "y"
-            self.debug = input("Enable debug mode? (y/n) [n]: ").lower() == "y"
-
-    return Args()
-
 def get_interactive_args_old():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
@@ -6863,23 +6849,23 @@ def main():
         # Setup logging
         logger = setup_logging()
 
-        # Parse arguments (command-line or interactive)
+        # Parse arguments (interactive or command-line)
         if len(sys.argv) > 1:  # Command-line mode
             args = parse_arguments()
         else:  # Interactive mode
             args = get_interactive_args()
 
         # Initialize DatasetProcessor
-        dataset_processor = DatasetProcessor(datafile=args.data, datatype="custom", output_dir=args.output_dir)
+        dataset_processor = DatasetProcessor(datafile=args.data, datatype=args.data_type, output_dir=args.output_dir)
 
         # Generate main configuration
-        config = dataset_processor._generate_main_config(args.input_dir)
+        config = dataset_processor._generate_main_config(args.input_dir if args.mode == 'predict' else args.data)
 
         # Update configuration based on dataset properties (if not in predict mode)
         if args.mode != 'predict':
             # Extract dataset properties and update configuration
-            input_size, in_channels = dataset_processor._detect_image_properties(args.input_dir)
-            num_classes = dataset_processor._detect_num_classes(args.input_dir)
+            input_size, in_channels = dataset_processor._detect_image_properties(args.data)
+            num_classes = dataset_processor._detect_num_classes(args.data)
 
             config["dataset"]["input_size"] = list(input_size)
             config["dataset"]["in_channels"] = in_channels
