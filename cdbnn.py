@@ -5361,6 +5361,19 @@ class DatasetProcessor:
             processed_path = self._process_data_path(self.datafile)
             return self._process_custom(processed_path)
 
+    def _handle_existing_directory(self, path: str):
+        """Handle existing directory by either removing it or merging its contents."""
+        if os.path.exists(path):
+            response = input(f"The directory '{path}' already exists. Do you want to (R)emove it or (M)erge its contents? [R/M]: ").lower()
+            if response == 'r':
+                shutil.rmtree(path)
+                os.makedirs(path)
+            elif response == 'm':
+                # Merge contents (no action needed, as shutil.copytree will handle it with dirs_exist_ok=True)
+                pass
+            else:
+                raise ValueError("Invalid choice. Please choose 'R' to remove or 'M' to merge.")
+
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
         """Process custom dataset structure"""
         train_dir = os.path.join(self.dataset_dir, "train")
@@ -5371,6 +5384,8 @@ class DatasetProcessor:
            os.path.isdir(os.path.join(data_path, "test")):
             # Check if adaptive_fit_predict is active
             if self.config.get('enable_adaptive', True):
+                # Handle existing train directory
+                self._handle_existing_directory(train_dir)
                 # Merge train and test folders into a single train folder
                 if os.path.exists(train_dir):
                     shutil.rmtree(train_dir)
