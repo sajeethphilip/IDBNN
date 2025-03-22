@@ -907,7 +907,17 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
+        """
+        Extract features from a DataLoader.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
@@ -917,7 +927,7 @@ class BaseAutoencoder(nn.Module):
 
         try:
             with torch.no_grad():
-                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc="Extracting features")):
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
@@ -970,104 +980,70 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
+    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
         """
-        Universal feature saving method for all autoencoder variants.
+        Save features for training and test sets separately.
 
         Args:
-            feature_dict: Dictionary containing features and related information
-            output_path: Path to save the CSV file
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Determine which features to save
-            feature_columns = []
-            data_dict = {}
+            # Save training features
+            train_df = self._features_to_dataframe(train_features)
+            train_output_path = output_path.replace(".csv", "_train.csv")
+            train_df.to_csv(train_output_path, index=False)
+            logger.info(f"Training features saved to {train_output_path}")
 
-            # Process embeddings
-            if 'embeddings' in feature_dict:
-                embeddings = feature_dict['embeddings'].cpu().numpy()
-                for i in range(embeddings.shape[1]):
-                    col_name = f'feature_{i}'
-                    feature_columns.append(col_name)
-                    data_dict[col_name] = embeddings[:, i]
-            else:
-                raise ValueError("Mandatory field 'embeddings' is missing in feature_dict")
-
-            # Process labels/targets
-            if 'labels' in feature_dict:
-                data_dict['target'] = feature_dict['labels'].cpu().numpy()
-                feature_columns.append('target')
-            else:
-                raise ValueError("Mandatory field 'labels' is missing in feature_dict")
-
-            # Process file indices
-            if 'indices' in feature_dict:
-                data_dict['file_index'] = feature_dict['indices']
-                feature_columns.append('file_index')
-
-            # Process optional fields with placeholders if missing
-            optional_fields = {
-                'indices': 'unknown_index',  # Placeholder for missing indices
-                'filenames': 'unknown_filename',  # Placeholder for missing filenames
-                'class_names': 'unknown_class',  # Placeholder for missing class names
-            }
-
-            for field, placeholder in optional_fields.items():
-                if field in feature_dict:
-                    data_dict[field] = feature_dict[field]  # Use actual data if available
-                else:
-                    # Use placeholder if field is missing
-                    data_dict[field] = [placeholder] * len(data_dict['target'])  # Match length of mandatory field
-                feature_columns.append(field)
-
-
-
-            # Process enhancement features if present
-            if hasattr(self, '_get_enhancement_columns'):
-                enhancement_features = self._get_enhancement_columns(feature_dict)
-                data_dict.update(enhancement_features)
-                feature_columns.extend(enhancement_features.keys())
-
-
-            # Check that all arrays have the same length
-            lengths = [len(data_dict[col]) for col in feature_columns]
-            if len(set(lengths)) != 1:
-                raise ValueError(f"Mismatch in array lengths: {lengths}")
-
-            # Save in chunks to manage memory
-            chunk_size = 1000
-            total_samples = len(next(iter(data_dict.values())))
-
-            for start_idx in range(0, total_samples, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_samples)
-
-                # Create chunk dictionary
-                chunk_dict = {
-                    col: data_dict[col][start_idx:end_idx]
-                    for col in feature_columns
-                }
-
-                # Save chunk to CSV
-                df = pd.DataFrame(chunk_dict)
-                mode = 'w' if start_idx == 0 else 'a'
-                header = start_idx == 0
-                df.to_csv(output_path, mode=mode, index=False, header=header)
-
-                # Clean up
-                del df, chunk_dict
-                gc.collect()
-
-            # Save metadata
-            self._save_feature_metadata(output_path, feature_columns)
-
-            logger.info(f"Features saved to {output_path}")
-            logger.info(f"Total features saved: {len(feature_columns)}")
+            # Save test features
+            test_df = self._features_to_dataframe(test_features)
+            test_output_path = output_path.replace(".csv", "_test.csv")
+            test_df.to_csv(test_output_path, index=False)
+            logger.info(f"Test features saved to {test_output_path}")
 
         except Exception as e:
             logger.error(f"Error saving features: {str(e)}")
             raise
+
+    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
+        """
+        Convert features dictionary to a pandas DataFrame.
+
+        Args:
+            features (Dict[str, torch.Tensor]): Dictionary containing features and metadata.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the features and metadata.
+        """
+        data_dict = {}
+
+        # Process embeddings
+        if 'embeddings' in features:
+            embeddings = features['embeddings'].cpu().numpy()
+            for i in range(embeddings.shape[1]):
+                data_dict[f'feature_{i}'] = embeddings[:, i]
+        else:
+            raise ValueError("Mandatory field 'embeddings' is missing in features")
+
+        # Process labels/targets
+        if 'labels' in features:
+            data_dict['target'] = features['labels'].cpu().numpy()
+        else:
+            raise ValueError("Mandatory field 'labels' is missing in features")
+
+        # Process optional fields
+        optional_fields = ['indices', 'filenames', 'class_names']
+        for field in optional_fields:
+            if field in features:
+                data_dict[field] = features[field]
+            else:
+                data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
+
+        # Convert to DataFrame
+        return pd.DataFrame(data_dict)
 
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
@@ -3416,7 +3392,13 @@ class BaseFeatureExtractor(nn.Module, ABC):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                # Extract features
+                train_features = self.extract_features(train_loader, dataset_type="train")
+                test_features = self.extract_features(test_loader, dataset_type="test")
 
+                # Save features
+                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
+                self.save_features(train_features, test_features, output_path)
             return self.history
 
         except Exception as e:
@@ -4226,6 +4208,13 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
+                # Extract features
+                train_features = self.extract_features(train_loader, dataset_type="train")
+                test_features = self.extract_features(test_loader, dataset_type="test")
+
+                # Save features
+                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
+                self.save_features(train_features, test_features, output_path)
             return self.history
 
         except Exception as e:
