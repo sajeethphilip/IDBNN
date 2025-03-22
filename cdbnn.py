@@ -77,64 +77,6 @@ from torchvision.transforms.functional import resize
 logger = logging.getLogger(__name__)
 
 
-
-def extract_image_properties(data_path):
-    """
-    Extract image properties (size, channels) from the dataset.
-    Args:
-        data_path (str): Path to the dataset directory.
-    Returns:
-        tuple: (input_size, in_channels, num_classes)
-    """
-    # Find the first image in the dataset
-    image_files = []
-    for root, _, files in os.walk(data_path):
-        for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                image_files.append(os.path.join(root, file))
-                break
-        if image_files:
-            break
-
-    if not image_files:
-        raise ValueError(f"No images found in {data_path}")
-
-    # Open the first image to get properties
-    with Image.open(image_files[0]) as img:
-        width, height = img.size
-        channels = len(img.getbands())
-
-    # Detect number of classes (if dataset is organized by class folders)
-    class_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-    num_classes = len(class_dirs) if class_dirs else 1  # Default to 1 if no class folders
-
-    return (height, width), channels, num_classes
-
-def update_config_with_dataset_properties(config, data_path):
-    """
-    Update the configuration with dataset-specific properties.
-    Args:
-        config (dict): The default configuration.
-        data_path (str): Path to the dataset directory.
-    Returns:
-        dict: Updated configuration.
-    """
-    # Extract dataset properties
-    input_size, in_channels, num_classes = extract_image_properties(data_path)
-
-    # Update configuration
-    config["dataset"]["input_size"] = list(input_size)
-    config["dataset"]["in_channels"] = in_channels
-    config["dataset"]["num_classes"] = num_classes
-
-    # Update normalization parameters if needed
-    if in_channels == 1:
-        config["dataset"]["mean"] = [0.5]
-        config["dataset"]["std"] = [0.5]
-
-    return config
-
-
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
