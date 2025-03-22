@@ -74,7 +74,47 @@ from tqdm import tqdm
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+from torchvision import transforms
+from torch.nn.functional import interpolate
+import torch
 
+def preprocess_image(image_tensor: torch.Tensor, target_size: int = 256, overlap: float = 0.5) -> torch.Tensor:
+    """
+    Preprocess an image tensor to ensure it is suitable for the CNN.
+    - If the image is smaller than target_size, resize it to target_size.
+    - If the image is larger than target_size, split it into sliding windows of target_size.
+
+    Args:
+        image_tensor (torch.Tensor): Input image tensor of shape (C, H, W).
+        target_size (int): Target size for resizing/windowing (default: 256).
+        overlap (float): Overlap fraction for sliding windows (default: 0.5).
+
+    Returns:
+        torch.Tensor: Processed image tensor(s). If windowing is used, returns a batch of tensors.
+    """
+    _, h, w = image_tensor.shape
+
+    # Resize if image is smaller than target_size
+    if h < target_size or w < target_size:
+        image_tensor = interpolate(image_tensor.unsqueeze(0), size=(target_size, target_size), mode='bilinear', align_corners=False).squeeze(0)
+        return image_tensor.unsqueeze(0)  # Add batch dimension
+
+    # Split into sliding windows if image is larger than target_size
+    if h > target_size or w > target_size:
+        stride = int(target_size * (1 - overlap))  # Stride based on overlap
+        windows = []
+
+        # Extract windows
+        for y in range(0, h - target_size + 1, stride):
+            for x in range(0, w - target_size + 1, stride):
+                window = image_tensor[:, y:y + target_size, x:x + target_size]
+                windows.append(window)
+
+        # Stack windows into a batch
+        return torch.stack(windows)
+
+    # If image is already target_size, return as is
+    return image_tensor.unsqueeze(0)
 
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
@@ -4441,8 +4481,11 @@ class FeatureExtractorCNN(nn.Module):
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)  # Add batch dimension
+        # If input is a batch of windows, process each window
+        if x.dim() == 4 and x.size(1) > 1:  # Batch of windows
+            batch_size, num_windows, c, h, w = x.size()
+            x = x.view(-1, c, h, w)  # Flatten batch and windows
+
 
         # Forward pass through layers
         x1 = self.conv1(x)
@@ -4467,7 +4510,13 @@ class FeatureExtractorCNN(nn.Module):
         if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
             x7 = self.batch_norm(x7)
 
+        # If input was a batch of windows, aggregate results
+        if x.dim() == 4 and x.size(1) > 1:
+            x7 = x7.view(batch_size, num_windows, -1)  # Reshape back to batch and windows
+            x7 = torch.mean(x7, dim=1)  # Average features across windows
+
         return x7
+
 class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
@@ -5183,6 +5232,9 @@ class CustomImageDataset(Dataset):
         label = self.labels[idx]
         file_index = self.file_indices[idx]  # Retrieve file index
         filename = self.filenames[idx]  # Retrieve filename
+        # Resize the image if it is smaller than 256x256
+        if image.size[0] < 256 or image.size[1] < 256:
+            image = image.resize((256, 256), Image.Resampling.LANCZOS)
 
         if self.transform:
             image = self.transform(image)
