@@ -5385,6 +5385,16 @@ class DatasetProcessor:
                     shutil.copytree(src, dst)
                 return train_dir, test_dir              # return train folder populated with both train and test data and the test folder for consistency.
 
+            else:
+                # Normal processing with separate train and test folders
+                if os.path.exists(train_dir):
+                    shutil.rmtree(train_dir)
+                if os.path.exists(test_dir):
+                    shutil.rmtree(test_dir)
+
+                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                shutil.copytree(os.path.join(data_path, "test"), test_dir)
+                return train_dir, test_dir
         # Handle single directory with class subdirectories
         if not os.path.isdir(data_path):
             raise ValueError(f"Invalid dataset path: {data_path}")
