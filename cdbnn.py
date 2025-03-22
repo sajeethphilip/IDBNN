@@ -849,6 +849,7 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """Extract features from the dataset using the autoencoder."""
         self.eval()
         all_embeddings = []
         all_labels = []
@@ -870,9 +871,11 @@ class BaseAutoencoder(nn.Module):
                         class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
                     else:
                         # Dataset without metadata (e.g., torchvision)
-                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
-                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
-                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
+                        # Generate consistent placeholders for indices, filenames, and class names
+                        start_idx = batch_idx * loader.batch_size
+                        indices = [start_idx + i for i in range(len(inputs))]
+                        filenames = [f"image_{idx}.png" for idx in indices]
+                        class_names = [f"class_{label.item()}" for label in labels]
 
                     # Extract embeddings
                     embeddings = self.encode(inputs)
@@ -889,6 +892,11 @@ class BaseAutoencoder(nn.Module):
                 # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
+
+                # Ensure all arrays have the same length
+                assert len(embeddings) == len(labels) == len(all_indices) == len(all_filenames) == len(all_class_names), \
+                    f"Mismatch in array lengths: embeddings={len(embeddings)}, labels={len(labels)}, " \
+                    f"indices={len(all_indices)}, filenames={len(all_filenames)}, class_names={len(all_class_names)}"
 
                 feature_dict = {
                     'embeddings': embeddings,
