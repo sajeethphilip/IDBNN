@@ -130,6 +130,7 @@ class PredictionManager:
     def predict_images(self, input_dir: str, output_csv: str = None):
         """
         Predict features for images in the input directory and save results to a CSV file.
+
         Args:
             input_dir (str): Directory containing new images.
             output_csv (str, optional): Path to save the output CSV file. Defaults to None.
@@ -157,8 +158,9 @@ class PredictionManager:
 
         # Prepare data structure for predictions
         predictions = {
-            'filename': [],  # Store image filenames
-            'features': []   # Store extracted features
+            'filename': [],        # Store image filenames
+            'features_phase1': [], # Store features from Phase 1
+            'features_phase2': []  # Store features from Phase 2 (if applicable)
         }
 
         # Process each image
@@ -172,18 +174,30 @@ class PredictionManager:
                 # Extract features using the model
                 with torch.no_grad():
                     if hasattr(self.model, 'encode'):  # Autoencoder model
-                        embedding = self.model.encode(image_tensor)
-                        if isinstance(embedding, tuple):
-                            embedding = embedding[0]  # Use the first element if output is a tuple
-                    else:  # CNN model
-                        embedding = self.model(image_tensor)
+                        embedding_phase1 = self.model.encode(image_tensor)
+                        if isinstance(embedding_phase1, tuple):
+                            embedding_phase1 = embedding_phase1[0]  # Use the first element if output is a tuple
 
-                    # Convert embedding to numpy array and flatten
-                    embedding = embedding.cpu().numpy().flatten()
+                        # If Phase 2 is enabled, extract Phase 2 features
+                        if hasattr(self.model, 'set_training_phase'):
+                            self.model.set_training_phase(2)  # Switch to Phase 2
+                            embedding_phase2 = self.model.encode(image_tensor)
+                            if isinstance(embedding_phase2, tuple):
+                                embedding_phase2 = embedding_phase2[0]
+                        else:
+                            embedding_phase2 = embedding_phase1  # Fallback to Phase 1 features
+                    else:  # CNN model
+                        embedding_phase1 = self.model(image_tensor)
+                        embedding_phase2 = embedding_phase1  # CNN only has one set of features
+
+                    # Convert embeddings to numpy arrays and flatten
+                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
+                    embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
 
                 # Store results
                 predictions['filename'].append(filename)
-                predictions['features'].append(embedding)
+                predictions['features_phase1'].append(embedding_phase1)
+                predictions['features_phase2'].append(embedding_phase2)
 
             except Exception as e:
                 logger.error(f"Error processing image {filename}: {str(e)}")
@@ -193,6 +207,7 @@ class PredictionManager:
         # Save predictions to CSV
         self._save_predictions(predictions, output_csv)
         logger.info(f"Predictions saved to {output_csv}")
+
 
     def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
         """
