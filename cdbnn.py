@@ -508,6 +508,9 @@ class BaseAutoencoder(nn.Module):
         """
         super().__init__()
 
+        # Set model type
+        self.model_type = 'autoencoder'  # Add this line
+
         # Basic configuration
         self.input_shape = input_shape
         self.in_channels = input_shape[0]
