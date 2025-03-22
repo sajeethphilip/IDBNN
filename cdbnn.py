@@ -72,6 +72,7 @@ from PIL import Image
 import pandas as pd
 from tqdm import tqdm
 from typing import Dict, List, Optional
+rom torchvision.transforms.functional import resize
 
 logger = logging.getLogger(__name__)
 
@@ -5174,20 +5175,32 @@ class CustomImageDataset(Dataset):
                             self.filenames.append(img_name)  # Populate filenames list
 
         # Preprocess all images during initialization
+        Print("I am here")
         self._preprocess_all_images()
+
 
     def _preprocess_all_images(self):
         """
         Preprocess all images to ensure consistent shapes (256x256).
         """
-        for img_path in self.image_files:
+        # Create a directory to store preprocessed images (if saving to disk)
+        self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
+        os.makedirs(self.preprocessed_dir, exist_ok=True)
+
+        # Preprocess images with a progress bar
+        for idx, img_path in enumerate(tqdm(self.image_files, desc="Preprocessing images")):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
             # Resize or window the image
             preprocessed_tensors = self._preprocess_image(image_tensor)
 
-            # Store preprocessed tensors (or save to disk and store paths)
+            # Save preprocessed images to disk (optional)
+            for i, tensor in enumerate(preprocessed_tensors):
+                save_path = os.path.join(self.preprocessed_dir, f"{self.filenames[idx]}_window{i}.pt")
+                torch.save(tensor, save_path)
+
+            # Store preprocessed tensors (or paths to the preprocessed images)
             self.preprocessed_images.append(preprocessed_tensors)
 
     def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
@@ -5206,11 +5219,7 @@ class CustomImageDataset(Dataset):
 
         # Resize if image is smaller than target_size
         if h < self.target_size or w < self.target_size:
-            image_tensor = transforms.functional.resize(
-                image_tensor,
-                (self.target_size, self.target_size),
-                antialias=True  # Explicitly set antialias=True
-            )
+            image_tensor = resize(image_tensor, (self.target_size, self.target_size), antialias=True)
             return image_tensor.unsqueeze(0)  # Add batch dimension
 
         # Split into sliding windows if image is larger than target_size
@@ -5229,6 +5238,7 @@ class CustomImageDataset(Dataset):
 
         # If image is already target_size, return as is
         return image_tensor.unsqueeze(0)
+
     def __len__(self):
         return len(self.image_files)
 
