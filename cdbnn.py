@@ -6844,7 +6844,8 @@ def main():
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
-
+            input_path = input(f"Enter directory containing new images [{args.data}]: ") or f"{args.data}"
+            output_csv = input(f"Enter output CSV path [data/{args.data}/{args.data}.csv]: ") or f"data/{args.data}/{args.data}.csv"
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
