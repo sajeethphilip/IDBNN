@@ -5148,7 +5148,7 @@ class CustomImageDataset(Dataset):
         file_index = self.file_indices[idx]  # Retrieve file index
         filename = self.filenames[idx]  # Retrieve filename
         # Print class and filename for each sample
-        print(f"{Colors.GREEN}Processing file: {filename}, Class: {self.reverse_encoder[label]}{Colors.ENDC}",end='\r',flush=True)
+        print("\033[K" +f"{Colors.GREEN}Processing file: {filename}, Class: {self.reverse_encoder[label]}{Colors.ENDC}",end='\r',flush=True)
 
         if self.transform:
             image = self.transform(image)
