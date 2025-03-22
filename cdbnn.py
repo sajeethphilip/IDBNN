@@ -72,7 +72,7 @@ from PIL import Image
 import pandas as pd
 from tqdm import tqdm
 from typing import Dict, List, Optional
-rom torchvision.transforms.functional import resize
+from torchvision.transforms.functional import resize
 
 logger = logging.getLogger(__name__)
 
