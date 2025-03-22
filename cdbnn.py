@@ -5392,10 +5392,6 @@ class DatasetProcessor:
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
         """Process custom dataset structure"""
-
-        # Ensure the configuration is ready
-        if not config:
-            raise ValueError("Configuration must be initialized before processing data.")
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
@@ -6034,19 +6030,6 @@ class DatasetProcessor:
 
         return train_dir, test_dir
 
-    def _detect_num_classes(self, data_path: str) -> int:
-        """Detect the number of classes in the dataset."""
-        class_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-        return len(class_dirs) if class_dirs else 1
-
-    def write_config_to_file(self, config: Dict, output_dir: str):
-        """Write the configuration to a JSON file."""
-        os.makedirs(output_dir, exist_ok=True)
-        config_path = os.path.join(output_dir, "config.json")
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=4)
-        print(f"Configuration saved to {config_path}")
-
 class ConfigManager:
     def __init__(self, config_dir: str):
         self.config_dir = config_dir
@@ -6554,7 +6537,7 @@ def parse_arguments():
     parser.add_argument('--cpu', action='store_true', help='force CPU usage')
     parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
     parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
-    parser.add_argument("--input_dir", type=str, required=True, help="Input directory containing images")
+
     return parser.parse_args()
 
 
@@ -6841,52 +6824,20 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
         return existing_config
     return new_config
-
 def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
     try:
-        # Setup logging
+        # Setup logging and parse arguments
         logger = setup_logging()
-
-        # Parse arguments (interactive or command-line)
-        if len(sys.argv) > 1:  # Command-line mode
-            args = parse_arguments()
-        else:  # Interactive mode
-            args = get_interactive_args()
-
-        # Initialize DatasetProcessor
-        dataset_processor = DatasetProcessor(datafile=args.data, datatype=args.data_type, output_dir=args.output_dir)
-
-        # Generate main configuration
-        config = dataset_processor._generate_main_config(args.input_dir if args.mode == 'predict' else args.data)
-
-        # Update configuration based on dataset properties (if not in predict mode)
-        if args.mode != 'predict':
-            # Extract dataset properties and update configuration
-            input_size, in_channels = dataset_processor._detect_image_properties(args.data)
-            num_classes = dataset_processor._detect_num_classes(args.data)
-
-            config["dataset"]["input_size"] = list(input_size)
-            config["dataset"]["in_channels"] = in_channels
-            config["dataset"]["num_classes"] = num_classes
-
-            # Update normalization parameters if needed
-            if in_channels == 1:
-                config["dataset"]["mean"] = [0.5]
-                config["dataset"]["std"] = [0.5]
-
-            # Write updated configuration to file
-            output_dir = os.path.join(args.output_dir, config["dataset"]["name"])
-            dataset_processor.write_config_to_file(config, output_dir)
+        args = parse_arguments()
 
         # Process based on mode
         if args.mode == 'predict':
-            # Load the config (if not already loaded)
-            if not config:
-                config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
+            # Load the config
+            config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
+            with open(config_path, 'r') as f:
+                config = json.load(f)
 
             # Initialize the PredictionManager
             predictor = PredictionManager(
@@ -6911,17 +6862,9 @@ def main():
             logger.info(f"Predictions saved to {args.output_csv}")
 
         elif args.mode == 'train':
-            # Ensure configuration is ready before training
-            if not config:
-                raise ValueError("Configuration must be initialized before training.")
-            return handle_training_mode(args, logger, config)
-
+            return handle_training_mode(args, logger)
         elif args.mode == 'reconstruct':
-            # Ensure configuration is ready before reconstruction
-            if not config:
-                raise ValueError("Configuration must be initialized before reconstruction.")
-            return handle_prediction_mode(args, logger, config)
-
+            return handle_prediction_mode(args, logger)
         else:
             logger.error(f"Invalid mode: {args.mode}")
             return 1
