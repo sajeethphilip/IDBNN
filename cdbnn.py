@@ -5396,7 +5396,7 @@ class DatasetProcessor:
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
             # Check if adaptive_fit_predict is active
-            if self.config.get('enable_adaptive', True):
+            if enable_adaptive:
                 # Handle existing train directory
                 self._handle_existing_directory(train_dir)
                 # Merge train and test folders into a single train folder
