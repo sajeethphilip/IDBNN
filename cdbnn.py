@@ -5142,7 +5142,7 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
+    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None, target_size: int = 128, overlap: float = 0.5):
         self.data_dir = data_dir
         self.transform = transform
         self.image_files = []
