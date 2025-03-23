@@ -39,6 +39,8 @@ cardinality_tolerance=4 #Use when the features are likely to be extremly diverse
 LearningRate =0.1
 TrainingRandomSeed=42  #None # 42
 Epochs=1000
+bin_sizes =128
+n_bins_per_dim =128
 TestFraction=0.2
 Train=True #True #False #
 Train_only=False #True #
@@ -1524,13 +1526,15 @@ class DBNN(GPUDBNN):
         # Load or create the configuration file and update global variables
         config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
         # Update global variables based on the configuration file
-        global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+        global Train_device,bin_sizes,n_bins_per_dim, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
         Train_device = config.get("compute_device", Train_device)
         print(''f"The train device is set as {Train_device}")
         self.device=Train_device
         Trials = config.get("trials", Trials)
         cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
         cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
+        bin_sizes = config.get("bin_sizes", 128)
+        n_bins_per_dim = config.get("n_bins_per_dim", 128)
         LearningRate = config.get("learning_rate", LearningRate)
         TrainingRandomSeed = config.get("random_seed", TrainingRandomSeed)
         Epochs = config.get("epochs", Epochs)
@@ -5019,7 +5023,37 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
         "enable_adaptive": True,
         "nokbd": False,
         "display": None,
-        "batch_size": None  # Batch size will be dynamically calculated if not provided
+        "training_params": {
+            "batch_size": None,  # Batch size will be dynamically calculated if not provided
+            "n_bins_per_dim": 128,
+            "minimum_training_accuracy": 0.95,
+            "invert_DBNN": True,
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.1,
+            "Save_training_epochs": False,
+            "training_save_path": "data",
+            "enable_vectorized": False,
+            "vectorization_warning_acknowledged": False,
+            "compute_device": "auto",
+            "use_interactive_kbd": False,
+            "modelType": "Histogram"
+        },
+        "active_learning": {
+            "tolerance": 1.0,
+            "cardinality_threshold_percentile": 95,
+            "strong_margin_threshold": 0.3,
+            "marginal_margin_threshold": 0.1,
+            "min_divergence": 0.1
+        },
+        "execution_flags": {
+            "train": True,
+            "train_only": False,
+            "predict": True,
+            "fresh_start": False,
+            "use_previous_model": True,
+            "gen_samples": False
+        }
     }
 
     if os.path.exists(config_path):
@@ -5033,13 +5067,15 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
         print(f"Created default configuration file at {config_path}")
 
     # Update global variables based on the configuration file
-    global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+    global Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
 
     # Update Train_device based on the compute_device setting in the configuration file
     Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
     Trials = config.get("trials", 100)
     cardinality_threshold = config.get("cardinality_threshold", 0.9)
     cardinality_tolerance = config.get("cardinality_tolerance", 4)
+    bin_sizes = config.get("bin_sizes", 128)
+    n_bins_per_dim = config.get("n_bins_per_dim", 128)
     LearningRate = config.get("learning_rate", 0.1)
     TrainingRandomSeed = config.get("random_seed", 42)
     Epochs = config.get("epochs", 1000)
@@ -5051,6 +5087,13 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
     EnableAdaptive = config.get("enable_adaptive", True)
     nokbd = config.get("nokbd", False)
     display = config.get("display", None)
+
+    # Dynamically calculate batch size if not provided in the training_params section
+    if "training_params" in config:
+        if "batch_size" not in config["training_params"] or config["training_params"]["batch_size"] is None:
+            # Calculate optimal batch size dynamically
+            sample_tensor_size = 4 * 1024 * 1024  # Example: 4MB per sample (adjust based on your dataset)
+            config["training_params"]["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
 
     return config
 
