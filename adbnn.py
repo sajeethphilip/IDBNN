@@ -5052,10 +5052,6 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
     nokbd = config.get("nokbd", False)
     display = config.get("display", None)
 
-    # Dynamically calculate batch size if not provided in the config
-    if "batch_size" not in config or config["batch_size"] is None:
-        config["batch_size"] = _calculate_optimal_batch_size()
-
     return config
 
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
