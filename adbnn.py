@@ -5153,7 +5153,7 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                 try:
                     with open(conf_path, 'r') as f:
                         dataset_conf = json.load(f)
-
+                    print(dataset_conf)
                     # Update configuration with adaptive settings if available
                     if adaptive_conf:
                         # Update execution flags (only if missing or explicitly required)
