@@ -110,10 +110,6 @@ class PredictionManager:
 
     def _get_image_files(self, input_path: str) -> List[str]:
         """Get a list of image files from the input path."""
-        if isinstance(input_path, list):
-            # If input_path is a list, use the first element as the directory
-            input_path = input_path[0]
-
         if os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
@@ -5168,10 +5164,6 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
-        if isinstance(data_dir, list):
-            # If data_dir is a list, use the first element as the directory
-            data_dir = data_dir[0]
-
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size  # Store target_size as an instance variable
@@ -6551,8 +6543,6 @@ def parse_arguments():
     parser.add_argument('--cpu', action='store_true', help='force CPU usage')
     parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
     parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
-    parser.add_argument('--input_path', type=str, required=True, help='Path to the input images')
-
 
     return parser.parse_args()
 
@@ -6612,7 +6602,7 @@ def get_interactive_args():
         # Set default input directory
         default_input = args.data if args.data else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_path = input(prompt).strip() or default_input
+        args.input_dir = input(prompt).strip() or default_input
 
         # Set default output CSV path
         default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
@@ -6847,7 +6837,6 @@ def main():
         # Setup logging and parse arguments
         logger = setup_logging()
         args = parse_arguments()
-        print(args)
 
         # Process based on mode
         if args.mode == 'predict':
@@ -6855,8 +6844,7 @@ def main():
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            input_path = input(f"Enter directory containing new images [{args.data}]: ") or f"{args.data}"
-            output_csv = input(f"Enter output CSV path [data/{args.data}/{args.data}.csv]: ") or f"data/{args.data}/{args.data}.csv"
+
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
@@ -6867,14 +6855,14 @@ def main():
             if hasattr(predictor.model, 'set_dataset'):
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_path, transform)  # Create the dataset
+                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
 
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_path=args.input_path,
+                input_dir=args.input_dir,
                 output_csv=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
