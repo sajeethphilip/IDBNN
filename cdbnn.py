@@ -6863,7 +6863,7 @@ def main():
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_dir=args.input_dir,
+                input_path=args.input_dir,
                 output_csv=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
