@@ -110,6 +110,8 @@ class PredictionManager:
 
     def _get_image_files(self, input_path: str) -> List[str]:
         """Get a list of image files from the input path."""
+        image_files = []
+
         if os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
@@ -121,8 +123,7 @@ class PredictionManager:
                 self._extract_archive(input_path, extract_dir)
                 return self._get_image_files(extract_dir)  # Recursively process extracted files
         elif os.path.isdir(input_path):
-            # Directory of images
-            image_files = []
+            # Directory of images - recursively search for image files
             for root, _, files in os.walk(input_path):
                 for file in files:
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
