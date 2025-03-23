@@ -163,6 +163,7 @@ The code does not appear to have explicit cheating mechanisms, but the unrealist
 
 
 Here is the output for the CIFAR10 dataset:
+
 ![image](https://github.com/user-attachments/assets/7ead2e04-954f-457a-ab62-981797839e46)
 
 ------------------------------------------------------------------------
