@@ -890,19 +890,19 @@ class BaseAutoencoder(nn.Module):
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
         """
-        Extract features from the latent space of the autoencoder.
+        Extract features from data, including filenames and class names.
 
         Args:
             loader (DataLoader): DataLoader for the dataset.
 
         Returns:
             Dict[str, torch.Tensor]: Dictionary containing:
-                - 'embeddings': Extracted features (latent space embeddings)
-                - 'labels': Target labels
-                - 'filenames': List of filenames
-                - 'class_names': List of class names
+                - 'embeddings': Extracted features (torch.Tensor)
+                - 'labels': Target labels (torch.Tensor)
+                - 'filenames': List of filenames (List[str])
+                - 'class_names': List of class names (List[str])
         """
-        self.eval()
+        self.feature_extractor.eval()
         all_embeddings = []
         all_labels = []
         all_filenames = []
@@ -912,31 +912,56 @@ class BaseAutoencoder(nn.Module):
             with torch.no_grad():
                 for inputs, targets in tqdm(loader, desc="Extracting features"):
                     inputs = inputs.to(self.device)
-                    embeddings, _ = self(inputs)  # Get latent space embeddings
+                    outputs = self.feature_extractor(inputs)
+
+                    # Handle different output formats
+                    if isinstance(outputs, tuple):
+                        # Tuple output (e.g., embedding, reconstruction)
+                        embeddings = outputs[0]  # Assume the first element is the embedding
+                    elif isinstance(outputs, dict):
+                        # Dictionary output (e.g., {'embedding': ...})
+                        if 'embedding' in outputs:
+                            embeddings = outputs['embedding']
+                        else:
+                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
+                    else:
+                        # Assume the output is the embedding directly
+                        embeddings = outputs
+
+                    # Append features and labels
                     all_embeddings.append(embeddings.cpu())
-                    all_labels.append(targets.cpu())
+                    all_labels.append(targets)
 
                     # Get metadata (filenames and class names) if available
                     if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
                         for idx in range(len(inputs)):
                             file_index, filename = loader.dataset.get_additional_info(idx)
                             class_name = loader.dataset.reverse_encoder[targets[idx].item()]
                             all_filenames.append(filename)
                             all_class_names.append(class_name)
                     else:
+                        # Dataset without metadata (e.g., torchvision)
                         for idx in range(len(inputs)):
                             all_filenames.append(f"unavailable_{idx}")
                             all_class_names.append(f"unavailable_{targets[idx].item()}")
 
-                # Concatenate all results
-                feature_dict = {
-                    'embeddings': torch.cat(all_embeddings),
-                    'labels': torch.cat(all_labels),
-                    'filenames': all_filenames,
-                    'class_names': all_class_names
-                }
+                    # Cleanup
+                    del inputs, outputs
+                    if len(all_embeddings) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
-                return feature_dict
+            # Concatenate all results
+            feature_dict = {
+                'embeddings': torch.cat(all_embeddings),
+                'labels': torch.cat(all_labels),
+                'filenames': all_filenames,
+                'class_names': all_class_names
+            }
+
+            return feature_dict
 
         except Exception as e:
             logger.error(f"Error extracting features: {str(e)}")
@@ -3545,8 +3570,22 @@ class BaseFeatureExtractor(nn.Module, ABC):
                     inputs = inputs.to(self.device)
                     outputs = self.feature_extractor(inputs)
 
+                    # Handle different output formats
+                    if isinstance(outputs, tuple):
+                        # Tuple output (e.g., embedding, reconstruction)
+                        embeddings = outputs[0]  # Assume the first element is the embedding
+                    elif isinstance(outputs, dict):
+                        # Dictionary output (e.g., {'embedding': ...})
+                        if 'embedding' in outputs:
+                            embeddings = outputs['embedding']
+                        else:
+                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
+                    else:
+                        # Assume the output is the embedding directly
+                        embeddings = outputs
+
                     # Append features and labels
-                    all_embeddings.append(outputs.cpu())
+                    all_embeddings.append(embeddings.cpu())
                     all_labels.append(targets)
 
                     # Get metadata (filenames and class names) if available
@@ -3583,6 +3622,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         except Exception as e:
             logger.error(f"Error extracting features: {str(e)}")
             raise
+
 
 import torch
 import torch.nn as nn
