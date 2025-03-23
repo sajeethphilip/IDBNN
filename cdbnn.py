@@ -617,7 +617,7 @@ class BaseAutoencoder(nn.Module):
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
-
+        self.feature_extractor=None
         # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
