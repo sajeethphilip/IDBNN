@@ -951,70 +951,74 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
-    def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
         """
-        Extract features from a DataLoader.
+        Extract features from data, including filenames and class names.
 
         Args:
             loader (DataLoader): DataLoader for the dataset.
-            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
 
         Returns:
-            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+            Dict[str, torch.Tensor]: Dictionary containing:
+                - 'embeddings': Extracted features (torch.Tensor)
+                - 'labels': Target labels (torch.Tensor)
+                - 'filenames': List of filenames (List[str])
+                - 'class_names': List of class names (List[str])
         """
-        self.eval()
+        self.feature_extractor.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []  # Store file indices
-        all_filenames = []  # Store filenames
-        all_class_names = []  # Store actual class names
+        all_filenames = []
+        all_class_names = []
 
         try:
             with torch.no_grad():
-                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
                     inputs = inputs.to(self.device)
-                    labels = labels.to(self.device)
+                    outputs = self.feature_extractor(inputs)
 
-                    # Get metadata if available, otherwise use placeholders
+                    # Append features and labels
+                    all_embeddings.append(outputs.cpu())
+                    all_labels.append(targets.cpu())
+
+                    # Get metadata (filenames and class names) if available
                     if hasattr(loader.dataset, 'get_additional_info'):
                         # Custom dataset with metadata
-                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
-                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                        for idx in range(len(inputs)):
+                            file_index, filename = loader.dataset.get_additional_info(idx)
+                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
+                            all_filenames.append(filename)
+                            all_class_names.append(class_name)
                     else:
                         # Dataset without metadata (e.g., torchvision)
-                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
-                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
-                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
+                        for idx in range(len(inputs)):
+                            all_filenames.append(f"unavailable_{idx}")
+                            all_class_names.append(f"unavailable_{targets[idx].item()}")
 
-                    # Extract embeddings
-                    embeddings = self.encode(inputs)
-                    if isinstance(embeddings, tuple):
-                        embeddings = embeddings[0]
+                    # Cleanup
+                    del inputs, outputs
+                    if len(all_embeddings) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
-                    # Append to lists
-                    all_embeddings.append(embeddings)
-                    all_labels.append(labels)
-                    all_indices.extend(indices)
-                    all_filenames.extend(filenames)
-                    all_class_names.extend(class_names)
+            # Concatenate all results
+            feature_dict = {
+                'embeddings': torch.cat(all_embeddings),
+                'labels': torch.cat(all_labels),
+                'filenames': all_filenames,
+                'class_names': all_class_names
+            }
 
-                # Concatenate all results
-                embeddings = torch.cat(all_embeddings)
-                labels = torch.cat(all_labels)
+            # Verify array lengths
+            if not (len(feature_dict['embeddings']) == len(feature_dict['labels']) ==
+                    len(feature_dict['filenames']) == len(feature_dict['class_names'])):
+                raise ValueError("Mismatched array lengths in feature dictionary")
 
-                feature_dict = {
-                    'embeddings': embeddings,
-                    'labels': labels,
-                    'indices': all_indices,  # Include indices in the feature dictionary
-                    'filenames': all_filenames,  # Include filenames in the feature dictionary
-                    'class_names': all_class_names  # Include actual class names
-                }
-
-                return feature_dict
+            return feature_dict
 
         except Exception as e:
-            logger.error(f"Error during feature extraction: {str(e)}")
+            logger.error(f"Error extracting features: {str(e)}")
             raise
 
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
