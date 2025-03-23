@@ -5170,6 +5170,8 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                         # Save updated configuration only if changes were made
                         with open(conf_path, 'w') as f:
                             json.dump(dataset_conf, f, indent=4)
+                            print(dataset_conf)
+                            input("Modified conf in  find dataset pairs. Press Enter or Ctrl-C")
                         print("\033[K" + f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
 
                 except Exception as e:
