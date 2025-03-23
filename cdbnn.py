@@ -621,7 +621,9 @@ class BaseAutoencoder(nn.Module):
         # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
-
+        # Initialize feature extractor based on encoder type
+        self.feature_extractor = ModelFactory.create_model(self.config)
+        self.feature_extractor.to(self.device)
         # Shape tracking initialization
         self.shape_registry = {'input': input_shape}
         self.spatial_dims = []
