@@ -173,13 +173,14 @@ class PredictionManager:
     def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
         """
         Predict features for images from the input path (file, directory, or archive).
+        Writes predictions to CSV batch-wise, including true class labels if available.
         """
         # Validate input_path
         if not isinstance(input_path, (str, bytes, os.PathLike)):
             raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-        # Get list of image files
-        image_files = self._get_image_files(input_path)
+        # Get list of image files and their corresponding class labels
+        image_files, class_labels = self._get_image_files_with_labels(input_path)
         if not image_files:
             raise ValueError(f"No valid images found in {input_path}")
 
@@ -192,13 +193,6 @@ class PredictionManager:
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Process images in batches
-        predictions = {
-            'filename': [],
-            'features_phase1': [],
-            'features_phase2': []
-        }
-
         # Create a dataset for the model (if required)
         if hasattr(self.model, 'set_dataset'):
             logger.debug("Creating dataset...")
@@ -207,9 +201,18 @@ class PredictionManager:
             self.model.set_dataset(dataset)  # Set the dataset before processing images
             logger.debug("Dataset set in the model.")
 
+        # Initialize CSV file and write header
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        with open(output_csv, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            # Write header
+            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+            csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i + batch_size]
+            batch_labels = class_labels[i:i + batch_size]
             batch_images = []
 
             # Load and transform images
@@ -268,16 +271,41 @@ class PredictionManager:
                     # Convert to numpy array
                     embedding_phase2 = embedding_phase2.cpu().numpy()
 
-            # Store results
-            for j, filename in enumerate(batch_files):
-                predictions['filename'].append(os.path.basename(filename))
-                predictions['features_phase1'].append(embedding_phase1[j].flatten())
-                predictions['features_phase2'].append(embedding_phase2[j].flatten())
+            # Write predictions to CSV batch-wise
+            with open(output_csv, 'a', newline='') as csvfile:
+                csv_writer = csv.writer(csvfile)
+                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                    row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
+                    csv_writer.writerow(row)
 
-        # Save predictions to CSV
-        logger.info("Saving predictions to CSV...")
-        self._save_predictions(predictions, output_csv)
         logger.info(f"Predictions saved to {output_csv}")
+
+    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
+        """
+        Get a list of image files and their corresponding class labels from the input path.
+        Assumes images are organized in subfolders under train/test folders.
+        """
+        image_files = []
+        class_labels = []
+
+        if os.path.isfile(input_path):
+            # Single image file (no class label)
+            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                image_files.append(input_path)
+                class_labels.append("unknown")  # No class label available
+        elif os.path.isdir(input_path):
+            # Directory of images - recursively search for image files
+            for root, dirs, files in os.walk(input_path):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        image_files.append(os.path.join(root, file))
+                        # Extract class label from subfolder name
+                        class_label = os.path.basename(root)
+                        class_labels.append(class_label)
+        else:
+            raise ValueError(f"Invalid input path: {input_path}")
+
+        return image_files, class_labels
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """
