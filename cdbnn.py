@@ -6839,6 +6839,7 @@ def main():
         # Setup logging and parse arguments
         logger = setup_logging()
         args = parse_arguments()
+        print(args)
 
         # Process based on mode
         if args.mode == 'predict':
