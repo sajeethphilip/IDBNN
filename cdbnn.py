@@ -110,6 +110,10 @@ class PredictionManager:
 
     def _get_image_files(self, input_path: str) -> List[str]:
         """Get a list of image files from the input path."""
+        if isinstance(input_path, list):
+            # If input_path is a list, use the first element as the directory
+            input_path = input_path[0]
+
         if os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
