@@ -1045,6 +1045,7 @@ class BaseAutoencoder(nn.Module):
                 enable_adaptive = True
                 print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
             if enable_adaptive:
+                print(f"Now in adaptive mode for saving features {train_features}")
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
                 train_output_path = output_path
