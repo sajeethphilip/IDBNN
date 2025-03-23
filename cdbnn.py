@@ -6844,7 +6844,7 @@ def main():
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            input_dir = input(f"Enter directory containing new images [{args.data}]: ") or f"{args.data}"
+            input_path = input(f"Enter directory containing new images [{args.data}]: ") or f"{args.data}"
             output_csv = input(f"Enter output CSV path [data/{args.data}/{args.data}.csv]: ") or f"data/{args.data}/{args.data}.csv"
             # Initialize the PredictionManager
             predictor = PredictionManager(
@@ -6856,14 +6856,14 @@ def main():
             if hasattr(predictor.model, 'set_dataset'):
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
+                dataset = predictor._create_dataset(args.input_path, transform)  # Create the dataset
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
 
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_dir=args.input_dir,
+                input_dir=args.input_path,
                 output_csv=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
