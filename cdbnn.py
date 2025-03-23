@@ -888,73 +888,6 @@ class BaseAutoencoder(nn.Module):
             # Return tuple format in phase 1
             return embedding, reconstruction
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """
-        Extract features from the latent space of the autoencoder.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing:
-                - 'embeddings': Extracted features (latent space embeddings)
-                - 'labels': Target labels
-                - 'filenames': List of filenames
-                - 'class_names': List of class names
-        """
-        self.eval()  # Set the model to evaluation mode
-        all_embeddings = []
-        all_labels = []
-        all_filenames = []
-        all_class_names = []
-
-        try:
-            with torch.no_grad():
-                for inputs, targets in tqdm(loader, desc="Extracting features"):
-                    inputs = inputs.to(self.device)
-                    outputs = self(inputs)  # Forward pass through the autoencoder
-
-                    # Handle different output formats
-                    if isinstance(outputs, tuple):
-                        # Tuple output (embedding, reconstruction)
-                        embeddings, _ = outputs
-                    elif isinstance(outputs, dict):
-                        # Dictionary output (e.g., {'embedding': ...})
-                        embeddings = outputs['embedding']
-                    else:
-                        # Assume the output is the embedding directly
-                        embeddings = outputs
-
-                    # Append features and labels
-                    all_embeddings.append(embeddings.cpu())
-                    all_labels.append(targets.cpu())
-
-                    # Get metadata (filenames and class names) if available
-                    if hasattr(loader.dataset, 'get_additional_info'):
-                        for idx in range(len(inputs)):
-                            file_index, filename = loader.dataset.get_additional_info(idx)
-                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
-                            all_filenames.append(filename)
-                            all_class_names.append(class_name)
-                    else:
-                        for idx in range(len(inputs)):
-                            all_filenames.append(f"unavailable_{idx}")
-                            all_class_names.append(f"unavailable_{targets[idx].item()}")
-
-                # Concatenate all results
-                feature_dict = {
-                    'embeddings': torch.cat(all_embeddings),
-                    'labels': torch.cat(all_labels),
-                    'filenames': all_filenames,
-                    'class_names': all_class_names
-                }
-
-                return feature_dict
-
-        except Exception as e:
-            logger.error(f"Error extracting features: {str(e)}")
-            raise
-
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
         return tuple([size for size in self.layer_sizes])
@@ -1018,6 +951,71 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
+    def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
+        """
+        Extract features from a DataLoader.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
+        self.eval()
+        all_embeddings = []
+        all_labels = []
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
+
+        try:
+            with torch.no_grad():
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
+
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    else:
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
+                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
+
+                    # Extract embeddings
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
+
+                    # Append to lists
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
+
+                # Concatenate all results
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
+
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels,
+                    'indices': all_indices,  # Include indices in the feature dictionary
+                    'filenames': all_filenames,  # Include filenames in the feature dictionary
+                    'class_names': all_class_names  # Include actual class names
+                }
+
+                return feature_dict
+
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
 
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -1028,29 +1026,31 @@ class BaseAutoencoder(nn.Module):
 
     def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
         """
-        Save features for training and test sets based on the adaptive flag.
-
-        Args:
-            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
-            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
-            output_path (str): Base path for saving the feature files.
+        Save features for training and test sets, including filename, true class, target, and phase 2 features.
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             # Access enable_adaptive from training_params
             try:
-                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+                enable_adaptive = self.config['model'].get('enable_adaptive', True)
             except:
                 enable_adaptive = True
                 print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+
+            # Initialize CSV file and write header
+            with open(output_path, 'w', newline='') as csvfile:
+                csv_writer = csv.writer(csvfile)
+                # Write header
+                feature_cols = [f'Feature_{i}' for i in range(train_features['embeddings'].shape[1])]
+                csv_writer.writerow(['filename', 'true_class', 'target'] + feature_cols)
+
+            # Save training features
             if enable_adaptive:
-                print(f"Now in adaptive mode for saving features {train_features}")
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
-                train_output_path = output_path
-                train_df.to_csv(train_output_path, index=False)
-                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+                train_df.to_csv(output_path, index=False)
+                logger.info(f"Features saved to {output_path} (adaptive mode)")
             else:
                 # In non-adaptive mode, save train and test features separately
                 train_df = self._features_to_dataframe(train_features)
@@ -1072,42 +1072,37 @@ class BaseAutoencoder(nn.Module):
 
     def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
         """
-        Convert features dictionary to a pandas DataFrame.
-
-        Args:
-            features (Dict[str, torch.Tensor]): Dictionary containing features and metadata.
-
-        Returns:
-            pd.DataFrame: DataFrame containing the features and metadata.
+        Convert features dictionary to a pandas DataFrame, including filename, true class, target, and phase 2 features.
         """
         data_dict = {}
-
-        # Process embeddings
-        if 'embeddings' in features:
-            embeddings = features['embeddings'].cpu().numpy()
-            for i in range(embeddings.shape[1]):
-                data_dict[f'feature_{i}'] = embeddings[:, i]
-        else:
-            raise ValueError("Mandatory field 'embeddings' is missing in features")
-
-        # Process labels/targets
-        if 'labels' in features:
-            data_dict['target'] = features['labels'].cpu().numpy()
-        else:
-            raise ValueError("Mandatory field 'labels' is missing in features")
 
         # Process filenames
         if 'filenames' in features:
             data_dict['filename'] = features['filenames']
         else:
-            data_dict['filename'] = ['unavailable'] * len(data_dict['target'])
+            data_dict['filename'] = [f"unknown_{i}" for i in range(len(features['embeddings']))]
 
-        # Process class names
+        # Process true class labels
         if 'class_names' in features:
-            data_dict['class_name'] = features['class_names']
+            data_dict['true_class'] = features['class_names']
         else:
-            data_dict['class_name'] = ['unavailable'] * len(data_dict['target'])
+            data_dict['true_class'] = [f"unknown_class" for _ in range(len(features['embeddings']))]
 
+        # Process target (tensorized label embeddings)
+        if 'labels' in features:
+            data_dict['target'] = features['labels'].cpu().numpy()
+        else:
+            data_dict['target'] = [-1 for _ in range(len(features['embeddings']))]
+
+        # Process phase 2 features
+        if 'embeddings' in features:
+            embeddings = features['embeddings'].cpu().numpy()
+            for i in range(embeddings.shape[1]):
+                data_dict[f'Feature_{i}'] = embeddings[:, i]
+        else:
+            raise ValueError("Mandatory field 'embeddings' is missing in features")
+
+        # Convert to DataFrame
         try:
             data_frame = pd.DataFrame(data_dict)
         except Exception as e:
@@ -2078,21 +2073,6 @@ class ModelFactory:
         device = torch.device('cuda' if config['execution_flags']['use_gpu']
                             and torch.cuda.is_available() else 'cpu')
 
-        # Get encoder type from config
-        encoder_type = config['model'].get('encoder_type', 'cnn').lower()
-
-        # Create appropriate model
-        if encoder_type == 'cnn':
-            logger.info("Creating CNNFeatureExtractor model")
-            model = FeatureExtractorCNN(
-                in_channels=input_shape[0],
-                feature_dims=feature_dims
-            )
-        elif encoder_type == 'autoenc':
-            logger.info("Creating AutoEncoderFeatureExtractor model")
-            model = AutoEncoderFeatureExtractor(config, device)
-        else:
-            raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
         # Get enabled enhancements
         enhancements = []
@@ -3048,17 +3028,6 @@ class BaseFeatureExtractor(nn.Module, ABC):
         else:
             self.device = device
 
-        # Initialize feature extractor based on encoder type
-        self.feature_extractor = ModelFactory.create_model(self.config)
-        self.feature_extractor.to(self.device)
-
-        # Initialize optimizer and other components
-        self.optimizer = self._initialize_optimizer()
-        self.scheduler = self._initialize_scheduler()
-        self.best_accuracy = 0.0
-        self.best_loss = float('inf')
-        self.current_epoch = 0
-        self.history = defaultdict(list)
         # Initialize common parameters
         self.feature_dims = self.config['model']['feature_dims']
         self.learning_rate = self.config['model'].get('learning_rate', 0.001)
@@ -3075,7 +3044,10 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if self.scheduler:
                 logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
         # Initialize training metrics
-
+        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
+        self.current_epoch = 0
+        self.history = defaultdict(list)
         self.training_log = []
         self.training_start_time = time.time()
 
@@ -3533,85 +3505,28 @@ class BaseFeatureExtractor(nn.Module, ABC):
                     if test_loss is not None else ""))
 
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Extract features from data, including filenames and class names.
+        Extract features from the dataset using the autoencoder.
 
         Args:
             loader (DataLoader): DataLoader for the dataset.
 
         Returns:
-            Dict[str, torch.Tensor]: Dictionary containing:
-                - 'embeddings': Extracted features (torch.Tensor)
-                - 'labels': Target labels (torch.Tensor)
-                - 'filenames': List of filenames (List[str])
-                - 'class_names': List of class names (List[str])
+            Tuple[torch.Tensor, torch.Tensor]: Extracted features and corresponding labels.
         """
         self.feature_extractor.eval()
         all_embeddings = []
         all_labels = []
-        all_filenames = []
-        all_class_names = []
 
-        try:
-            with torch.no_grad():
-                for inputs, targets in tqdm(loader, desc="Extracting features"):
-                    inputs = inputs.to(self.device)
-                    outputs = self.feature_extractor(inputs)
+        with torch.no_grad():
+            for inputs, labels in tqdm(loader, desc="Extracting features"):
+                inputs = inputs.to(self.device)
+                embeddings, _ = self.feature_extractor(inputs)
+                all_embeddings.append(embeddings.cpu())
+                all_labels.append(labels)
 
-                    # Handle different output formats
-                    if isinstance(outputs, tuple):
-                        # Tuple output (e.g., embedding, reconstruction)
-                        embeddings = outputs[0]  # Assume the first element is the embedding
-                    elif isinstance(outputs, dict):
-                        # Dictionary output (e.g., {'embedding': ...})
-                        if 'embedding' in outputs:
-                            embeddings = outputs['embedding']
-                        else:
-                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                    else:
-                        # Assume the output is the embedding directly
-                        embeddings = outputs
-
-                    # Append features and labels
-                    all_embeddings.append(embeddings.cpu())
-                    all_labels.append(targets)
-
-                    # Get metadata (filenames and class names) if available
-                    if hasattr(loader.dataset, 'get_additional_info'):
-                        # Custom dataset with metadata
-                        for idx in range(len(inputs)):
-                            file_index, filename = loader.dataset.get_additional_info(idx)
-                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
-                            all_filenames.append(filename)
-                            all_class_names.append(class_name)
-                    else:
-                        # Dataset without metadata (e.g., torchvision)
-                        for idx in range(len(inputs)):
-                            all_filenames.append(f"unavailable_{idx}")
-                            all_class_names.append(f"unavailable_{targets[idx].item()}")
-
-                    # Cleanup
-                    del inputs, outputs
-                    if len(all_embeddings) % 50 == 0:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-            # Concatenate all results
-            feature_dict = {
-                'embeddings': torch.cat(all_embeddings),
-                'labels': torch.cat(all_labels),
-                'filenames': all_filenames,
-                'class_names': all_class_names
-            }
-
-            return feature_dict
-
-        except Exception as e:
-            logger.error(f"Error extracting features: {str(e)}")
-            raise
-
+        return torch.cat(all_embeddings), torch.cat(all_labels)
 
 import torch
 import torch.nn as nn
@@ -5008,6 +4923,32 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
         return running_loss / len(val_loader), 100. * correct / total
 
+    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract features from data"""
+        self.feature_extractor.eval()
+        features = []
+        labels = []
+
+        try:
+            with torch.no_grad():
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                    inputs = inputs.to(self.device)
+                    outputs = self.feature_extractor(inputs)
+                    features.append(outputs.cpu())
+                    labels.append(targets)
+
+                    # Cleanup
+                    del inputs, outputs
+                    if len(features) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+            return torch.cat(features), torch.cat(labels)
+
+        except Exception as e:
+            logger.error(f"Error extracting features: {str(e)}")
+            raise
 
     def get_feature_shape(self) -> Tuple[int, ...]:
         """Get shape of extracted features"""
