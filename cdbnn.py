@@ -965,7 +965,7 @@ class BaseAutoencoder(nn.Module):
                 - 'filenames': List of filenames (List[str])
                 - 'class_names': List of class names (List[str])
         """
-        self.eval()
+        self.feature_extractor.eval()
         all_embeddings = []
         all_labels = []
         all_filenames = []
@@ -2079,6 +2079,21 @@ class ModelFactory:
         device = torch.device('cuda' if config['execution_flags']['use_gpu']
                             and torch.cuda.is_available() else 'cpu')
 
+        # Get encoder type from config
+        encoder_type = config['model'].get('encoder_type', 'cnn').lower()
+
+        # Create appropriate model
+        if encoder_type == 'cnn':
+            logger.info("Creating CNNFeatureExtractor model")
+            model = FeatureExtractorCNN(
+                in_channels=input_shape[0],
+                feature_dims=feature_dims
+            )
+        elif encoder_type == 'autoenc':
+            logger.info("Creating AutoEncoderFeatureExtractor model")
+            model = AutoEncoderFeatureExtractor(config, device)
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
         # Get enabled enhancements
         enhancements = []
@@ -3034,6 +3049,17 @@ class BaseFeatureExtractor(nn.Module, ABC):
         else:
             self.device = device
 
+        # Initialize feature extractor based on encoder type
+        self.feature_extractor = ModelFactory.create_model(self.config)
+        self.feature_extractor.to(self.device)
+
+        # Initialize optimizer and other components
+        self.optimizer = self._initialize_optimizer()
+        self.scheduler = self._initialize_scheduler()
+        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
+        self.current_epoch = 0
+        self.history = defaultdict(list)
         # Initialize common parameters
         self.feature_dims = self.config['model']['feature_dims']
         self.learning_rate = self.config['model'].get('learning_rate', 0.001)
@@ -3050,10 +3076,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if self.scheduler:
                 logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
         # Initialize training metrics
-        self.best_accuracy = 0.0
-        self.best_loss = float('inf')
-        self.current_epoch = 0
-        self.history = defaultdict(list)
+
         self.training_log = []
         self.training_start_time = time.time()
 
