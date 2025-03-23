@@ -5168,6 +5168,10 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
+        if isinstance(data_dir, list):
+            # If data_dir is a list, use the first element as the directory
+            data_dir = data_dir[0]
+
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size  # Store target_size as an instance variable
