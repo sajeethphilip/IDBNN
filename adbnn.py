@@ -300,14 +300,7 @@ class DatasetConfig:
             "fresh_start": false,
             "use_previous_model": true
         }
-        # Save the configuration
-        config_path = f"data/{dataset_name}/{dataset_name}.conf"
-        try:
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=4)
-            print("\033[K" +f"Created default configuration file: {config_path}")
-        except Exception as e:
-            print("\033[K" +f"Warning: Could not save configuration file: {str(e)}")
+
 
         return config
 
