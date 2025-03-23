@@ -169,10 +169,10 @@ class PredictionManager:
         model.eval()
         logger.info("Model loaded successfully.")
         return model
+
     def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
         """
         Predict features for images from the input path (file, directory, or archive).
-        Optimized for batch processing and GPU utilization.
         """
         # Validate input_path
         if not isinstance(input_path, (str, bytes, os.PathLike)):
@@ -190,77 +190,9 @@ class PredictionManager:
 
         # Get the image transform from the config
         transform = self._get_transforms()
-
-        # Create a dataset and dataloader for batch processing
-        dataset = self._create_dataset(image_files, transform)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-
-        # Initialize predictions dictionary
-        predictions = {
-            'filename': [],
-            'features_phase1': [],
-            'features_phase2': []
-        }
+        logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
         # Process images in batches
-        self.model.eval()
-        with torch.no_grad():
-            for batch_idx, (images, _) in enumerate(tqdm(dataloader, desc="Predicting features")):
-                try:
-                    images = images.to(self.device)
-
-                    # Phase 1: Extract features
-                    embeddings_phase1 = self.model(images)
-                    if isinstance(embeddings_phase1, tuple):
-                        embeddings_phase1 = embeddings_phase1[0]
-
-                    # Phase 2: If enabled, extract additional features
-                    embeddings_phase2 = None
-                    if hasattr(self.model, 'set_training_phase'):
-                        self.model.set_training_phase(2)
-                        embeddings_phase2 = self.model(images)
-                        if isinstance(embeddings_phase2, tuple):
-                            embeddings_phase2 = embeddings_phase2[0]
-
-                    # Store results
-                    batch_filenames = [os.path.basename(image_files[batch_idx * batch_size + i])
-                                     for i in range(len(images))]
-                    predictions['filename'].extend(batch_filenames)
-                    predictions['features_phase1'].extend(embeddings_phase1.cpu().numpy())
-                    if embeddings_phase2 is not None:
-                        predictions['features_phase2'].extend(embeddings_phase2.cpu().numpy())
-
-                except Exception as e:
-                    logger.error(f"Error processing batch {batch_idx}: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    continue
-
-        # Save predictions to CSV
-        self._save_predictions(predictions, output_csv)
-        logger.info(f"Predictions saved to {output_csv}")
-    def predict_images_old(self, input_path: str, output_csv: str = None):
-        """
-        Predict features for images from the input path (file, directory, or archive).
-        """
-        # Validate input_path
-        if not isinstance(input_path, (str, bytes, os.PathLike)):
-            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
-
-        # Get list of image files
-        image_files = self._get_image_files(input_path)
-        if not image_files:
-            raise ValueError(f"No valid images found in {input_path}")
-
-        # Set default output CSV path if not provided
-        if output_csv is None:
-            dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
-
-        # Get the image transform from the config
-        transform = self._get_transforms()
-        logger.debug(f"Image transforms: {transform}")
-
-        # Process images
         predictions = {
             'filename': [],
             'features_phase1': [],
@@ -275,84 +207,75 @@ class PredictionManager:
             self.model.set_dataset(dataset)  # Set the dataset before processing images
             logger.debug("Dataset set in the model.")
 
-        # Process each image
-        for filename in tqdm(image_files, desc="Predicting features"):
-            try:
-                logger.debug(f"Processing image: {filename}")
+        # Process images in batches
+        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+            batch_files = image_files[i:i + batch_size]
+            batch_images = []
 
-                # Load and transform the image
-                image = Image.open(filename).convert('RGB')
-                image_tensor = transform(image).unsqueeze(0).to(self.device)
-                logger.debug(f"Image tensor shape: {image_tensor.shape}")
+            # Load and transform images
+            for filename in batch_files:
+                try:
+                    image = Image.open(filename).convert('RGB')
+                    image_tensor = transform(image).unsqueeze(0).to(self.device)
+                    batch_images.append(image_tensor)
+                except Exception as e:
+                    logger.error(f"Error loading image {filename}: {str(e)}")
+                    continue
 
-                # Extract features using the model (phase 1)
+            if not batch_images:
+                continue
+
+            # Stack images into a batch
+            batch_tensor = torch.cat(batch_images, dim=0)
+
+            # Extract features using the model (phase 1)
+            with torch.no_grad():
+                output = self.model(batch_tensor)
+
+                # Handle dictionary output
+                if isinstance(output, dict):
+                    if 'embedding' in output:
+                        embedding_phase1 = output['embedding']  # Extract embedding from dictionary
+                    else:
+                        raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
+                # Handle tuple output (e.g., (embedding, reconstruction))
+                elif isinstance(output, tuple):
+                    embedding_phase1 = output[0]  # Assume the first element is the embedding
+                else:
+                    embedding_phase1 = output  # Assume the output is a single tensor
+
+                # Convert to numpy array
+                embedding_phase1 = embedding_phase1.cpu().numpy()
+
+            # Extract features using the model (phase 2)
+            if hasattr(self.model, 'set_training_phase'):
+                self.model.set_training_phase(2)  # Switch to phase 2
                 with torch.no_grad():
-                    logger.debug("Running model for phase 1...")
-                    output = self.model(image_tensor)
-                    logger.debug(f"Model output type: {type(output)}")
+                    output = self.model(batch_tensor)
 
                     # Handle dictionary output
                     if isinstance(output, dict):
                         if 'embedding' in output:
-                            embedding_phase1 = output['embedding']  # Extract embedding from dictionary
+                            embedding_phase2 = output['embedding']  # Extract embedding from dictionary
                         else:
                             raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
                     # Handle tuple output (e.g., (embedding, reconstruction))
                     elif isinstance(output, tuple):
-                        logger.debug("Model output is a tuple.")
-                        logger.debug(f"Tuple length: {len(output)}")
-                        logger.debug(f"First element type: {type(output[0])}")
-                        embedding_phase1 = output[0]  # Assume the first element is the embedding
+                        embedding_phase2 = output[0]  # Assume the first element is the embedding
                     else:
-                        logger.debug("Model output is a single tensor.")
-                        embedding_phase1 = output  # Assume the output is a single tensor
+                        embedding_phase2 = output  # Assume the output is a single tensor
 
                     # Convert to numpy array
-                    embedding_phase1 = embedding_phase1.cpu().numpy().flatten()
-                    logger.debug(f"Embedding shape: {embedding_phase1.shape}")
+                    embedding_phase2 = embedding_phase2.cpu().numpy()
 
-                # Extract features using the model (phase 2)
-                if hasattr(self.model, 'set_training_phase'):
-                    logger.debug("Switching to phase 2...")
-                    self.model.set_training_phase(2)  # Switch to phase 2
-                    with torch.no_grad():
-                        logger.debug("Running model for phase 2...")
-                        output = self.model(image_tensor)
-                        logger.debug(f"Model output type: {type(output)}")
-
-                        # Handle dictionary output
-                        if isinstance(output, dict):
-                            if 'embedding' in output:
-                                embedding_phase2 = output['embedding']  # Extract embedding from dictionary
-                            else:
-                                raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                        # Handle tuple output (e.g., (embedding, reconstruction))
-                        elif isinstance(output, tuple):
-                            logger.debug("Model output is a tuple.")
-                            logger.debug(f"Tuple length: {len(output)}")
-                            logger.debug(f"First element type: {type(output[0])}")
-                            embedding_phase2 = output[0]  # Assume the first element is the embedding
-                        else:
-                            logger.debug("Model output is a single tensor.")
-                            embedding_phase2 = output  # Assume the output is a single tensor
-
-                        # Convert to numpy array
-                        embedding_phase2 = embedding_phase2.cpu().numpy().flatten()
-                        logger.debug(f"Embedding shape: {embedding_phase2.shape}")
-
-                # Store results
+            # Store results
+            for j, filename in enumerate(batch_files):
                 predictions['filename'].append(os.path.basename(filename))
-                predictions['features_phase1'].append(embedding_phase1)
-                predictions['features_phase2'].append(embedding_phase2)
-                logger.debug(f"Stored predictions for {filename}")
-
-            except Exception as e:
-                logger.error(f"Error processing image {filename}: {str(e)}")
-                logger.error(traceback.format_exc())  # Log the full traceback
-                continue
+                predictions['features_phase1'].append(embedding_phase1[j].flatten())
+                predictions['features_phase2'].append(embedding_phase2[j].flatten())
 
         # Save predictions to CSV
-        logger.debug("Saving predictions to CSV...")
+        logger.info("Saving predictions to CSV...")
         self._save_predictions(predictions, output_csv)
         logger.info(f"Predictions saved to {output_csv}")
 
