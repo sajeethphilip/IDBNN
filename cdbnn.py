@@ -223,8 +223,14 @@ class PredictionManager:
                     output = self.model(image_tensor)
                     logger.debug(f"Model output type: {type(output)}")
 
+                    # Handle dictionary output
+                    if isinstance(output, dict):
+                        if 'embedding' in output:
+                            embedding_phase1 = output['embedding']  # Extract embedding from dictionary
+                        else:
+                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
                     # Handle tuple output (e.g., (embedding, reconstruction))
-                    if isinstance(output, tuple):
+                    elif isinstance(output, tuple):
                         logger.debug("Model output is a tuple.")
                         logger.debug(f"Tuple length: {len(output)}")
                         logger.debug(f"First element type: {type(output[0])}")
@@ -246,8 +252,14 @@ class PredictionManager:
                         output = self.model(image_tensor)
                         logger.debug(f"Model output type: {type(output)}")
 
+                        # Handle dictionary output
+                        if isinstance(output, dict):
+                            if 'embedding' in output:
+                                embedding_phase2 = output['embedding']  # Extract embedding from dictionary
+                            else:
+                                raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
                         # Handle tuple output (e.g., (embedding, reconstruction))
-                        if isinstance(output, tuple):
+                        elif isinstance(output, tuple):
                             logger.debug("Model output is a tuple.")
                             logger.debug(f"Tuple length: {len(output)}")
                             logger.debug(f"First element type: {type(output[0])}")
