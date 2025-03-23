@@ -3507,28 +3507,70 @@ class BaseFeatureExtractor(nn.Module, ABC):
                     if test_loss is not None else ""))
 
 
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
         """
-        Extract features from the dataset using the autoencoder.
+        Extract features from data, including filenames and class names.
 
         Args:
             loader (DataLoader): DataLoader for the dataset.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Extracted features and corresponding labels.
+            Dict[str, torch.Tensor]: Dictionary containing:
+                - 'embeddings': Extracted features (torch.Tensor)
+                - 'labels': Target labels (torch.Tensor)
+                - 'filenames': List of filenames (List[str])
+                - 'class_names': List of class names (List[str])
         """
         self.feature_extractor.eval()
         all_embeddings = []
         all_labels = []
+        all_filenames = []
+        all_class_names = []
 
-        with torch.no_grad():
-            for inputs, labels in tqdm(loader, desc="Extracting features"):
-                inputs = inputs.to(self.device)
-                embeddings, _ = self.feature_extractor(inputs)
-                all_embeddings.append(embeddings.cpu())
-                all_labels.append(labels)
+        try:
+            with torch.no_grad():
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                    inputs = inputs.to(self.device)
+                    outputs = self.feature_extractor(inputs)
 
-        return torch.cat(all_embeddings), torch.cat(all_labels)
+                    # Append features and labels
+                    all_embeddings.append(outputs.cpu())
+                    all_labels.append(targets)
+
+                    # Get metadata (filenames and class names) if available
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        for idx in range(len(inputs)):
+                            file_index, filename = loader.dataset.get_additional_info(idx)
+                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
+                            all_filenames.append(filename)
+                            all_class_names.append(class_name)
+                    else:
+                        # Dataset without metadata (e.g., torchvision)
+                        for idx in range(len(inputs)):
+                            all_filenames.append(f"unavailable_{idx}")
+                            all_class_names.append(f"unavailable_{targets[idx].item()}")
+
+                    # Cleanup
+                    del inputs, outputs
+                    if len(all_embeddings) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+            # Concatenate all results
+            feature_dict = {
+                'embeddings': torch.cat(all_embeddings),
+                'labels': torch.cat(all_labels),
+                'filenames': all_filenames,
+                'class_names': all_class_names
+            }
+
+            return feature_dict
+
+        except Exception as e:
+            logger.error(f"Error extracting features: {str(e)}")
+            raise
 
 import torch
 import torch.nn as nn
