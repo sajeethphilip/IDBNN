@@ -1026,28 +1026,31 @@ class BaseAutoencoder(nn.Module):
 
     def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
         """
-        Save features for training and test sets based on the adaptive flag.
-
-        Args:
-            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
-            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
-            output_path (str): Base path for saving the feature files.
+        Save features for training and test sets, including filename, true class, target, and phase 2 features.
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
             # Access enable_adaptive from training_params
             try:
-                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+                enable_adaptive = self.config['model'].get('enable_adaptive', True)
             except:
                 enable_adaptive = True
                 print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+
+            # Initialize CSV file and write header
+            with open(output_path, 'w', newline='') as csvfile:
+                csv_writer = csv.writer(csvfile)
+                # Write header
+                feature_cols = [f'Feature_{i}' for i in range(train_features['embeddings'].shape[1])]
+                csv_writer.writerow(['filename', 'true_class', 'target'] + feature_cols)
+
+            # Save training features
             if enable_adaptive:
                 # In adaptive mode, only save the merged dataset (train folder)
                 train_df = self._features_to_dataframe(train_features)
-                train_output_path = output_path
-                train_df.to_csv(train_output_path, index=False)
-                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+                train_df.to_csv(output_path, index=False)
+                logger.info(f"Features saved to {output_path} (adaptive mode)")
             else:
                 # In non-adaptive mode, save train and test features separately
                 train_df = self._features_to_dataframe(train_features)
@@ -1069,45 +1072,43 @@ class BaseAutoencoder(nn.Module):
 
     def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
         """
-        Convert features dictionary to a pandas DataFrame.
-
-        Args:
-            features (Dict[str, torch.Tensor]): Dictionary containing features and metadata.
-
-        Returns:
-            pd.DataFrame: DataFrame containing the features and metadata.
+        Convert features dictionary to a pandas DataFrame, including filename, true class, target, and phase 2 features.
         """
         data_dict = {}
 
-        # Process embeddings
-        if 'embeddings' in features:
-            embeddings = features['embeddings'].cpu().numpy()
-            for i in range(embeddings.shape[1]):
-                data_dict[f'feature_{i}'] = embeddings[:, i]
+        # Process filenames
+        if 'filenames' in features:
+            data_dict['filename'] = features['filenames']
         else:
-            raise ValueError("Mandatory field 'embeddings' is missing in features")
+            data_dict['filename'] = [f"unknown_{i}" for i in range(len(features['embeddings']))]
 
-        # Process labels/targets
+        # Process true class labels
+        if 'class_names' in features:
+            data_dict['true_class'] = features['class_names']
+        else:
+            data_dict['true_class'] = [f"unknown_class" for _ in range(len(features['embeddings']))]
+
+        # Process target (tensorized label embeddings)
         if 'labels' in features:
             data_dict['target'] = features['labels'].cpu().numpy()
         else:
-            raise ValueError("Mandatory field 'labels' is missing in features")
+            data_dict['target'] = [-1 for _ in range(len(features['embeddings']))]
 
-        '''# Process optional fields
-        optional_fields = ['indices', 'filenames', 'class_names']
-        for field in optional_fields:
-            if field in features:
-                data_dict[field] = features[field]
-                print(f"Found filed {data_dict[field]}")
-            else:
-                data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
-                print(f"Dummy filed {data_dict[field]}")
-        '''
+        # Process phase 2 features
+        if 'embeddings' in features:
+            embeddings = features['embeddings'].cpu().numpy()
+            for i in range(embeddings.shape[1]):
+                data_dict[f'Feature_{i}'] = embeddings[:, i]
+        else:
+            raise ValueError("Mandatory field 'embeddings' is missing in features")
+
         # Convert to DataFrame
         try:
-            data_frame=pd.DataFrame(data_dict)
-        except:
-            print("Failed creating dataframe")
+            data_frame = pd.DataFrame(data_dict)
+        except Exception as e:
+            logger.error(f"Failed creating dataframe: {str(e)}")
+            raise
+
         return data_frame
 
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
@@ -3417,7 +3418,6 @@ class BaseFeatureExtractor(nn.Module, ABC):
                 if os.path.exists(epoch_dir):
                     self.create_training_summary(epoch_dir)
 
-
                 # Validation
                 val_loss, val_acc = None, None
                 if val_loader:
@@ -3457,13 +3457,15 @@ class BaseFeatureExtractor(nn.Module, ABC):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                # Extract features
+
+                # Extract features and save them to CSV
                 train_features = self.extract_features(train_loader, dataset_type="train")
                 test_features = self.extract_features(test_loader, dataset_type="test")
 
-                # Save features
+                # Save features with filename, true class, target, and phase 2 features
                 output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
                 self.save_features(train_features, test_features, output_path)
+
             return self.history
 
         except Exception as e:
