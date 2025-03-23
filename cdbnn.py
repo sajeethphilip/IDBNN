@@ -888,6 +888,60 @@ class BaseAutoencoder(nn.Module):
             # Return tuple format in phase 1
             return embedding, reconstruction
 
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """
+        Extract features from the latent space of the autoencoder.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing:
+                - 'embeddings': Extracted features (latent space embeddings)
+                - 'labels': Target labels
+                - 'filenames': List of filenames
+                - 'class_names': List of class names
+        """
+        self.eval()
+        all_embeddings = []
+        all_labels = []
+        all_filenames = []
+        all_class_names = []
+
+        try:
+            with torch.no_grad():
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                    inputs = inputs.to(self.device)
+                    embeddings, _ = self(inputs)  # Get latent space embeddings
+                    all_embeddings.append(embeddings.cpu())
+                    all_labels.append(targets.cpu())
+
+                    # Get metadata (filenames and class names) if available
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        for idx in range(len(inputs)):
+                            file_index, filename = loader.dataset.get_additional_info(idx)
+                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
+                            all_filenames.append(filename)
+                            all_class_names.append(class_name)
+                    else:
+                        for idx in range(len(inputs)):
+                            all_filenames.append(f"unavailable_{idx}")
+                            all_class_names.append(f"unavailable_{targets[idx].item()}")
+
+                # Concatenate all results
+                feature_dict = {
+                    'embeddings': torch.cat(all_embeddings),
+                    'labels': torch.cat(all_labels),
+                    'filenames': all_filenames,
+                    'class_names': all_class_names
+                }
+
+                return feature_dict
+
+        except Exception as e:
+            logger.error(f"Error extracting features: {str(e)}")
+            raise
+
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
         return tuple([size for size in self.layer_sizes])
