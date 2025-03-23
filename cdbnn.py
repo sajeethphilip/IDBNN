@@ -110,6 +110,9 @@ class PredictionManager:
 
     def _get_image_files(self, input_path: str) -> List[str]:
         """Get a list of image files from the input path."""
+        if not isinstance(input_path, (str, bytes, os.PathLike)):
+            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
+
         image_files = []
 
         if os.path.isfile(input_path):
@@ -171,6 +174,10 @@ class PredictionManager:
         """
         Predict features for images from the input path (file, directory, or archive).
         """
+        # Validate input_path
+        if not isinstance(input_path, (str, bytes, os.PathLike)):
+            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
+
         # Get list of image files
         image_files = self._get_image_files(input_path)
         if not image_files:
@@ -269,12 +276,12 @@ class PredictionManager:
         self._save_predictions(predictions, output_csv)
         logger.info(f"Predictions saved to {output_csv}")
 
-    def _create_dataset(self, input_dir: str, transform: transforms.Compose) -> Dataset:
+    def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """
-        Create a dataset from the images in the input directory.
+        Create a dataset from the list of image files.
 
         Args:
-            input_dir (str): Directory containing images.
+            image_files (List[str]): List of paths to image files.
             transform (transforms.Compose): Transformations to apply to the images.
 
         Returns:
@@ -295,7 +302,6 @@ class PredictionManager:
                     image = self.transform(image)
                 return image, 0  # Dummy label
 
-        image_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
         return DummyDataset(image_files, transform)
 
     def _get_transforms(self) -> transforms.Compose:
