@@ -6543,6 +6543,8 @@ def parse_arguments():
     parser.add_argument('--cpu', action='store_true', help='force CPU usage')
     parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
     parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
+    parser.add_argument('--input_path', type=str, required=True, help='Path to the input images')
+
 
     return parser.parse_args()
 
