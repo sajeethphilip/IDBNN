@@ -6604,7 +6604,7 @@ def get_interactive_args():
         # Set default input directory
         default_input = args.data if args.data else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_dir = input(prompt).strip() or default_input
+        args.input_path = input(prompt).strip() or default_input
 
         # Set default output CSV path
         default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
@@ -6866,7 +6866,7 @@ def main():
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_dir=args.input_path,
+                input_path=args.input_path,
                 output_csv=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
