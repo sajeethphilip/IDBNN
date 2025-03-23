@@ -965,7 +965,7 @@ class BaseAutoencoder(nn.Module):
                 - 'filenames': List of filenames (List[str])
                 - 'class_names': List of class names (List[str])
         """
-        self.feature_extractor.eval()
+        self.eval()
         all_embeddings = []
         all_labels = []
         all_filenames = []
