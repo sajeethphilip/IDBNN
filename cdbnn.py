@@ -170,7 +170,7 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
         """
         Predict features for images from the input path (file, directory, or archive).
         Writes predictions to CSV batch-wise, including true class labels and their tensorized embeddings.
@@ -187,7 +187,7 @@ class PredictionManager:
         # Set default output CSV path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         # Get the image transform from the config
         transform = self._get_transforms()
@@ -211,7 +211,7 @@ class PredictionManager:
             csv_writer = csv.writer(csvfile)
             # Write header
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class', 'target'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            csv_writer.writerow(['filename', 'true_class', 'target'] + [f'phase1_{col}' for col in feature_cols] + [f'{col}' for col in feature_cols])
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
