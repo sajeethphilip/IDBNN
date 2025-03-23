@@ -5095,14 +5095,14 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     Recursively find all matching .conf and .csv files in the data directory structure.
 
     Args:
-        data_dir: Root directory to search for datasets
+        data_dir: Root directory to search for datasets.
 
     Returns:
-        List of tuples (basename, conf_path, csv_path)
+        List of tuples (basename, conf_path, csv_path).
     """
     # Ensure data directory exists
     if not os.path.exists(data_dir):
-        print("\033[K" +f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
+        print("\033[K" + f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
         os.makedirs(data_dir)
         return []
 
@@ -5121,25 +5121,27 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
 
             conf_path = os.path.join(root, conf_file)
 
-            # Look for matching CSV in same directory and dataset-specific subdirectory
+            # Look for matching CSV in the same directory and dataset-specific subdirectory
             csv_file = f"{basename}.csv"
             csv_paths = [
                 os.path.join(root, csv_file),
                 os.path.join(root, basename, csv_file)
             ]
-           # Load adaptive_dbnn.conf if it exists
+
+            # Load adaptive_dbnn.conf if it exists
             adaptive_conf = {}
-            adaptive_conf_path =f'{data_dir}/{basename}/adaptive_dbnn.conf'
+            adaptive_conf_path = os.path.join(data_dir, basename, 'adaptive_dbnn.conf')
             if os.path.exists(adaptive_conf_path):
                 try:
                     with open(adaptive_conf_path, 'r') as f:
                         adaptive_conf = json.load(f)
-                    print("\033[K" +f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
+                    print("\033[K" + f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
                 except Exception as e:
-                    print(f"Warning: Could not load adaptive configuration from{adaptive_conf_path}: {str(e)}")
+                    print(f"Warning: Could not load adaptive configuration from {adaptive_conf_path}: {str(e)}")
             else:
-                print("\033[K" +f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
+                print("\033[K" + f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
 
+            # Find the CSV file
             csv_path = None
             for path in csv_paths:
                 if os.path.exists(path):
@@ -5147,43 +5149,44 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                     break
 
             if csv_path:
-                # Update configuration with adaptive settings if available
-                if adaptive_conf:
-                    try:
-                        with open(conf_path, 'r') as f:
-                            dataset_conf = json.load(f)
+                # Load the dataset configuration
+                try:
+                    with open(conf_path, 'r') as f:
+                        dataset_conf = json.load(f)
 
-                        # Update execution flags from adaptive configuration
+                    # Update configuration with adaptive settings if available
+                    if adaptive_conf:
+                        # Update execution flags (only if missing or explicitly required)
                         if 'execution_flags' in adaptive_conf:
-                            dataset_conf['execution_flags'] = adaptive_conf['execution_flags']
+                            dataset_conf.setdefault('execution_flags', {}).update(adaptive_conf['execution_flags'])
 
-                        # Update training parameters
+                        # Update training parameters (only if missing or explicitly required)
                         if 'training_params' in adaptive_conf:
-                            dataset_conf['training_params'].update(adaptive_conf['training_params'])
+                            dataset_conf.setdefault('training_params', {}).update(adaptive_conf['training_params'])
 
-                        # Save updated configuration
+                        # Save updated configuration only if changes were made
                         with open(conf_path, 'w') as f:
                             json.dump(dataset_conf, f, indent=4)
-                        print("\033[K" +f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
+                        print("\033[K" + f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
 
-                    except Exception as e:
-                        print(f"Warning: Could not update configuration for {basename}: {str(e)}")
+                except Exception as e:
+                    print(f"Warning: Could not update configuration for {basename}: {str(e)}")
 
                 dataset_pairs.append((basename, conf_path, csv_path))
                 processed_datasets.add(basename)
-                print("\033[K" +f"Found dataset pair:", end="\r", flush=True)
-                print("\033[K" +f"  Config: {conf_path}", end="\r", flush=True)
-                print("\033[K" +f"  Data  : {csv_path}", end="\r", flush=True)
+                print("\033[K" + f"Found dataset pair:", end="\r", flush=True)
+                print("\033[K" + f"  Config: {conf_path}", end="\r", flush=True)
+                print("\033[K" + f"  Data  : {csv_path}", end="\r", flush=True)
             else:
-                print("\033[K" +f"Warning: Config file {conf_file} exists but no matching CSV found")
-                print("\033[K" +f"Looked in:")
+                print("\033[K" + f"Warning: Config file {conf_file} exists but no matching CSV found")
+                print("\033[K" + f"Looked in:")
                 for path in csv_paths:
-                    print("\033[K" +f"  - {path}")
+                    print("\033[K" + f"  - {path}")
 
     if not dataset_pairs:
-        print("\033[K" +"No matching .conf and .csv file pairs found.")
-        print("\033[K" +"Each dataset should have both a .conf configuration file and a matching .csv data file.")
-        print("\033[K" +"Example: 'dataset1.conf' and 'dataset1.csv'")
+        print("\033[K" + "No matching .conf and .csv file pairs found.")
+        print("\033[K" + "Each dataset should have both a .conf configuration file and a matching .csv data file.")
+        print("\033[K" + "Example: 'dataset1.conf' and 'dataset1.csv'")
 
     return dataset_pairs
 
