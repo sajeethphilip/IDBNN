@@ -5018,7 +5018,8 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
         "gen_samples": False,
         "enable_adaptive": True,
         "nokbd": False,
-        "display": None
+        "display": None,
+        "batch_size": None  # Batch size will be dynamically calculated if not provided
     }
 
     if os.path.exists(config_path):
@@ -5050,6 +5051,10 @@ def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
     EnableAdaptive = config.get("enable_adaptive", True)
     nokbd = config.get("nokbd", False)
     display = config.get("display", None)
+
+    # Dynamically calculate batch size if not provided in the config
+    if "batch_size" not in config or config["batch_size"] is None:
+        config["batch_size"] = _calculate_optimal_batch_size()
 
     return config
 
@@ -5246,46 +5251,65 @@ def process_datasets():
     print("\033[K" +"All datasets processed")
 
 
-def validate_config(conf_path: str) -> bool:
+def validate_config(config: dict) -> dict:
     """
-    Validate configuration file and ensure proper folder structure
+    Validate the configuration parameters, ensuring that only the batch size is dynamically updated.
 
     Args:
-        conf_path: Path to configuration file
+        config: Configuration dictionary.
 
     Returns:
-        True if valid, False otherwise
+        dict: Validated configuration dictionary.
     """
-    try:
-        with open(conf_path, 'r') as f:
-            config = json.load(f)
+    validated_config = config.copy()
 
-        # Check required fields
-        required_fields = ['file_path', 'column_names', 'target_column']
-        for field in required_fields:
-            if field not in config:
-                print("\033[K" +f"Missing required field: {field}")
-                return False
+    # Validate other parameters (only replace with defaults if missing or invalid)
+    if "device" not in validated_config or validated_config["device"] not in ["cuda", "cpu"]:
+        validated_config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Validate dataset directory exists
-        basename = os.path.splitext(os.path.basename(conf_path))[0]
-        dataset_dir = os.path.join('data', basename)
-        if not os.path.exists(dataset_dir):
-            print("\033[K" +f"Dataset directory missing: {dataset_dir}")
-            create_dir = input("Create directory? (y/n): ").lower() == 'y'
-            if create_dir:
-                os.makedirs(dataset_dir)
-                print("\033[K" +f"Created directory: {dataset_dir}")
-            else:
-                return False
+    if "trials" not in validated_config or not isinstance(validated_config["trials"], int):
+        validated_config["trials"] = 100
 
-        return True
-    except json.JSONDecodeError:
-        print("\033[K" +f"Invalid JSON in configuration file: {conf_path}")
-        return False
-    except Exception as e:
-        print("\033[K" +f"Error validating configuration: {str(e)}")
-        return False
+    if "cardinality_threshold" not in validated_config or not isinstance(validated_config["cardinality_threshold"], float):
+        validated_config["cardinality_threshold"] = 0.9
+
+    if "cardinality_tolerance" not in validated_config or not isinstance(validated_config["cardinality_tolerance"], int):
+        validated_config["cardinality_tolerance"] = 4
+
+    if "learning_rate" not in validated_config or not isinstance(validated_config["learning_rate"], float):
+        validated_config["learning_rate"] = 0.1
+
+    if "random_seed" not in validated_config or not isinstance(validated_config["random_seed"], int):
+        validated_config["random_seed"] = 42
+
+    if "epochs" not in validated_config or not isinstance(validated_config["epochs"], int):
+        validated_config["epochs"] = 1000
+
+    if "test_fraction" not in validated_config or not isinstance(validated_config["test_fraction"], float):
+        validated_config["test_fraction"] = 0.2
+
+    if "train" not in validated_config or not isinstance(validated_config["train"], bool):
+        validated_config["train"] = True
+
+    if "train_only" not in validated_config or not isinstance(validated_config["train_only"], bool):
+        validated_config["train_only"] = False
+
+    if "predict" not in validated_config or not isinstance(validated_config["predict"], bool):
+        validated_config["predict"] = True
+
+    if "gen_samples" not in validated_config or not isinstance(validated_config["gen_samples"], bool):
+        validated_config["gen_samples"] = False
+
+    if "enable_adaptive" not in validated_config or not isinstance(validated_config["enable_adaptive"], bool):
+        validated_config["enable_adaptive"] = True
+
+    if "nokbd" not in validated_config or not isinstance(validated_config["nokbd"], bool):
+        validated_config["nokbd"] = False
+
+    if "display" not in validated_config:
+        validated_config["display"] = None
+
+    return validated_config
 
 def print_dataset_info(conf_path: str, csv_path: str):
     """Print information about the dataset with robust error handling"""
