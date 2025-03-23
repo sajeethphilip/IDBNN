@@ -170,7 +170,7 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
         """
         Predict features for images from the input path (file, directory, or archive).
         Writes predictions to CSV batch-wise, including true class labels if available.
