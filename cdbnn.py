@@ -169,8 +169,76 @@ class PredictionManager:
         model.eval()
         logger.info("Model loaded successfully.")
         return model
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
+        """
+        Predict features for images from the input path (file, directory, or archive).
+        Optimized for batch processing and GPU utilization.
+        """
+        # Validate input_path
+        if not isinstance(input_path, (str, bytes, os.PathLike)):
+            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-    def predict_images(self, input_path: str, output_csv: str = None):
+        # Get list of image files
+        image_files = self._get_image_files(input_path)
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_path}")
+
+        # Set default output CSV path if not provided
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+
+        # Get the image transform from the config
+        transform = self._get_transforms()
+
+        # Create a dataset and dataloader for batch processing
+        dataset = self._create_dataset(image_files, transform)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+        # Initialize predictions dictionary
+        predictions = {
+            'filename': [],
+            'features_phase1': [],
+            'features_phase2': []
+        }
+
+        # Process images in batches
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, (images, _) in enumerate(tqdm(dataloader, desc="Predicting features")):
+                try:
+                    images = images.to(self.device)
+
+                    # Phase 1: Extract features
+                    embeddings_phase1 = self.model(images)
+                    if isinstance(embeddings_phase1, tuple):
+                        embeddings_phase1 = embeddings_phase1[0]
+
+                    # Phase 2: If enabled, extract additional features
+                    embeddings_phase2 = None
+                    if hasattr(self.model, 'set_training_phase'):
+                        self.model.set_training_phase(2)
+                        embeddings_phase2 = self.model(images)
+                        if isinstance(embeddings_phase2, tuple):
+                            embeddings_phase2 = embeddings_phase2[0]
+
+                    # Store results
+                    batch_filenames = [os.path.basename(image_files[batch_idx * batch_size + i])
+                                     for i in range(len(images))]
+                    predictions['filename'].extend(batch_filenames)
+                    predictions['features_phase1'].extend(embeddings_phase1.cpu().numpy())
+                    if embeddings_phase2 is not None:
+                        predictions['features_phase2'].extend(embeddings_phase2.cpu().numpy())
+
+                except Exception as e:
+                    logger.error(f"Error processing batch {batch_idx}: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    continue
+
+        # Save predictions to CSV
+        self._save_predictions(predictions, output_csv)
+        logger.info(f"Predictions saved to {output_csv}")
+    def predict_images_old(self, input_path: str, output_csv: str = None):
         """
         Predict features for images from the input path (file, directory, or archive).
         """
