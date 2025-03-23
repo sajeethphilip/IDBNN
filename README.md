@@ -162,6 +162,11 @@ To critically analyze the code and verify if there is any "cheating" involved th
 The code does not appear to have explicit cheating mechanisms, but the unrealistically high accuracy could be due to overfitting or issues with the dataset. The lack of regularization and potential overfitting in the adaptive training strategy are the most likely causes. Adding regularization techniques and ensuring proper hyperparameter tuning should help mitigate these issues.
 
 
+Here is the output for the CIFAR10 dataset:
+
+
+![image](https://github.com/user-attachments/assets/6d075df3-5be3-40ef-9ef3-9397dfac7506)
+
 ------------------------------------------------------------------------
 
 This part of the document is OLD, but most of the revisions ensure backward compatibility.
