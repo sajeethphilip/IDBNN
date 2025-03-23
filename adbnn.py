@@ -1347,7 +1347,7 @@ class DBNNConfig:
             config_data = json.load(f)
         return cls(**config_data)
 
-    def save(self, config_path: str):
+    def save_old(self, config_path: str):
         """Save configuration to JSON file"""
         config_dict = {k: v for k, v in self.__dict__.items()}
         with open(config_path, 'w') as f:
@@ -4989,7 +4989,7 @@ from datetime import datetime
 import json
 import os
 
-def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
+def load_or_create_config(config_path: str) -> dict:
     """
     Load the configuration file if it exists, or create a default one if it doesn't.
     Update global variables based on the configuration file.
@@ -5416,9 +5416,9 @@ def main():
     if args.interactive:
         # Interactive mode to modify settings
         print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Interactive Mode{Colors.ENDC}")
-
+        dataset_name =input("\033[K" +f"{Colors.BOLD}Enter the name of the database:{Colors.ENDC}").strip().lower()
         # Load or create the configuration file
-        config = load_or_create_config()
+        config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
 
         # Display current configuration
         print("\033[K" +f"{Colors.BOLD}Current Configuration:{Colors.ENDC}")
