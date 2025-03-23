@@ -5058,6 +5058,9 @@ def load_or_create_config(config_path: str) -> dict:
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         print(f"Created default configuration file at {config_path}")
+        print(config)
+        input("Press Enter Key")
+
 
     # Update global variables based on the configuration file
     global Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
@@ -5153,8 +5156,7 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                 try:
                     with open(conf_path, 'r') as f:
                         dataset_conf = json.load(f)
-                        input("Press Enter Key")
-                    print(dataset_conf)
+
                     # Update configuration with adaptive settings if available
                     if adaptive_conf:
                         # Update execution flags (only if missing or explicitly required)
