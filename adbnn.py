@@ -5466,9 +5466,6 @@ def main():
                     return
             config['file_path'] = csv_file
 
-        # Save updated configuration
-        with open('adaptive_dbnn.conf', 'w') as f:
-            json.dump(config, f, indent=4)
 
         print("\033[K" +f"{Colors.GREEN}Configuration updated.{Colors.ENDC}")
 
