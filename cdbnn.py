@@ -1093,10 +1093,24 @@ class BaseAutoencoder(nn.Module):
         else:
             raise ValueError("Mandatory field 'labels' is missing in features")
 
+        # Process filenames
+        if 'filenames' in features:
+            data_dict['filename'] = features['filenames']
+        else:
+            data_dict['filename'] = ['unavailable'] * len(data_dict['target'])
+
+        # Process class names
+        if 'class_names' in features:
+            data_dict['class_name'] = features['class_names']
+        else:
+            data_dict['class_name'] = ['unavailable'] * len(data_dict['target'])
+
         try:
-            data_frame=pd.DataFrame(data_dict)
-        except:
-            print("Failed creating dataframe")
+            data_frame = pd.DataFrame(data_dict)
+        except Exception as e:
+            logger.error(f"Failed creating dataframe: {str(e)}")
+            raise
+
         return data_frame
 
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
@@ -4911,28 +4925,66 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
 
         return running_loss / len(val_loader), 100. * correct / total
 
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Extract features from data"""
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """
+        Extract features from data, including filenames and class names.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing:
+                - 'embeddings': Extracted features (torch.Tensor)
+                - 'labels': Target labels (torch.Tensor)
+                - 'filenames': List of filenames (List[str])
+                - 'class_names': List of class names (List[str])
+        """
         self.feature_extractor.eval()
-        features = []
-        labels = []
+        all_embeddings = []
+        all_labels = []
+        all_filenames = []
+        all_class_names = []
 
         try:
             with torch.no_grad():
                 for inputs, targets in tqdm(loader, desc="Extracting features"):
                     inputs = inputs.to(self.device)
                     outputs = self.feature_extractor(inputs)
-                    features.append(outputs.cpu())
-                    labels.append(targets)
+
+                    # Append features and labels
+                    all_embeddings.append(outputs.cpu())
+                    all_labels.append(targets)
+
+                    # Get metadata (filenames and class names) if available
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        for idx in range(len(inputs)):
+                            file_index, filename = loader.dataset.get_additional_info(idx)
+                            class_name = loader.dataset.reverse_encoder[targets[idx].item()]
+                            all_filenames.append(filename)
+                            all_class_names.append(class_name)
+                    else:
+                        # Dataset without metadata (e.g., torchvision)
+                        for idx in range(len(inputs)):
+                            all_filenames.append(f"unavailable_{idx}")
+                            all_class_names.append(f"unavailable_{targets[idx].item()}")
 
                     # Cleanup
                     del inputs, outputs
-                    if len(features) % 50 == 0:
+                    if len(all_embeddings) % 50 == 0:
                         gc.collect()
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
 
-            return torch.cat(features), torch.cat(labels)
+            # Concatenate all results
+            feature_dict = {
+                'embeddings': torch.cat(all_embeddings),
+                'labels': torch.cat(all_labels),
+                'filenames': all_filenames,
+                'class_names': all_class_names
+            }
+
+            return feature_dict
 
         except Exception as e:
             logger.error(f"Error extracting features: {str(e)}")
