@@ -2137,7 +2137,7 @@ class DBNN(GPUDBNN):
         optimal_batch_size = int(available_memory / memory_per_sample)
 
         # Enforce minimum and maximum bounds
-        optimal_batch_size = max(32, min(optimal_batch_size, 4096))
+        optimal_batch_size = max(32, min(optimal_batch_size, 128))
 
         DEBUG.log(f" Memory Analysis:")
         DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
