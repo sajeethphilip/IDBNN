@@ -211,9 +211,11 @@ class PredictionManager:
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            # Write header
+            # Write header with distinct columns for Phase 1 and Phase 2
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            phase1_cols = [f'phase1_{col}' for col in feature_cols]
+            phase2_cols = [f'phase2_{col}' for col in feature_cols]
+            csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -268,7 +270,12 @@ class PredictionManager:
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    row = [os.path.basename(filename), true_class] + phase1_embedding[j].tolist() + phase2_embedding[j].tolist()
+                    # Write Phase 1 features
+                    phase1_features = phase1_embedding[j].tolist()
+                    # Write Phase 2 features
+                    phase2_features = phase2_embedding[j].tolist()
+                    # Combine into a single row
+                    row = [os.path.basename(filename), true_class] + phase1_features + phase2_features
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
