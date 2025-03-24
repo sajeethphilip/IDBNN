@@ -115,6 +115,7 @@ class PredictionManager:
             model = FeatureExtractorCNN(
                 in_channels=self.config['dataset']['in_channels'],
                 feature_dims=self.config['model']['feature_dims'],
+                self.config
             )
         elif self.config['model']['encoder_type'] == 'autoenc':
             model = EnhancedAutoEncoderFeatureExtractor(self.config)
@@ -2017,6 +2018,7 @@ class ModelFactory:
             model = FeatureExtractorCNN(
                 in_channels=input_shape[0],
                 feature_dims=feature_dims,
+                self.config
             )
         else:
             model = EnhancedAutoEncoderFeatureExtractor(config)
@@ -4689,7 +4691,8 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         """Create CNN model"""
         return FeatureExtractorCNN(
             in_channels=self.config['dataset']['in_channels'],
-            feature_dims=self.feature_dims
+            feature_dims=self.feature_dims,
+            self.config
         ).to(self.device)
 
     def _load_from_checkpoint(self):
