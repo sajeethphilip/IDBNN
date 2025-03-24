@@ -4587,7 +4587,7 @@ class FeatureExtractorCNN(nn.Module):
         }
 
     def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Comprehensive feature extraction with all enhancements"""
+        """Robust feature extraction with exact metadata synchronization"""
         self.eval()
         all_features = []
         all_labels = []
@@ -4595,48 +4595,57 @@ class FeatureExtractorCNN(nn.Module):
         all_class_names = []
         enhancement_features = defaultdict(list)
 
+        # Get exact dataset size (accounts for partial batches)
+        total_samples = len(loader.dataset)
+        actual_batch_size = loader.batch_size
+
         pbar = tqdm(loader, desc="Extracting features", unit="batch",
                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
 
         with torch.no_grad():
             for batch_idx, (inputs, labels) in enumerate(pbar):
+                # Get ACTUAL number of samples in this batch (last batch may be smaller)
+                actual_samples_in_batch = len(labels)
                 inputs = inputs.to(self.device)
+
+                # Forward pass
                 outputs = self(inputs)
 
-                # Handle different output formats
+                # Handle output formats
                 if isinstance(outputs, dict):
                     features = outputs.get('features', outputs)
-                    # Store enhancement outputs
+                    # Store enhancements
                     for key, value in outputs.items():
                         if key not in ['features']:
                             enhancement_features[key].append(value.cpu())
                 else:
                     features = outputs
 
-                # Store core features and labels
+                # Store features and labels
                 all_features.append(features.cpu())
                 batch_labels = labels.tolist()
                 all_labels.extend(batch_labels)
 
-                # Get additional info if available - IMPROVED METADATA HANDLING
+                # METADATA COLLECTION WITH PROPER INDEXING
                 if hasattr(loader.dataset, 'get_additional_info'):
-                    # Calculate correct indices for partial batches
-                    start_idx = batch_idx * loader.batch_size
-                    end_idx = start_idx + len(labels)  # Use actual batch size (important for last batch)
+                    start_idx = batch_idx * actual_batch_size
+                    end_idx = min(start_idx + actual_samples_in_batch, total_samples)
 
-                    try:
-                        # Get metadata for only the samples in current batch
-                        batch_metadata = [loader.dataset.get_additional_info(i)
-                                        for i in range(start_idx, end_idx)]
+                    # Get metadata only for present samples
+                    batch_metadata = []
+                    for i in range(start_idx, end_idx):
+                        try:
+                            meta = loader.dataset.get_additional_info(i)
+                            batch_metadata.append(meta)
+                        except IndexError:
+                            logger.warning(f"Metadata missing for index {i}")
+                            continue
 
-                        if batch_metadata:  # Only proceed if we got metadata
-                            indices, filenames = zip(*batch_metadata)
-                            all_filenames.extend(filenames)
-                    except IndexError as e:
-                        logger.error(f"Metadata index error in batch {batch_idx}: {str(e)}")
-                        raise ValueError("Mismatch between data samples and metadata indices")
+                    if batch_metadata:
+                        indices, filenames = zip(*batch_metadata)
+                        all_filenames.extend(filenames)
 
-                # Handle class names - IMPROVED SYNCHRONIZATION
+                # Class names handling
                 if hasattr(loader.dataset, 'reverse_encoder'):
                     try:
                         all_class_names.extend([
@@ -4644,43 +4653,46 @@ class FeatureExtractorCNN(nn.Module):
                             for label in labels
                         ])
                     except KeyError as e:
-                        logger.error(f"Missing class label in reverse_encoder: {str(e)}")
-                        raise ValueError("Undefined label in reverse encoder mapping")
+                        logger.error(f"Missing class mapping for label {e}")
+                        raise ValueError(f"Class mapping missing for one or more labels")
 
-                # Update progress
                 pbar.set_postfix({
                     'batch': f"{batch_idx + 1}/{len(loader)}",
                     'features': f"{features.shape[-1]}D"
                 })
 
-        # VALIDATION BEFORE CREATING FINAL DICT
-        num_samples = len(all_features) * loader.batch_size
-        if len(all_labels) != num_samples:
-            logger.error(f"Label count mismatch: {len(all_labels)} vs expected {num_samples}")
-            raise ValueError("Label count doesn't match feature count")
-        if all_filenames and len(all_filenames) != num_samples:
-            logger.error(f"Filename count mismatch: {len(all_filenames)} vs expected {num_samples}")
-            raise ValueError("Filename count doesn't match feature count")
-        if all_class_names and len(all_class_names) != num_samples:
-            logger.error(f"Class name count mismatch: {len(all_class_names)} vs expected {num_samples}")
-            raise ValueError("Class name count doesn't match feature count")
+        # VALIDATION WITH TRUE SAMPLE COUNT
+        if len(all_labels) != total_samples:
+            logger.error(f"CRITICAL: Label count mismatch. Expected {total_samples}, got {len(all_labels)}")
+            logger.error(f"Possible data loader issue. Checking batch sizes...")
+            logger.error(f"Configured batch size: {actual_batch_size}")
+            logger.error(f"Total batches: {len(loader)}")
+            logger.error(f"Calculated samples: {len(loader)*actual_batch_size} vs dataset: {total_samples}")
+            raise ValueError(f"Label count mismatch. Expected {total_samples}, got {len(all_labels)}")
 
-        # Prepare output dictionary
+        # Prepare final output with exact synchronization
         feature_dict = {
             'features': torch.cat(all_features),
             'labels': torch.tensor(all_labels),
         }
 
-        # Only add metadata if we collected it
-        if all_filenames:
+        # Only include metadata if we have ALL samples accounted for
+        if len(all_filenames) == total_samples:
             feature_dict['filenames'] = all_filenames
-        if all_class_names:
-            feature_dict['class_names'] = all_class_names
+        else:
+            logger.warning(f"Filename count mismatch. Expected {total_samples}, got {len(all_filenames)}")
 
-        # Add enhancement features if they exist
+        if len(all_class_names) == total_samples:
+            feature_dict['class_names'] = all_class_names
+        else:
+            logger.warning(f"Class name count mismatch. Expected {total_samples}, got {len(all_class_names)}")
+
+        # Enhancement features
         for key, values in enhancement_features.items():
-            if values:  # Only add if we have values
+            if values and len(values) == len(all_features):
                 feature_dict[key] = torch.cat(values, dim=0)
+            else:
+                logger.warning(f"Enhancement feature '{key}' count mismatch")
 
         return feature_dict
 
