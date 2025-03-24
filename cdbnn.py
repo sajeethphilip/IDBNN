@@ -170,10 +170,10 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
         """
         Predict features for images from the input path (file, directory, or archive).
-        Writes predictions to CSV batch-wise, including true class labels and their tensorized embeddings.
+        Writes predictions to CSV batch-wise, including true class labels if available.
         """
         # Validate input_path
         if not isinstance(input_path, (str, bytes, os.PathLike)):
@@ -201,17 +201,15 @@ class PredictionManager:
             self.model.set_dataset(dataset)  # Set the dataset before processing images
             logger.debug("Dataset set in the model.")
 
-        # Get the label encoder used during training
-        if not hasattr(self, 'label_encoder'):
-            raise ValueError("Label encoder not found. Ensure the model was trained with class labels.")
-
         # Initialize CSV file and write header
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            # Write header
+            # Write header with distinct columns for Phase 1 and Phase 2
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class', 'target'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            phase1_cols = [f'phase1_{col}' for col in feature_cols]
+            phase2_cols = [f'phase2_{col}' for col in feature_cols]
+            csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -235,53 +233,43 @@ class PredictionManager:
             # Stack images into a batch
             batch_tensor = torch.cat(batch_images, dim=0)
 
-            # Extract features using the model (phase 1)
+            # Phase 1: Extract basic features
+            self.model.set_training_phase(1)
             with torch.no_grad():
-                output = self.model(batch_tensor)
-
-                # Handle dictionary output
-                if isinstance(output, dict):
-                    if 'embedding' in output:
-                        embedding_phase1 = output['embedding']  # Extract embedding from dictionary
-                    else:
-                        raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                # Handle tuple output (e.g., (embedding, reconstruction))
-                elif isinstance(output, tuple):
-                    embedding_phase1 = output[0]  # Assume the first element is the embedding
+                phase1_output = self.model(batch_tensor)
+                if isinstance(phase1_output, dict):
+                    phase1_embedding = phase1_output.get('embedding', phase1_output.get('features'))
+                elif isinstance(phase1_output, tuple):
+                    phase1_embedding = phase1_output[0]
                 else:
-                    embedding_phase1 = output  # Assume the output is a single tensor
+                    phase1_embedding = phase1_output
 
-                # Convert to numpy array
-                embedding_phase1 = embedding_phase1.cpu().numpy()
+                phase1_embedding = phase1_embedding.cpu().numpy()
 
-            # Extract features using the model (phase 2)
+            # Phase 2: Extract enhanced features with KL divergence and clustering
             if hasattr(self.model, 'set_training_phase'):
-                self.model.set_training_phase(2)  # Switch to phase 2
+                self.model.set_training_phase(2)
                 with torch.no_grad():
-                    output = self.model(batch_tensor)
-
-                    # Handle dictionary output
-                    if isinstance(output, dict):
-                        if 'embedding' in output:
-                            embedding_phase2 = output['embedding']  # Extract embedding from dictionary
-                        else:
-                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                    # Handle tuple output (e.g., (embedding, reconstruction))
-                    elif isinstance(output, tuple):
-                        embedding_phase2 = output[0]  # Assume the first element is the embedding
+                    phase2_output = self.model(batch_tensor)
+                    if isinstance(phase2_output, dict):
+                        phase2_embedding = phase2_output.get('embedding', phase2_output.get('features'))
+                    elif isinstance(phase2_output, tuple):
+                        phase2_embedding = phase2_output[0]
                     else:
-                        embedding_phase2 = output  # Assume the output is a single tensor
+                        phase2_embedding = phase2_output
 
-                    # Convert to numpy array
-                    embedding_phase2 = embedding_phase2.cpu().numpy()
+                    phase2_embedding = phase2_embedding.cpu().numpy()
 
             # Write predictions to CSV batch-wise
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    # Get the tensorized label embedding for the true class
-                    target = self.label_encoder.transform([true_class])[0]  # Use the label encoder from training
-                    row = [os.path.basename(filename), true_class, target] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
+                    # Write Phase 1 features
+                    phase1_features = phase1_embedding[j].tolist()
+                    # Write Phase 2 features
+                    phase2_features = phase2_embedding[j].tolist()
+                    # Combine into a single row
+                    row = [os.path.basename(filename), true_class] + phase1_features + phase2_features
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
