@@ -176,115 +176,91 @@ class PredictionManager:
         logger.info("Model loaded successfully.")
         return model
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
-        """
-        Predict features for images from the input path (file, directory, or archive).
-        Writes predictions to CSV batch-wise, including true class labels if available.
-        """
-        # Validate input_path
-        if not isinstance(input_path, (str, bytes, os.PathLike)):
-            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
+ def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
+    """
+    Predict features for images from the input path (file, directory, or archive).
+    Writes predictions to CSV batch-wise, including true class labels if available.
+    """
+    # Validate input_path
+    if not isinstance(input_path, (str, bytes, os.PathLike)):
+        raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-        # Get list of image files and their corresponding class labels
-        image_files, class_labels = self._get_image_files_with_labels(input_path)
-        if not image_files:
-            raise ValueError(f"No valid images found in {input_path}")
+    # Get list of image files and their corresponding class labels
+    image_files, class_labels = self._get_image_files_with_labels(input_path)
+    if not image_files:
+        raise ValueError(f"No valid images found in {input_path}")
 
-        # Set default output CSV path if not provided
-        if output_csv is None:
-            dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+    # Set default output CSV path if not provided
+    if output_csv is None:
+        dataset_name = self.config['dataset']['name']
+        output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
-        # Get the image transform from the config
-        transform = self._get_transforms()
-        logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
+    # Get the image transform from the config
+    transform = self._get_transforms()
+    logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Create a dataset for the model (if required)
-        if hasattr(self.model, 'set_dataset'):
-            logger.debug("Creating dataset...")
-            dataset = self._create_dataset(image_files, transform)
-            logger.debug(f"Dataset created with {len(dataset)} images.")
-            self.model.set_dataset(dataset)  # Set the dataset before processing images
-            logger.debug("Dataset set in the model.")
+    # Initialize CSV file and write header
+    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    with open(output_csv, 'w', newline='') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        # Write header
+        feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+        csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
 
-        # Initialize CSV file and write header
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        with open(output_csv, 'w', newline='') as csvfile:
-            csv_writer = csv.writer(csvfile)
-            # Write header
-            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+    # Process images in batches
+    for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+        batch_files = image_files[i:i + batch_size]
+        batch_labels = class_labels[i:i + batch_size]
+        batch_images = []
 
-        # Process images in batches
-        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
-            batch_files = image_files[i:i + batch_size]
-            batch_labels = class_labels[i:i + batch_size]
-            batch_images = []
-
-            # Load and transform images
-            for filename in batch_files:
-                try:
-                    image = Image.open(filename).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append(image_tensor)
-                except Exception as e:
-                    logger.error(f"Error loading image {filename}: {str(e)}")
-                    continue
-
-            if not batch_images:
+        # Load and transform images
+        for filename in batch_files:
+            try:
+                image = Image.open(filename).convert('RGB')
+                image_tensor = transform(image).unsqueeze(0).to(self.device)
+                batch_images.append(image_tensor)
+            except Exception as e:
+                logger.error(f"Error loading image {filename}: {str(e)}")
                 continue
 
-            # Stack images into a batch
-            batch_tensor = torch.cat(batch_images, dim=0)
+        if not batch_images:
+            continue
 
-            # Extract features using the model (phase 1)
-            with torch.no_grad():
-                output = self.model(batch_tensor)
+        # Stack images into a batch
+        batch_tensor = torch.cat(batch_images, dim=0)
 
-                # Handle dictionary output
-                if isinstance(output, dict):
-                    if 'embedding' in output:
-                        embedding_phase1 = output['embedding']  # Extract embedding from dictionary
-                    else:
-                        raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                # Handle tuple output (e.g., (embedding, reconstruction))
-                elif isinstance(output, tuple):
-                    embedding_phase1 = output[0]  # Assume the first element is the embedding
-                else:
-                    embedding_phase1 = output  # Assume the output is a single tensor
+        # Extract features using the model (phase 1)
+        with torch.no_grad():
+            self.model.set_training_phase(1)  # Ensure Phase 1
+            output_phase1 = self.model(batch_tensor)
+            if isinstance(output_phase1, dict):
+                embedding_phase1 = output_phase1['embedding']
+            elif isinstance(output_phase1, tuple):
+                embedding_phase1 = output_phase1[0]
+            else:
+                embedding_phase1 = output_phase1
+            embedding_phase1 = embedding_phase1.cpu().numpy()
 
-                # Convert to numpy array
-                embedding_phase1 = embedding_phase1.cpu().numpy()
+        # Extract features using the model (phase 2)
+        with torch.no_grad():
+            self.model.set_training_phase(2)  # Switch to Phase 2
+            output_phase2 = self.model(batch_tensor)
+            if isinstance(output_phase2, dict):
+                embedding_phase2 = output_phase2['embedding']
+            elif isinstance(output_phase2, tuple):
+                embedding_phase2 = output_phase2[0]
+            else:
+                embedding_phase2 = output_phase2
+            embedding_phase2 = embedding_phase2.cpu().numpy()
 
-            # Extract features using the model (phase 2)
-            if hasattr(self.model, 'set_training_phase'):
-                self.model.set_training_phase(2)  # Switch to phase 2
-                with torch.no_grad():
-                    output = self.model(batch_tensor)
+        # Write predictions to CSV batch-wise
+        with open(output_csv, 'a', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
+                csv_writer.writerow(row)
 
-                    # Handle dictionary output
-                    if isinstance(output, dict):
-                        if 'embedding' in output:
-                            embedding_phase2 = output['embedding']  # Extract embedding from dictionary
-                        else:
-                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
-                    # Handle tuple output (e.g., (embedding, reconstruction))
-                    elif isinstance(output, tuple):
-                        embedding_phase2 = output[0]  # Assume the first element is the embedding
-                    else:
-                        embedding_phase2 = output  # Assume the output is a single tensor
-
-                    # Convert to numpy array
-                    embedding_phase2 = embedding_phase2.cpu().numpy()
-
-            # Write predictions to CSV batch-wise
-            with open(output_csv, 'a', newline='') as csvfile:
-                csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
-                    csv_writer.writerow(row)
-
-        logger.info(f"Predictions saved to {output_csv}")
+    logger.info(f"Predictions saved to {output_csv}")
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
