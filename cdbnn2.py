@@ -250,9 +250,13 @@ class PredictionManager:
         all_class_names = []
         cluster_data = []
         enhancement_features = defaultdict(list)
-
+        # Initialize progress bar
+        pbar = tqdm(dataloader,
+                    desc="Predicting features",
+                    unit="batch",
+                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
         with torch.no_grad():
-            for images, labels, file_indices, filenames in tqdm(dataloader, desc="Predicting features"):
+            for batch_idx, (images, labels, file_indices, filenames) in enumerate(pbar):
                 images = images.to(self.device)
                 outputs = self.model(images)
 
@@ -3529,8 +3533,12 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                                 'training_decoder_output', f'epoch_{self.current_epoch}')
         os.makedirs(output_dir, exist_ok=True)
 
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
-                   unit='batch', leave=False)
+        # Initialize tqdm progress bar
+        pbar = tqdm(enumerate(train_loader),
+                    total=len(train_loader),
+                    desc=f"Epoch {self.current_epoch + 1}",
+                    unit="batch",
+                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
 
         for batch_idx, (inputs, _) in enumerate(pbar):
             try:
@@ -4822,8 +4830,11 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         correct = 0
         total = 0
 
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
-                   unit='batch', leave=False)
+        pbar = tqdm(enumerate(train_loader),
+                    total=len(train_loader),
+                    desc=f"Train Epoch {self.current_epoch + 1}",
+                    unit="batch",
+                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
 
         try:
             for batch_idx, (inputs, targets) in enumerate(pbar):
