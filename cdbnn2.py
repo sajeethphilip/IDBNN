@@ -77,7 +77,7 @@ from torchvision import transforms
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from torchvision.transforms.functional import resize
 from collections import defaultdict
 
@@ -128,7 +128,7 @@ class PredictionManager:
         return model
 
     def _load_or_generate_label_encoders(self) -> Tuple[Dict, Dict]:
-        """Load label encoders if they exist, otherwise generate and save them."""
+        """Load label encoders if they exist, otherwise generate them from the input directory."""
         label_encoder_path = os.path.join(self.output_dir, "label_encoder.json")
         reverse_encoder_path = os.path.join(self.output_dir, "reverse_encoder.json")
 
@@ -139,20 +139,33 @@ class PredictionManager:
             with open(reverse_encoder_path, 'r') as f:
                 reverse_encoder = json.load(f)
         else:
-            # Generate new label encoders
+            # Generate new label encoders from the input directory
+            input_dir = self.config.get('dataset', {}).get('train_dir', None)
+            if not input_dir or not os.path.exists(input_dir):
+                raise FileNotFoundError(
+                    f"Training directory not found: {input_dir}. "
+                    "Please provide a valid training directory to generate label encoders."
+                )
+
+            # Scan the training directory for class folders
+            class_dirs = [d for d in os.listdir(input_dir)
+                          if os.path.isdir(os.path.join(input_dir, d))]
+            if not class_dirs:
+                raise ValueError(f"No class directories found in {input_dir}.")
+
+            # Generate label encoders
             label_encoder = {}
             reverse_encoder = {}
-            class_dirs = [d for d in os.listdir(self.config['dataset']['train_dir'])
-                          if os.path.isdir(os.path.join(self.config['dataset']['train_dir'], d))]
             for idx, class_name in enumerate(sorted(class_dirs)):
                 label_encoder[class_name] = idx
                 reverse_encoder[idx] = class_name
 
             # Save the label encoders
+            os.makedirs(self.output_dir, exist_ok=True)
             with open(label_encoder_path, 'w') as f:
-                json.dump(label_encoder, f)
+                json.dump(label_encoder, f, indent=4)
             with open(reverse_encoder_path, 'w') as f:
-                json.dump(reverse_encoder, f)
+                json.dump(reverse_encoder, f, indent=4)
 
         return label_encoder, reverse_encoder
 
