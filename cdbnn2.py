@@ -5362,53 +5362,108 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
         raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
+    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None, config: Optional[Dict] = None):
         self.data_dir = data_dir
-        self.transform = transform
+        self.config = config or {
+            'dataset': {
+                'input_size': [256, 256],
+                'mean': [0.485, 0.456, 0.406],  # ImageNet defaults
+                'std': [0.229, 0.224, 0.225],
+                'in_channels': 3
+            }
+        }
+
+        # Set default transform if none provided
+        self.transform = transform or self._get_default_transform()
+
+        # Initialize data structures
         self.image_files = []
         self.labels = []
-        self.file_indices = []  # Store file indices
-        self.filenames = []  # Initialize filenames list
+        self.file_indices = []
+        self.filenames = []
         self.label_encoder = {}
         self.reverse_encoder = {}
 
+        # Load data from CSV or directory structure
         if csv_file and os.path.exists(csv_file):
-            self.data = pd.read_csv(csv_file)
+            self._load_from_csv(csv_file)
         else:
-            unique_labels = sorted(os.listdir(data_dir))
-            for idx, label in enumerate(unique_labels):
-                self.label_encoder[label] = idx
-                self.reverse_encoder[idx] = label
+            self._load_from_directory()
 
-            for class_name in unique_labels:
-                class_dir = os.path.join(data_dir, class_name)
-                if os.path.isdir(class_dir):
-                    for img_name in os.listdir(class_dir):
-                        if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                            self.image_files.append(os.path.join(class_dir, img_name))
-                            self.labels.append(self.label_encoder[class_name])
-                            self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
-                            self.filenames.append(img_name)  # Populate filenames list
+    def _get_default_transform(self) -> transforms.Compose:
+        """Create default transform pipeline that enforces 256x256"""
+        transform_list = [
+            transforms.Resize(256),  # Resize shorter side to 256
+            transforms.CenterCrop(256),  # Crop to exact 256x256
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=self.config['dataset']['mean'],
+                std=self.config['dataset']['std']
+            )
+        ]
+
+        # Handle grayscale if configured
+        if self.config['dataset']['in_channels'] == 1:
+            transform_list.insert(0, transforms.Grayscale(num_output_channels=1))
+
+        return transforms.Compose(transform_list)
+
+    def _load_from_directory(self):
+        """Load data from directory structure"""
+        unique_labels = sorted(os.listdir(self.data_dir))
+        for idx, label in enumerate(unique_labels):
+            self.label_encoder[label] = idx
+            self.reverse_encoder[idx] = label
+
+        for class_name in unique_labels:
+            class_dir = os.path.join(self.data_dir, class_name)
+            if os.path.isdir(class_dir):
+                for img_name in os.listdir(class_dir):
+                    if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        self.image_files.append(os.path.join(class_dir, img_name))
+                        self.labels.append(self.label_encoder[class_name])
+                        self.file_indices.append(len(self.image_files) - 1)
+                        self.filenames.append(img_name)
 
     def __len__(self):
         return len(self.image_files)
 
     def get_additional_info(self, idx):
-        """Retrieve additional information (file_index and filename) for a given index."""
+        """Retrieve additional information (file_index and filename)"""
         return self.file_indices[idx], self.filenames[idx]
 
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
-        image = Image.open(img_path).convert('RGB')
-        label = self.labels[idx]
-        file_index = self.file_indices[idx]  # Retrieve file index
-        filename = self.filenames[idx]  # Retrieve filename
 
-        if self.transform:
-            image = self.transform(image)
+        try:
+            # Open image and convert to RGB (or grayscale if configured)
+            if self.config['dataset']['in_channels'] == 1:
+                image = Image.open(img_path).convert('L')  # Grayscale
+            else:
+                image = Image.open(img_path).convert('RGB')
 
-        # Return only image and label during training
-        return image, label
+            label = self.labels[idx]
+
+            # Apply transforms (includes 256x256 resizing)
+            if self.transform:
+                image = self.transform(image)
+
+            # Verify output dimensions
+            if image.shape[-2:] != torch.Size([256, 256]):
+                raise ValueError(
+                    f"Image {img_path} failed resizing. "
+                    f"Got {image.shape}, expected [C, 256, 256]"
+                )
+
+            return image, label
+
+        except Exception as e:
+            logger.error(f"Error loading image {img_path}: {str(e)}")
+            # Return a blank image if loading fails
+            channels = self.config['dataset']['in_channels']
+            blank_image = torch.zeros(channels, 256, 256)
+            return blank_image, self.labels[idx] if idx < len(self.labels) else 0
+
 
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
