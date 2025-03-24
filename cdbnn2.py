@@ -5405,7 +5405,7 @@ class CustomImageDataset(Dataset):
         filename = self.filenames[idx]  # Retrieve filename
 
         if self.transform:
-            #image = self.transform(image)
+            image = self.transform(image)
             image = transforms.functional.resize(image, (256, 256))
 
         # Return only image and label during training
