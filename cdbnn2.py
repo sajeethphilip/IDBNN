@@ -208,12 +208,17 @@ class PredictionManager:
             logger.debug("Dataset set in the model.")
 
         # Initialize CSV file and write header
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)  # Ensure directory exists
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             # Write header
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            if hasattr(self.model, 'set_training_phase'):
+                # Autoencoder mode: Write Phase 1 and Phase 2 headers
+                csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            else:
+                # CNN mode: Write single set of features
+                csv_writer.writerow(['filename', 'true_class'] + [f'feature_{col}' for col in feature_cols])
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -237,37 +242,53 @@ class PredictionManager:
             # Stack images into a batch
             batch_tensor = torch.cat(batch_images, dim=0)
 
-            # Extract features using the model (phase 1)
+            # Extract features using the model
             with torch.no_grad():
-                self.model.set_training_phase(1)  # Ensure Phase 1
-                output_phase1 = self.model(batch_tensor)
-                if isinstance(output_phase1, dict):
-                    embedding_phase1 = output_phase1['embedding']
-                elif isinstance(output_phase1, tuple):
-                    embedding_phase1 = output_phase1[0]
-                else:
-                    embedding_phase1 = output_phase1
-                embedding_phase1 = embedding_phase1.cpu().numpy()
+                if hasattr(self.model, 'set_training_phase'):
+                    # Autoencoder mode: Extract Phase 1 and Phase 2 features
+                    self.model.set_training_phase(1)  # Phase 1
+                    output_phase1 = self.model(batch_tensor)
+                    if isinstance(output_phase1, dict):
+                        embedding_phase1 = output_phase1['embedding']
+                    elif isinstance(output_phase1, tuple):
+                        embedding_phase1 = output_phase1[0]
+                    else:
+                        embedding_phase1 = output_phase1
+                    embedding_phase1 = embedding_phase1.cpu().numpy()
 
-            # Extract features using the model (phase 2)
-            with torch.no_grad():
-                self.model.set_training_phase(2)  # Switch to Phase 2
-                output_phase2 = self.model(batch_tensor)
-                if isinstance(output_phase2, dict):
-                    embedding_phase2 = output_phase2['embedding']
-                elif isinstance(output_phase2, tuple):
-                    embedding_phase2 = output_phase2[0]
-                else:
-                    embedding_phase2 = output_phase2
-                embedding_phase2 = embedding_phase2.cpu().numpy()
+                    self.model.set_training_phase(2)  # Phase 2
+                    output_phase2 = self.model(batch_tensor)
+                    if isinstance(output_phase2, dict):
+                        embedding_phase2 = output_phase2['embedding']
+                    elif isinstance(output_phase2, tuple):
+                        embedding_phase2 = output_phase2[0]
+                    else:
+                        embedding_phase2 = output_phase2
+                    embedding_phase2 = embedding_phase2.cpu().numpy()
 
-            # Write predictions to CSV batch-wise
-            os.makedirs(os.path.dirname(output_csv), exist_ok=True)  # Ensure directory exists before appending
-            with open(output_csv, 'a', newline='') as csvfile:
-                csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
-                    csv_writer.writerow(row)
+                    # Write predictions to CSV batch-wise
+                    with open(output_csv, 'a', newline='') as csvfile:
+                        csv_writer = csv.writer(csvfile)
+                        for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                            row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
+                            csv_writer.writerow(row)
+                else:
+                    # CNN mode: Extract single set of features
+                    output = self.model(batch_tensor)
+                    if isinstance(output, dict):
+                        embedding = output['embedding']
+                    elif isinstance(output, tuple):
+                        embedding = output[0]
+                    else:
+                        embedding = output
+                    embedding = embedding.cpu().numpy()
+
+                    # Write predictions to CSV batch-wise
+                    with open(output_csv, 'a', newline='') as csvfile:
+                        csv_writer = csv.writer(csvfile)
+                        for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                            row = [os.path.basename(filename), true_class] + embedding[j].tolist()
+                            csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
 
