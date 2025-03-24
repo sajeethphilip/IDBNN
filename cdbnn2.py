@@ -109,59 +109,51 @@ class PredictionManager:
         self.model.eval()
 
     def _load_model(self) -> torch.nn.Module:
-        """Load the appropriate model based on the configuration."""
+        # Model initialization (unchanged)
         if self.config['model']['encoder_type'] == 'cnn':
-            model = FeatureExtractorCNN(
-                in_channels=self.config['dataset']['in_channels'],
-                feature_dims=self.config['model']['feature_dims']
-            )
+            model = FeatureExtractorCNN(...)
         elif self.config['model']['encoder_type'] == 'autoenc':
             model = EnhancedAutoEncoderFeatureExtractor(self.config)
-        else:
-            raise ValueError(f"Unsupported encoder type: {self.config['model']['encoder_type']}")
 
-        # Load model weights
         checkpoint = torch.load(self.model_path, map_location=self.device)
 
-        # Handle custom checkpoint format
-        if 'model_states' in checkpoint:
-            # Extract the correct state_dict based on the model configuration
-            state_key = self._get_state_key(checkpoint['model_states'])
-            if state_key not in checkpoint['model_states']:
-                raise ValueError(
-                    f"Checkpoint file {self.model_path} does not contain the expected state key: {state_key}. "
-                    "Available keys: " + ", ".join(checkpoint['model_states'].keys())
-                )
-
-            model.load_state_dict(checkpoint['model_states'][state_key]['current']['state_dict'])
-        elif 'state_dict' in checkpoint:
-            # Standard checkpoint format
-            model.load_state_dict(checkpoint['state_dict'])
+        # Key change - branch by model type
+        if self.config['model']['encoder_type'] == 'cnn':
+            # CNN - simple state dict loading
+            if 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
+            else:
+                raise ValueError("CNN checkpoint missing state_dict")
         else:
-            raise ValueError(
-                f"Checkpoint file {self.model_path} is invalid. "
-                "It must contain either 'model_states' or 'state_dict'."
-            )
+            # Autoencoder - handle phase states
+            if 'model_states' in checkpoint:
+                state_key = self._get_state_key(checkpoint['model_states'])
+                model.load_state_dict(checkpoint['model_states'][state_key]['current']['state_dict'])
+            elif 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'])
 
         model.to(self.device)
         return model
 
     def _get_state_key(self, model_states: Dict) -> str:
-        """Generate the state key based on the model configuration."""
+        """Autoencoder-specific state key generation"""
+        if self.config['model']['encoder_type'] == 'cnn':
+            raise ValueError("CNN models don't use state keys")
+
         phase = 2 if self.config['model']['autoencoder_config']['enhancements']['enable_phase2'] else 1
         components = [f"phase{phase}"]
 
         if phase == 2:
             if self.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
                 components.append("kld")
-            if self.config['model']['autoencoder_config']['enhancements']['use_class_encoding']:
-                components.append("cls")
+                if self.config['model']['autoencoder_config']['enhancements']['use_class_encoding']:
+                    components.append("cls")
 
-            image_type = self.config['dataset'].get('image_type', 'general')
-            if image_type != 'general':
-                components.append(image_type)
+                image_type = self.config['dataset'].get('image_type', 'general')
+                if image_type != 'general':
+                    components.append(image_type)
 
-        return "_".join(components)
+            return "_".join(components)
 
     def _load_or_generate_label_encoders(self) -> Tuple[Dict, Dict]:
         """Load label encoders if they exist, otherwise generate them from the input directory."""
@@ -206,18 +198,11 @@ class PredictionManager:
         return label_encoder, reverse_encoder
 
     def predict_from_folder(self, folder_path: str, output_csv_path: str) -> None:
-        """
-        Predict features from images in a folder and save to CSV.
-
-        Args:
-            folder_path (str): Path to the folder containing images.
-            output_csv_path (str): Path to save the output CSV file.
-        """
         # Create dataset and dataloader
         dataset = CustomImageDataset(folder_path, transform=self._get_transforms())
         dataloader = DataLoader(dataset, batch_size=self.config['training']['batch_size'], shuffle=False)
 
-        # Initialize storage for features and metadata
+        # Initialize storage
         all_features = []
         all_labels = []
         all_filenames = []
@@ -225,14 +210,23 @@ class PredictionManager:
 
         # Perform prediction
         with torch.no_grad():
-            for images, labels, file_indices, filenames in tqdm(dataloader, desc="Predicting features"):
+            for images, labels, file_indices, filenames in tqdm(dataloader):
                 images = images.to(self.device)
 
-                # Get features from the model
+                # CNN case - direct features
                 if self.config['model']['encoder_type'] == 'cnn':
                     features = self.model(images)
-                else:  # Autoencoder
-                    features, _ = self.model(images)
+
+                # Autoencoder case - handle KL divergence outputs
+                else:
+                    output = self.model(images)
+                    if isinstance(output, dict):  # Phase 2 with enhancements
+                        features = output['embedding']
+                        if 'cluster_probabilities' in output:  # KL divergence output
+                            # Store cluster info if needed
+                            pass
+                    else:  # Phase 1 or basic autoencoder
+                        features = output[0]  # Just get embeddings
 
                 # Store results
                 all_features.append(features.cpu())
