@@ -5406,7 +5406,7 @@ class CustomImageDataset(Dataset):
 
         if self.transform:
             #image = self.transform(image)
-            image = transforms.functional.resize(256)
+            image = transforms.functional.resize(image,tuple = (256, 256))
 
         # Return only image and label during training
         return image, label
