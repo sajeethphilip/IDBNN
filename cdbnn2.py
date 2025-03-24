@@ -115,7 +115,6 @@ class PredictionManager:
             model = FeatureExtractorCNN(
                 in_channels=self.config['dataset']['in_channels'],
                 feature_dims=self.config['model']['feature_dims'],
-                dropout_prob=0.5
             )
         elif self.config['model']['encoder_type'] == 'autoenc':
             model = EnhancedAutoEncoderFeatureExtractor(self.config)
@@ -2018,7 +2017,6 @@ class ModelFactory:
             model = FeatureExtractorCNN(
                 in_channels=input_shape[0],
                 feature_dims=feature_dims,
-                dropout_prob=0.5
             )
         else:
             model = EnhancedAutoEncoderFeatureExtractor(config)
