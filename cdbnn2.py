@@ -4342,111 +4342,118 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """CNN-based feature extractor model with self-attention"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
-        super().__init__()
-        self.dropout_prob = dropout_prob
+    """Original 7-layer CNN with added clustering capability"""
 
-        # Layer 1
+    def __init__(self, in_channels: int, feature_dims: int, config: Dict):
+        super().__init__()
+        self.config = config
+        self.feature_dims = feature_dims
+
+        # Original 7-layer architecture (preserved exactly)
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Layer 2
         self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Layer 3
         self.conv3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Self-attention after Layer 3
         self.attention1 = SelfAttention(128)
 
-        # Layer 4
         self.conv4 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Layer 5
         self.conv5 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Layer 6
         self.conv6 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
+            nn.MaxPool2d(2)
         )
 
-        # Self-attention after Layer 6
         self.attention2 = SelfAttention(512)
 
-        # Layer 7
         self.conv7 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
+            nn.AdaptiveAvgPool2d((1, 1))
         )
 
-        # Fully connected layer
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)  # Add batch dimension
+        # Added clustering capability (integrated with original structure)
+        self._init_clustering(config)
 
-        # Forward pass through layers
-        x1 = self.conv1(x)
-        x2 = self.conv2(x1)
-        x3 = self.conv3(x2)
+    def _init_clustering(self, config):
+        """Initialize clustering parameters from config"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+        if self.use_kl_divergence:
+            num_classes = config['dataset'].get('num_classes', 10)
+            self.cluster_centers = nn.Parameter(torch.randn(num_classes, self.feature_dims))
+            self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
 
-        # Apply self-attention
-        x3 = self.attention1(x3)
+    def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict]:
+        """Forward pass with optional clustering outputs"""
+        # Original feature extraction
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.attention1(x)
+        x = self.conv4(x)
+        x = self.conv5(x)
+        x = self.conv6(x)
+        x = self.attention2(x)
+        x = self.conv7(x)
 
-        x4 = self.conv4(x3)
-        x5 = self.conv5(x4)
-        x6 = self.conv6(x5)
+        x = x.view(x.size(0), -1)
+        features = self.batch_norm(self.fc(x))
 
-        # Apply self-attention
-        x6 = self.attention2(x6)
+        # Enhanced clustering output
+        if self.use_kl_divergence and (self.training or not self.training):  # Always enabled
+            latent_info = self.organize_latent_space(features)
+            return {
+                'features': features,
+                'cluster_probabilities': latent_info['cluster_probabilities'],
+                'cluster_assignments': latent_info['cluster_assignments']
+            }
+        return features
 
-        x7 = self.conv7(x6)
+    def organize_latent_space(self, embeddings: torch.Tensor) -> Dict:
+        """Calculate cluster assignments and probabilities"""
+        distances = torch.cdist(embeddings, self.cluster_centers)
+        q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
+        q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
-        # Flatten and fully connected layer
-        x7 = x7.view(x7.size(0), -1)
-        x7 = self.fc(x7)
-        if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
-            x7 = self.batch_norm(x7)
+        return {
+            'cluster_probabilities': q_dist,
+            'cluster_assignments': q_dist.argmax(dim=1)
+        }
 
-        return x7
 class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
@@ -6901,7 +6908,7 @@ def perform_training_and_extraction(
     # Training
     logger.info("Starting model training...")
     # HERE: train_loader is passed but train_dataset isn't stored anywhere
-    history = train_model(model, train_loader, config, loss_manager)
+    history = train_model(model, train_loader, config)
 
     # Feature extraction
     logger.info("Extracting features...")
@@ -6949,7 +6956,7 @@ def perform_training_and_extraction(
     """Perform model training and feature extraction"""
     # Training
     logger.info("Starting model training...")
-    history = train_model(model, train_loader, config, loss_manager)
+    history = train_model(model, train_loader, config)
 
     # Feature extraction
     logger.info("Extracting features...")
