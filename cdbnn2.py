@@ -4605,28 +4605,47 @@ class FeatureExtractorCNN(nn.Module):
 
                 # Handle different output formats
                 if isinstance(outputs, dict):
-                    features = outputs.get('features', outputs)  # Fallback to full output if no features key
-                    # Store all enhancement outputs
+                    features = outputs.get('features', outputs)
+                    # Store enhancement outputs
                     for key, value in outputs.items():
                         if key not in ['features']:
                             enhancement_features[key].append(value.cpu())
                 else:
                     features = outputs
 
-                # Store core features and metadata
+                # Store core features and labels
                 all_features.append(features.cpu())
-                all_labels.extend(labels.tolist())
+                batch_labels = labels.tolist()
+                all_labels.extend(batch_labels)
 
-                # Get additional info if available
+                # Get additional info if available - IMPROVED METADATA HANDLING
                 if hasattr(loader.dataset, 'get_additional_info'):
-                    indices, filenames = zip(*[loader.dataset.get_additional_info(i)
-                                             for i in range(batch_idx * loader.batch_size,
-                                                          (batch_idx + 1) * loader.batch_size)])
-                    all_filenames.extend(filenames)
+                    # Calculate correct indices for partial batches
+                    start_idx = batch_idx * loader.batch_size
+                    end_idx = start_idx + len(labels)  # Use actual batch size (important for last batch)
 
+                    try:
+                        # Get metadata for only the samples in current batch
+                        batch_metadata = [loader.dataset.get_additional_info(i)
+                                        for i in range(start_idx, end_idx)]
+
+                        if batch_metadata:  # Only proceed if we got metadata
+                            indices, filenames = zip(*batch_metadata)
+                            all_filenames.extend(filenames)
+                    except IndexError as e:
+                        logger.error(f"Metadata index error in batch {batch_idx}: {str(e)}")
+                        raise ValueError("Mismatch between data samples and metadata indices")
+
+                # Handle class names - IMPROVED SYNCHRONIZATION
                 if hasattr(loader.dataset, 'reverse_encoder'):
-                    all_class_names.extend([loader.dataset.reverse_encoder[label.item()]
-                                          for label in labels])
+                    try:
+                        all_class_names.extend([
+                            loader.dataset.reverse_encoder[label.item()]
+                            for label in labels
+                        ])
+                    except KeyError as e:
+                        logger.error(f"Missing class label in reverse_encoder: {str(e)}")
+                        raise ValueError("Undefined label in reverse encoder mapping")
 
                 # Update progress
                 pbar.set_postfix({
@@ -4634,19 +4653,37 @@ class FeatureExtractorCNN(nn.Module):
                     'features': f"{features.shape[-1]}D"
                 })
 
+        # VALIDATION BEFORE CREATING FINAL DICT
+        num_samples = len(all_features) * loader.batch_size
+        if len(all_labels) != num_samples:
+            logger.error(f"Label count mismatch: {len(all_labels)} vs expected {num_samples}")
+            raise ValueError("Label count doesn't match feature count")
+        if all_filenames and len(all_filenames) != num_samples:
+            logger.error(f"Filename count mismatch: {len(all_filenames)} vs expected {num_samples}")
+            raise ValueError("Filename count doesn't match feature count")
+        if all_class_names and len(all_class_names) != num_samples:
+            logger.error(f"Class name count mismatch: {len(all_class_names)} vs expected {num_samples}")
+            raise ValueError("Class name count doesn't match feature count")
+
         # Prepare output dictionary
         feature_dict = {
             'features': torch.cat(all_features),
             'labels': torch.tensor(all_labels),
-            'filenames': all_filenames,
-            'class_names': all_class_names
         }
 
-        # Add enhancement features
+        # Only add metadata if we collected it
+        if all_filenames:
+            feature_dict['filenames'] = all_filenames
+        if all_class_names:
+            feature_dict['class_names'] = all_class_names
+
+        # Add enhancement features if they exist
         for key, values in enhancement_features.items():
-            feature_dict[key] = torch.cat(values, dim=0)
+            if values:  # Only add if we have values
+                feature_dict[key] = torch.cat(values, dim=0)
 
         return feature_dict
+
 class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
