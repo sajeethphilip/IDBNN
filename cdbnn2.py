@@ -6978,7 +6978,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         features_dict = perform_training_and_extraction(
             model, train_loader, test_loader, config, loss_manager, logger
         )
-
+        print("Features Extracted")
         # Save results
         save_training_results(features_dict, model, config, data_dir, data_name, logger)
 
@@ -7095,26 +7095,7 @@ def get_training_confirmation(logger: logging.Logger) -> bool:
         return False
     return True
 
-# Original dataset creation point
-def perform_training_and_extraction(
-    model: nn.Module,
-    train_loader: DataLoader,
-    test_loader: Optional[DataLoader],
-    config: Dict,
-    loss_manager: EnhancedLossManager,
-    logger: logging.Logger
-) -> Dict:
-    """Perform model training and feature extraction"""
-    # Training
-    logger.info("Starting model training...")
-    # HERE: train_loader is passed but train_dataset isn't stored anywhere
-    history = train_model(model, train_loader, config)
 
-    # Feature extraction
-    logger.info("Extracting features...")
-    # HERE: We need train_dataset but it's not accessible
-    features_dict = extract_features_from_model(model, train_loader, test_loader)
-    return features_dict
 
 def extract_features_from_model(
     model: nn.Module,
