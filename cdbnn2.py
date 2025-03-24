@@ -87,21 +87,22 @@ logger = logging.getLogger(__name__)
 class PredictionManager:
     """Manages the prediction phase for both CNN and Autoencoder models."""
 
-    def __init__(self, config: Dict, model_path: str, label_encoder: Dict, reverse_encoder: Dict):
+    def __init__(self, config: Dict, model_path: str, output_dir: str):
         """
         Initialize the PredictionManager.
 
         Args:
             config (Dict): Configuration dictionary containing dataset and model parameters.
             model_path (str): Path to the trained model checkpoint.
-            label_encoder (Dict): Dictionary mapping class names to encoded labels.
-            reverse_encoder (Dict): Dictionary mapping encoded labels back to class names.
+            output_dir (str): Directory where label encoders and other outputs will be saved.
         """
         self.config = config
         self.model_path = model_path
-        self.label_encoder = label_encoder
-        self.reverse_encoder = reverse_encoder
+        self.output_dir = output_dir
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
+
+        # Load or generate label encoders
+        self.label_encoder, self.reverse_encoder = self._load_or_generate_label_encoders()
 
         # Load the model
         self.model = self._load_model()
@@ -125,6 +126,35 @@ class PredictionManager:
         model.to(self.device)
 
         return model
+
+    def _load_or_generate_label_encoders(self) -> Tuple[Dict, Dict]:
+        """Load label encoders if they exist, otherwise generate and save them."""
+        label_encoder_path = os.path.join(self.output_dir, "label_encoder.json")
+        reverse_encoder_path = os.path.join(self.output_dir, "reverse_encoder.json")
+
+        if os.path.exists(label_encoder_path) and os.path.exists(reverse_encoder_path):
+            # Load existing label encoders
+            with open(label_encoder_path, 'r') as f:
+                label_encoder = json.load(f)
+            with open(reverse_encoder_path, 'r') as f:
+                reverse_encoder = json.load(f)
+        else:
+            # Generate new label encoders
+            label_encoder = {}
+            reverse_encoder = {}
+            class_dirs = [d for d in os.listdir(self.config['dataset']['train_dir'])
+                          if os.path.isdir(os.path.join(self.config['dataset']['train_dir'], d))]
+            for idx, class_name in enumerate(sorted(class_dirs)):
+                label_encoder[class_name] = idx
+                reverse_encoder[idx] = class_name
+
+            # Save the label encoders
+            with open(label_encoder_path, 'w') as f:
+                json.dump(label_encoder, f)
+            with open(reverse_encoder_path, 'w') as f:
+                json.dump(reverse_encoder, f)
+
+        return label_encoder, reverse_encoder
 
     def predict_from_folder(self, folder_path: str, output_csv_path: str) -> None:
         """
@@ -193,7 +223,6 @@ class PredictionManager:
             transform_list.insert(0, transforms.Grayscale(num_output_channels=1))
 
         return transforms.Compose(transform_list)
-
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -6566,7 +6595,7 @@ def main():
         args = parse_arguments()
 
         # Process based on mode
-        if args.mode == 'predict':
+        ls if args.mode == 'predict':
             # Load the config
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
