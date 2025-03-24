@@ -255,6 +255,22 @@ class PredictionManager:
                     desc="Predicting features",
                     unit="batch",
                     bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+        try:
+            features_dict = self.model.extract_features(dataloader)
+            self._save_prediction_results(
+                all_features=features_dict['features'].numpy(),
+                all_labels=features_dict['labels'].tolist(),
+                all_filenames=features_dict['filenames'],
+                all_class_names=features_dict['class_names'],
+                enhancement_features={
+                    k: [v] for k, v in features_dict.items()
+                    if k not in ['features', 'labels', 'filenames', 'class_names']
+                },
+                output_csv_path=output_csv_path
+            )
+        except Exception as e:
+            logger.error(f"Feature extraction failed: {str(e)}")
+            raise
         with torch.no_grad():
             for batch_idx, (images, labels, file_indices, filenames) in enumerate(pbar):
                 images = images.to(self.device)
@@ -4366,70 +4382,61 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """Original 7-layer CNN with enhanced clustering capability"""
+    """Enhanced 7-layer CNN with support for multiple enhancement types"""
 
     def __init__(self, in_channels: int, feature_dims: int, config: Dict):
         super().__init__()
         self.config = config
         self.feature_dims = feature_dims
-        self.dropout_prob = 0.5  # Preserving original dropout
+        self.dropout_prob = 0.5
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
-                         and torch.cuda.is_available() else 'cpu')
+                                 and torch.cuda.is_available() else 'cpu')
 
         # Original 7-layer architecture
-        self.conv1 = nn.Sequential(
+        self.conv_layers = nn.Sequential(
+            # Layer 1: 256x256 -> 128x128
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.conv2 = nn.Sequential(
+            # Layer 2: 128x128 -> 64x64
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.conv3 = nn.Sequential(
+            # Layer 3: 64x64 -> 32x32
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.attention1 = SelfAttention(128)  # Preserving attention
-
-        self.conv4 = nn.Sequential(
+            # Layer 4: 32x32 -> 16x16
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.conv5 = nn.Sequential(
+            # Layer 5: 16x16 -> 8x8
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.conv6 = nn.Sequential(
+            # Layer 6: 8x8 -> 4x4
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob)
-        )
+            nn.Dropout(self.dropout_prob),
 
-        self.attention2 = SelfAttention(512)  # Preserving attention
-
-        self.conv7 = nn.Sequential(
+            # Layer 7: 4x4 -> 1x1
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
@@ -4439,10 +4446,70 @@ class FeatureExtractorCNN(nn.Module):
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
-        # KL divergence clustering initialization
+        # Initialize all enhancements
+        self._init_enhancements(config)
         self._init_clustering(config)
 
-    def _init_clustering(self, config):
+    def _init_enhancements(self, config: Dict):
+        """Initialize all enhancement modules based on config"""
+        self.enhancement_modules = nn.ModuleDict()
+        enh_config = config['model']['enhancement_modules']
+
+        # Astronomical enhancements
+        if enh_config.get('astronomical', {}).get('enabled', False):
+            self.enhancement_modules['astronomical'] = nn.ModuleDict({
+                'star_detection': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(512, 1, kernel_size=1),
+                    nn.Sigmoid()
+                ),
+                'galaxy_structure': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, dilation=2, padding=2),
+                    nn.BatchNorm2d(512),
+                    nn.ReLU()
+                )
+            })
+
+        # Medical enhancements
+        if enh_config.get('medical', {}).get('enabled', False):
+            self.enhancement_modules['medical'] = nn.ModuleDict({
+                'tissue_boundary': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(512),
+                    nn.PReLU(),
+                    nn.Conv2d(512, 1, kernel_size=1),
+                    nn.Sigmoid()
+                ),
+                'lesion_detection': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                    nn.InstanceNorm2d(512),
+                    nn.PReLU()
+                )
+            })
+
+        # Agricultural enhancements
+        if enh_config.get('agricultural', {}).get('enabled', False):
+            self.enhancement_modules['agricultural'] = nn.ModuleDict({
+                'texture_analysis': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, padding=1, groups=4),
+                    nn.InstanceNorm2d(512),
+                    nn.PReLU()
+                ),
+                'damage_detection': nn.Sequential(
+                    nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                    nn.PReLU(),
+                    nn.Conv2d(512, 1, kernel_size=1),
+                    nn.Sigmoid()
+                )
+            })
+
+        # Replace forward if any enhancements are enabled
+        if len(self.enhancement_modules) > 0:
+            self.original_forward = self.forward
+            self.forward = self.enhanced_forward
+
+    def _init_clustering(self, config: Dict):
         """Initialize clustering parameters from config"""
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
         if self.use_kl_divergence:
@@ -4451,42 +4518,58 @@ class FeatureExtractorCNN(nn.Module):
             self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict]:
-        """Forward pass with optional clustering outputs"""
-        # Original feature extraction
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.attention1(x)
-        x = self.conv4(x)
-        x = self.conv5(x)
-        x = self.conv6(x)
-        x = self.attention2(x)
-        x = self.conv7(x)
-
+        """Standard forward pass without enhancements"""
+        x = self.conv_layers(x)
         x = x.view(x.size(0), -1)
         features = self.fc(x)
         features = self.batch_norm(features) if features.size(0) > 1 else features
 
-        # Add clustering outputs if enabled
         if self.use_kl_divergence:
             cluster_outputs = self.organize_latent_space(features)
             return {**cluster_outputs, 'features': features}
 
         return features
 
+    def enhanced_forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Forward pass with all enabled enhancements"""
+        base_output = self.original_forward(x)
+        intermediate_features = self.conv_layers[:-2](x)  # Get features before final layers
+
+        enhancements = {}
+
+        # Apply all enabled enhancements
+        if 'astronomical' in self.enhancement_modules:
+            enhancements.update({
+                'star_features': self.enhancement_modules['astronomical']['star_detection'](intermediate_features),
+                'galaxy_features': self.enhancement_modules['astronomical']['galaxy_structure'](intermediate_features)
+            })
+
+        if 'medical' in self.enhancement_modules:
+            enhancements.update({
+                'tissue_boundaries': self.enhancement_modules['medical']['tissue_boundary'](intermediate_features),
+                'lesion_features': self.enhancement_modules['medical']['lesion_detection'](intermediate_features)
+            })
+
+        if 'agricultural' in self.enhancement_modules:
+            enhancements.update({
+                'texture_features': self.enhancement_modules['agricultural']['texture_analysis'](intermediate_features),
+                'damage_features': self.enhancement_modules['agricultural']['damage_detection'](intermediate_features)
+            })
+
+        # Combine outputs
+        if isinstance(base_output, dict):
+            return {**base_output, **enhancements}
+        return {'features': base_output, **enhancements}
+
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict:
-        """KL divergence clustering (works in both train and prediction modes)"""
+        """KL divergence clustering"""
         device = embeddings.device
         cluster_centers = self.cluster_centers.to(device)
 
-        # Calculate distances to cluster centers
         distances = torch.cdist(embeddings, cluster_centers)
-
-        # Convert distances to probabilities (soft assignments)
         q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
         q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
-        # Create target distribution
         if labels is not None and self.training:
             p_dist = torch.zeros_like(q_dist)
             for i in range(cluster_centers.size(0)):
@@ -4494,7 +4577,6 @@ class FeatureExtractorCNN(nn.Module):
                 if mask.any():
                     p_dist[mask, i] = 1.0
         else:
-            # Self-supervised target distribution (works in prediction mode)
             p_dist = (q_dist ** 2) / q_dist.sum(dim=0, keepdim=True)
             p_dist = p_dist / p_dist.sum(dim=1, keepdim=True)
 
@@ -4504,6 +4586,67 @@ class FeatureExtractorCNN(nn.Module):
             'cluster_assignments': q_dist.argmax(dim=1)
         }
 
+    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """Comprehensive feature extraction with all enhancements"""
+        self.eval()
+        all_features = []
+        all_labels = []
+        all_filenames = []
+        all_class_names = []
+        enhancement_features = defaultdict(list)
+
+        pbar = tqdm(loader, desc="Extracting features", unit="batch",
+                   bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+
+        with torch.no_grad():
+            for batch_idx, (inputs, labels) in enumerate(pbar):
+                inputs = inputs.to(self.device)
+                outputs = self(inputs)
+
+                # Handle different output formats
+                if isinstance(outputs, dict):
+                    features = outputs.get('features', outputs)  # Fallback to full output if no features key
+                    # Store all enhancement outputs
+                    for key, value in outputs.items():
+                        if key not in ['features']:
+                            enhancement_features[key].append(value.cpu())
+                else:
+                    features = outputs
+
+                # Store core features and metadata
+                all_features.append(features.cpu())
+                all_labels.extend(labels.tolist())
+
+                # Get additional info if available
+                if hasattr(loader.dataset, 'get_additional_info'):
+                    indices, filenames = zip(*[loader.dataset.get_additional_info(i)
+                                             for i in range(batch_idx * loader.batch_size,
+                                                          (batch_idx + 1) * loader.batch_size)])
+                    all_filenames.extend(filenames)
+
+                if hasattr(loader.dataset, 'reverse_encoder'):
+                    all_class_names.extend([loader.dataset.reverse_encoder[label.item()]
+                                          for label in labels])
+
+                # Update progress
+                pbar.set_postfix({
+                    'batch': f"{batch_idx + 1}/{len(loader)}",
+                    'features': f"{features.shape[-1]}D"
+                })
+
+        # Prepare output dictionary
+        feature_dict = {
+            'features': torch.cat(all_features),
+            'labels': torch.tensor(all_labels),
+            'filenames': all_filenames,
+            'class_names': all_class_names
+        }
+
+        # Add enhancement features
+        for key, values in enhancement_features.items():
+            feature_dict[key] = torch.cat(values, dim=0)
+
+        return feature_dict
 class FeatureExtractorCNN_old(nn.Module):
     """CNN-based feature extractor model"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128):
