@@ -2038,9 +2038,9 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """Enhanced training loop supporting both pathways"""
-    loss_manager = EnhancedLossManager(config)
+    """Original unified training function updated for both pathways"""
     optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+    loss_manager = EnhancedLossManager(config)
     history = defaultdict(list)
 
     for epoch in range(config['training']['epochs']):
@@ -2051,44 +2051,59 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
             inputs, labels = inputs.to(model.device), labels.to(model.device)
             optimizer.zero_grad()
 
-            # Forward pass - handles both model types
+            # Forward pass (handles both CNN and Autoencoder outputs)
             outputs = model(inputs)
 
-            # Loss calculation with enhancements
-            if isinstance(outputs, dict):  # Enhanced autoencoder
-                loss = loss_manager.calculate_loss(
-                    outputs['reconstruction'], inputs,
-                    outputs.get('embedding'), outputs.get('class_logits'),
-                    labels
-                )['loss']
-            elif isinstance(outputs, tuple):  # Basic autoencoder
-                loss = F.mse_loss(outputs[1], inputs)
-                if config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
-                    latent_info = model.organize_latent_space(outputs[0], labels)
-                    loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
-                           F.kl_div(latent_info['cluster_probabilities'].log(),
-                                   latent_info['target_distribution'],
-                                   reduction='batchmean')
-            else:  # CNN
-                loss = F.cross_entropy(outputs, labels)
-                if config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
-                    latent_info = model.organize_latent_space(outputs, labels)
-                    loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
-                           F.kl_div(latent_info['cluster_probabilities'].log(),
-                                   latent_info['target_distribution'],
-                                   reduction='batchmean')
+            # Loss calculation
+            if isinstance(outputs, dict):  # Enhanced output (both CNN and Autoencoder)
+                # Reconstruction loss for autoencoders
+                if 'reconstruction' in outputs:
+                    recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
+                else:
+                    recon_loss = 0
 
+                # Classification loss
+                if 'class_logits' in outputs:
+                    cls_loss = F.cross_entropy(outputs['class_logits'], labels)
+                else:
+                    cls_loss = 0
+
+                # KL divergence loss
+                if 'cluster_probabilities' in outputs and 'target_distribution' in outputs:
+                    kl_loss = F.kl_div(
+                        outputs['cluster_probabilities'].log(),
+                        outputs['target_distribution'],
+                        reduction='batchmean'
+                    )
+                else:
+                    kl_loss = 0
+
+                # Combine losses with original weights
+                loss = (
+                    config['model']['autoencoder_config']['reconstruction_weight'] * recon_loss +
+                    config['model']['autoencoder_config']['enhancements']['classification_weight'] * cls_loss +
+                    config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+                )
+
+            elif isinstance(outputs, tuple):  # Basic autoencoder
+                loss = F.mse_loss(outputs[1], inputs)  # reconstruction loss
+
+            else:  # Basic CNN
+                loss = F.cross_entropy(outputs, labels)
+
+            # Backward pass
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
 
-        # Store epoch metrics
+        # Store metrics
         history['loss'].append(epoch_loss / len(train_loader))
 
-        # Phase transition logic
+        # Phase transition (original implementation)
         if config['model']['autoencoder_config']['enhancements']['enable_phase2'] and \
            epoch == config['training']['epochs'] // 2:
-            model.set_training_phase(2)
+            if hasattr(model, 'set_training_phase'):
+                model.set_training_phase(2)
             history['phase_transition'] = epoch
 
     return history
