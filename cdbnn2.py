@@ -199,6 +199,14 @@ class PredictionManager:
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
+        # Create a dataset for the model (if required)
+        if hasattr(self.model, 'set_dataset'):
+            logger.debug("Creating dataset...")
+            dataset = self._create_dataset(image_files, transform)
+            logger.debug(f"Dataset created with {len(dataset)} images.")
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.debug("Dataset set in the model.")
+
         # Initialize CSV file and write header
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
@@ -231,27 +239,43 @@ class PredictionManager:
 
             # Extract features using the model (phase 1)
             with torch.no_grad():
-                self.model.set_training_phase(1)  # Ensure Phase 1
-                output_phase1 = self.model(batch_tensor)
-                if isinstance(output_phase1, dict):
-                    embedding_phase1 = output_phase1['embedding']
-                elif isinstance(output_phase1, tuple):
-                    embedding_phase1 = output_phase1[0]
+                output = self.model(batch_tensor)
+
+                # Handle dictionary output
+                if isinstance(output, dict):
+                    if 'embedding' in output:
+                        embedding_phase1 = output['embedding']  # Extract embedding from dictionary
+                    else:
+                        raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
+                # Handle tuple output (e.g., (embedding, reconstruction))
+                elif isinstance(output, tuple):
+                    embedding_phase1 = output[0]  # Assume the first element is the embedding
                 else:
-                    embedding_phase1 = output_phase1
+                    embedding_phase1 = output  # Assume the output is a single tensor
+
+                # Convert to numpy array
                 embedding_phase1 = embedding_phase1.cpu().numpy()
 
             # Extract features using the model (phase 2)
-            with torch.no_grad():
-                self.model.set_training_phase(2)  # Switch to Phase 2
-                output_phase2 = self.model(batch_tensor)
-                if isinstance(output_phase2, dict):
-                    embedding_phase2 = output_phase2['embedding']
-                elif isinstance(output_phase2, tuple):
-                    embedding_phase2 = output_phase2[0]
-                else:
-                    embedding_phase2 = output_phase2
-                embedding_phase2 = embedding_phase2.cpu().numpy()
+            if hasattr(self.model, 'set_training_phase'):
+                self.model.set_training_phase(2)  # Switch to phase 2
+                with torch.no_grad():
+                    output = self.model(batch_tensor)
+
+                    # Handle dictionary output
+                    if isinstance(output, dict):
+                        if 'embedding' in output:
+                            embedding_phase2 = output['embedding']  # Extract embedding from dictionary
+                        else:
+                            raise ValueError("Model output is a dictionary but does not contain 'embedding' key")
+                    # Handle tuple output (e.g., (embedding, reconstruction))
+                    elif isinstance(output, tuple):
+                        embedding_phase2 = output[0]  # Assume the first element is the embedding
+                    else:
+                        embedding_phase2 = output  # Assume the output is a single tensor
+
+                    # Convert to numpy array
+                    embedding_phase2 = embedding_phase2.cpu().numpy()
 
             # Write predictions to CSV batch-wise
             with open(output_csv, 'a', newline='') as csvfile:
