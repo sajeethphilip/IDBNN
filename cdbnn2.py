@@ -2059,43 +2059,64 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """Training function with proper accuracy handling"""
-    # Configuration
+    """Training function with proper phase separation and enhancement handling"""
+    # Configuration setup
     training_config = config.get('training', {})
     model_config = config.get('model', {})
     autoencoder_config = model_config.get('autoencoder_config', {})
     enhancements = autoencoder_config.get('enhancements', {})
+    enhancement_modules = model_config.get('enhancement_modules', {})
 
-    # Phase control
+    # Phase-aware defaults
+    defaults = {
+        'phase1': {
+            'learning_rate': 0.001,
+            'reconstruction_weight': 1.0,
+            'feature_loss_weight': 0.01
+        },
+        'phase2': {
+            'learning_rate': 0.0005,
+            'kl_divergence_weight': 0.1,
+            'classification_weight': 0.1
+        },
+        'epochs': 20,
+        'phase2_epoch_ratio': 0.5
+    }
+
+    # Apply config
+    total_epochs = training_config.get('epochs', defaults['epochs'])
     enable_phase2 = enhancements.get('enable_phase2', False)
-    use_classification = enhancements.get('use_class_encoding', False)
-    total_epochs = training_config.get('epochs', 20)
-    phase2_epoch = int(total_epochs * 0.5) if enable_phase2 else total_epochs
+    phase2_epoch = int(total_epochs * enhancements.get('phase2_epoch_ratio', defaults['phase2_epoch_ratio'])) if enable_phase2 else total_epochs
 
-    # Optimizer setup
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # Initialize training components
+    optimizer = optim.Adam(model.parameters(), lr=defaults['phase1']['learning_rate'])
     history = defaultdict(list)
     current_phase = 1
 
+    # Main training loop
     with tqdm(range(total_epochs), desc="Training Progress", unit="epoch") as epoch_pbar:
         for epoch in epoch_pbar:
             model.train()
             epoch_loss = 0.0
-            phase_correct = 0
-            phase_total = 0
+            correct = 0
+            total = 0
 
-            # Phase transition
+            # Phase transition check
             if enable_phase2 and epoch == phase2_epoch and current_phase == 1:
                 current_phase = 2
+                model.set_training_phase(2)
+                # Update optimizer for phase 2
                 for g in optimizer.param_groups:
-                    g['lr'] = 0.0005  # Phase 2 learning rate
+                    g['lr'] = defaults['phase2']['learning_rate']
+
                 if hasattr(model, '_initialize_cluster_centers'):
                     model._initialize_cluster_centers()
+
                 history['phase_transition'] = epoch
-                tqdm.write(f"\nEntered Phase 2 at epoch {epoch+1}")
+                tqdm.write(f"\nTransitioned to Phase 2 at epoch {epoch+1}")
 
             # Batch processing
-            with tqdm(train_loader, desc=f"Epoch {epoch+1} (Phase {current_phase})", leave=False) as batch_pbar:
+            with tqdm(train_loader, desc=f"Epoch {epoch+1}/{total_epochs} (Phase {current_phase})", leave=False) as batch_pbar:
                 for inputs, labels in batch_pbar:
                     inputs, labels = inputs.to(model.device), labels.to(model.device)
                     optimizer.zero_grad()
@@ -2103,59 +2124,83 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
                     # Forward pass
                     outputs = model(inputs)
                     if not isinstance(outputs, dict):
-                        raise ValueError("Model must return dictionary output")
+                        raise ValueError(f"Model outputs must be dictionary, got {type(outputs)}")
 
-                    # Loss calculation
                     loss_components = {}
-                    total_loss = 0.0
+                    total_loss = torch.tensor(0.0, device=model.device)
 
-                    # PHASE 1 LOSSES
+                    # PHASE 1 LOSS COMPONENTS
                     if current_phase == 1:
+                        # Basic reconstruction loss (always present)
                         if 'reconstruction' in outputs:
                             recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
                             loss_components['recon'] = recon_loss.item()
-                            total_loss += recon_loss
+                            total_loss += defaults['phase1']['reconstruction_weight'] * recon_loss
 
-                    # PHASE 2 LOSSES
+                        # Feature preservation loss
+                        if 'features' in outputs:
+                            feat_loss = torch.norm(outputs['features'], p=2)
+                            loss_components['feat'] = feat_loss.item()
+                            total_loss += defaults['phase1']['feature_loss_weight'] * feat_loss
+
+                    # PHASE 2 LOSS COMPONENTS
                     elif current_phase == 2:
-                        # Only calculate accuracy if classification is enabled
-                        if use_classification and 'class_logits' in outputs:
+                        # KL divergence loss (if enabled)
+                        if 'cluster_probabilities' in outputs and enhancements.get('use_kl_divergence', False):
+                            target_dist = outputs.get('target_distribution', outputs['cluster_probabilities'].detach())
+                            kl_loss = F.kl_div(
+                                outputs['cluster_probabilities'].log(),
+                                target_dist,
+                                reduction='batchmean'
+                            )
+                            loss_components['kl'] = kl_loss.item()
+                            total_loss += defaults['phase2']['kl_divergence_weight'] * kl_loss
+
+                        # Classification loss (if enabled)
+                        if 'class_logits' in outputs and enhancements.get('use_class_encoding', False):
                             cls_loss = F.cross_entropy(outputs['class_logits'], labels)
                             loss_components['cls'] = cls_loss.item()
-                            total_loss += cls_loss
+                            total_loss += defaults['phase2']['classification_weight'] * cls_loss
+                            _, predicted = outputs['class_logits'].max(1)
+                            correct += predicted.eq(labels).sum().item()
+                            total += labels.size(0)
 
-                            # PROPER ACCURACY CALCULATION
-                            with torch.no_grad():
-                                _, predicted = torch.max(outputs['class_logits'], 1)
-                                phase_correct += (predicted == labels).sum().item()
-                                phase_total += labels.size(0)
+                    # ENHANCEMENT-SPECIFIC LOSSES (only if enabled in config)
+                    active_enhancements = {k: v for k, v in enhancement_modules.items() if v.get('enabled', False)}
+                    for enh_key in active_enhancements:
+                        if enh_key in outputs:
+                            enh_loss = torch.norm(outputs[enh_key], p=2)
+                            loss_components[enh_key] = enh_loss.item()
+                            total_loss += active_enhancements[enh_key].get('weight', 0.1) * enh_loss
 
-                    # Backpropagation
+                    # Verify we have active loss components
+                    if not loss_components:
+                        available_keys = ", ".join(outputs.keys())
+                        raise ValueError(f"No active loss components. Available outputs: {available_keys}")
+
+                    # Backward pass
                     total_loss.backward()
                     optimizer.step()
                     epoch_loss += total_loss.item()
 
-                    # Update batch progress
+                    # Update progress
                     batch_pbar.set_postfix({
                         'loss': f"{total_loss.item():.4f}",
                         **{k: f"{v:.4f}" for k, v in loss_components.items()},
-                        'acc': f"{(phase_correct/phase_total*100):.2f}%" if phase_total > 0 else "N/A"
+                        'acc': f"{(correct/total*100):.2f}%" if total > 0 else "0%"
                     })
 
-            # Epoch statistics
+            # Store metrics
             history['loss'].append(epoch_loss/len(train_loader))
-
-            # Only store meaningful accuracy in Phase 2 with classification
-            if current_phase == 2 and use_classification:
-                history['accuracy'].append(phase_correct/phase_total if phase_total > 0 else 0.0)
-                acc_display = f"{(history['accuracy'][-1]*100):.2f}%"
+            if current_phase == 2 and 'class_logits' in outputs:
+                history['accuracy'].append(correct/total if total > 0 else 0.0)
             else:
-                history['accuracy'].append(0.0)  # Placeholder
-                acc_display = "N/A"
+                history['accuracy'].append(0.0)  # Placeholder for phase 1
 
+            # Update epoch progress
             epoch_pbar.set_postfix({
                 'loss': f"{history['loss'][-1]:.4f}",
-                'acc': acc_display,
+                'acc': f"{(history['accuracy'][-1]*100):.2f}%",
                 'phase': current_phase
             })
 
