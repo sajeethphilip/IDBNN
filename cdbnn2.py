@@ -329,9 +329,10 @@ class PredictionManager:
 
 
     def _get_transforms(self) -> transforms.Compose:
-        """Get the appropriate transforms for prediction."""
+        """Ensure consistent 256x256 input size"""
         transform_list = [
-            transforms.Resize(self.config['dataset']['input_size']),
+            transforms.Resize(256),  # First resize to 256x256
+            transforms.CenterCrop(256),  # Ensure exact dimensions
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=self.config['dataset']['mean'],
@@ -5377,7 +5378,10 @@ class DatasetProcessor:
 #------------------------
     def get_transforms(self, config: Dict, is_train: bool = True) -> transforms.Compose:
         """Get transforms based on configuration"""
-        transform_list = []
+        transform_list = [
+                    transforms.Resize(256),  # First resize to ensure minimum size
+                    transforms.CenterCrop(256),  # Then crop to exact size
+                ]
 
         # Handle resolution and channel conversion first
         target_size = tuple(config['dataset']['input_size'])
