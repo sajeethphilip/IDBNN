@@ -2060,39 +2060,81 @@ class ModelFactory:
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
     """
-    Robust two-phase training with comprehensive config safety checks.
-    Handles both CNN and enhanced autoencoder cases safely.
+    Ultra-robust two-phase training with complete output format handling.
+    Safely works with:
+    - Basic CNN models (outputs Tensor)
+    - Enhanced models (outputs Dict)
+    - Hybrid models (various output formats)
     """
-    # --------------------------
-    # 1. Configuration Safeguards
-    # --------------------------
-    device = next(model.parameters()).device
 
-    # Safe config access with defaults
+    # 1. Configuration with fail-safe defaults
     training_config = config.get('training', {})
     model_config = config.get('model', {})
-    autoencoder_config = model_config.get('autoencoder_config', {})
-    enhancements = autoencoder_config.get('enhancements', {})
+    ae_config = model_config.get('autoencoder_config', {})
+    enh_config = ae_config.get('enhancements', {})
 
-    # Set defaults if keys don't exist
-    epochs = training_config.get('epochs', 20)
-    learning_rate = model_config.get('learning_rate', 0.001)
-    use_phase2 = enhancements.get('enable_phase2', False)
-    use_kl_divergence = enhancements.get('use_kl_divergence', False)
-    kl_weight = enhancements.get('kl_divergence_weight', 0.1)
-    early_stopping_patience = training_config.get('early_stopping', {}).get('patience', 5)
+    params = {
+        'epochs': training_config.get('epochs', 20),
+        'lr': model_config.get('learning_rate', 0.001),
+        'use_phase2': enh_config.get('enable_phase2', False),
+        'use_kl': enh_config.get('use_kl_divergence', False),
+        'kl_weight': enh_config.get('kl_divergence_weight', 0.1),
+        'patience': training_config.get('early_stopping', {}).get('patience', 5),
+        'min_delta': 0.001
+    }
 
-    # --------------------------
-    # 2. Training Initialization
-    # --------------------------
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    device = next(model.parameters()).device
+    optimizer = optim.Adam(model.parameters(), lr=params['lr'])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
     history = defaultdict(list)
 
-    def run_phase(phase_num: int, max_epochs: int) -> Tuple[float, dict]:
-        """Executes a training phase with proper loss calculation"""
-        phase_best_loss = float('inf')
-        patience_counter = 0
+    def get_predicted(outputs):
+        """Safe prediction extraction from any model output format"""
+        if isinstance(outputs, dict):
+            if 'class_logits' in outputs:
+                return outputs['class_logits'].max(1)[1]
+            elif 'features' in outputs:
+                return outputs['features'].max(1)[1]
+            return outputs.get('predictions', None)
+        return outputs.max(1)[1] if outputs.dim() > 1 else outputs.round().long()
+
+    def get_loss(outputs, targets, phase):
+        """Safe loss calculation for any model output format"""
+        if phase == 1:
+            if isinstance(outputs, dict):
+                if 'features' in outputs:
+                    return F.cross_entropy(outputs['features'], targets)
+                elif 'class_logits' in outputs:
+                    return F.cross_entropy(outputs['class_logits'], targets)
+            return F.cross_entropy(outputs, targets)
+
+        else:  # Phase 2
+            base_loss = 0
+            kl_loss = 0
+
+            if isinstance(outputs, dict):
+                # Classification loss from any available output
+                if 'class_logits' in outputs:
+                    base_loss = F.cross_entropy(outputs['class_logits'], targets)
+                elif 'features' in outputs:
+                    base_loss = F.cross_entropy(outputs['features'], targets)
+
+                # KL divergence if enabled and available
+                if params['use_kl'] and 'cluster_probabilities' in outputs:
+                    kl_loss = F.kl_div(
+                        outputs['cluster_probabilities'].log(),
+                        outputs.get('target_distribution', outputs['cluster_probabilities'].detach()),
+                        reduction='batchmean'
+                    ) * params['kl_weight']
+
+            else:
+                base_loss = F.cross_entropy(outputs, targets)
+
+            return base_loss + kl_loss
+
+    def run_phase(phase, max_epochs):
+        best_loss = float('inf')
+        patience = 0
         phase_history = defaultdict(list)
 
         for epoch in range(max_epochs):
@@ -2100,114 +2142,77 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
             running_loss = 0.0
             correct = 0
             total = 0
-            kl_loss = 0.0
 
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 optimizer.zero_grad()
 
-                # Forward pass
                 outputs = model(inputs)
-
-                # Phase-specific loss calculation
-                if phase_num == 1:
-                    # Phase 1: Basic feature learning
-                    if isinstance(outputs, dict):
-                        loss = F.cross_entropy(outputs.get('features', outputs.get('class_logits')), targets)
-                    else:
-                        loss = F.cross_entropy(outputs, targets)
-                else:
-                    # Phase 2: Enhanced training
-                    if isinstance(outputs, dict):
-                        # Classification loss
-                        cls_loss = F.cross_entropy(outputs.get('class_logits', outputs['features']), targets)
-
-                        # KL divergence if enabled
-                        kl_loss = 0
-                        if use_kl_divergence and 'cluster_probabilities' in outputs:
-                            kl_loss = F.kl_div(
-                                outputs['cluster_probabilities'].log(),
-                                outputs.get('target_distribution', outputs['cluster_probabilities'].detach()),
-                                reduction='batchmean'
-                            ) * kl_weight
-
-                        loss = cls_loss + kl_loss
-                    else:
-                        loss = F.cross_entropy(outputs, targets)
-
+                loss = get_loss(outputs, targets, phase)
                 loss.backward()
                 optimizer.step()
 
-                # Metrics
                 running_loss += loss.item()
-                _, predicted = outputs.max(1) if not isinstance(outputs, dict) else outputs['class_logits'].max(1)
+                preds = get_predicted(outputs)
+                if preds is not None:
+                    correct += preds.eq(targets).sum().item()
                 total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
 
-            # Epoch statistics
             epoch_loss = running_loss / len(train_loader)
-            epoch_acc = 100. * correct / total
+            epoch_acc = 100. * correct / total if total > 0 else 0
 
-            # Store phase-specific metrics
-            key_prefix = f'phase{phase_num}_'
-            phase_history[f'{key_prefix}loss'].append(epoch_loss)
-            phase_history[f'{key_prefix}acc'].append(epoch_acc)
+            phase_history[f'phase{phase}_loss'].append(epoch_loss)
+            phase_history[f'phase{phase}_acc'].append(epoch_acc)
 
-            if phase_num == 2 and use_kl_divergence:
-                phase_history[f'{key_prefix}kl_loss'].append(kl_loss.item())
-
-            # Learning rate scheduling (only in phase 1)
-            if phase_num == 1:
+            if phase == 1:
                 scheduler.step(epoch_loss)
 
-            # Early stopping check
-            if epoch_loss < phase_best_loss - 0.001:  # Minimum delta
-                phase_best_loss = epoch_loss
-                patience_counter = 0
+            # Early stopping logic
+            if epoch_loss < best_loss - params['min_delta']:
+                best_loss = epoch_loss
+                patience = 0
             else:
-                patience_counter += 1
-                if patience_counter >= early_stopping_patience:
-                    print(f'Phase {phase_num} early stopping at epoch {epoch+1}')
+                patience += 1
+                if patience >= params['patience']:
+                    print(f'Phase {phase} early stopping at epoch {epoch+1}')
                     break
 
-            print(f'Phase {phase_num} | Epoch {epoch+1} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.2f}%')
+            print(f'Phase {phase} | Epoch {epoch+1} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.2f}%')
 
-        return phase_best_loss, phase_history
+        return best_loss, phase_history
 
-    # --------------------------
-    # 3. Phase 1: Core Training
-    # --------------------------
-    print("Starting Phase 1: Core Feature Learning")
-    phase1_epochs = epochs//2 if use_phase2 else epochs
-    phase1_best_loss, phase1_history = run_phase(1, phase1_epochs)
-    history.update(phase1_history)
+    # Phase 1: Core training
+    print("=== Phase 1: Core Feature Learning ===")
+    phase1_epochs = params['epochs']//2 if params['use_phase2'] else params['epochs']
+    phase1_best, phase1_hist = run_phase(1, phase1_epochs)
+    history.update(phase1_hist)
 
-    # --------------------------
-    # 4. Phase 2: Enhancements
-    # --------------------------
-    if use_phase2:
-        print("\nStarting Phase 2: Enhancement Training")
+    # Phase 2: Enhancements (if enabled)
+    if params['use_phase2']:
+        print("\n=== Phase 2: Enhancement Training ===")
 
         # Safe phase transition
         if hasattr(model, 'set_training_phase'):
             model.set_training_phase(2)
 
         # Cluster initialization if needed
-        if use_kl_divergence and hasattr(model, 'cluster_centers'):
+        if params['use_kl'] and hasattr(model, 'cluster_centers'):
             print("Initializing cluster centers...")
             model.eval()
-            all_features = []
+            features = []
             with torch.no_grad():
                 for inputs, _ in train_loader:
-                    outputs = model(inputs.to(device))
-                    features = outputs['features'] if isinstance(outputs, dict) else outputs
-                    all_features.append(features.cpu())
+                    out = model(inputs.to(device))
+                    feats = out['features'] if isinstance(out, dict) else out
+                    features.append(feats.cpu())
 
-            if all_features:  # Only initialize if we got features
+            if features:  # Only initialize if we got features
+                features = torch.cat(features).numpy()
                 from sklearn.cluster import KMeans
-                features = torch.cat(all_features).numpy()
-                kmeans = KMeans(n_clusters=model.cluster_centers.size(0), n_init=10)
-                kmeans.fit(features)
+                kmeans = KMeans(
+                    n_clusters=model.cluster_centers.size(0),
+                    n_init=10
+                ).fit(features)
                 model.cluster_centers.data = torch.tensor(
                     kmeans.cluster_centers_,
                     device=device,
@@ -2215,23 +2220,21 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
                 )
 
         # Run phase 2
-        phase2_epochs = epochs - len(phase1_history['phase1_loss'])
-        phase2_best_loss, phase2_history = run_phase(2, phase2_epochs)
-        history.update(phase2_history)
+        remaining_epochs = params['epochs'] - len(phase1_hist[f'phase1_loss'])
+        phase2_best, phase2_hist = run_phase(2, remaining_epochs)
+        history.update(phase2_hist)
 
-        # --------------------------
-        # 5. Phase 1 Refinement (if needed)
-        # --------------------------
-        if phase2_best_loss >= phase1_best_loss:
-            print("\nPhase 2 did not improve results. Reverting to Phase 1.")
+        # Optional refinement phase
+        if phase2_best >= phase1_best:
+            print("\nPhase 2 did not improve results. Refining Phase 1...")
             if hasattr(model, 'set_training_phase'):
                 model.set_training_phase(1)
 
-            remaining_epochs = epochs - len(phase1_history['phase1_loss']) - len(phase2_history['phase2_loss'])
-            if remaining_epochs > 0:
-                _, refine_history = run_phase(1, remaining_epochs)
-                history['phase1_refine_loss'] = refine_history['phase1_loss']
-                history['phase1_refine_acc'] = refine_history['phase1_acc']
+            refine_epochs = params['epochs'] - len(phase1_hist[f'phase1_loss']) - len(phase2_hist[f'phase2_loss'])
+            if refine_epochs > 0:
+                _, refine_hist = run_phase(1, refine_epochs)
+                history['phase1_refine_loss'] = refine_hist[f'phase1_loss']
+                history['phase1_refine_acc'] = refine_hist[f'phase1_acc']
 
     return history
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
