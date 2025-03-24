@@ -4621,40 +4621,98 @@ class FeatureExtractorCNN(nn.Module):
                 logger.warning(f"Enhancement feature '{key}' count mismatch")
 
         return feature_dict
+    def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
+        """
+        Save extracted features to CSV file with metadata.
+        Compatible with the existing feature saving format used in other models.
 
-class FeatureExtractorCNN_old(nn.Module):
-    """CNN-based feature extractor model"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128):
-        super().__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+        Args:
+            feature_dict: Dictionary containing:
+                - 'features': Extracted feature tensor
+                - 'labels': Corresponding labels
+                - 'filenames': List of filenames (optional)
+                - 'class_names': List of class names (optional)
+                - Any enhancement features
+            output_path: Path to save the CSV file
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            # Convert features to numpy if they're not already
+            features = feature_dict['features'].cpu().numpy()
+            labels = feature_dict['labels'].cpu().numpy()
 
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
+            # Create DataFrame with feature columns
+            feature_columns = [f'feature_{i}' for i in range(features.shape[1])]
+            data_dict = {col: features[:, i] for i, col in enumerate(feature_columns)}
 
-        self.fc = nn.Linear(128, feature_dims)
-        self.batch_norm = nn.BatchNorm1d(feature_dims)
+            # Add core metadata
+            data_dict['target'] = labels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)  # Add batch dimension
-        x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        if x.size(0) > 1:  # Only apply batch norm if batch size > 1
-            x = self.batch_norm(x)
-        return x
+            # Add optional metadata if available
+            if 'filenames' in feature_dict:
+                data_dict['filename'] = feature_dict['filenames']
+            if 'class_names' in feature_dict:
+                data_dict['class_name'] = feature_dict['class_names']
+
+            # Add enhancement features if present
+            for key, value in feature_dict.items():
+                if key not in ['features', 'labels', 'filenames', 'class_names']:
+                    if isinstance(value, torch.Tensor):
+                        value = value.cpu().numpy()
+                    if value.ndim == 1:
+                        data_dict[key] = value
+                    else:
+                        # Handle multi-dimensional enhancement features
+                        for i in range(value.shape[1]):
+                            data_dict[f'{key}_{i}'] = value[:, i]
+
+            # Save in chunks to manage memory
+            chunk_size = 1000
+            total_samples = len(labels)
+
+            for start_idx in range(0, total_samples, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_samples)
+
+                # Create chunk dictionary
+                chunk_dict = {
+                    col: data_dict[col][start_idx:end_idx]
+                    for col in data_dict.keys()
+                }
+
+                # Save chunk to CSV
+                df = pd.DataFrame(chunk_dict)
+                mode = 'w' if start_idx == 0 else 'a'
+                header = start_idx == 0
+                df.to_csv(output_path, mode=mode, index=False, header=header)
+
+                # Clean up
+                del df, chunk_dict
+                gc.collect()
+
+            # Save metadata
+            metadata = {
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'feature_columns': feature_columns,
+                'total_samples': total_samples,
+                'model_type': self.__class__.__name__,
+                'feature_dims': self.feature_dims,
+                'config': self.config
+            }
+
+            metadata_path = os.path.join(
+                os.path.dirname(output_path),
+                'feature_metadata.json'
+            )
+
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=4)
+
+            logger.info(f"Features saved to {output_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
