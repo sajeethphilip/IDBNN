@@ -6752,11 +6752,21 @@ def main():
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
 
+            # Set the dataset (if required)
+            if hasattr(predictor.model, 'set_dataset'):
+                # Create a dataset with the images in the input directory
+                transform = predictor._get_transforms()  # Get the image transforms
+                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
+                predictor.model.set_dataset(dataset)  # Set the dataset in the model
+                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
+
             # Perform predictions
+            logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_dir=args.input_dir,
+                input_path=args.input_dir,
                 output_csv=args.output_csv
             )
+            logger.info(f"Predictions saved to {args.output_csv}")
 
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
