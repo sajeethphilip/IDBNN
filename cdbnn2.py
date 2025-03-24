@@ -2060,111 +2060,98 @@ class ModelFactory:
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
     optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-    loss_manager = EnhancedLossManager(config)
     history = defaultdict(list)
 
-    # Debugging setup
-    debug_interval = config.get('debug_interval', 10)
-    grad_accumulation_steps = config.get('grad_accumulation_steps', 1)
+    # Phase configuration
+    total_epochs = config['training']['epochs']
+    phase1_epochs = total_epochs // 2 if config['model']['autoencoder_config']['enhancements']['enable_phase2'] else total_epochs
+    current_phase = 1
 
-    # Weight verification
+    # Loss weights
     recon_weight = config['model']['autoencoder_config']['reconstruction_weight']
     cls_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
     kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
 
-    print(f"\nLoss weights - Reconstruction: {recon_weight}, Classification: {cls_weight}, KL: {kl_weight}\n")
+    for epoch in range(total_epochs):
+        # Phase transition
+        if current_phase == 1 and epoch >= phase1_epochs:
+            current_phase = 2
+            model.set_training_phase(2)
+            print(f"\nTransitioning to Phase 2 (Clustering) at epoch {epoch+1}")
+            # Reinitialize cluster centers
+            if hasattr(model, '_initialize_cluster_centers'):
+                model._initialize_cluster_centers()
 
-    for epoch in range(config['training']['epochs']):
         model.train()
         epoch_loss = 0.0
         total_samples = 0
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", unit="batch",
-                   bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Phase {current_phase}]",
+                   unit="batch", bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
 
-        for batch_idx, (inputs, labels) in enumerate(pbar):
+        for inputs, labels in pbar:
             inputs, labels = inputs.to(model.device), labels.to(model.device)
+            optimizer.zero_grad()
 
-            # Forward pass with debug output
             outputs = model(inputs)
             loss_components = {}
 
-            # Detailed loss calculation
-            if isinstance(outputs, dict):
-                # Reconstruction loss
-                if 'reconstruction' in outputs:
+            # Phase 1: Basic training
+            if current_phase == 1:
+                if isinstance(outputs, dict):
+                    # Reconstruction only
                     loss_components['recon'] = F.mse_loss(outputs['reconstruction'], inputs)
+                    if 'class_logits' in outputs:
+                        loss_components['cls'] = F.cross_entropy(outputs['class_logits'], labels)
+                else:
+                    # Fallback to simple loss
+                    loss_components['recon'] = F.mse_loss(outputs[1], inputs) if isinstance(outputs, tuple) else 0
 
-                # Classification loss
-                if 'class_logits' in outputs:
-                    loss_components['cls'] = F.cross_entropy(outputs['class_logits'], labels)
-                    _, predicted = outputs['class_logits'].max(1)
-                    accuracy = predicted.eq(labels).sum().item() / labels.size(0)
+            # Phase 2: Add clustering
+            else:
+                if isinstance(outputs, dict):
+                    # All losses
+                    loss_components['recon'] = F.mse_loss(outputs['reconstruction'], inputs)
+                    if 'class_logits' in outputs:
+                        loss_components['cls'] = F.cross_entropy(outputs['class_logits'], labels)
+                    if 'cluster_probabilities' in outputs:
+                        loss_components['kl'] = F.kl_div(
+                            outputs['cluster_probabilities'].log(),
+                            outputs['target_distribution'],
+                            reduction='batchmean'
+                        )
 
-                # KL divergence loss
-                if 'cluster_probabilities' in outputs and 'target_distribution' in outputs:
-                    kl_loss = F.kl_div(
-                        outputs['cluster_probabilities'].log(),
-                        outputs['target_distribution'],
-                        reduction='batchmean'
-                    )
-                    loss_components['kl'] = kl_loss
-
-                    # Debug KL divergence
-                    if batch_idx % debug_interval == 0:
-                        print(f"\nKL Debug - Min: {outputs['cluster_probabilities'].min().item():.4f} "
-                              f"Max: {outputs['cluster_probabilities'].max().item():.4f} "
-                              f"Mean: {outputs['cluster_probabilities'].mean().item():.4f}")
-
-            # Combined loss
+            # Weighted loss
             total_loss = sum(
                 weight * loss_components.get(name, 0)
                 for name, weight in [
                     ('recon', recon_weight),
                     ('cls', cls_weight),
-                    ('kl', kl_weight)
+                    ('kl', kl_weight if current_phase == 2 else 0)
                 ]
             )
 
-            # Backward pass with gradient checking
             total_loss.backward()
+            optimizer.step()
 
-            if (batch_idx + 1) % grad_accumulation_steps == 0:
-                # Gradient debugging
-                if batch_idx % debug_interval == 0:
-                    grad_norms = [
-                        (name, param.grad.norm().item())
-                        for name, param in model.named_parameters()
-                        if param.grad is not None
-                    ]
-                    print("\nGradient norms:")
-                    for name, norm in sorted(grad_norms, key=lambda x: x[1], reverse=True)[:5]:
-                        print(f"{name}: {norm:.4f}")
-
-                optimizer.step()
-                optimizer.zero_grad()
-
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f"{total_loss.item():.4f}",
-                **{k: f"{v.item():.4f}" for k, v in loss_components.items()},
-                'acc': f"{accuracy*100:.2f}%" if 'accuracy' in locals() else "N/A"
-            })
-
+            # Update metrics
             epoch_loss += total_loss.item() * inputs.size(0)
             total_samples += inputs.size(0)
 
-        # Epoch statistics
-        avg_loss = epoch_loss / total_samples
-        history['loss'].append(avg_loss)
-        if 'accuracy' in locals():
-            history['accuracy'].append(accuracy)
+            # Update progress
+            pbar.set_postfix({
+                'loss': f"{total_loss.item():.4f}",
+                **{k: f"{v:.4f}" for k, v in loss_components.items()}
+            })
 
-        print(f"\nEpoch {epoch+1} Summary:")
-        print(f"Avg Loss: {avg_loss:.4f}")
-        if 'accuracy' in locals():
-            print(f"Accuracy: {accuracy*100:.2f}%")
-        print("="*50)
+        # Store epoch stats
+        history['loss'].append(epoch_loss / total_samples)
+        for k in loss_components:
+            history[k].append(loss_components[k].item())
+
+        # Phase transition marker
+        if current_phase == 2 and epoch == phase1_epochs:
+            history['phase_transition'] = epoch
 
     return history
 
