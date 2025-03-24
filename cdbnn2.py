@@ -6572,25 +6572,29 @@ def main():
             with open(config_path, 'r') as f:
                 config = json.load(f)
 
+            # Load label encoders (assuming they are saved in the same directory as the config)
+            label_encoder_path = os.path.join(args.output_dir, args.data, "label_encoder.json")
+            reverse_encoder_path = os.path.join(args.output_dir, args.data, "reverse_encoder.json")
+
+            with open(label_encoder_path, 'r') as f:
+                label_encoder = json.load(f)
+
+            with open(reverse_encoder_path, 'r') as f:
+                reverse_encoder = json.load(f)
+
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
-                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
+                model_path=os.path.join(args.output_dir, args.data, "checkpoints", f"{args.data}_best.pth"),
+                label_encoder=label_encoder,
+                reverse_encoder=reverse_encoder
             )
-
-            # Set the dataset (if required)
-            if hasattr(predictor.model, 'set_dataset'):
-                # Create a dataset with the images in the input directory
-                transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
-                predictor.model.set_dataset(dataset)  # Set the dataset in the model
-                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
 
             # Perform predictions
             logger.info("Starting prediction process...")
-            predictor.predict_images(
-                input_path=args.input_dir,
-                output_csv=args.output_csv
+            predictor.predict_from_folder(
+                folder_path=args.input_dir,
+                output_csv_path=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
 
