@@ -81,6 +81,8 @@ from typing import Dict, List, Optional
 from torchvision.transforms.functional import resize
 
 logger = logging.getLogger(__name__)
+
+
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
 
@@ -177,7 +179,7 @@ class PredictionManager:
     def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 32):
         """
         Predict features for images from the input path (file, directory, or archive).
-        Writes predictions to CSV batch-wise, including true class labels and their tensorized embeddings.
+        Writes predictions to CSV batch-wise, including true class labels if available.
         """
         # Validate input_path
         if not isinstance(input_path, (str, bytes, os.PathLike)):
@@ -205,17 +207,13 @@ class PredictionManager:
             self.model.set_dataset(dataset)  # Set the dataset before processing images
             logger.debug("Dataset set in the model.")
 
-        # Get the label encoder used during training
-        if not hasattr(self, 'label_encoder'):
-            raise ValueError("Label encoder not found. Ensure the model was trained with class labels.")
-
         # Initialize CSV file and write header
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             # Write header
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(['filename', 'true_class', 'target'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
+            csv_writer.writerow(['filename', 'true_class'] + [f'phase1_{col}' for col in feature_cols] + [f'phase2_{col}' for col in feature_cols])
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -283,9 +281,7 @@ class PredictionManager:
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    # Get the tensorized label embedding for the true class
-                    target = self.label_encoder.transform([true_class])[0]  # Use the label encoder from training
-                    row = [os.path.basename(filename), true_class, target] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
+                    row = [os.path.basename(filename), true_class] + embedding_phase1[j].tolist() + embedding_phase2[j].tolist()
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
