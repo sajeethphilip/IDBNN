@@ -2100,7 +2100,7 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
         history['loss'].append(epoch_loss / len(train_loader))
 
         # Phase transition (original implementation)
-        if config['model']['autoencoder_config']['enhancements']['enable_phase2'] and \
+        if config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('enable_phase2', False) and \
            epoch == config['training']['epochs'] // 2:
             if hasattr(model, 'set_training_phase'):
                 model.set_training_phase(2)
