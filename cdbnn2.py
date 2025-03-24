@@ -2059,172 +2059,160 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """Final corrected training function with proper error handling"""
-    # Configuration setup with validation
-    training_config = config.get('training', {})
-    model_config = config.get('model', {})
-    autoencoder_config = model_config.get('autoencoder_config', {})
-    enhancements = autoencoder_config.get('enhancements', {})
-    enhancement_modules = model_config.get('enhancement_modules', {})
+    """
+    Enhanced two-phase training with separate feature learning and enhancement phases.
 
-    # Phase configuration
-    phase_config = {
-        1: {
-            'name': 'Feature Extraction',
-            'learning_rate': 0.001,
-            'required_outputs': ['reconstruction'],
-            'loss_components': {
-                'reconstruction': {'weight': 1.0},
-                'feature': {'weight': 0.01, 'optional': True}
-            }
-        },
-        2: {
-            'name': 'Enhanced Training',
-            'learning_rate': 0.0005,
-            'required_outputs': [],
-            'loss_components': {
-                'kl_divergence': {
-                    'weight': enhancements.get('kl_divergence_weight', 0.1),
-                    'required': enhancements.get('use_kl_divergence', False)
-                },
-                'classification': {
-                    'weight': enhancements.get('classification_weight', 0.1),
-                    'required': enhancements.get('use_class_encoding', False)
-                }
-            }
-        }
-    }
-
-    # Training schedule
-    total_epochs = training_config.get('epochs', 20)
-    enable_phase2 = enhancements.get('enable_phase2', False)
-    phase2_start = int(total_epochs * 0.5) if enable_phase2 else total_epochs
-    current_phase = 1
-
-    # Initialize training
-    optimizer = optim.Adam(model.parameters(), lr=phase_config[1]['learning_rate'])
+    Phase 1: Core feature extraction training
+    Phase 2: Enhancement/clustering fine-tuning (if enabled)
+    """
+    # Initialize training components
+    device = next(model.parameters()).device
+    optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
     history = defaultdict(list)
-    best_loss = float('inf')
 
-    # Main training loop
-    try:
-        epoch_pbar = tqdm(range(total_epochs), desc="Training Progress", unit="epoch")
-        for epoch in epoch_pbar:
+    # Training configuration
+    epochs = config['training']['epochs']
+    early_stopping_patience = config['training'].get('early_stopping', {}).get('patience', 5)
+    use_enhancements = config['model']['autoencoder_config']['enhancements']['enable_phase2']
+
+    def run_phase(phase_num: int, max_epochs: int) -> Tuple[float, float]:
+        """Inner function to run a training phase"""
+        phase_best_loss = float('inf')
+        patience_counter = 0
+        phase_history = defaultdict(list)
+
+        for epoch in range(max_epochs):
+            # Training loop
             model.train()
-            epoch_metrics = {
-                'loss': 0.0,
-                'correct': 0,
-                'total': 0,
-                'components': defaultdict(float)
-            }
+            running_loss = 0.0
+            correct = 0
+            total = 0
 
-            # Phase transition
-            if enable_phase2 and epoch == phase2_start and current_phase == 1:
-                current_phase = 2
-                model.set_training_phase(2)
-                for g in optimizer.param_groups:
-                    g['lr'] = phase_config[2]['learning_rate']
-
-                if hasattr(model, '_initialize_cluster_centers'):
-                    model._initialize_cluster_centers()
-
-                history['phase_transition'] = epoch
-                tqdm.write(f"\nTransitioned to Phase {current_phase} at epoch {epoch+1}")
-
-            # Batch processing
-            batch_pbar = tqdm(train_loader,
-                            desc=f"Epoch {epoch+1}/{total_epochs} ({phase_config[current_phase]['name']})",
-                            leave=False)
-
-            for inputs, labels in batch_pbar:
-                inputs, labels = inputs.to(model.device), labels.to(model.device)
+            for inputs, targets in train_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
                 optimizer.zero_grad()
 
-                # Forward pass
-                outputs = model(inputs)
-                if not isinstance(outputs, dict):
-                    raise ValueError("Model outputs must be a dictionary")
+                # Phase-specific forward pass
+                if phase_num == 1:
+                    outputs = model(inputs)
+                    if isinstance(outputs, dict):
+                        outputs = outputs['features']  # Extract features if enhanced model
+                    loss = F.cross_entropy(outputs, targets)
+                else:  # Phase 2
+                    outputs = model(inputs)
+                    if isinstance(outputs, dict):
+                        # Combined loss with enhancements
+                        base_loss = F.cross_entropy(outputs.get('class_logits', outputs['features']), targets)
 
-                # Validate required outputs
-                for output_name in phase_config[current_phase]['required_outputs']:
-                    if output_name not in outputs:
-                        raise ValueError(
-                            f"Missing required output '{output_name}' in phase {current_phase}. "
-                            f"Available outputs: {list(outputs.keys())}"
-                        )
-
-                # Calculate losses
-                total_loss = torch.tensor(0.0, device=model.device)
-                loss_components = {}
-
-                # Phase-specific losses
-                for loss_name, loss_cfg in phase_config[current_phase]['loss_components'].items():
-                    if loss_cfg.get('required', True) or loss_name in outputs:
-                        if loss_name == 'reconstruction':
-                            loss = F.mse_loss(outputs['reconstruction'], inputs)
-                        elif loss_name == 'feature':
-                            loss = torch.norm(outputs.get('features', torch.zeros(1)), p=2)
-                        elif loss_name == 'kl_divergence':
-                            target = outputs.get('target_distribution', outputs['cluster_probabilities'].detach())
-                            loss = F.kl_div(
+                        # KL divergence loss if enabled
+                        kl_loss = 0
+                        if 'cluster_probabilities' in outputs and 'target_distribution' in outputs:
+                            kl_loss = F.kl_div(
                                 outputs['cluster_probabilities'].log(),
-                                target,
+                                outputs['target_distribution'],
                                 reduction='batchmean'
-                            )
-                        elif loss_name == 'classification':
-                            loss = F.cross_entropy(outputs['class_logits'], labels)
-                            _, predicted = outputs['class_logits'].max(1)
-                            epoch_metrics['correct'] += predicted.eq(labels).sum().item()
-                            epoch_metrics['total'] += labels.size(0)
-                        else:
-                            continue
+                            ) * config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
 
-                        weighted_loss = loss * loss_cfg['weight']
-                        loss_components[loss_name] = loss.item()
-                        total_loss += weighted_loss
+                        loss = base_loss + kl_loss
+                    else:
+                        loss = F.cross_entropy(outputs, targets)
 
-                # Enhancement losses
-                for enh_name, enh_cfg in enhancement_modules.items():
-                    if enh_cfg.get('enabled', False) and enh_name in outputs:
-                        loss = torch.norm(outputs[enh_name], p=2)
-                        weighted_loss = loss * enh_cfg.get('weight', 0.1)
-                        loss_components[enh_name] = loss.item()
-                        total_loss += weighted_loss
-
-                # Backward pass
-                total_loss.backward()
+                loss.backward()
                 optimizer.step()
-                epoch_metrics['loss'] += total_loss.item()
 
-                # Update batch progress
-                batch_pbar.set_postfix({
-                    'loss': f"{total_loss.item():.4f}",
-                    **{k: f"{v:.4f}" for k, v in loss_components.items()},
-                    'acc': f"{(epoch_metrics['correct']/max(1, epoch_metrics['total'])*100):.2f}%"
-                })
+                # Update metrics
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
 
-            # Epoch completion
-            epoch_avg_loss = epoch_metrics['loss'] / len(train_loader)
-            history['loss'].append(epoch_avg_loss)
-            history['accuracy'].append(
-                epoch_metrics['correct'] / max(1, epoch_metrics['total'])
-                if current_phase == 2 and 'classification' in phase_config[2]['loss_components']
-                else 0.0
-            )
+            # Epoch statistics
+            epoch_loss = running_loss / len(train_loader)
+            epoch_acc = 100. * correct / total
 
-            # Update epoch progress
-            epoch_pbar.set_postfix({
-                'loss': f"{epoch_avg_loss:.4f}",
-                'acc': f"{(history['accuracy'][-1]*100):.2f}%",
-                'phase': current_phase
-            })
+            # Phase-specific processing
+            if phase_num == 1:
+                scheduler.step(epoch_loss)
+                phase_history['phase1_loss'].append(epoch_loss)
+                phase_history['phase1_acc'].append(epoch_acc)
+            else:
+                phase_history['phase2_loss'].append(epoch_loss)
+                phase_history['phase2_acc'].append(epoch_acc)
+                phase_history['phase2_kl_loss'].append(kl_loss.item() if 'kl_loss' in locals() else 0)
 
-    except Exception as e:
-        logger.error(f"Error in training phase {current_phase}: {str(e)}")
-        raise RuntimeError(f"Training failed in phase {current_phase}") from e
+            # Early stopping check
+            if epoch_loss < phase_best_loss - 0.001:  # Minimum delta
+                phase_best_loss = epoch_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stopping_patience:
+                    print(f'Phase {phase_num} early stopping at epoch {epoch+1}')
+                    break
+
+            print(f'Phase {phase_num} | Epoch {epoch+1} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.2f}%')
+
+        return phase_best_loss, phase_history
+
+    # Phase 1: Core feature learning
+    print("Starting Phase 1: Core Feature Learning")
+    phase1_best_loss, phase1_history = run_phase(1, epochs//2 if use_enhancements else epochs)
+    history.update(phase1_history)
+
+    # Phase transition logic
+    if use_enhancements:
+        print("\nStarting Phase 2: Enhancement Training")
+        if hasattr(model, 'set_training_phase'):
+            model.set_training_phase(2)  # Activate enhancement modules
+
+        # Initialize cluster centers if using KL divergence
+        if config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
+            if hasattr(model, '_initialize_cluster_centers'):
+                model._initialize_cluster_centers()
+            elif hasattr(model, 'cluster_centers'):
+                print("Initializing cluster centers with k-means")
+                model.eval()
+                with torch.no_grad():
+                    features = []
+                    labels = []
+                    for inputs, targets in train_loader:
+                        outputs = model(inputs.to(device))
+                        if isinstance(outputs, dict):
+                            features.append(outputs['features'].cpu())
+                        else:
+                            features.append(outputs.cpu())
+                        labels.append(targets.cpu())
+
+                    features = torch.cat(features)
+                    labels = torch.cat(labels)
+
+                    # K-means initialization
+                    from sklearn.cluster import KMeans
+                    kmeans = KMeans(n_clusters=model.cluster_centers.size(0), n_init=10)
+                    kmeans.fit(features.numpy())
+                    model.cluster_centers.data = torch.tensor(
+                        kmeans.cluster_centers_,
+                        device=device
+                    )
+
+        # Run phase 2
+        phase2_best_loss, phase2_history = run_phase(2, epochs - len(phase1_history['phase1_loss']))
+        history.update(phase2_history)
+
+        # Final phase 1 refinement if phase 2 didn't improve
+        if phase2_best_loss >= phase1_best_loss:
+            print("\nReverting to Phase 1 for final refinement")
+            if hasattr(model, 'set_training_phase'):
+                model.set_training_phase(1)
+
+            remaining_epochs = epochs - len(phase1_history['phase1_loss']) - len(phase2_history['phase2_loss'])
+            if remaining_epochs > 0:
+                _, phase1_refine = run_phase(1, remaining_epochs)
+                history['phase1_refine_loss'] = phase1_refine['phase1_loss']
+                history['phase1_refine_acc'] = phase1_refine['phase1_acc']
 
     return history
-
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
     Generate unique identifier for checkpoint based on phase and active enhancements.
