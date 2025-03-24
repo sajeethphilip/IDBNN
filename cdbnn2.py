@@ -2058,57 +2058,170 @@ class ModelFactory:
         return model.to(torch.device('cuda' if config['execution_flags']['use_gpu'] else 'cpu'))
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader,
-                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
-    # Store dataset reference in model
-    model.set_dataset(train_loader.dataset)
+def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
+    """Final corrected training function with proper error handling"""
+    # Configuration setup with validation
+    training_config = config.get('training', {})
+    model_config = config.get('model', {})
+    autoencoder_config = model_config.get('autoencoder_config', {})
+    enhancements = autoencoder_config.get('enhancements', {})
+    enhancement_modules = model_config.get('enhancement_modules', {})
 
+    # Phase configuration
+    phase_config = {
+        1: {
+            'name': 'Feature Extraction',
+            'learning_rate': 0.001,
+            'required_outputs': ['reconstruction'],
+            'loss_components': {
+                'reconstruction': {'weight': 1.0},
+                'feature': {'weight': 0.01, 'optional': True}
+            }
+        },
+        2: {
+            'name': 'Enhanced Training',
+            'learning_rate': 0.0005,
+            'required_outputs': [],
+            'loss_components': {
+                'kl_divergence': {
+                    'weight': enhancements.get('kl_divergence_weight', 0.1),
+                    'required': enhancements.get('use_kl_divergence', False)
+                },
+                'classification': {
+                    'weight': enhancements.get('classification_weight', 0.1),
+                    'required': enhancements.get('use_class_encoding', False)
+                }
+            }
+        }
+    }
+
+    # Training schedule
+    total_epochs = training_config.get('epochs', 20)
+    enable_phase2 = enhancements.get('enable_phase2', False)
+    phase2_start = int(total_epochs * 0.5) if enable_phase2 else total_epochs
+    current_phase = 1
+
+    # Initialize training
+    optimizer = optim.Adam(model.parameters(), lr=phase_config[1]['learning_rate'])
     history = defaultdict(list)
+    best_loss = float('inf')
 
-    # Initialize starting epoch and phase
-    start_epoch = getattr(model, 'current_epoch', 0)
-    current_phase = getattr(model, 'training_phase', 1)
+    # Main training loop
+    try:
+        epoch_pbar = tqdm(range(total_epochs), desc="Training Progress", unit="epoch")
+        for epoch in epoch_pbar:
+            model.train()
+            epoch_metrics = {
+                'loss': 0.0,
+                'correct': 0,
+                'total': 0,
+                'components': defaultdict(float)
+            }
 
-    # Phase 1: Pure reconstruction (if not already completed)
-    if current_phase == 1:
-        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
-        model.set_training_phase(1)
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+            # Phase transition
+            if enable_phase2 and epoch == phase2_start and current_phase == 1:
+                current_phase = 2
+                model.set_training_phase(2)
+                for g in optimizer.param_groups:
+                    g['lr'] = phase_config[2]['learning_rate']
 
-        phase1_history = _train_phase(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 1, config,
-            start_epoch=start_epoch
-        )
-        history.update(phase1_history)
+                if hasattr(model, '_initialize_cluster_centers'):
+                    model._initialize_cluster_centers()
 
-        # Reset start_epoch for phase 2
-        start_epoch = 0
-    else:
-        logger.info("Phase 1 already completed, skipping")
+                history['phase_transition'] = epoch
+                tqdm.write(f"\nTransitioned to Phase {current_phase} at epoch {epoch+1}")
 
-    # Phase 2: Latent space organization
-    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        if current_phase < 2:
-            logger.info("Starting Phase 2: Latent space organization")
-            model.set_training_phase(2)
-        else:
-            logger.info("Resuming Phase 2: Latent space organization")
+            # Batch processing
+            batch_pbar = tqdm(train_loader,
+                            desc=f"Epoch {epoch+1}/{total_epochs} ({phase_config[current_phase]['name']})",
+                            leave=False)
 
-        # Lower learning rate for fine-tuning
-        optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'])
+            for inputs, labels in batch_pbar:
+                inputs, labels = inputs.to(model.device), labels.to(model.device)
+                optimizer.zero_grad()
 
-        phase2_history = _train_phase(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 2, config,
-            start_epoch=start_epoch if current_phase == 2 else 0
-        )
+                # Forward pass
+                outputs = model(inputs)
+                if not isinstance(outputs, dict):
+                    raise ValueError("Model outputs must be a dictionary")
 
-        # Merge histories
-        for key, value in phase2_history.items():
-            history[f"phase2_{key}"] = value
+                # Validate required outputs
+                for output_name in phase_config[current_phase]['required_outputs']:
+                    if output_name not in outputs:
+                        raise ValueError(
+                            f"Missing required output '{output_name}' in phase {current_phase}. "
+                            f"Available outputs: {list(outputs.keys())}"
+                        )
+
+                # Calculate losses
+                total_loss = torch.tensor(0.0, device=model.device)
+                loss_components = {}
+
+                # Phase-specific losses
+                for loss_name, loss_cfg in phase_config[current_phase]['loss_components'].items():
+                    if loss_cfg.get('required', True) or loss_name in outputs:
+                        if loss_name == 'reconstruction':
+                            loss = F.mse_loss(outputs['reconstruction'], inputs)
+                        elif loss_name == 'feature':
+                            loss = torch.norm(outputs.get('features', torch.zeros(1)), p=2)
+                        elif loss_name == 'kl_divergence':
+                            target = outputs.get('target_distribution', outputs['cluster_probabilities'].detach())
+                            loss = F.kl_div(
+                                outputs['cluster_probabilities'].log(),
+                                target,
+                                reduction='batchmean'
+                            )
+                        elif loss_name == 'classification':
+                            loss = F.cross_entropy(outputs['class_logits'], labels)
+                            _, predicted = outputs['class_logits'].max(1)
+                            epoch_metrics['correct'] += predicted.eq(labels).sum().item()
+                            epoch_metrics['total'] += labels.size(0)
+                        else:
+                            continue
+
+                        weighted_loss = loss * loss_cfg['weight']
+                        loss_components[loss_name] = loss.item()
+                        total_loss += weighted_loss
+
+                # Enhancement losses
+                for enh_name, enh_cfg in enhancement_modules.items():
+                    if enh_cfg.get('enabled', False) and enh_name in outputs:
+                        loss = torch.norm(outputs[enh_name], p=2)
+                        weighted_loss = loss * enh_cfg.get('weight', 0.1)
+                        loss_components[enh_name] = loss.item()
+                        total_loss += weighted_loss
+
+                # Backward pass
+                total_loss.backward()
+                optimizer.step()
+                epoch_metrics['loss'] += total_loss.item()
+
+                # Update batch progress
+                batch_pbar.set_postfix({
+                    'loss': f"{total_loss.item():.4f}",
+                    **{k: f"{v:.4f}" for k, v in loss_components.items()},
+                    'acc': f"{(epoch_metrics['correct']/max(1, epoch_metrics['total'])*100):.2f}%"
+                })
+
+            # Epoch completion
+            epoch_avg_loss = epoch_metrics['loss'] / len(train_loader)
+            history['loss'].append(epoch_avg_loss)
+            history['accuracy'].append(
+                epoch_metrics['correct'] / max(1, epoch_metrics['total'])
+                if current_phase == 2 and 'classification' in phase_config[2]['loss_components']
+                else 0.0
+            )
+
+            # Update epoch progress
+            epoch_pbar.set_postfix({
+                'loss': f"{epoch_avg_loss:.4f}",
+                'acc': f"{(history['accuracy'][-1]*100):.2f}%",
+                'phase': current_phase
+            })
+
+    except Exception as e:
+        logger.error(f"Error in training phase {current_phase}: {str(e)}")
+        raise RuntimeError(f"Training failed in phase {current_phase}") from e
 
     return history
 
