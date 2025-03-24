@@ -6614,22 +6614,11 @@ def main():
             with open(config_path, 'r') as f:
                 config = json.load(f)
 
-            # Load label encoders (assuming they are saved in the same directory as the config)
-            label_encoder_path = os.path.join(args.output_dir, args.data, "label_encoder.json")
-            reverse_encoder_path = os.path.join(args.output_dir, args.data, "reverse_encoder.json")
-
-            with open(label_encoder_path, 'r') as f:
-                label_encoder = json.load(f)
-
-            with open(reverse_encoder_path, 'r') as f:
-                reverse_encoder = json.load(f)
-
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
-                model_path=os.path.join(args.output_dir, args.data, "checkpoints", f"{args.data}_best.pth"),
-                label_encoder=label_encoder,
-                reverse_encoder=reverse_encoder
+                model_path=args.model_path,
+                output_dir=args.output_dir
             )
 
             # Perform predictions
