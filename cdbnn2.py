@@ -4349,6 +4349,7 @@ class FeatureExtractorCNN(nn.Module):
         self.config = config
         self.feature_dims = feature_dims
         self.dropout_prob = 0.5  # Preserving original dropout
+        delf.device = Train_device
 
         # Original 7-layer architecture
         self.conv1 = nn.Sequential(
