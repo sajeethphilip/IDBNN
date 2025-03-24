@@ -2059,73 +2059,119 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """Original unified training function updated for both pathways"""
+    """Enhanced training function with detailed progress tracking"""
     optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
     loss_manager = EnhancedLossManager(config)
     history = defaultdict(list)
 
-    for epoch in range(config['training']['epochs']):
+    # Training configuration
+    total_epochs = config['training']['epochs']
+    phase2_epoch = total_epochs // 2 if config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('enable_phase2', False) else None
+
+    # Main training loop with epoch progress
+    epoch_pbar = tqdm(range(total_epochs), desc="Training Progress", unit="epoch",
+                     bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+
+    for epoch in epoch_pbar:
         model.train()
         epoch_loss = 0.0
+        correct = 0
+        total = 0
 
-        for batch_idx, (inputs, labels) in enumerate(train_loader):
+        # Batch progress bar
+        batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{total_epochs}",
+                         unit="batch", leave=False,
+                         bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+
+        for batch_idx, (inputs, labels) in enumerate(batch_pbar):
             inputs, labels = inputs.to(model.device), labels.to(model.device)
             optimizer.zero_grad()
 
-            # Forward pass (handles both CNN and Autoencoder outputs)
+            # Forward pass with enhanced output handling
             outputs = model(inputs)
+            loss_info = {}
 
-            # Loss calculation
-            if isinstance(outputs, dict):  # Enhanced output (both CNN and Autoencoder)
-                # Reconstruction loss for autoencoders
+            # Loss calculation with detailed tracking
+            if isinstance(outputs, dict):  # Enhanced models
+                loss_components = {}
+
+                # Reconstruction loss
                 if 'reconstruction' in outputs:
-                    recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
-                else:
-                    recon_loss = 0
+                    loss_components['recon'] = F.mse_loss(outputs['reconstruction'], inputs)
 
                 # Classification loss
                 if 'class_logits' in outputs:
-                    cls_loss = F.cross_entropy(outputs['class_logits'], labels)
-                else:
-                    cls_loss = 0
+                    loss_components['cls'] = F.cross_entropy(outputs['class_logits'], labels)
+                    _, predicted = outputs['class_logits'].max(1)
+                    correct += predicted.eq(labels).sum().item()
+                    total += labels.size(0)
 
                 # KL divergence loss
                 if 'cluster_probabilities' in outputs and 'target_distribution' in outputs:
-                    kl_loss = F.kl_div(
+                    loss_components['kl'] = F.kl_div(
                         outputs['cluster_probabilities'].log(),
                         outputs['target_distribution'],
                         reduction='batchmean'
                     )
-                else:
-                    kl_loss = 0
 
-                # Combine losses with original weights
-                loss = (
-                    config['model']['autoencoder_config']['reconstruction_weight'] * recon_loss +
-                    config['model']['autoencoder_config']['enhancements']['classification_weight'] * cls_loss +
-                    config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+                # Combine losses
+                loss = sum(
+                    weight * loss_components.get(name, 0)
+                    for name, weight in [
+                        ('recon', config['model']['autoencoder_config']['reconstruction_weight']),
+                        ('cls', config['model']['autoencoder_config']['enhancements']['classification_weight']),
+                        ('kl', config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'])
+                    ]
                 )
 
+                loss_info.update(loss_components)
+
             elif isinstance(outputs, tuple):  # Basic autoencoder
-                loss = F.mse_loss(outputs[1], inputs)  # reconstruction loss
+                loss = F.mse_loss(outputs[1], inputs)
+                loss_info['recon'] = loss.item()
 
             else:  # Basic CNN
                 loss = F.cross_entropy(outputs, labels)
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(labels).sum().item()
+                total += labels.size(0)
+                loss_info['cls'] = loss.item()
 
             # Backward pass
             loss.backward()
             optimizer.step()
+
+            # Update metrics
             epoch_loss += loss.item()
 
-        # Store metrics
-        history['loss'].append(epoch_loss / len(train_loader))
+            # Update batch progress
+            batch_pbar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                **{k: f"{v:.4f}" for k, v in loss_info.items()},
+                'acc': f"{(correct / total * 100):.2f}%" if total > 0 else "0%"
+            })
 
-        # Phase transition (original implementation)
-        if config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('enable_phase2', False) and \
-           epoch == config['training']['epochs'] // 2:
-            if hasattr(model, 'set_training_phase'):
-                model.set_training_phase(2)
+        # Close batch progress
+        batch_pbar.close()
+
+        # Store epoch metrics
+        avg_loss = epoch_loss / len(train_loader)
+        history['loss'].append(avg_loss)
+        if total > 0:
+            history['accuracy'].append(correct / total)
+
+        # Update epoch progress
+        epoch_pbar.set_postfix({
+            'loss': f"{avg_loss:.4f}",
+            'acc': f"{(correct / total * 100):.2f}%" if total > 0 else "0%",
+            'phase': '2' if phase2_epoch and epoch >= phase2_epoch else '1'
+        })
+
+        # Phase transition handling
+        if phase2_epoch and epoch == phase2_epoch:
+            model.set_training_phase(2)
             history['phase_transition'] = epoch
+            tqdm.write(f"\nPhase transition to phase 2 at epoch {epoch + 1}")
 
     return history
 
