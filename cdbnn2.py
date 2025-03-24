@@ -144,7 +144,7 @@ class PredictionManager:
             elif hasattr(model, 'cluster_centers'):
                 num_classes = self.config['dataset'].get('num_classes', 10)
                 model.cluster_centers = nn.Parameter(
-                    torch.randn(num_classes, self.config['model']['feature_dims'])
+                    torch.randn(num_classes, self.config['model']['feature_dims']))
 
         model.to(self.device)
         return model
