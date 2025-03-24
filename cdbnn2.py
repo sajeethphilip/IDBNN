@@ -4342,59 +4342,66 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """Original 7-layer CNN with added clustering capability"""
+    """Original 7-layer CNN with enhanced clustering capability"""
 
     def __init__(self, in_channels: int, feature_dims: int, config: Dict):
         super().__init__()
         self.config = config
         self.feature_dims = feature_dims
+        self.dropout_prob = 0.5  # Preserving original dropout
 
-        # Original 7-layer architecture (preserved exactly)
+        # Original 7-layer architecture
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
         self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
         self.conv3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
-        self.attention1 = SelfAttention(128)
+        self.attention1 = SelfAttention(128)  # Preserving attention
 
         self.conv4 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
         self.conv5 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
         self.conv6 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
+            nn.Dropout(self.dropout_prob)
         )
 
-        self.attention2 = SelfAttention(512)
+        self.attention2 = SelfAttention(512)  # Preserving attention
 
         self.conv7 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
@@ -4406,7 +4413,7 @@ class FeatureExtractorCNN(nn.Module):
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
-        # Added clustering capability (integrated with original structure)
+        # KL divergence clustering initialization
         self._init_clustering(config)
 
     def _init_clustering(self, config):
@@ -4431,26 +4438,43 @@ class FeatureExtractorCNN(nn.Module):
         x = self.conv7(x)
 
         x = x.view(x.size(0), -1)
-        features = self.batch_norm(self.fc(x))
+        features = self.fc(x)
+        features = self.batch_norm(features) if features.size(0) > 1 else features
 
-        # Enhanced clustering output
-        if self.use_kl_divergence and (self.training or not self.training):  # Always enabled
-            latent_info = self.organize_latent_space(features)
-            return {
-                'features': features,
-                'cluster_probabilities': latent_info['cluster_probabilities'],
-                'cluster_assignments': latent_info['cluster_assignments']
-            }
+        # Add clustering outputs if enabled
+        if self.use_kl_divergence:
+            cluster_outputs = self.organize_latent_space(features)
+            return {**cluster_outputs, 'features': features}
+
         return features
 
-    def organize_latent_space(self, embeddings: torch.Tensor) -> Dict:
-        """Calculate cluster assignments and probabilities"""
-        distances = torch.cdist(embeddings, self.cluster_centers)
+    def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict:
+        """KL divergence clustering (works in both train and prediction modes)"""
+        device = embeddings.device
+        cluster_centers = self.cluster_centers.to(device)
+
+        # Calculate distances to cluster centers
+        distances = torch.cdist(embeddings, cluster_centers)
+
+        # Convert distances to probabilities (soft assignments)
         q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
         q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
+        # Create target distribution
+        if labels is not None and self.training:
+            p_dist = torch.zeros_like(q_dist)
+            for i in range(cluster_centers.size(0)):
+                mask = (labels == i)
+                if mask.any():
+                    p_dist[mask, i] = 1.0
+        else:
+            # Self-supervised target distribution (works in prediction mode)
+            p_dist = (q_dist ** 2) / q_dist.sum(dim=0, keepdim=True)
+            p_dist = p_dist / p_dist.sum(dim=1, keepdim=True)
+
         return {
             'cluster_probabilities': q_dist,
+            'target_distribution': p_dist,
             'cluster_assignments': q_dist.argmax(dim=1)
         }
 
