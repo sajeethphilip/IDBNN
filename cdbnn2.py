@@ -4624,7 +4624,7 @@ class FeatureExtractorCNN(nn.Module):
     def save_features(self, feature_dict: Dict[str, torch.Tensor], output_path: str):
         """
         Save extracted features to CSV file with metadata.
-        Compatible with the existing feature saving format used in other models.
+        Handles both 1D and multi-dimensional feature arrays.
 
         Args:
             feature_dict: Dictionary containing:
@@ -4638,15 +4638,13 @@ class FeatureExtractorCNN(nn.Module):
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Convert features to numpy if they're not already
+            # Convert core features to numpy
             features = feature_dict['features'].cpu().numpy()
             labels = feature_dict['labels'].cpu().numpy()
 
             # Create DataFrame with feature columns
             feature_columns = [f'feature_{i}' for i in range(features.shape[1])]
             data_dict = {col: features[:, i] for i, col in enumerate(feature_columns)}
-
-            # Add core metadata
             data_dict['target'] = labels
 
             # Add optional metadata if available
@@ -4655,17 +4653,32 @@ class FeatureExtractorCNN(nn.Module):
             if 'class_names' in feature_dict:
                 data_dict['class_name'] = feature_dict['class_names']
 
-            # Add enhancement features if present
+            # Process enhancement features
             for key, value in feature_dict.items():
                 if key not in ['features', 'labels', 'filenames', 'class_names']:
+                    # Convert to numpy if it's a tensor
                     if isinstance(value, torch.Tensor):
                         value = value.cpu().numpy()
+
+                    # Handle different dimensionalities
                     if value.ndim == 1:
                         data_dict[key] = value
-                    else:
-                        # Handle multi-dimensional enhancement features
+                    elif value.ndim == 2:
+                        # For 2D arrays, create multiple columns
                         for i in range(value.shape[1]):
                             data_dict[f'{key}_{i}'] = value[:, i]
+                    else:
+                        # For higher dim arrays, flatten them
+                        flat_value = value.reshape(value.shape[0], -1)
+                        for i in range(flat_value.shape[1]):
+                            data_dict[f'{key}_flat_{i}'] = flat_value[:, i]
+
+            # Verify all arrays are 1D and same length
+            for key, val in data_dict.items():
+                if val.ndim != 1:
+                    raise ValueError(f"Array '{key}' must be 1-dimensional")
+                if len(val) != len(labels):
+                    raise ValueError(f"Array '{key}' length doesn't match labels")
 
             # Save in chunks to manage memory
             chunk_size = 1000
