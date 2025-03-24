@@ -4349,7 +4349,8 @@ class FeatureExtractorCNN(nn.Module):
         self.config = config
         self.feature_dims = feature_dims
         self.dropout_prob = 0.5  # Preserving original dropout
-        delf.device = Train_device
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                         and torch.cuda.is_available() else 'cpu')
 
         # Original 7-layer architecture
         self.conv1 = nn.Sequential(
