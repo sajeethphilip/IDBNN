@@ -2018,7 +2018,7 @@ class ModelFactory:
             model = FeatureExtractorCNN(
                 in_channels=input_shape[0],
                 feature_dims=feature_dims,
-                config=self.config
+                config=config
             )
         else:
             model = EnhancedAutoEncoderFeatureExtractor(config)
