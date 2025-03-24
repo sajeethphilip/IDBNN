@@ -2059,104 +2059,108 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """Two-phase training with proper KL divergence handling"""
+    """Robust two-phase training with proper initialization and phase transition"""
     optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
     history = defaultdict(list)
 
     # Phase configuration
-    try:
-        phase2_enabled = config['model']['autoencoder_config']['enhancements']['enable_phase2']
-    except KeyError:
-        phase2_enabled = False
+    ae_config = config['model'].get('autoencoder_config', {})
+    enh_config = ae_config.get('enhancements', {})
+
+    # Ensure proper phase configuration exists
+    if 'enable_phase2' not in enh_config:
+        enh_config['enable_phase2'] = False  # Default to single phase
 
     total_epochs = config['training']['epochs']
-    phase1_epochs = total_epochs // 2 if phase2_enabled else total_epochs
+    phase2_epoch = total_epochs // 2 if enh_config['enable_phase2'] else total_epochs
 
-    # Phase 1: Basic training
-    for epoch in range(phase1_epochs):
+    # Phase 1: Basic training (reconstruction only)
+    for epoch in range(phase2_epoch):
         model.train()
         epoch_loss = 0.0
 
-        pbar = tqdm(train_loader, desc=f"Phase 1 Epoch {epoch+1}/{phase1_epochs}")
+        pbar = tqdm(train_loader, desc=f"Phase1 Epoch {epoch+1}/{phase2_epoch}",
+                   bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+
         for inputs, labels in pbar:
             inputs = inputs.to(model.device)
             optimizer.zero_grad()
 
             # Phase 1 forward pass
-            outputs = model(inputs)
-
-            # Phase 1 loss (reconstruction + classification only)
-            if isinstance(outputs, dict):
-                loss = config['model']['autoencoder_config']['reconstruction_weight'] * \
-                       F.mse_loss(outputs['reconstruction'], inputs)
-
-                if 'class_logits' in outputs:
-                    loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * \
-                           F.cross_entropy(outputs['class_logits'], labels.to(model.device))
-
-            elif isinstance(outputs, tuple):  # Basic autoencoder
-                loss = F.mse_loss(outputs[1], inputs)
-
-            else:  # Basic CNN
+            if isinstance(model, (BaseAutoencoder, DynamicAutoencoder)):
+                embedding, reconstruction = model(inputs)
+                loss = F.mse_loss(reconstruction, inputs)
+            else:  # CNN case
+                outputs = model(inputs)
                 loss = F.cross_entropy(outputs, labels.to(model.device))
 
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
 
+            epoch_loss += loss.item()
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
         history['phase1_loss'].append(epoch_loss / len(train_loader))
 
-    # Phase 2: KL divergence enhancement (if enabled)
-    if phase2_enabled:
-        # Initialize cluster centers using current features
-        model._initialize_cluster_centers()
-        model.set_training_phase(2)
+    # Phase 2: Enhanced training (if enabled)
+    if enh_config['enable_phase2']:
+        if hasattr(model, 'set_training_phase'):
+            model.set_training_phase(2)
+            print(f"\nTransitioned to Phase 2 at epoch {phase2_epoch}")
 
-        # Adjust learning rate for phase 2
-        for g in optimizer.param_groups:
-            g['lr'] = config['model']['autoencoder_config']['phase2_learning_rate']
+        # Initialize cluster centers if using KL divergence
+        if enh_config.get('use_kl_divergence', False) and hasattr(model, '_initialize_cluster_centers'):
+            print("Initializing cluster centers...")
+            model._initialize_cluster_centers()
 
-        for epoch in range(phase1_epochs, total_epochs):
+        for epoch in range(phase2_epoch, total_epochs):
             model.train()
             epoch_loss = 0.0
 
-            pbar = tqdm(train_loader, desc=f"Phase 2 Epoch {epoch+1}/{total_epochs}")
+            pbar = tqdm(train_loader, desc=f"Phase2 Epoch {epoch+1}/{total_epochs}",
+                       bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+
             for inputs, labels in pbar:
-                inputs = inputs.to(model.device)
-                labels = labels.to(model.device)
+                inputs, labels = inputs.to(model.device), labels.to(model.device)
                 optimizer.zero_grad()
 
                 # Phase 2 forward pass
                 outputs = model(inputs)
+                loss_components = {}
 
-                # Phase 2 loss components
-                loss = 0
+                # Reconstruction loss
                 if 'reconstruction' in outputs:
-                    loss += config['model']['autoencoder_config']['reconstruction_weight'] * \
-                           F.mse_loss(outputs['reconstruction'], inputs)
+                    loss_components['recon'] = F.mse_loss(outputs['reconstruction'], inputs)
 
+                # Classification loss
                 if 'class_logits' in outputs:
-                    loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * \
-                           F.cross_entropy(outputs['class_logits'], labels)
+                    loss_components['cls'] = F.cross_entropy(outputs['class_logits'], labels)
 
-                # Only apply KL divergence in phase 2
-                if 'cluster_probabilities' in outputs and 'target_distribution' in outputs:
-                    kl_loss = F.kl_div(
+                # KL divergence loss
+                if 'cluster_probabilities' in outputs:
+                    loss_components['kl'] = F.kl_div(
                         outputs['cluster_probabilities'].log(),
                         outputs['target_distribution'],
                         reduction='batchmean'
                     )
-                    loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
 
-                loss.backward()
+                # Combined loss
+                total_loss = sum(
+                    weight * loss_components.get(name, 0)
+                    for name, weight in [
+                        ('recon', ae_config.get('reconstruction_weight', 1.0)),
+                        ('cls', enh_config.get('classification_weight', 1.0)),
+                        ('kl', enh_config.get('kl_divergence_weight', 0.1))
+                    ]
+                )
+
+                total_loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
 
+                epoch_loss += total_loss.item()
                 pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}",
-                    'kl': f"{kl_loss.item():.4f}" if 'kl_loss' in locals() else "N/A"
+                    'loss': f"{total_loss.item():.4f}",
+                    **{k: f"{v.item():.4f}" for k, v in loss_components.items()}
                 })
 
             history['phase2_loss'].append(epoch_loss / len(train_loader))
