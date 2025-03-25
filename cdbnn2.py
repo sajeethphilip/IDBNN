@@ -586,6 +586,518 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
         print(f"- Phase 1: {self.config['model']['autoencoder_config']['phase1_learning_rate']}")
         print(f"- Phase 2: {self.config['model']['autoencoder_config']['phase2_learning_rate']}")
 
+class BaseFeatureExtractor(nn.Module, ABC):
+    """Abstract base class for feature extraction models."""
+    def __init__(self, config: Dict, device: str = None):
+        super().__init__()  # Initialize nn.Module
+        self.config = self.verify_config(config)
+
+
+        # Set device
+        if device is None:
+            self.device = torch.device('cuda' if self.config['execution_flags']['use_gpu']
+                                     and torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = device
+
+        # Initialize common parameters
+        self.feature_dims = self.config['model']['feature_dims']
+        self.learning_rate = self.config['model'].get('learning_rate', 0.001)
+        self.feature_extractor = self._create_model()
+        # Initialize optimizer if not created during checkpoint loading
+        if not hasattr(self, 'optimizer'):
+            self.optimizer = self._initialize_optimizer()
+            logger.info(f"Initialized {self.optimizer.__class__.__name__} optimizer")
+
+        # Initialize scheduler
+        self.scheduler = None
+        if self.config['model'].get('scheduler'):
+            self.scheduler = self._initialize_scheduler()
+            if self.scheduler:
+                logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
+        # Initialize training metrics
+        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
+        self.current_epoch = 0
+        self.history = defaultdict(list)
+        self.training_log = []
+        self.training_start_time = time.time()
+
+        # Setup logging directory
+        self.log_dir = os.path.join('Traininglog', self.config['dataset']['name'])
+        os.makedirs(self.log_dir, exist_ok=True)
+
+
+        # Load checkpoint or initialize optimizer
+        if not self.config['execution_flags'].get('fresh_start', False):
+            self._load_from_checkpoint()
+
+
+
+    @abstractmethod
+    def _create_model(self) -> nn.Module:
+        """Create and return the feature extraction model"""
+        pass
+
+    def load_state_dict(self, state_dict: Dict, strict: bool = True):
+        """Load model state from a state dictionary."""
+        # Pass the strict parameter to the underlying model's load_state_dict
+        self.feature_extractor.load_state_dict(state_dict, strict=strict)
+        self.feature_extractor.eval()
+
+    def save_checkpoint(self, path: str, is_best: bool = False):
+        """Save model checkpoint."""
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config
+        }
+        torch.save(checkpoint, path)
+        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {path}")
+
+
+    def _initialize_optimizer(self) -> torch.optim.Optimizer:
+        """Initialize optimizer based on configuration"""
+        optimizer_config = self.config['model'].get('optimizer', {})
+
+        # Set base parameters
+        optimizer_params = {
+            'lr': self.learning_rate,
+            'weight_decay': optimizer_config.get('weight_decay', 1e-4)
+        }
+
+        # Configure optimizer-specific parameters
+        optimizer_type = optimizer_config.get('type', 'Adam')
+        if optimizer_type == 'SGD':
+            optimizer_params['momentum'] = optimizer_config.get('momentum', 0.9)
+            optimizer_params['nesterov'] = optimizer_config.get('nesterov', False)
+        elif optimizer_type == 'Adam':
+            optimizer_params['betas'] = (
+                optimizer_config.get('beta1', 0.9),
+                optimizer_config.get('beta2', 0.999)
+            )
+            optimizer_params['eps'] = optimizer_config.get('epsilon', 1e-8)
+
+        # Get optimizer class
+        try:
+            optimizer_class = getattr(optim, optimizer_type)
+        except AttributeError:
+            logger.warning(f"Optimizer {optimizer_type} not found, using Adam")
+            optimizer_class = optim.Adam
+            optimizer_type = 'Adam'
+
+        # Create and return optimizer
+        optimizer = optimizer_class(
+            self.feature_extractor.parameters(),
+            **optimizer_params
+        )
+
+        logger.info(f"Initialized {optimizer_type} optimizer with parameters: {optimizer_params}")
+        return optimizer
+
+    def _initialize_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
+        """Initialize learning rate scheduler if specified in config"""
+        scheduler_config = self.config['model'].get('scheduler', {})
+        if not scheduler_config:
+            return None
+
+        scheduler_type = scheduler_config.get('type')
+        if not scheduler_type:
+            return None
+
+        try:
+            if scheduler_type == 'StepLR':
+                return optim.lr_scheduler.StepLR(
+                    self.optimizer,
+                    step_size=scheduler_config.get('step_size', 7),
+                    gamma=scheduler_config.get('gamma', 0.1)
+                )
+            elif scheduler_type == 'ReduceLROnPlateau':
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    self.optimizer,
+                    mode='min',
+                    factor=scheduler_config.get('factor', 0.1),
+                    patience=scheduler_config.get('patience', 10),
+                    verbose=True
+                )
+            elif scheduler_type == 'CosineAnnealingLR':
+                return optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=scheduler_config.get('T_max', self.config['training']['epochs']),
+                    eta_min=scheduler_config.get('eta_min', 0)
+                )
+        except Exception as e:
+            logger.warning(f"Failed to initialize scheduler: {str(e)}")
+            return None
+
+        return None
+
+    def verify_config(self, config: Dict) -> Dict:
+        """Verify and fill in missing configuration values with complete options"""
+        if 'dataset' not in config:
+            raise ValueError("Configuration must contain 'dataset' section")
+
+        # Ensure all required sections exist
+        required_sections = ['dataset', 'model', 'training', 'execution_flags',
+                            'likelihood_config', 'active_learning']
+        for section in required_sections:
+            if section not in config:
+                config[section] = {}
+
+        # Dataset configuration
+        dataset = config['dataset']
+        dataset.setdefault('name', 'custom_dataset')
+        dataset.setdefault('type', 'custom')
+        dataset.setdefault('in_channels', 3)
+        dataset.setdefault('input_size', [224, 224])
+        dataset.setdefault('mean', [0.485, 0.456, 0.406])
+        dataset.setdefault('std', [0.229, 0.224, 0.225])
+
+        # Model configuration
+        model = config.setdefault('model', {})
+        model.setdefault('feature_dims', 128)
+        model.setdefault('learning_rate', 0.001)
+        model.setdefault('encoder_type', 'cnn')
+        model.setdefault('modelType', 'Histogram')
+
+        # Add autoencoder enhancement configuration
+        autoencoder_config = model.setdefault('autoencoder_config', {})
+        autoencoder_config.setdefault('enhancements', {
+            'use_kl_divergence': True,
+            'use_class_encoding': False,
+            'kl_divergence_weight': 0.1,
+            'classification_weight': 0.1,
+            'clustering_temperature': 1.0,
+            'min_cluster_confidence': 0.7,
+            'reconstruction_weight': 1.0,
+            'feature_weight': 0.1
+        })
+
+        # Complete optimizer configuration
+        optimizer_config = model.setdefault('optimizer', {})
+        optimizer_config.update({
+            'type': 'Adam',
+            'weight_decay': 1e-4,
+            'momentum': 0.9,
+            'beta1': 0.9,
+            'beta2': 0.999,
+            'epsilon': 1e-8
+        })
+
+        # Complete scheduler configuration
+        scheduler_config = model.setdefault('scheduler', {})
+        scheduler_config.update({
+            'type': 'ReduceLROnPlateau',
+            'factor': 0.1,
+            'patience': 10,
+            'verbose': True,
+            'min_lr': 1e-6
+        })
+
+        # Loss functions configuration
+        loss_functions = model.setdefault('loss_functions', {})
+
+        # Enhanced autoencoder loss
+        loss_functions.setdefault('enhanced_autoencoder', {
+            'enabled': True,
+            'type': 'EnhancedAutoEncoderLoss',
+            'weight': 1.0,
+            'params': {
+                'reconstruction_weight': 1.0,
+                'clustering_weight': 0.1,
+                'classification_weight': 0.1,
+                'feature_weight': 0.1
+            }
+        })
+
+        # Detail preserving loss
+        loss_functions.setdefault('detail_preserving', {
+            'enabled': True,
+            'type': 'DetailPreservingLoss',
+            'weight': 0.8,
+            'params': {
+                'detail_weight': 1.0,
+                'texture_weight': 0.8,
+                'frequency_weight': 0.6
+            }
+        })
+
+        # Structural loss
+        loss_functions.setdefault('structural', {
+            'enabled': True,
+            'type': 'StructuralLoss',
+            'weight': 0.7,
+            'params': {
+                'edge_weight': 1.0,
+                'smoothness_weight': 0.5
+            }
+        })
+
+        # Color enhancement loss
+        loss_functions.setdefault('color_enhancement', {
+            'enabled': True,
+            'type': 'ColorEnhancementLoss',
+            'weight': 0.5,
+            'params': {
+                'channel_weight': 0.5,
+                'contrast_weight': 0.3
+            }
+        })
+
+        # Morphology loss
+        loss_functions.setdefault('morphology', {
+            'enabled': True,
+            'type': 'MorphologyLoss',
+            'weight': 0.3,
+            'params': {
+                'shape_weight': 0.7,
+                'symmetry_weight': 0.3
+            }
+        })
+
+        # Original autoencoder loss
+        loss_functions.setdefault('autoencoder', {
+            'enabled': False,
+            'type': 'AutoencoderLoss',
+            'weight': 1.0,
+            'params': {
+                'reconstruction_weight': 1.0,
+                'feature_weight': 0.1
+            }
+        })
+
+        # Training configuration
+        training = config.setdefault('training', {})
+        training.update({
+            'batch_size': 128,
+            'epochs': 20,
+            'num_workers': min(4, os.cpu_count() or 1),
+            'checkpoint_dir': os.path.join('Model', 'checkpoints'),
+            'trials': 100,
+            'test_fraction': 0.2,
+            'random_seed': 42,
+            'minimum_training_accuracy': 0.95,
+            'cardinality_threshold': 0.9,
+            'cardinality_tolerance': 4,
+            'n_bins_per_dim': 128,
+            'enable_adaptive': True,
+            'invert_DBNN': False,
+            'reconstruction_weight': 0.5,
+            'feedback_strength': 0.3,
+            'inverse_learning_rate': 0.1,
+            'Save_training_epochs': False,
+            'training_save_path': 'training_data',
+            'early_stopping': {
+                'enabled': True,
+                'patience': 5,
+                'min_delta': 0.001
+            },
+            'validation_split': 0.2
+        })
+
+        # Execution flags
+        exec_flags = config.setdefault('execution_flags', {})
+        exec_flags.update({
+            'mode': 'train_and_predict',
+            'use_gpu': torch.cuda.is_available(),
+            'mixed_precision': True,
+            'distributed_training': False,
+            'debug_mode': False,
+            'use_previous_model': True,
+            'fresh_start': False,
+            'train': True,
+            'train_only': False,
+            'predict': False,
+            'reconstruct':True
+        })
+
+        # Likelihood configuration
+        likelihood = config.setdefault('likelihood_config', {})
+        likelihood.update({
+            'feature_group_size': 2,
+            'max_combinations': 1000,
+            'bin_sizes': [128]
+        })
+
+        # Active learning configuration
+        active = config.setdefault('active_learning', {})
+        active.update({
+            'tolerance': 1.0,
+            'cardinality_threshold_percentile': 95,
+            'strong_margin_threshold': 0.3,
+            'marginal_margin_threshold': 0.1,
+            'min_divergence': 0.1
+        })
+
+        # Output configuration
+        output = config.setdefault('output', {})
+        output.update({
+            'image_dir': 'output/images',
+            'mode': 'train',
+            'csv_dir': os.path.join('data', config['dataset']['name']),
+            'input_csv': None,
+            'class_info': {
+                'include_given_class': True,
+                'include_predicted_class': True,
+                'include_cluster_probabilities': True,
+                'confidence_threshold': 0.5
+            },
+            'visualization': {
+                'enabled': True,
+                'save_reconstructions': True,
+                'save_feature_distributions': True,
+                'save_latent_space': True,
+                'max_samples': 1000
+            }
+        })
+
+        return config
+
+    @abstractmethod
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch"""
+        pass
+
+    @abstractmethod
+    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
+        """Validate the model"""
+        pass
+
+    def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict[str, List[float]]:
+        """Train the model"""
+        early_stopping = self.config['training'].get('early_stopping', {})
+        patience = early_stopping.get('patience', 5)
+        min_delta = early_stopping.get('min_delta', 0.001)
+        max_epochs = self.config['training']['epochs']
+
+        patience_counter = 0
+        best_val_metric = float('inf')
+
+        try:
+            for epoch in range(self.current_epoch, max_epochs):
+                self.current_epoch = epoch
+
+                # Training
+                train_loss, train_acc = self._train_epoch(train_loader)
+
+                # Create summary for this epoch
+                epoch_dir = os.path.join('data', self.config['dataset']['name'],
+                                       'training_decoder_output', f'epoch_{epoch}')
+                if os.path.exists(epoch_dir):
+                    self.create_training_summary(epoch_dir)
+
+
+                # Validation
+                val_loss, val_acc = None, None
+                if val_loader:
+                    val_loss, val_acc = self._validate(val_loader)
+                    current_metric = val_loss
+                else:
+                    current_metric = train_loss
+
+                # Update learning rate scheduler
+                if self.scheduler is not None:
+                    if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        self.scheduler.step(current_metric)
+                    else:
+                        self.scheduler.step()
+
+                # Log metrics
+                self.log_training_metrics(epoch, train_loss, train_acc, val_loss, val_acc,
+                                       train_loader, val_loader)
+
+                # Save checkpoint
+                self._save_checkpoint(is_best=False)
+
+                # Check for improvement
+                if current_metric < best_val_metric - min_delta:
+                    best_val_metric = current_metric
+                    patience_counter = 0
+                    self._save_checkpoint(is_best=True)
+                else:
+                    patience_counter += 1
+
+                # Early stopping check
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping triggered after {epoch + 1} epochs")
+                    break
+
+                # Memory cleanup
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Extract features
+                train_features = self.extract_features(train_loader, dataset_type="train")
+                test_features = self.extract_features(test_loader, dataset_type="test")
+
+                # Save features
+                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
+                self.save_features(train_features, test_features, output_path)
+            return self.history
+
+        except Exception as e:
+            logger.error(f"Error during training: {str(e)}")
+            raise
+
+    def log_training_metrics(self, epoch: int, train_loss: float, train_acc: float,
+                           test_loss: Optional[float] = None, test_acc: Optional[float] = None,
+                           train_loader: Optional[DataLoader] = None,
+                           test_loader: Optional[DataLoader] = None):
+        """Log training metrics"""
+        elapsed_time = time.time() - self.training_start_time
+
+        metrics = {
+            'epoch': epoch,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'elapsed_time': elapsed_time,
+            'elapsed_time_formatted': str(timedelta(seconds=int(elapsed_time))),
+            'learning_rate': self.optimizer.param_groups[0]['lr'],
+            'train_loss': train_loss,
+            'train_accuracy': train_acc,
+            'train_samples': len(train_loader.dataset) if train_loader else None,
+            'test_loss': test_loss,
+            'test_accuracy': test_acc,
+            'test_samples': len(test_loader.dataset) if test_loader else None
+        }
+
+        self.training_log.append(metrics)
+
+        log_df = pd.DataFrame(self.training_log)
+        log_path = os.path.join(self.log_dir, 'training_metrics.csv')
+        log_df.to_csv(log_path, index=False)
+
+        logger.info(f"Epoch {epoch + 1}: "
+                   f"Train Loss {train_loss:.4f}, Acc {train_acc:.2f}%" +
+                   (f", Test Loss {test_loss:.4f}, Acc {test_acc:.2f}%"
+                    if test_loss is not None else ""))
+
+
+    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract features from the dataset using the autoencoder.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Extracted features and corresponding labels.
+        """
+        self.feature_extractor.eval()
+        all_embeddings = []
+        all_labels = []
+
+        with torch.no_grad():
+            for inputs, labels in tqdm(loader, desc="Extracting features"):
+                inputs = inputs.to(self.device)
+                embeddings, _ = self.feature_extractor(inputs)
+                all_embeddings.append(embeddings.cpu())
+                all_labels.append(labels)
+
+        return torch.cat(all_embeddings), torch.cat(all_labels)
 
 class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
@@ -3144,518 +3656,7 @@ class AgriculturalCNNFeatureExtractor(BaseFeatureExtractor):
 
 
 
-class BaseFeatureExtractor(nn.Module, ABC):
-    """Abstract base class for feature extraction models."""
-    def __init__(self, config: Dict, device: str = None):
-        super().__init__()  # Initialize nn.Module
-        self.config = self.verify_config(config)
 
-
-        # Set device
-        if device is None:
-            self.device = torch.device('cuda' if self.config['execution_flags']['use_gpu']
-                                     and torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = device
-
-        # Initialize common parameters
-        self.feature_dims = self.config['model']['feature_dims']
-        self.learning_rate = self.config['model'].get('learning_rate', 0.001)
-        self.feature_extractor = self._create_model()
-        # Initialize optimizer if not created during checkpoint loading
-        if not hasattr(self, 'optimizer'):
-            self.optimizer = self._initialize_optimizer()
-            logger.info(f"Initialized {self.optimizer.__class__.__name__} optimizer")
-
-        # Initialize scheduler
-        self.scheduler = None
-        if self.config['model'].get('scheduler'):
-            self.scheduler = self._initialize_scheduler()
-            if self.scheduler:
-                logger.info(f"Initialized {self.scheduler.__class__.__name__} scheduler")
-        # Initialize training metrics
-        self.best_accuracy = 0.0
-        self.best_loss = float('inf')
-        self.current_epoch = 0
-        self.history = defaultdict(list)
-        self.training_log = []
-        self.training_start_time = time.time()
-
-        # Setup logging directory
-        self.log_dir = os.path.join('Traininglog', self.config['dataset']['name'])
-        os.makedirs(self.log_dir, exist_ok=True)
-
-
-        # Load checkpoint or initialize optimizer
-        if not self.config['execution_flags'].get('fresh_start', False):
-            self._load_from_checkpoint()
-
-
-
-    @abstractmethod
-    def _create_model(self) -> nn.Module:
-        """Create and return the feature extraction model"""
-        pass
-
-    def load_state_dict(self, state_dict: Dict, strict: bool = True):
-        """Load model state from a state dictionary."""
-        # Pass the strict parameter to the underlying model's load_state_dict
-        self.feature_extractor.load_state_dict(state_dict, strict=strict)
-        self.feature_extractor.eval()
-
-    def save_checkpoint(self, path: str, is_best: bool = False):
-        """Save model checkpoint."""
-        checkpoint = {
-            'state_dict': self.feature_extractor.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'epoch': self.current_epoch,
-            'best_accuracy': self.best_accuracy,
-            'best_loss': self.best_loss,
-            'history': dict(self.history),
-            'config': self.config
-        }
-        torch.save(checkpoint, path)
-        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {path}")
-
-
-    def _initialize_optimizer(self) -> torch.optim.Optimizer:
-        """Initialize optimizer based on configuration"""
-        optimizer_config = self.config['model'].get('optimizer', {})
-
-        # Set base parameters
-        optimizer_params = {
-            'lr': self.learning_rate,
-            'weight_decay': optimizer_config.get('weight_decay', 1e-4)
-        }
-
-        # Configure optimizer-specific parameters
-        optimizer_type = optimizer_config.get('type', 'Adam')
-        if optimizer_type == 'SGD':
-            optimizer_params['momentum'] = optimizer_config.get('momentum', 0.9)
-            optimizer_params['nesterov'] = optimizer_config.get('nesterov', False)
-        elif optimizer_type == 'Adam':
-            optimizer_params['betas'] = (
-                optimizer_config.get('beta1', 0.9),
-                optimizer_config.get('beta2', 0.999)
-            )
-            optimizer_params['eps'] = optimizer_config.get('epsilon', 1e-8)
-
-        # Get optimizer class
-        try:
-            optimizer_class = getattr(optim, optimizer_type)
-        except AttributeError:
-            logger.warning(f"Optimizer {optimizer_type} not found, using Adam")
-            optimizer_class = optim.Adam
-            optimizer_type = 'Adam'
-
-        # Create and return optimizer
-        optimizer = optimizer_class(
-            self.feature_extractor.parameters(),
-            **optimizer_params
-        )
-
-        logger.info(f"Initialized {optimizer_type} optimizer with parameters: {optimizer_params}")
-        return optimizer
-
-    def _initialize_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
-        """Initialize learning rate scheduler if specified in config"""
-        scheduler_config = self.config['model'].get('scheduler', {})
-        if not scheduler_config:
-            return None
-
-        scheduler_type = scheduler_config.get('type')
-        if not scheduler_type:
-            return None
-
-        try:
-            if scheduler_type == 'StepLR':
-                return optim.lr_scheduler.StepLR(
-                    self.optimizer,
-                    step_size=scheduler_config.get('step_size', 7),
-                    gamma=scheduler_config.get('gamma', 0.1)
-                )
-            elif scheduler_type == 'ReduceLROnPlateau':
-                return optim.lr_scheduler.ReduceLROnPlateau(
-                    self.optimizer,
-                    mode='min',
-                    factor=scheduler_config.get('factor', 0.1),
-                    patience=scheduler_config.get('patience', 10),
-                    verbose=True
-                )
-            elif scheduler_type == 'CosineAnnealingLR':
-                return optim.lr_scheduler.CosineAnnealingLR(
-                    self.optimizer,
-                    T_max=scheduler_config.get('T_max', self.config['training']['epochs']),
-                    eta_min=scheduler_config.get('eta_min', 0)
-                )
-        except Exception as e:
-            logger.warning(f"Failed to initialize scheduler: {str(e)}")
-            return None
-
-        return None
-
-    def verify_config(self, config: Dict) -> Dict:
-        """Verify and fill in missing configuration values with complete options"""
-        if 'dataset' not in config:
-            raise ValueError("Configuration must contain 'dataset' section")
-
-        # Ensure all required sections exist
-        required_sections = ['dataset', 'model', 'training', 'execution_flags',
-                            'likelihood_config', 'active_learning']
-        for section in required_sections:
-            if section not in config:
-                config[section] = {}
-
-        # Dataset configuration
-        dataset = config['dataset']
-        dataset.setdefault('name', 'custom_dataset')
-        dataset.setdefault('type', 'custom')
-        dataset.setdefault('in_channels', 3)
-        dataset.setdefault('input_size', [224, 224])
-        dataset.setdefault('mean', [0.485, 0.456, 0.406])
-        dataset.setdefault('std', [0.229, 0.224, 0.225])
-
-        # Model configuration
-        model = config.setdefault('model', {})
-        model.setdefault('feature_dims', 128)
-        model.setdefault('learning_rate', 0.001)
-        model.setdefault('encoder_type', 'cnn')
-        model.setdefault('modelType', 'Histogram')
-
-        # Add autoencoder enhancement configuration
-        autoencoder_config = model.setdefault('autoencoder_config', {})
-        autoencoder_config.setdefault('enhancements', {
-            'use_kl_divergence': True,
-            'use_class_encoding': False,
-            'kl_divergence_weight': 0.1,
-            'classification_weight': 0.1,
-            'clustering_temperature': 1.0,
-            'min_cluster_confidence': 0.7,
-            'reconstruction_weight': 1.0,
-            'feature_weight': 0.1
-        })
-
-        # Complete optimizer configuration
-        optimizer_config = model.setdefault('optimizer', {})
-        optimizer_config.update({
-            'type': 'Adam',
-            'weight_decay': 1e-4,
-            'momentum': 0.9,
-            'beta1': 0.9,
-            'beta2': 0.999,
-            'epsilon': 1e-8
-        })
-
-        # Complete scheduler configuration
-        scheduler_config = model.setdefault('scheduler', {})
-        scheduler_config.update({
-            'type': 'ReduceLROnPlateau',
-            'factor': 0.1,
-            'patience': 10,
-            'verbose': True,
-            'min_lr': 1e-6
-        })
-
-        # Loss functions configuration
-        loss_functions = model.setdefault('loss_functions', {})
-
-        # Enhanced autoencoder loss
-        loss_functions.setdefault('enhanced_autoencoder', {
-            'enabled': True,
-            'type': 'EnhancedAutoEncoderLoss',
-            'weight': 1.0,
-            'params': {
-                'reconstruction_weight': 1.0,
-                'clustering_weight': 0.1,
-                'classification_weight': 0.1,
-                'feature_weight': 0.1
-            }
-        })
-
-        # Detail preserving loss
-        loss_functions.setdefault('detail_preserving', {
-            'enabled': True,
-            'type': 'DetailPreservingLoss',
-            'weight': 0.8,
-            'params': {
-                'detail_weight': 1.0,
-                'texture_weight': 0.8,
-                'frequency_weight': 0.6
-            }
-        })
-
-        # Structural loss
-        loss_functions.setdefault('structural', {
-            'enabled': True,
-            'type': 'StructuralLoss',
-            'weight': 0.7,
-            'params': {
-                'edge_weight': 1.0,
-                'smoothness_weight': 0.5
-            }
-        })
-
-        # Color enhancement loss
-        loss_functions.setdefault('color_enhancement', {
-            'enabled': True,
-            'type': 'ColorEnhancementLoss',
-            'weight': 0.5,
-            'params': {
-                'channel_weight': 0.5,
-                'contrast_weight': 0.3
-            }
-        })
-
-        # Morphology loss
-        loss_functions.setdefault('morphology', {
-            'enabled': True,
-            'type': 'MorphologyLoss',
-            'weight': 0.3,
-            'params': {
-                'shape_weight': 0.7,
-                'symmetry_weight': 0.3
-            }
-        })
-
-        # Original autoencoder loss
-        loss_functions.setdefault('autoencoder', {
-            'enabled': False,
-            'type': 'AutoencoderLoss',
-            'weight': 1.0,
-            'params': {
-                'reconstruction_weight': 1.0,
-                'feature_weight': 0.1
-            }
-        })
-
-        # Training configuration
-        training = config.setdefault('training', {})
-        training.update({
-            'batch_size': 128,
-            'epochs': 20,
-            'num_workers': min(4, os.cpu_count() or 1),
-            'checkpoint_dir': os.path.join('Model', 'checkpoints'),
-            'trials': 100,
-            'test_fraction': 0.2,
-            'random_seed': 42,
-            'minimum_training_accuracy': 0.95,
-            'cardinality_threshold': 0.9,
-            'cardinality_tolerance': 4,
-            'n_bins_per_dim': 128,
-            'enable_adaptive': True,
-            'invert_DBNN': False,
-            'reconstruction_weight': 0.5,
-            'feedback_strength': 0.3,
-            'inverse_learning_rate': 0.1,
-            'Save_training_epochs': False,
-            'training_save_path': 'training_data',
-            'early_stopping': {
-                'enabled': True,
-                'patience': 5,
-                'min_delta': 0.001
-            },
-            'validation_split': 0.2
-        })
-
-        # Execution flags
-        exec_flags = config.setdefault('execution_flags', {})
-        exec_flags.update({
-            'mode': 'train_and_predict',
-            'use_gpu': torch.cuda.is_available(),
-            'mixed_precision': True,
-            'distributed_training': False,
-            'debug_mode': False,
-            'use_previous_model': True,
-            'fresh_start': False,
-            'train': True,
-            'train_only': False,
-            'predict': False,
-            'reconstruct':True
-        })
-
-        # Likelihood configuration
-        likelihood = config.setdefault('likelihood_config', {})
-        likelihood.update({
-            'feature_group_size': 2,
-            'max_combinations': 1000,
-            'bin_sizes': [128]
-        })
-
-        # Active learning configuration
-        active = config.setdefault('active_learning', {})
-        active.update({
-            'tolerance': 1.0,
-            'cardinality_threshold_percentile': 95,
-            'strong_margin_threshold': 0.3,
-            'marginal_margin_threshold': 0.1,
-            'min_divergence': 0.1
-        })
-
-        # Output configuration
-        output = config.setdefault('output', {})
-        output.update({
-            'image_dir': 'output/images',
-            'mode': 'train',
-            'csv_dir': os.path.join('data', config['dataset']['name']),
-            'input_csv': None,
-            'class_info': {
-                'include_given_class': True,
-                'include_predicted_class': True,
-                'include_cluster_probabilities': True,
-                'confidence_threshold': 0.5
-            },
-            'visualization': {
-                'enabled': True,
-                'save_reconstructions': True,
-                'save_feature_distributions': True,
-                'save_latent_space': True,
-                'max_samples': 1000
-            }
-        })
-
-        return config
-
-    @abstractmethod
-    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
-        """Train one epoch"""
-        pass
-
-    @abstractmethod
-    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
-        """Validate the model"""
-        pass
-
-    def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict[str, List[float]]:
-        """Train the model"""
-        early_stopping = self.config['training'].get('early_stopping', {})
-        patience = early_stopping.get('patience', 5)
-        min_delta = early_stopping.get('min_delta', 0.001)
-        max_epochs = self.config['training']['epochs']
-
-        patience_counter = 0
-        best_val_metric = float('inf')
-
-        try:
-            for epoch in range(self.current_epoch, max_epochs):
-                self.current_epoch = epoch
-
-                # Training
-                train_loss, train_acc = self._train_epoch(train_loader)
-
-                # Create summary for this epoch
-                epoch_dir = os.path.join('data', self.config['dataset']['name'],
-                                       'training_decoder_output', f'epoch_{epoch}')
-                if os.path.exists(epoch_dir):
-                    self.create_training_summary(epoch_dir)
-
-
-                # Validation
-                val_loss, val_acc = None, None
-                if val_loader:
-                    val_loss, val_acc = self._validate(val_loader)
-                    current_metric = val_loss
-                else:
-                    current_metric = train_loss
-
-                # Update learning rate scheduler
-                if self.scheduler is not None:
-                    if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                        self.scheduler.step(current_metric)
-                    else:
-                        self.scheduler.step()
-
-                # Log metrics
-                self.log_training_metrics(epoch, train_loss, train_acc, val_loss, val_acc,
-                                       train_loader, val_loader)
-
-                # Save checkpoint
-                self._save_checkpoint(is_best=False)
-
-                # Check for improvement
-                if current_metric < best_val_metric - min_delta:
-                    best_val_metric = current_metric
-                    patience_counter = 0
-                    self._save_checkpoint(is_best=True)
-                else:
-                    patience_counter += 1
-
-                # Early stopping check
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping triggered after {epoch + 1} epochs")
-                    break
-
-                # Memory cleanup
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                # Extract features
-                train_features = self.extract_features(train_loader, dataset_type="train")
-                test_features = self.extract_features(test_loader, dataset_type="test")
-
-                # Save features
-                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
-                self.save_features(train_features, test_features, output_path)
-            return self.history
-
-        except Exception as e:
-            logger.error(f"Error during training: {str(e)}")
-            raise
-
-    def log_training_metrics(self, epoch: int, train_loss: float, train_acc: float,
-                           test_loss: Optional[float] = None, test_acc: Optional[float] = None,
-                           train_loader: Optional[DataLoader] = None,
-                           test_loader: Optional[DataLoader] = None):
-        """Log training metrics"""
-        elapsed_time = time.time() - self.training_start_time
-
-        metrics = {
-            'epoch': epoch,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'elapsed_time': elapsed_time,
-            'elapsed_time_formatted': str(timedelta(seconds=int(elapsed_time))),
-            'learning_rate': self.optimizer.param_groups[0]['lr'],
-            'train_loss': train_loss,
-            'train_accuracy': train_acc,
-            'train_samples': len(train_loader.dataset) if train_loader else None,
-            'test_loss': test_loss,
-            'test_accuracy': test_acc,
-            'test_samples': len(test_loader.dataset) if test_loader else None
-        }
-
-        self.training_log.append(metrics)
-
-        log_df = pd.DataFrame(self.training_log)
-        log_path = os.path.join(self.log_dir, 'training_metrics.csv')
-        log_df.to_csv(log_path, index=False)
-
-        logger.info(f"Epoch {epoch + 1}: "
-                   f"Train Loss {train_loss:.4f}, Acc {train_acc:.2f}%" +
-                   (f", Test Loss {test_loss:.4f}, Acc {test_acc:.2f}%"
-                    if test_loss is not None else ""))
-
-
-    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Extract features from the dataset using the autoencoder.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Extracted features and corresponding labels.
-        """
-        self.feature_extractor.eval()
-        all_embeddings = []
-        all_labels = []
-
-        with torch.no_grad():
-            for inputs, labels in tqdm(loader, desc="Extracting features"):
-                inputs = inputs.to(self.device)
-                embeddings, _ = self.feature_extractor(inputs)
-                all_embeddings.append(embeddings.cpu())
-                all_labels.append(labels)
-
-        return torch.cat(all_embeddings), torch.cat(all_labels)
 
 import torch
 import torch.nn as nn
