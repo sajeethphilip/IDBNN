@@ -409,7 +409,25 @@ class FeatureExtractorPipeline:
 
     def _prepare_data_structure(self) -> None:
         """Copy data from source_dir to properly structured training directory"""
-        # Create required directories
+        # Handle existing training directory
+        if os.path.exists(self.train_dir):
+            if self.interactive:
+                print(f"Warning: Training directory already exists at {self.train_dir}")
+                response = input("Do you want to: [R]eplace, [M]erge, or [A]bort? ").lower()
+                if response == 'a':
+                    raise FileExistsError("Aborted by user")
+                elif response == 'r':
+                    print(f"Removing existing directory {self.train_dir}")
+                    shutil.rmtree(self.train_dir)
+                elif response == 'm':
+                    print("Merging with existing data")
+                else:
+                    print("Invalid choice, defaulting to merge")
+            else:
+                # Non-interactive mode - default to merge
+                print(f"Training directory exists, merging new data into {self.train_dir}")
+
+        # Create required directories (with exist_ok=True for merge case)
         os.makedirs(self.train_dir, exist_ok=True)
         os.makedirs(self.model_dir, exist_ok=True)
 
@@ -442,38 +460,68 @@ class FeatureExtractorPipeline:
         )
 
     def _handle_train_test_structure(self) -> None:
-        """Handle source with train/test folders"""
+        """Handle source with train/test folders with proper merging"""
         src_train = os.path.join(self.source_dir, "train")
         src_test = os.path.join(self.source_dir, "test")
+
+        if not os.path.exists(src_train):
+            raise FileNotFoundError(f"No training data found in {src_train}")
 
         if self.interactive and os.path.exists(src_test):
             response = input("Merge train and test sets? (y/n): ").lower()
             self.merge_train_test = response == 'y'
 
+        # Copy/merge train data
+        print(f"Copying training data to {self.train_dir}")
+        self._safe_copytree(src_train, self.train_dir)
+
+        # Handle test data if merging
         if self.merge_train_test and os.path.exists(src_test):
-            # Merge test into train
-            print(f"Copying and merging data to {self.train_dir}")
-            shutil.copytree(src_train, self.train_dir, dirs_exist_ok=True)
+            print(f"Merging test data into {self.train_dir}")
             for class_name in os.listdir(src_test):
                 src_class = os.path.join(src_test, class_name)
                 if os.path.isdir(src_class):
                     dst_class = os.path.join(self.train_dir, class_name)
                     if os.path.exists(dst_class):
                         # Merge class directories
+                        print(f"  Merging class {class_name}")
                         for img in os.listdir(src_class):
                             if img.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                dst_path = os.path.join(dst_class, img)
+                                if os.path.exists(dst_path):
+                                    if self.interactive:
+                                        response = input(f"    Overwrite {img}? [y/n] ").lower()
+                                        if response != 'y':
+                                            continue
                                 shutil.copy2(
                                     os.path.join(src_class, img),
-                                    os.path.join(dst_class, img)
+                                    dst_path
                                 )
                     else:
+                        # Copy entire class directory
+                        print(f"  Copying new class {class_name}")
                         shutil.copytree(src_class, dst_class)
-        elif os.path.exists(src_train):
-            # Just copy train folder
-            print(f"Copying training data to {self.train_dir}")
-            shutil.copytree(src_train, self.train_dir)
-        else:
-            raise FileNotFoundError(f"No training data found in {src_train}")
+
+    def _safe_copytree(self, src: str, dst: str) -> None:
+        """Safe directory copy that handles existing files"""
+        os.makedirs(dst, exist_ok=True)
+        for item in os.listdir(src):
+            src_path = os.path.join(src, item)
+            dst_path = os.path.join(dst, item)
+
+            if os.path.isdir(src_path):
+                if os.path.exists(dst_path):
+                    # Recursively merge directories
+                    self._safe_copytree(src_path, dst_path)
+                else:
+                    shutil.copytree(src_path, dst_path)
+            else:
+                if os.path.exists(dst_path):
+                    if self.interactive:
+                        response = input(f"Overwrite {item}? [y/n] ").lower()
+                        if response != 'y':
+                            continue
+                shutil.copy2(src_path, dst_path)
 
     def _handle_class_folders(self) -> None:
         """Handle source with direct class folders"""
@@ -991,7 +1039,7 @@ def main():
 
     # Set up destination path
     dest_dir = os.path.join("data", args.dataset)
-    os.makedirs(dest_dir, exist_ok=True)
+    #os.makedirs(dest_dir, exist_ok=True)
 
     print(f"\nSetting up data structure in {dest_dir}")
     print(f"Source data from: {args.source}")
