@@ -897,45 +897,6 @@ def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFr
 
     return df
 
-def main():
-    parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
-    parser.add_argument("--datafolder", type=str, required=True,
-                       help="Base folder for dataset (e.g. 'galaxies' will use data/galaxies/)")
-    parser.add_argument("--predict_dir", type=str,
-                       help="Directory with images to predict on")
-    parser.add_argument("--predict_output", type=str,
-                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
-    # ... (other arguments remain the same)
-
-    args = parser.parse_args()
-
-    # Ensure datafolder is under data/
-    base_datafolder = args.datafolder
-    args.datafolder = os.path.join("data", base_datafolder)
-    os.makedirs(args.datafolder, exist_ok=True)
-
-    # Initialize pipeline
-    pipeline = FeatureExtractorPipeline(
-        datafolder=args.datafolder,
-        merge_train_test=args.merge_train_test,
-        interactive=args.interactive
-    )
-
-    # Handle prediction
-    if args.predict_dir:
-        # Set default output path if not specified
-        if args.predict_output is None:
-            args.predict_output = os.path.join(args.datafolder, f"{base_datafolder}.csv")
-
-        print(f"\nStarting prediction on images in: {args.predict_dir}")
-        print(f"Results will be saved to: {args.predict_output}")
-
-        predictions = pipeline.predict(args.predict_dir, args.predict_output)
-
-        # Print sample of results
-        print("\nSample predictions:")
-        print(predictions[["image_path", "target_name", "target"]].head())
-
     def _save_model(self) -> None:
         os.makedirs(self.model_dir, exist_ok=True)
         model_path = os.path.join(self.model_dir, "feature_extractor.pth")
@@ -1018,8 +979,7 @@ def main():
     parser.add_argument("--predict_dir", type=str,
                        help="Directory to predict on (required for predict mode)")
     parser.add_argument("--predict_output", type=str,
-                       default="predictions.csv",
-                       help="Output CSV for predictions (will be saved in datafolder)")
+                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
     parser.add_argument("--merge_train_test", action="store_true",
                        help="Force merge of train and test sets without prompt")
     parser.add_argument("--interactive", action="store_true",
@@ -1031,6 +991,11 @@ def main():
         args.datafolder = os.path.join("data", args.datafolder)
     os.makedirs(args.datafolder, exist_ok=True)
 
+    # Ensure datafolder is under data/
+    base_datafolder = args.datafolder
+    args.datafolder = os.path.join("data", base_datafolder)
+    os.makedirs(args.datafolder, exist_ok=True)
+
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
         datafolder=args.datafolder,
@@ -1038,21 +1003,20 @@ def main():
         interactive=args.interactive
     )
 
-    # Execute based on mode
-    if args.mode in ["train", "train_and_predict"]:
-        print("Starting training...")
-        class_mapping = pipeline.train()
-        print("Label mapping:", class_mapping)
+    # Handle prediction
+    if args.predict_dir:
+        # Set default output path if not specified
+        if args.predict_output is None:
+            args.predict_output = os.path.join(args.datafolder, f"{base_datafolder}.csv")
 
-    if args.mode in ["predict", "train_and_predict"]:
-        if not args.predict_dir:
-            raise ValueError("--predict_dir required for prediction mode")
+        print(f"\nStarting prediction on images in: {args.predict_dir}")
+        print(f"Results will be saved to: {args.predict_output}")
 
-        output_csv = os.path.join(args.datafolder, args.predict_output)
-        print(f"Predicting on images in {args.predict_dir}...")
-        predictions = pipeline.predict(args.predict_dir, output_csv)
-        print(f"Predicted features for {len(predictions)} images")
-        print(f"Results saved to {output_csv}")
+        predictions = pipeline.predict(args.predict_dir, args.predict_output)
+
+        # Print sample of results
+        print("\nSample predictions:")
+        print(predictions[["image_path", "target_name", "target"]].head())
 
 if __name__ == "__main__":
     main()
