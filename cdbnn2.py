@@ -2662,62 +2662,149 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Universal training function that works for both CNN and Autoencoder models"""
+def _calculate_phase2_loss(outputs: Union[Dict, Tuple], inputs: torch.Tensor,
+                          targets: torch.Tensor, config: Dict) -> torch.Tensor:
+    """Calculate phase 2 loss for autoencoders"""
+    if isinstance(outputs, dict):
+        reconstruction = outputs['reconstruction']
+        embedding = outputs['embedding']
+    else:
+        embedding, reconstruction = outputs
+
+    # Base reconstruction loss
+    loss = F.mse_loss(reconstruction, inputs)
+
+    # Add KL divergence loss if enabled
+    if config['model']['autoencoder_config']['enhancements'].get('use_kl_divergence', False):
+        latent_info = outputs.get('latent_info', {})
+        if 'cluster_probabilities' in latent_info:
+            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+            kl_loss = F.kl_div(
+                latent_info['cluster_probabilities'].log(),
+                latent_info['target_distribution'],
+                reduction='batchmean'
+            )
+            loss += kl_weight * kl_loss
+
+    # Add classification loss if enabled
+    if config['model']['autoencoder_config']['enhancements'].get('use_class_encoding', False):
+        class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+        class_loss = F.cross_entropy(outputs['class_logits'], targets)
+        loss += class_weight * class_loss
+
+    return loss
+
+def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader,
+               config: Dict, device: torch.device) -> Dict[str, List]:
+    """Universal training function for both CNN and Autoencoder models"""
 
     # Initialize based on model type
     is_autoencoder = isinstance(model, BaseAutoencoder)
     is_cnn = isinstance(model, BaseFeatureExtractor)
 
+    # Common setup
+    optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
+    history = defaultdict(list)
+    best_loss = float('inf')
+
+    # Autoencoder-specific setup
     if is_autoencoder:
-        # Autoencoder-specific setup
         model.set_dataset(train_loader.dataset)
         current_phase = getattr(model, 'training_phase', 1)
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-    elif is_cnn:
-        # CNN-specific setup
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-        current_phase = 1  # CNNs don't use phases
     else:
-        raise ValueError("Unknown model type")
+        current_phase = 1  # CNNs don't use phases
 
-    history = defaultdict(list)
-    start_epoch = getattr(model, 'current_epoch', 0)
+    try:
+        # Phase 1 training (for both model types)
+        logger.info(f"Starting {'Phase 1' if is_autoencoder else ''} training")
+        for epoch in range(config['training']['epochs']):
+            model.train()
+            epoch_loss = 0.0
+            epoch_accuracy = 0.0
 
-    # Phase 1 training (for both model types)
-    logger.info("Starting Phase 1 training")
-    phase_history = _train_phase(
-        model=model,
-        train_loader=train_loader,
-        optimizer=optimizer,
-        loss_manager=loss_manager,
-        epochs=config['training']['epochs'],
-        phase=1,
-        config=config,
-        is_autoencoder=is_autoencoder,
-        start_epoch=start_epoch
-    )
-    history.update(phase_history)
+            # Training loop
+            for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader, desc=f'Epoch {epoch+1}')):
+                inputs, targets = inputs.to(device), targets.to(device)
+                optimizer.zero_grad()
 
-    # Phase 2 only for autoencoders
-    if is_autoencoder and config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        logger.info("Starting Phase 2 training")
-        model.set_training_phase(2)
-        phase2_history = _train_phase(
-            model=model,
-            train_loader=train_loader,
-            optimizer=optimizer,
-            loss_manager=loss_manager,
-            epochs=config['training']['epochs'],
-            phase=2,
-            config=config,
-            is_autoencoder=True,
-            start_epoch=0
-        )
-        for key, val in phase2_history.items():
-            history[f'phase2_{key}'] = val
+                # Forward pass
+                if is_autoencoder:
+                    outputs = model(inputs)
+                    if isinstance(outputs, tuple):
+                        _, reconstruction = outputs
+                        loss = F.mse_loss(reconstruction, inputs)
+                    else:
+                        loss = F.mse_loss(outputs['reconstruction'], inputs)
+                else:
+                    outputs = model(inputs)
+                    loss = F.cross_entropy(outputs, targets)
+                    _, predicted = outputs.max(1)
+                    epoch_accuracy += predicted.eq(targets).sum().item()
 
-    return history
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+
+            # Validation
+            val_loss, val_accuracy = _validate(model, val_loader, device, is_autoencoder)
+            scheduler.step(val_loss)
+
+            # Record metrics
+            epoch_loss /= len(train_loader)
+            history['train_loss'].append(epoch_loss)
+            history['val_loss'].append(val_loss)
+
+            if not is_autoencoder:
+                epoch_accuracy = 100. * epoch_accuracy / len(train_loader.dataset)
+                val_accuracy = 100. * val_accuracy / len(val_loader.dataset)
+                history['train_acc'].append(epoch_accuracy)
+                history['val_acc'].append(val_accuracy)
+                logger.info(f'Epoch {epoch+1}: Loss: {epoch_loss:.4f} (Val: {val_loss:.4f}) | Acc: {epoch_accuracy:.2f}% (Val: {val_accuracy:.2f}%)')
+            else:
+                logger.info(f'Epoch {epoch+1}: Loss: {epoch_loss:.4f} (Val: {val_loss:.4f})')
+
+            # Checkpointing
+            if val_loss < best_loss:
+                best_loss = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': val_loss,
+                }, os.path.join(config['training']['checkpoint_dir'], 'best_model.pth'))
+
+        # Phase 2 training (autoencoders only)
+        if is_autoencoder and config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+            logger.info("Starting Phase 2 training")
+            model.set_training_phase(2)
+
+            for epoch in range(config['training']['epochs']):
+                model.train()
+                epoch_loss = 0.0
+
+                for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader, desc=f'Phase 2 Epoch {epoch+1}')):
+                    inputs, targets = inputs.to(device), targets.to(device)
+                    optimizer.zero_grad()
+
+                    outputs = model(inputs)
+                    loss = _calculate_phase2_loss(outputs, inputs, targets, config)
+
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.item()
+
+                # Validation and recording
+                val_loss, _ = _validate(model, val_loader, device, is_autoencoder)
+                history['phase2_train_loss'].append(epoch_loss / len(train_loader))
+                history['phase2_val_loss'].append(val_loss)
+                logger.info(f'Phase 2 Epoch {epoch+1}: Loss: {epoch_loss:.4f} (Val: {val_loss:.4f})')
+
+        return history
+
+    except Exception as e:
+        logger.error(f"Error during training: {str(e)}")
+        raise
 
 def _train_phase(model: nn.Module, train_loader: DataLoader, optimizer: optim.Optimizer,
                 loss_manager: EnhancedLossManager, epochs: int, phase: int, config: Dict,
@@ -3652,27 +3739,6 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             feature_weight=ae_config['feature_weight']
         )(inputs, reconstruction, embedding)
 
-    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
-        """Validate model"""
-        self.feature_extractor.eval()
-        running_loss = 0.0
-        reconstruction_accuracy = 0.0
-
-        with torch.no_grad():
-            for inputs, _ in val_loader:
-                inputs = inputs.to(self.device)
-                embedding, reconstruction = self.feature_extractor(inputs)
-
-                loss = self._calculate_loss(inputs, reconstruction, embedding)
-                running_loss += loss.item()
-                reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
-
-                del inputs, embedding, reconstruction, loss
-
-        return (running_loss / len(val_loader),
-                (reconstruction_accuracy / len(val_loader)) * 100)
-
-
 
     def _save_training_batch(self, inputs: torch.Tensor, reconstructions: torch.Tensor,
                            batch_idx: int, output_dir: str):
@@ -4429,6 +4495,36 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         except Exception as e:
             logger.error(f"Error loading model: {str(e)}")
             raise
+
+def _validate(model: nn.Module, val_loader: DataLoader, device: torch.device, is_autoencoder: bool) -> Tuple[float, float]:
+    """Validation for both model types"""
+    model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for inputs, targets in val_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+
+            if is_autoencoder:
+                outputs = model(inputs)
+                if isinstance(outputs, tuple):
+                    _, reconstruction = outputs
+                    val_loss += F.mse_loss(reconstruction, inputs).item()
+                else:
+                    val_loss += F.mse_loss(outputs['reconstruction'], inputs).item()
+            else:
+                outputs = model(inputs)
+                val_loss += F.cross_entropy(outputs, targets).item()
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(targets).sum().item()
+                total += targets.size(0)
+
+    val_loss /= len(val_loader)
+    accuracy = correct / total if not is_autoencoder else 0.0
+    return val_loss, accuracy
+
 
 class FeatureExtractorCNN(nn.Module):
     """CNN-based feature extractor model with self-attention"""
