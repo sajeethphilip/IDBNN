@@ -4418,8 +4418,6 @@ class FeatureExtractorCNN(nn.Module):
         if self.use_kl_divergence:
             self._init_cluster_centers(config)
 
-        if self.use_class_encoding:
-            self._init_classifier(config)
 
     def _init_cluster_centers(self, config: Dict):
         """Proper cluster center initialization"""
