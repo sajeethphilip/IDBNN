@@ -987,11 +987,6 @@ def main():
     args = parser.parse_args()
 
     # Ensure datafolder is under data/
-    if not args.datafolder.startswith("data/"):
-        args.datafolder = os.path.join("data", args.datafolder)
-    os.makedirs(args.datafolder, exist_ok=True)
-
-    # Ensure datafolder is under data/
     base_datafolder = args.datafolder
     args.datafolder = os.path.join("data", base_datafolder)
     os.makedirs(args.datafolder, exist_ok=True)
