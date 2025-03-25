@@ -973,8 +973,10 @@ def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFr
 def main():
     print("Welcome to Convolution DBNN")
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
-    parser.add_argument("--datafolder", type=str, required=True,
-                       help="Path to data folder (e.g., 'galaxies') - will be created under 'data/'")
+    parser.add_argument("--source", type=str, required=True,
+                      help="Path to source directory containing the data")
+    parser.add_argument("--dataset", type=str, required=True,
+                      help="Name for the dataset (will create data/<dataset>/)")
     parser.add_argument("--mode", type=str, choices=["train", "predict", "train_and_predict"],
                        default="train_and_predict", help="Execution mode")
     parser.add_argument("--predict_dir", type=str,
