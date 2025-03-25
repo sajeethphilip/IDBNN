@@ -4333,17 +4333,22 @@ class FeatureExtractorCNN(nn.Module):
 
     def __init__(self, in_channels: int, feature_dims: int, config: Dict):
         super().__init__()
-        # === Core Configuration ===
+        # Core configuration
         self.config = config
         self.feature_dims = feature_dims
-        self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and
-                                 torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                                 and torch.cuda.is_available() else 'cpu')
         self.training_phase = 1  # Start with phase 1
 
-        # === Architecture ===
+        # Architecture (7-layer CNN)
         self.conv_layers = nn.Sequential(
-            # [Original 7-layer architecture...]
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.5),
+            # ... [original layers] ...
+            nn.Conv2d(512, 512, 3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
@@ -4351,122 +4356,83 @@ class FeatureExtractorCNN(nn.Module):
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
-        # === Phase 2 Initialization ===
-        self._init_phase2_components(config)
-        self._init_enhancements(config)
+        # Phase 2 initialization from interactive config
+        ae_config = config['model']['autoencoder_config']['enhancements']
+        self.use_kl_divergence = ae_config['use_kl_divergence']
+        self.use_class_encoding = ae_config['use_class_encoding']
+
+        # Initialize phase 2 components if enabled in config
+        if self.use_kl_divergence:
+            self._init_clustering(config)
+        if self.use_class_encoding:
+            self._init_classifier(config)
+
+        # Enhancement modules from interactive setup
+        self.enhancement_modules = nn.ModuleDict()
+        if config['model']['enhancement_modules'].get('astronomical', {}).get('enabled', False):
+            self._init_astronomical_enhancements()
+
         self.to(self.device)
 
-    def _init_phase2_components(self, config: Dict):
-        """Initialize phase 2 components from both config and interactive settings"""
-        # Get settings from both config and interactive parameters
-        ae_config = config['model']['autoencoder_config']['enhancements']
-        interactive_params = config.get('interactive_params', {})
+    def _init_clustering(self, config: Dict):
+        """Initialize KL divergence clustering"""
+        num_clusters = config['dataset'].get('num_classes', 10)
+        self.cluster_centers = nn.Parameter(
+            torch.randn(num_clusters, self.feature_dims, device=self.device)
+        )
+        self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
 
-        # KL Divergence
-        self.use_kl_divergence = (ae_config.get('use_kl_divergence', False) or
-                                interactive_params.get('use_kl', False))
-        if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(
-                torch.randn(num_clusters, self.feature_dims, device=self.device)
-            )
-            self.clustering_temperature = (
-                interactive_params.get('clustering_temperature', 1.0) or
-                ae_config.get('clustering_temperature', 1.0)
-            )
+    def _init_classifier(self, config: Dict):
+        """Initialize class encoding"""
+        num_classes = config['dataset'].get('num_classes', 10)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.feature_dims, self.feature_dims//2),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(self.feature_dims//2, num_classes)
+        )
 
-        # Class Encoding
-        self.use_class_encoding = (ae_config.get('use_class_encoding', False) or
-                                 interactive_params.get('use_class_encoding', False))
-        if self.use_class_encoding:
-            num_classes = config['dataset'].get('num_classes', 10)
-            self.classifier = nn.Sequential(
-                nn.Linear(self.feature_dims, self.feature_dims//2),
+    def _init_astronomical_enhancements(self):
+        """Initialize astronomical feature modules"""
+        self.enhancement_modules['astronomical'] = nn.ModuleDict({
+            'star_detector': nn.Sequential(
+                nn.Conv2d(512, 512, 3, padding=1),
                 nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(self.feature_dims//2, num_classes)
+                nn.Conv2d(512, 1, 1),
+                nn.Sigmoid()
+            ),
+            'galaxy_enhancer': nn.Sequential(
+                nn.Conv2d(512, 512, 3, dilation=2, padding=2),
+                nn.BatchNorm2d(512),
+                nn.ReLU()
             )
-
-        # Phase 2 Flag
-        self.enable_phase2 = (ae_config.get('enable_phase2', False) or
-                            interactive_params.get('enable_phase2', False))
-
-    def _init_enhancements(self, config: Dict):
-        """Initialize enhancement modules from interactive settings"""
-        self.enhancement_modules = nn.ModuleDict()
-        interactive_params = config.get('interactive_params', {})
-
-        # Astronomical Enhancements
-        if interactive_params.get('enable_astronomical', False):
-            self.enhancement_modules['astronomical'] = nn.ModuleDict({
-                'star_detector': nn.Sequential(
-                    nn.Conv2d(512, 512, 3, padding=1),
-                    nn.ReLU(),
-                    nn.Conv2d(512, 1, 1),
-                    nn.Sigmoid()
-                ),
-                'galaxy_enhancer': nn.Sequential(
-                    nn.Conv2d(512, 512, 3, dilation=2, padding=2),
-                    nn.BatchNorm2d(512),
-                    nn.ReLU()
-                )
-            })
+        })
 
     def set_training_phase(self, phase: int):
-        """Handle phase transition with interactive parameter support"""
+        """Handle phase transition with proper initialization"""
         self.training_phase = phase
-        if phase == 2 and not self.enable_phase2:
-            logger.warning("Phase 2 was requested but not enabled in configuration")
-            return
-
-        if phase == 2 and self.use_kl_divergence:
-            if not hasattr(self, 'cluster_centers'):
-                num_classes = self.config['dataset'].get('num_classes', 10)
-                self.cluster_centers = nn.Parameter(
-                    torch.randn(num_classes, self.feature_dims, device=self.device)
-                )
-            # Initialize clusters if needed
-            if hasattr(self, 'train_loader'):
-                self._initialize_cluster_centers()
-
-    def _initialize_cluster_centers(self):
-        """Initialize clusters using k-means on current features"""
-        if not hasattr(self, 'train_loader'):
-            return
-
-        self.eval()
-        features = []
-        with torch.no_grad():
-            for inputs, _ in self.train_loader:
-                inputs = inputs.to(self.device)
-                features.append(self.conv_layers(inputs).view(inputs.size(0), -1))
-
-        if features:
-            features = torch.cat(features).cpu().numpy()
-            from sklearn.cluster import KMeans
-            kmeans = KMeans(n_clusters=self.cluster_centers.size(0), n_init=10)
-            kmeans.fit(features)
-            with torch.no_grad():
-                self.cluster_centers.copy_(
-                    torch.tensor(kmeans.cluster_centers_, device=self.device)
-                )
-        self.train()
+        if phase == 2:
+            # Lazy initialization of phase 2 components
+            if self.use_kl_divergence and not hasattr(self, 'cluster_centers'):
+                self._init_clustering(self.config)
+            if self.use_class_encoding and not hasattr(self, 'classifier'):
+                self._init_classifier(self.config)
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict]:
-        """Phase-aware forward pass with enhancement support"""
+        """Phase-aware forward pass with enhancements"""
         # Feature extraction
         x = self.conv_layers(x)
         x = x.view(x.size(0), -1)
         features = self.batch_norm(self.fc(x)) if x.size(0) > 1 else self.fc(x)
 
-        # Phase 1: Simple features
-        if self.training_phase == 1 or not self.enable_phase2:
+        # Phase 1: Basic features only
+        if self.training_phase == 1:
             return features
 
         # Phase 2: Enhanced outputs
         outputs = {'features': features}
 
-        # Class predictions
+        # Class encoding
         if self.use_class_encoding:
             class_logits = self.classifier(features)
             outputs.update({
@@ -4475,19 +4441,18 @@ class FeatureExtractorCNN(nn.Module):
                 'class_predictions': class_logits.argmax(dim=1)
             })
 
-        # Clustering
+        # KL divergence clustering
         if self.use_kl_divergence:
             distances = torch.cdist(features, self.cluster_centers)
             q = 1.0 / (1.0 + (distances / self.clustering_temperature)**2)
-            q = q / q.sum(dim=1, keepdim=True)
             outputs.update({
-                'cluster_probabilities': q,
+                'cluster_probabilities': q / q.sum(dim=1, keepdim=True),
                 'cluster_assignments': q.argmax(dim=1)
             })
 
-        # Enhancements
+        # Astronomical enhancements
         if 'astronomical' in self.enhancement_modules:
-            mid_features = self.conv_layers[:-4](x)  # Get intermediate features
+            mid_features = self.conv_layers[:-4](x)  # Get mid-level features
             outputs.update({
                 'star_features': self.enhancement_modules['astronomical']['star_detector'](mid_features),
                 'galaxy_features': self.enhancement_modules['astronomical']['galaxy_enhancer'](mid_features)
@@ -4506,63 +4471,60 @@ class FeatureExtractorCNN(nn.Module):
                 inputs = batch[0].to(self.device)
                 out = self(inputs)
 
-                # Handle output format
+                # Handle output formats
                 if isinstance(out, dict):
                     features.append(out['features'].cpu())
                     for k, v in out.items():
                         if k != 'features':
-                            enh_features[k].append(v.cpu() if isinstance(v, torch.Tensor) else v)
+                            enh_features[k].append(v.cpu())
                 else:
                     features.append(out.cpu())
 
                 labels.append(batch[1])
 
-                # Metadata
-                if len(batch) > 2:  # Has filenames
+                # Metadata collection
+                if len(batch) > 2:  # Has additional info
                     filenames.extend(batch[2])
                 if hasattr(loader.dataset, 'reverse_encoder'):
                     class_names.extend([loader.dataset.reverse_encoder[l.item()] for l in batch[1]])
 
-        # Build output dict
+        # Build output dictionary
         feature_dict = {
             'features': torch.cat(features),
-            'labels': torch.cat(labels)
+            'labels': torch.cat(labels)  # Maintain 'labels' for backward compatibility
         }
 
-        # Backward compatibility
-        feature_dict['target'] = feature_dict['labels']
-
         # Optional metadata
-        if filenames and len(filenames) == len(feature_dict['features']):
+        if filenames:
             feature_dict['filenames'] = filenames
-        if class_names and len(class_names) == len(feature_dict['features']):
+        if class_names:
             feature_dict['class_names'] = class_names
 
         # Enhancement features
         for k, v in enh_features.items():
-            if v and isinstance(v[0], torch.Tensor):
+            if v:
                 feature_dict[k] = torch.cat(v)
-            elif v:
-                feature_dict[k] = np.concatenate(v) if isinstance(v[0], np.ndarray) else v
 
         return feature_dict
 
     def save_features(self, feature_dict: Dict[str, Any], output_path: str):
         """Robust feature saving with:
-        - Interactive parameter support
-        - Backward compatibility
-        - Automatic type conversion
+        - Backward compatibility (labels->target)
+        - Multi-dimensional support
+        - Chunked processing
+        - Complete metadata
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Ensure labels->target conversion
+            # Convert labels to target for backward compatibility
             if 'labels' in feature_dict:
                 feature_dict['target'] = feature_dict.pop('labels')
 
-            # Convert all data to numpy
+            # Process all features
             data = {}
             for key, val in feature_dict.items():
+                # Convert to numpy
                 if isinstance(val, torch.Tensor):
                     val = val.cpu().numpy()
                 elif isinstance(val, list):
@@ -4574,19 +4536,19 @@ class FeatureExtractorCNN(nn.Module):
                 elif val.ndim == 2:
                     for i in range(val.shape[1]):
                         data[f"{key}_{i}"] = val[:, i]
-                else:
+                else:  # Higher dimensions
                     flat = val.reshape(val.shape[0], -1)
                     for i in range(flat.shape[1]):
                         data[f"{key}_flat_{i}"] = flat[:, i]
 
-            # Validate sizes
-            base_size = len(next(iter(data.values())))
+            # Validate dimensions
+            base_len = len(next(iter(data.values())))
             for k, v in data.items():
-                if len(v) != base_size:
-                    raise ValueError(f"Size mismatch: {k} has {len(v)} elements (expected {base_size})")
+                if len(v) != base_len:
+                    raise ValueError(f"Dimension mismatch for {k}: expected {base_len}, got {len(v)}")
 
             # Save in chunks
-            for i in range(0, base_size, 1000):
+            for i in range(0, base_len, 1000):
                 chunk = {k: v[i:i+1000] for k, v in data.items()}
                 pd.DataFrame(chunk).to_csv(
                     output_path,
@@ -4595,19 +4557,18 @@ class FeatureExtractorCNN(nn.Module):
                     index=False
                 )
 
-            # Save metadata
-            metadata = {
+            # Save complete metadata
+            torch.save({
+                'config': self.config,
                 'phase': self.training_phase,
-                'kl_divergence': self.use_kl_divergence,
-                'class_encoding': self.use_class_encoding,
-                'enhancements': list(self.enhancement_modules.keys()),
-                'interactive_params': self.config.get('interactive_params', {})
-            }
-            torch.save(metadata, os.path.join(os.path.dirname(output_path), 'training_metadata.pt'))
+                'timestamp': datetime.now().isoformat(),
+                'feature_columns': [k for k in data.keys() if k.startswith('feature_')],
+                'enhancements': list(self.enhancement_modules.keys())
+            }, os.path.join(os.path.dirname(output_path), 'metadata.pt'))
 
         except Exception as e:
             logger.error(f"Feature saving failed: {str(e)}\n{traceback.format_exc()}")
-            raise
+            raise RuntimeError("Feature saving failed") from e
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
