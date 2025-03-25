@@ -4400,7 +4400,6 @@ class FeatureExtractorCNN(nn.Module):
         # Phase 2 components
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
         self.use_class_encoding = config['model']['autoencoder_config']['enhancements']['use_class_encoding']
-        global params['use_phase2']
 
         if self.use_kl_divergence:
             num_clusters = config['dataset'].get('num_classes', 10)
