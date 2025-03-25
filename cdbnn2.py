@@ -657,7 +657,6 @@ class FeatureExtractorPipeline:
             Dictionary mapping class names to numeric labels
         """
         # Create dataset and establish label encoding
-        self.class_to_idx = train_dataset.class_to_idx
         self._save_label_encoding()
         # Verify we have classes
         if self.class_to_idx is None or self.num_classes is None:
@@ -667,6 +666,7 @@ class FeatureExtractorPipeline:
             self.train_dir,
             transform=self.transform
         )
+        self.class_to_idx = train_dataset.class_to_idx
         # Update config with actual class count
         self.config["dataset"]["num_classes"] = self.num_classes
         self.clusterer = KLDivergenceClusterer(self.config)
