@@ -1065,6 +1065,7 @@ def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFr
             self.extract_features()
 
 def main():
+    print("Welcome to COnvolution DBNN")
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
     parser.add_argument("--datafolder", type=str, required=True,
                        help="Path to data folder (e.g., 'galaxies') - will be created under 'data/'")
