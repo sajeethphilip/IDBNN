@@ -2560,59 +2560,7 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader,
-                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
-    # Store dataset reference in model
-    #model.set_dataset(train_loader.dataset)
 
-    history = defaultdict(list)
-
-    # Initialize starting epoch and phase
-    start_epoch = getattr(model, 'current_epoch', 0)
-    current_phase = getattr(model, 'training_phase', 1)
-
-    # Phase 1: Pure reconstruction (if not already completed)
-    if current_phase == 1:
-        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
-        model.set_training_phase(1)
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-
-        phase1_history = _train_phase(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 1, config,
-            start_epoch=start_epoch
-        )
-        history.update(phase1_history)
-
-        # Reset start_epoch for phase 2
-        start_epoch = 0
-    else:
-        logger.info("Phase 1 already completed, skipping")
-
-    # Phase 2: Latent space organization
-    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        if current_phase < 2:
-            logger.info("Starting Phase 2: Latent space organization")
-            model.set_training_phase(2)
-        else:
-            logger.info("Resuming Phase 2: Latent space organization")
-
-        # Lower learning rate for fine-tuning
-        optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'])
-
-        phase2_history = _train_phase(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 2, config,
-            start_epoch=start_epoch if current_phase == 2 else 0
-        )
-
-        # Merge histories
-        for key, value in phase2_history.items():
-            history[f"phase2_{key}"] = value
-
-    return history
 
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
@@ -2714,153 +2662,132 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _train_phase(model: nn.Module, train_loader: DataLoader,
-                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
-                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic for each phase with enhanced checkpoint handling"""
+def train_model(model: nn.Module, train_loader: DataLoader, config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Universal training function that works for both CNN and Autoencoder models"""
+
+    # Initialize based on model type
+    is_autoencoder = isinstance(model, BaseAutoencoder)
+    is_cnn = isinstance(model, BaseFeatureExtractor)
+
+    if is_autoencoder:
+        # Autoencoder-specific setup
+        model.set_dataset(train_loader.dataset)
+        current_phase = getattr(model, 'training_phase', 1)
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+    elif is_cnn:
+        # CNN-specific setup
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+        current_phase = 1  # CNNs don't use phases
+    else:
+        raise ValueError("Unknown model type")
+
     history = defaultdict(list)
-    device = next(model.parameters()).device
+    start_epoch = getattr(model, 'current_epoch', 0)
 
-    # Get phase-specific metrics
-    # Initialize unified checkpoint
-    checkpoint_manager = UnifiedCheckpoint(config)
+    # Phase 1 training (for both model types)
+    logger.info("Starting Phase 1 training")
+    phase_history = _train_phase(
+        model=model,
+        train_loader=train_loader,
+        optimizer=optimizer,
+        loss_manager=loss_manager,
+        epochs=config['training']['epochs'],
+        phase=1,
+        config=config,
+        is_autoencoder=is_autoencoder,
+        start_epoch=start_epoch
+    )
+    history.update(phase_history)
 
-    # Load best loss from checkpoint
-    best_loss = checkpoint_manager.get_best_loss(phase, model)
+    # Phase 2 only for autoencoders
+    if is_autoencoder and config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        logger.info("Starting Phase 2 training")
+        model.set_training_phase(2)
+        phase2_history = _train_phase(
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            loss_manager=loss_manager,
+            epochs=config['training']['epochs'],
+            phase=2,
+            config=config,
+            is_autoencoder=True,
+            start_epoch=0
+        )
+        for key, val in phase2_history.items():
+            history[f'phase2_{key}'] = val
+
+    return history
+
+def _train_phase(model: nn.Module, train_loader: DataLoader, optimizer: optim.Optimizer,
+                loss_manager: EnhancedLossManager, epochs: int, phase: int, config: Dict,
+                is_autoencoder: bool, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for a single phase"""
+    history = defaultdict(list)
+    best_loss = float('inf')
     patience_counter = 0
+    patience = config['training'].get('early_stopping', {}).get('patience', 5)
 
-    try:
-        for epoch in range(start_epoch, epochs):
-            model.train()
-            running_loss = 0.0
-            num_batches = len(train_loader)  # Get total number of batches
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        running_loss = 0.0
+        running_accuracy = 0.0
 
-            # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (data, labels) in enumerate(pbar):
-                try:
-                    # Move data to correct device
-                    if isinstance(data, (list, tuple)):
-                        data = data[0]
-                    data = data.to(device)
-                    labels = labels.to(device)
+        pbar = tqdm(train_loader, desc=f'Phase {phase} - Epoch {epoch+1}/{epochs}')
+        for batch_idx, (inputs, targets) in enumerate(pbar):
+            inputs, targets = inputs.to(model.device), targets.to(model.device)
+            optimizer.zero_grad()
 
-                    # Zero gradients
-                    optimizer.zero_grad()
-
-                    # Forward pass based on phase
-                    if phase == 1:
-                        # Phase 1: Only reconstruction
-                        embeddings = model.encode(data)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
-                        reconstruction = model.decode(embeddings)
-                        loss = F.mse_loss(reconstruction, data)
+            # Forward pass differs between model types
+            if is_autoencoder:
+                outputs = model(inputs)
+                if phase == 1:
+                    # Phase 1: Simple reconstruction
+                    if isinstance(outputs, tuple):
+                        embedding, reconstruction = outputs
                     else:
-                        # Phase 2: Include clustering and classification
-                        output = model(data)
-                        if isinstance(output, dict):
-                            reconstruction = output['reconstruction']
-                            embedding = output['embedding']
-                        else:
-                            embedding, reconstruction = output
-
-                        # Calculate base loss
-                        loss = loss_manager.calculate_loss(
-                            reconstruction, data,
-                            config['dataset'].get('image_type', 'general')
-                        )['loss']
-
-                        # Add KL divergence loss if enabled
-                        if model.use_kl_divergence:
-                            latent_info = model.organize_latent_space(embedding, labels)
-                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
-                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
-                                kl_loss = F.kl_div(
-                                    latent_info['cluster_probabilities'].log(),
-                                    latent_info['target_distribution'],
-                                    reduction='batchmean'
-                                )
-                                loss += kl_weight * kl_loss
-
-                        # Add classification loss if enabled
-                        if model.use_class_encoding and hasattr(model, 'classifier'):
-                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
-                            class_logits = model.classifier(embedding)
-                            class_loss = F.cross_entropy(class_logits, labels)
-                            loss += class_weight * class_loss
-
-                    # Backward pass and optimization
-                    loss.backward()
-                    optimizer.step()
-
-                    # Update running loss - handle possible NaN or inf
-                    current_loss = loss.item()
-                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
-                        running_loss += current_loss
-
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
-
-                    # Update progress bar with safe values
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
-
-                    # Memory cleanup
-                    del data, loss
-                    if phase == 2:
-                        del output
-                    torch.cuda.empty_cache()
-
-                except Exception as e:
-                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                    continue
-
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
+                        reconstruction = outputs['reconstruction']
+                    loss = F.mse_loss(reconstruction, inputs)
+                else:
+                    # Phase 2: Enhanced training
+                    loss = loss_manager.calculate_loss(
+                        outputs['reconstruction'], inputs,
+                        config['dataset'].get('image_type', 'general')
+                    )['loss']
             else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
+                # CNN training
+                outputs = model(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                _, predicted = outputs.max(1)
+                running_accuracy += predicted.eq(targets).sum().item()
 
-            # Record history
-            history[f'phase{phase}_loss'].append(avg_loss)
+            loss.backward()
+            optimizer.step()
 
-            # Save checkpoint and check for best model
-            is_best = avg_loss < best_loss
-            if is_best:
-                best_loss = avg_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
+            running_loss += loss.item()
+            pbar.set_postfix({'loss': f'{running_loss/(batch_idx+1):.4f}'})
 
-            checkpoint_manager.save_model_state(
-                model=model,
-                optimizer=optimizer,
-                phase=phase,
-                epoch=epoch,
-                loss=avg_loss,
-                is_best=is_best
-            )
-            # Early stopping check
-            patience = config['training'].get('early_stopping', {}).get('patience', 5)
-            if patience_counter >= patience:
-                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
-                break
+        # Epoch complete
+        epoch_loss = running_loss / len(train_loader)
+        history['loss'].append(epoch_loss)
 
-            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+        if not is_autoencoder:
+            epoch_acc = 100. * running_accuracy / len(train_loader.dataset)
+            history['accuracy'].append(epoch_acc)
 
-            # Clean up at end of epoch
-            pbar.close()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # Check for improvement
+        if epoch_loss < best_loss - config['training'].get('early_stopping', {}).get('min_delta', 0.001):
+            best_loss = epoch_loss
+            patience_counter = 0
+            # Save best model
+            torch.save(model.state_dict(), os.path.join(config['training']['checkpoint_dir'], 'best_model.pth'))
+        else:
+            patience_counter += 1
 
-    except Exception as e:
-        logger.error(f"Error in training phase {phase}: {str(e)}")
-        raise
+        # Early stopping
+        if patience_counter >= patience:
+            logger.info(f"Early stopping triggered after {epoch+1} epochs")
+            break
 
     return history
 
