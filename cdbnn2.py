@@ -2094,12 +2094,15 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
     model_config = config.get('model', {})
     ae_config = model_config.get('autoencoder_config', {})
     enh_config = ae_config.get('enhancements', {})
-
+    use_kl_divergence = model.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+    use_class_encoding = model.config['model']['autoencoder_config']['enhancements']['use_class_encoding']
+    if use_class_encoding or use_kl_divergence:
+        use_phase2=True
     params = {
         'epochs': training_config.get('epochs', 20),
         'lr': model_config.get('learning_rate', 0.001),
-        'use_phase2': enh_config.get('enable_phase2', False),
-        'use_kl': enh_config.get('use_kl_divergence', False),
+        'use_phase2':use_phase2
+        'use_kl':  use_kl_divergence
         'kl_weight': enh_config.get('kl_divergence_weight', 0.1),
         'patience': training_config.get('early_stopping', {}).get('patience', 5),
         'min_delta': 0.001
@@ -4404,7 +4407,6 @@ class FeatureExtractorCNN(nn.Module):
             num_clusters = config['dataset'].get('num_classes', 10)
             self.cluster_centers = nn.Parameter(torch.randn(num_clusters, feature_dims))
             self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-            params['use_phase2']=True
 
         if self.use_class_encoding:
             num_classes = config['dataset'].get('num_classes', 10)
@@ -4414,7 +4416,6 @@ class FeatureExtractorCNN(nn.Module):
                 nn.Dropout(0.3),
                 nn.Linear(feature_dims // 2, num_classes)
             )
-            params['use_phase2']=True
 
         # Initialize all enhancements
         self._init_enhancements(config)
@@ -4451,7 +4452,6 @@ class FeatureExtractorCNN(nn.Module):
                     nn.ReLU()
                 )
             })
-            params['use_phase2']=True
 
     def set_training_phase(self, phase: int):
         """Set the training phase (1 or 2)"""
