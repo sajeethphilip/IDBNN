@@ -752,16 +752,32 @@ class BaseAutoencoder(nn.Module):
         self.eval()
         with torch.no_grad():
             # Get a batch of features
-            loader = self.config.get('train_loader')  # Need to ensure loader is available
+            loader = self.config.get('train_loader')
             if loader is None:
                 return
 
             features = []
             for inputs, _ in loader:
                 inputs = inputs.to(self.device)
-                features.append(self(inputs).cpu())
+                outputs = self(inputs)
+
+                # Handle different output formats
+                if isinstance(outputs, dict):
+                    # For enhanced models, use the embeddings
+                    feats = outputs['embedding']
+                elif isinstance(outputs, tuple):
+                    # For basic autoencoders, use the first output (embeddings)
+                    feats = outputs[0]
+                else:
+                    # For CNN models, use the direct output
+                    feats = outputs
+
+                features.append(feats.cpu())
                 if len(features) * inputs.size(0) > 1000:  # Use first 1000 samples
                     break
+
+            if not features:
+                return
 
             features = torch.cat(features)
 
@@ -862,6 +878,10 @@ class BaseAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
+        # Verify input shape
+        if len(x.shape) != 4:
+            raise ValueError(f"Input must be 4D (batch, channels, height, width), got {x.shape}")
+
         embedding = self.encode(x)
         if isinstance(embedding, tuple):
             embedding = embedding[0]
