@@ -4650,6 +4650,7 @@ class FeatureExtractorCNN(nn.Module):
         except Exception as e:
             logger.error(f"Error saving features: {str(e)}")
             raise
+
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
         super(DCTLayer, self).__init__()
