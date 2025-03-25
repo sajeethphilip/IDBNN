@@ -1033,8 +1033,8 @@ def main():
                        help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
     parser.add_argument("--merge_train_test", action="store_true",
                        help="Force merge of train and test sets without prompt")
-    parser.add_argument("--interactive", action="store_true",
-                       help="Run in interactive mode with prompts")
+    parser.add_argument("--force", action="store_true",
+                          help="Automatically overwrite existing files without prompt")
     args = parser.parse_args()
 
     # Set up destination path
@@ -1049,7 +1049,7 @@ def main():
         source_dir=args.source,
         datafolder=dest_dir,
         merge_train_test=args.merge_train_test,
-        interactive=args.interactive
+        interactive=not args.force
     )
 
     if args.mode in ["train", "train_and_predict"]:
