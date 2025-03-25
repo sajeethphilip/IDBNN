@@ -2101,8 +2101,8 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
     params = {
         'epochs': training_config.get('epochs', 20),
         'lr': model_config.get('learning_rate', 0.001),
-        'use_phase2':use_phase2
-        'use_kl': use_kl_divergence
+        'use_phase2':use_phase2,
+        'use_kl': use_kl_divergence,
         'kl_weight': enh_config.get('kl_divergence_weight', 0.1),
         'patience': training_config.get('early_stopping', {}).get('patience', 5),
         'min_delta': 0.001
