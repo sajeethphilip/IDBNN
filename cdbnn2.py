@@ -1081,15 +1081,15 @@ def main():
     args = parser.parse_args()
 
     # Ensure datafolder is under data/
-    base_name = args.datafolder
-    args.datafolder = os.path.join("data", base_name)
+    base_name = args.data_folder
+    datafolder = os.path.join("data", base_name)
     os.makedirs(args.datafolder, exist_ok=True)
     print(f"\nSetting up data structure in {args.datafolder}")
     print("Searching for training data...")
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
-        datafolder=args.datafolder,
+        datafolder=datafolder,
         merge_train_test=args.merge_train_test,
         interactive=args.interactive
     )
@@ -1103,7 +1103,7 @@ def main():
     if args.predict_dir:
         # Set default output path if not specified
         if args.predict_output is None:
-            args.predict_output = os.path.join(args.datafolder, f"{base_datafolder}.csv")
+            args.predict_output = os.path.join(datafolder, f"{base_datafolder}.csv")
 
         print(f"\nStarting prediction on images in: {args.predict_dir}")
         print(f"Results will be saved to: {args.predict_output}")
