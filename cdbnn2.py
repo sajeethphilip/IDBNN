@@ -555,12 +555,29 @@ class FeatureExtractorPipeline:
         return torch.device("cuda" if use_gpu else "cpu")
 
     def _initialize_model(self) -> nn.Module:
+        """Initialize model, loading previous best if available"""
         model = FeatureExtractorCNN(
             in_channels=self.config["dataset"]["in_channels"],
             feature_dims=self.config["model"]["feature_dims"],
             dropout_prob=self.config["model"].get("dropout_prob", 0.5)
-        )
-        return model.to(self.device)
+        ).to(self.device)
+
+        # Check for existing best model
+        model_path = os.path.join(self.model_dir, "feature_extractor.pth")
+        if os.path.exists(model_path) and not self.config["execution_flags"]["fresh_start"]:
+            print("Loading previously trained model...")
+            checkpoint = torch.load(model_path, map_location=self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+
+            # If class mapping exists in checkpoint, use it
+            if 'class_to_idx' in checkpoint:
+                self.class_to_idx = checkpoint['class_to_idx']
+                self.num_classes = len(self.class_to_idx)
+                print(f"Loaded class mapping: {self.class_to_idx}")
+        else:
+            print("Initializing new model")
+
+        return model
 
     def _configure_optimizer(self) -> optim.Optimizer:
         opt_config = self.config["model"]["optimizer"]
@@ -863,7 +880,92 @@ class FeatureExtractorPipeline:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    def extract_features(self) -> None:
+    def extract_features(self, output_csv: Optional[str] = None) -> pd.DataFrame:
+        """
+        Extract features and save to CSV with complete tracking information
+
+        Args:
+            output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
+
+        Returns:
+            DataFrame with columns:
+            image_path, subfolder_name, target_name, target, feature_0...feature_N
+        """
+        # Set default output path if not specified
+        if output_csv is None:
+            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
+
+        # Create dataset from training directory
+        dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=self.config["training"]["num_workers"]
+        )
+
+        # Initialize lists to store results
+        image_paths = []
+        subfolder_names = []
+        target_names = []
+        targets = []
+        features_list = []
+
+        # Extract features
+        self.model.eval()
+        with torch.no_grad():
+            for images, batch_targets, batch_paths in tqdm(loader, desc="Extracting features"):
+                images = images.to(self.device)
+                batch_features = self.model(images).cpu().numpy()
+
+                features_list.append(batch_features)
+
+                # Extract path information
+                image_paths.extend(batch_paths)
+
+                # Get subfolder names (class names)
+                subfolder_names.extend([
+                    os.path.basename(os.path.dirname(p)) for p in batch_paths
+                ])
+
+                # Get target names (using class_to_idx mapping)
+                target_names.extend([
+                    list(self.class_to_idx.keys())[list(self.class_to_idx.values()).index(t)]
+                    for t in batch_targets.numpy()
+                ])
+
+                targets.extend(batch_targets.numpy())
+
+        # Create DataFrame
+        features_array = np.concatenate(features_list, axis=0)
+        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
+
+        df = pd.DataFrame(features_array, columns=feature_cols)
+
+        # Add tracking information
+        df.insert(0, "image_path", image_paths)
+        df.insert(1, "subfolder_name", subfolder_names)
+        df.insert(2, "target_name", target_names)
+        df.insert(3, "target", targets)
+
+        # Make paths relative to datafolder if possible
+        try:
+            df["image_path"] = df["image_path"].apply(
+                lambda x: os.path.relpath(x, start=self.datafolder))
+        except ValueError:
+            pass  # Keep absolute paths if they're not under datafolder
+
+        # Save results
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+
+        print(f"\nFeature extraction complete. Results saved to {output_csv}")
+        print(f"Total images processed: {len(df)}")
+        print("Columns:", df.columns.tolist())
+
+        return df
+
+    def extract_features_old(self) -> None:
         """Extract features and save to CSV"""
         dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         loader = DataLoader(
