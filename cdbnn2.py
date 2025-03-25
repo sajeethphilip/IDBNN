@@ -4339,6 +4339,9 @@ class FeatureExtractorCNN(nn.Module):
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
 
+        # Initialize phase tracking
+        self.training_phase = 1  # Start with phase 1
+
         # Original 7-layer architecture
         self.conv_layers = nn.Sequential(
             # Layer 1: 256x256 -> 128x128
