@@ -2564,7 +2564,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
-    model.set_dataset(train_loader.dataset)
+    #model.set_dataset(train_loader.dataset)
 
     history = defaultdict(list)
 
@@ -6972,13 +6972,7 @@ def main():
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
 
-            # Set the dataset (if required)
-            if hasattr(predictor.model, 'set_dataset'):
-                # Create a dataset with the images in the input directory
-                transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
-                predictor.model.set_dataset(dataset)  # Set the dataset in the model
-                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
+
 
             # Perform predictions
             logger.info("Starting prediction process...")
