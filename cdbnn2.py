@@ -157,12 +157,93 @@ class KLDivergenceClusterer:
 
         return confident_features, confident_targets
 
+# Supported image formats
+SUPPORTED_IMAGE_FORMATS = {
+    # Standard formats
+    'bmp', 'gif', 'jpeg', 'jpg', 'png', 'tif', 'tiff', 'webp',
+
+    # Astronomy-specific formats
+    'fits', 'fit', 'fts',
+
+    # Medical imaging formats
+    'dcm', 'dicom', 'nii', 'nii.gz',
+
+    # Satellite/Remote sensing formats
+    'hdf', 'hdf5', 'h5', 'nc', 'img', 'dat',
+
+    # Agriculture/Geospatial formats
+    'jp2', 'j2k', 'sid', 'ecw', 'las', 'laz'
+}
+
 class ImageFolderWithPaths(datasets.ImageFolder):
-    """Dataset that preserves image paths"""
+    """Custom dataset that handles multiple image formats and preserves paths"""
+    def __init__(self, root, transform=None):
+        self.root = root
+        self.transform = transform
+
+        # Find all supported files recursively
+        self.samples = []
+        self.classes = []
+        self.class_to_idx = {}
+
+        # Build class mapping
+        class_names = sorted(entry.name for entry in os.scandir(root) if entry.is_dir())
+        if not class_names:
+            class_names = ['']  # Handle case with no subdirectories
+            self.samples = self._find_images(root)
+        else:
+            for idx, class_name in enumerate(class_names):
+                self.class_to_idx[class_name] = idx
+                class_dir = os.path.join(root, class_name)
+                self.samples.extend([(p, idx) for p in self._find_images(class_dir)])
+
+        self.classes = list(self.class_to_idx.keys())
+
+    def _find_images(self, directory):
+        """Recursively find all supported image files"""
+        image_paths = []
+        for root, _, files in os.walk(directory):
+            for file in files:
+                ext = os.path.splitext(file)[1][1:].lower()
+                if ext in SUPPORTED_IMAGE_FORMATS:
+                    image_paths.append(os.path.join(root, file))
+        return image_paths
+
     def __getitem__(self, index):
-        original_tuple = super().__getitem__(index)
-        path = self.imgs[index][0]
-        return original_tuple + (path,)
+        path, target = self.samples[index]
+
+        # Handle different file formats
+        ext = os.path.splitext(path)[1][1:].lower()
+
+        if ext in {'fits', 'fit', 'fts'}:
+            # Astronomy FITS files
+            with fits.open(path) as hdul:
+                image = hdul[0].data
+                if image.ndim == 2:
+                    image = np.stack([image]*3, axis=-1)  # Convert to 3-channel
+                image = Image.fromarray(image)
+        elif ext in {'dcm', 'dicom'}:
+            # Medical DICOM files
+            ds = pydicom.dcmread(path)
+            image = ds.pixel_array
+            if image.ndim == 2:
+                image = np.stack([image]*3, axis=-1)
+            image = Image.fromarray(image)
+        elif ext in {'nii', 'nii.gz'}:
+            # NIfTI medical images (middle slice)
+            img = nib.load(path)
+            data = img.get_fdata()
+            slice_idx = data.shape[-1] // 2
+            image = data[:, :, slice_idx]
+            image = Image.fromarray(image).convert('RGB')
+        else:
+            # Standard image formats
+            image = Image.open(path).convert('RGB')
+
+        if self.transform is not None:
+            image = self.transform(image)
+
+        return image, target, path
 
 class FeatureExtractorPipeline:
     """Complete feature extraction pipeline"""
@@ -965,63 +1046,7 @@ class FeatureExtractorPipeline:
 
         return df
 
-    def extract_features_old(self) -> None:
-        """Extract features and save to CSV"""
-        dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
-        loader = DataLoader(
-            dataset,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=False,
-            num_workers=self.config["training"]["num_workers"]
-        )
 
-        self.model.eval()
-        features_list = []
-        paths_list = []
-        labels_list = []
-        class_names_list = []
-
-        with torch.no_grad():
-            for data, target, paths in tqdm(loader, desc="Extracting features"):
-                data = data.to(self.device)
-                features = self.model(data).cpu().numpy()
-
-                features_list.append(features)
-                paths_list.extend(paths)
-                labels_list.extend(target.numpy())
-                class_names_list.extend([os.path.basename(os.path.dirname(p)) for p in paths])
-
-        # Create DataFrame
-        features_array = np.concatenate(features_list, axis=0)
-        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
-
-        df = pd.DataFrame(features_array, columns=feature_cols)
-        df["image_path"] = paths_list
-        df["target"] = labels_list
-        df["target_name"] = class_names_list
-
-        # Save to CSV
-        df.to_csv(self.csv_path, index=False)
-        print(f"Features saved to {self.csv_path}")
-
-    def run(self) -> None:
-        """Run the complete pipeline"""
-        mode = self.config["execution_flags"]["mode"]
-
-        if mode in ["train", "train_and_predict"]:
-            if self.config["execution_flags"]["fresh_start"] or not self.config["execution_flags"]["use_previous_model"]:
-                print("Starting fresh training...")
-                self.train()
-            else:
-                try:
-                    print("Loading existing model...")
-                    self._load_model()
-                except FileNotFoundError:
-                    print("No existing model found, starting fresh training")
-                    self.train()
-
-        if mode in ["predict", "train_and_predict"]:
-            self.extract_features()
 
 def main():
     print("Welcome to Convolution DBNN")
