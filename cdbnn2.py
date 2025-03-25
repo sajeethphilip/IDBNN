@@ -434,17 +434,8 @@ class FeatureExtractorPipeline:
         return train_path, test_path, image_subfolders
 
     def _prepare_data_structure(self) -> None:
-        """Ensure proper training directory structure exists with class folders"""
-        # First verify the source directory contains valid data
-        if not self._has_valid_source_structure():
-            raise FileNotFoundError(
-                f"No valid training data found in {self.source_dir}\n"
-                "Expected either:\n"
-                "1. Class folders directly in this directory\n"
-                "2. 'train/' and optionally 'test/' subdirectories"
-            )
-
-        # Handle existing training directory
+        """Handle all dataset organization scenarios"""
+        # First handle the training directory existence
         if os.path.exists(self.train_dir):
             if self.interactive:
                 print(f"Warning: Training directory already exists at {self.train_dir}")
@@ -462,60 +453,18 @@ class FeatureExtractorPipeline:
             else:
                 # Non-interactive mode - default to merge
                 print(f"Training directory exists, merging new data into {self.train_dir}")
+        else:
+            os.makedirs(self.train_dir)
 
-        # Now ensure we have class folders in the training directory
+        # Now copy data from source to training directory
+        self._copy_data_from_source()
+
+        # Finally count the actual classes
         self._count_actual_classes()
-        self._ensure_class_folders_exist()
 
-    def _count_actual_classes(self) -> None:
-        """Count actual class folders with images in training directory"""
-        class_folders = []
-        for f in os.listdir(self.train_dir):
-            folder_path = os.path.join(self.train_dir, f)
-            if os.path.isdir(folder_path):
-                # Check if folder contains images
-                if any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
-                   for fname in os.listdir(folder_path)):
-                    class_folders.append(f)
-
-        if not class_folders:
-            raise FileNotFoundError(
-                f"No valid class folders found in {self.train_dir}\n"
-                "Please ensure the directory contains subfolders with images"
-            )
-
-        # Create class mapping and count
-        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(sorted(class_folders))}
-        self.num_classes = len(self.class_to_idx)
-
-        print(f"Found {self.num_classes} classes: {self.class_to_idx}")
-
-    def _has_valid_source_structure(self) -> bool:
-        """Check if source directory has valid structure"""
-        # Check for direct class folders
-        if any(os.path.isdir(os.path.join(self.source_dir, f)) and
-               any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
-                   for fname in os.listdir(os.path.join(self.source_dir, f)))
-               for f in os.listdir(self.source_dir)):
-            return True
-
-        # Check for train/test structure
-        train_path = os.path.join(self.source_dir, "train")
-        if os.path.exists(train_path) and any(os.path.isdir(os.path.join(train_path, f))
-                                             for f in os.listdir(train_path)):
-            return True
-
-        return False
-
-    def _ensure_class_folders_exist(self) -> None:
-        """Copy class folders from source to training directory if needed"""
-        # Check if training directory already has class folders
-        if any(os.path.isdir(os.path.join(self.train_dir, f))
-               for f in os.listdir(self.train_dir)):
-            print("Training directory already contains class folders")
-            return
-
-        print("Copying class folders to training directory...")
+    def _copy_data_from_source(self) -> None:
+        """Copy data from source to training directory"""
+        print(f"Copying data from {self.source_dir} to {self.train_dir}")
 
         # Case 1: Source has direct class folders
         class_folders = [f for f in os.listdir(self.source_dir)
@@ -544,7 +493,39 @@ class FeatureExtractorPipeline:
                     shutil.copytree(src, dst)
             return
 
-        raise FileNotFoundError("No class folders found in source directory")
+        raise FileNotFoundError(
+            f"No valid training data found in {self.source_dir}\n"
+            "Expected either:\n"
+            "1. Class folders directly in this directory\n"
+            "2. 'train/' subdirectory with class folders"
+        )
+
+
+    def _count_actual_classes(self) -> None:
+        """Count actual class folders with images in training directory"""
+        class_folders = []
+        for f in os.listdir(self.train_dir):
+            folder_path = os.path.join(self.train_dir, f)
+            if os.path.isdir(folder_path):
+                # Check if folder contains images
+                if any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
+                   for fname in os.listdir(folder_path)):
+                    class_folders.append(f)
+
+        if not class_folders:
+            raise FileNotFoundError(
+                f"No valid class folders found in {self.train_dir}\n"
+                "Please ensure the source directory contains:\n"
+                "1. Subfolders with images\n"
+                "2. Or a 'train/' subdirectory with class folders"
+            )
+
+        # Create class mapping and count
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(sorted(class_folders))}
+        self.num_classes = len(self.class_to_idx)
+
+        print(f"Found {self.num_classes} classes: {self.class_to_idx}")
+        print(f"Total training samples: {sum(len(os.listdir(os.path.join(self.train_dir, cls))) for cls in class_folders)}")
 
     def _merge_train_test_sets(self) -> None:
         """Merge train and test sets into train folder"""
