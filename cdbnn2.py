@@ -408,71 +408,129 @@ class FeatureExtractorPipeline:
         return train_path, test_path, image_subfolders
 
     def _prepare_data_structure(self) -> None:
-        """Handle all dataset organization scenarios with proper copying"""
+        """Copy data from source_dir to properly structured training directory"""
         # Create required directories
-        train_dir = os.path.join(self.datafolder, "train")
-        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(self.train_dir, exist_ok=True)
         os.makedirs(self.model_dir, exist_ok=True)
 
-        # Get source directory (parent of our datafolder)
-        source_dir = os.path.dirname(os.path.normpath(self.datafolder))
-
-        # Check if we have class folders in the source directory
-        class_folders = [
-            f for f in os.listdir(source_dir)
-            if os.path.isdir(os.path.join(source_dir, f)) and
-            any(fname.lower().endswith(('.png', '.jpg', '.jpeg','gif','tiff'))
-                for fname in os.listdir(os.path.join(source_dir, f)))
-        ]
-
-        if class_folders:
-            print(f"Found {len(class_folders)} class folders in source directory")
-            self._copy_class_folders(source_dir, class_folders, train_dir)
+        # Check for different organizational patterns in source_dir
+        if self._has_train_test_structure():
+            self._handle_train_test_structure()
+        elif self._has_class_folders():
+            self._handle_class_folders()
         else:
-            # Check for train/test folders in source directory
-            src_train = os.path.join(source_dir, "train")
-            src_test = os.path.join(source_dir, "test")
+            raise FileNotFoundError(
+                f"No valid training data found in {self.source_dir}\n"
+                "Expected either:\n"
+                "1. Class folders directly in this directory\n"
+                "2. 'train/' and optionally 'test/' subdirectories"
+            )
 
-            if os.path.exists(src_train) or os.path.exists(src_test):
-                self._handle_train_test_folders(src_train, src_test, train_dir)
-            else:
-                raise FileNotFoundError(
-                    f"No valid training data found in {source_dir}. "
-                    "Expected either:\n"
-                    "1. Class folders directly in this directory\n"
-                    "2. 'train/' and optionally 'test/' subdirectories"
-                )
+    def _has_train_test_structure(self) -> bool:
+        """Check if source has train/test folders"""
+        return (os.path.exists(os.path.join(self.source_dir, "train")) or \
+               (os.path.exists(os.path.join(self.source_dir, "test")))
 
-    def _handle_train_test_folders(self, src_train: str, src_test: str, train_dir: str) -> None:
-        """Handle existing train/test folders in source directory"""
+    def _has_class_folders(self) -> bool:
+        """Check if source has direct class folders"""
+        items = os.listdir(self.source_dir)
+        return any(
+            os.path.isdir(os.path.join(self.source_dir, f)) and
+            any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
+                for fname in os.listdir(os.path.join(self.source_dir, f)))
+            for f in items
+        )
+
+    def _handle_train_test_structure(self) -> None:
+        """Handle source with train/test folders"""
+        src_train = os.path.join(self.source_dir, "train")
+        src_test = os.path.join(self.source_dir, "test")
+
         if self.interactive and os.path.exists(src_test):
             response = input("Merge train and test sets? (y/n): ").lower()
             self.merge_train_test = response == 'y'
 
         if self.merge_train_test and os.path.exists(src_test):
             # Merge test into train
-            print("Merging test set into training data...")
-            shutil.copytree(src_train, train_dir, dirs_exist_ok=True)
+            print(f"Copying and merging data to {self.train_dir}")
+            shutil.copytree(src_train, self.train_dir, dirs_exist_ok=True)
             for class_name in os.listdir(src_test):
-                src_dir = os.path.join(src_test, class_name)
-                if os.path.isdir(src_dir):
-                    dst_dir = os.path.join(train_dir, class_name)
-                    if os.path.exists(dst_dir):
-                        # Merge directories
-                        for img in os.listdir(src_dir):
+                src_class = os.path.join(src_test, class_name)
+                if os.path.isdir(src_class):
+                    dst_class = os.path.join(self.train_dir, class_name)
+                    if os.path.exists(dst_class):
+                        # Merge class directories
+                        for img in os.listdir(src_class):
                             if img.lower().endswith(('.png', '.jpg', '.jpeg')):
                                 shutil.copy2(
-                                    os.path.join(src_dir, img),
-                                    os.path.join(dst_dir, img)
+                                    os.path.join(src_class, img),
+                                    os.path.join(dst_class, img)
                                 )
                     else:
-                        shutil.copytree(src_dir, dst_dir)
+                        shutil.copytree(src_class, dst_class)
         elif os.path.exists(src_train):
-            # Copy train folder
-            print("Copying training data...")
-            shutil.copytree(src_train, train_dir)
+            # Just copy train folder
+            print(f"Copying training data to {self.train_dir}")
+            shutil.copytree(src_train, self.train_dir)
         else:
             raise FileNotFoundError(f"No training data found in {src_train}")
+
+    def _handle_class_folders(self) -> None:
+        """Handle source with direct class folders"""
+        class_folders = [
+            f for f in os.listdir(self.source_dir)
+            if os.path.isdir(os.path.join(self.source_dir, f)) and
+            any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
+                for fname in os.listdir(os.path.join(self.source_dir, f)))
+        ]
+
+        print(f"Found {len(class_folders)} class folders in {self.source_dir}")
+
+        if self.interactive:
+            response = input(f"Create train/test split from {len(class_folders)} classes? (y/n): ").lower()
+            create_split = response == 'y'
+        else:
+            create_split = not self.merge_train_test
+
+        if create_split:
+            # Create train/test split (80/20)
+            os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
+            os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
+
+            for class_name in class_folders:
+                src_class = os.path.join(self.source_dir, class_name)
+
+                # Create class directories
+                os.makedirs(os.path.join(self.train_dir, "train", class_name), exist_ok=True)
+                os.makedirs(os.path.join(self.train_dir, "test", class_name), exist_ok=True)
+
+                # Get and shuffle images
+                images = [f for f in os.listdir(src_class)
+                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                np.random.shuffle(images)
+                split_idx = int(len(images) * 0.8)
+
+                # Copy to train
+                for img in images[:split_idx]:
+                    shutil.copy2(
+                        os.path.join(src_class, img),
+                        os.path.join(self.train_dir, "train", class_name, img)
+                    )
+
+                # Copy to test
+                for img in images[split_idx:]:
+                    shutil.copy2(
+                        os.path.join(src_class, img),
+                        os.path.join(self.train_dir, "test", class_name, img)
+                    )
+        else:
+            # Copy all to train (no test split)
+            print(f"Copying all classes to {self.train_dir}")
+            for class_name in class_folders:
+                shutil.copytree(
+                    os.path.join(self.source_dir, class_name),
+                    os.path.join(self.train_dir, class_name)
+                )
 
     def _copy_class_folders(self, source_dir: str, class_folders: List[str], train_dir: str) -> None:
         """Copy class folders from source to training directory"""
@@ -520,306 +578,6 @@ class FeatureExtractorPipeline:
                     os.path.join(source_dir, class_name),
                     os.path.join(train_dir, class_name)
                 )
-
-
-    def _handle_class_folders_direct(self, class_folders: List[str]) -> None:
-        """Handle case when class folders are directly in datafolder"""
-        dst_train = os.path.join(self.datafolder, "train")
-
-        if self.interactive:
-            response = input(f"Create train/test split from {len(class_folders)} classes? (y/n): ").lower()
-            create_split = response == 'y'
-        else:
-            create_split = not self.merge_train_test
-
-        if create_split:
-            # Create train/test split (80/20)
-            os.makedirs(os.path.join(dst_train, "train"), exist_ok=True)
-            os.makedirs(os.path.join(dst_train, "test"), exist_ok=True)
-
-            for class_name in class_folders:
-                src_dir = os.path.join(self.datafolder, class_name)
-
-                # Create class directories
-                os.makedirs(os.path.join(dst_train, "train", class_name), exist_ok=True)
-                os.makedirs(os.path.join(dst_train, "test", class_name), exist_ok=True)
-
-                # Get and shuffle images
-                images = [f for f in os.listdir(src_dir)
-                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-                np.random.shuffle(images)
-                split_idx = int(len(images) * 0.8)
-
-                # Copy to train
-                for img in images[:split_idx]:
-                    shutil.copy2(
-                        os.path.join(src_dir, img),
-                        os.path.join(dst_train, "train", class_name, img)
-                    )
-
-                # Copy to test
-                for img in images[split_idx:]:
-                    shutil.copy2(
-                        os.path.join(src_dir, img),
-                        os.path.join(dst_train, "test", class_name, img)
-                    )
-        else:
-            # Copy all to train (no test split)
-            for class_name in class_folders:
-                shutil.copytree(
-                    os.path.join(self.datafolder, class_name),
-                    os.path.join(dst_train, class_name)
-                )
-
-    def _handle_image_subfolders(self, subfolders: List[str]) -> None:
-        """Handle case when only image subfolders exist"""
-        dst_train = os.path.join(self.datafolder, "train")
-
-        if self.interactive:
-            response = input(f"Create train/test split from {len(subfolders)} folders? (y/n): ").lower()
-            create_split = response == 'y'
-        else:
-            create_split = not self.merge_train_test
-
-        if create_split:
-            # Create train/test split
-            os.makedirs(os.path.join(dst_train, "train"), exist_ok=True)
-            os.makedirs(os.path.join(dst_train, "test"), exist_ok=True)
-
-            for folder in subfolders:
-                class_name = os.path.basename(folder)
-
-                # Create class directories
-                os.makedirs(os.path.join(dst_train, "train", class_name), exist_ok=True)
-                os.makedirs(os.path.join(dst_train, "test", class_name), exist_ok=True)
-
-                # Split images 80/20
-                images = [f for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-                split_idx = int(len(images) * 0.8)
-
-                # Copy to train
-                for img in images[:split_idx]:
-                    shutil.copy2(
-                        os.path.join(folder, img),
-                        os.path.join(dst_train, "train", class_name, img)
-                    )
-
-                # Copy to test
-                for img in images[split_idx:]:
-                    shutil.copy2(
-                        os.path.join(folder, img),
-                        os.path.join(dst_train, "test", class_name, img)
-                    )
-        else:
-            # Use all as training data
-            for folder in subfolders:
-                class_name = os.path.basename(folder)
-                dst_class = os.path.join(dst_train, class_name)
-                shutil.copytree(folder, dst_class)
-
-    def _handle_train_test_exists(self) -> None:
-        """Handle existing train/test folders in datafolder"""
-        train_path = os.path.join(self.datafolder, "train")
-        test_path = os.path.join(self.datafolder, "test")
-        dst_train = os.path.join(self.datafolder, "train")  # Final destination
-
-        if self.interactive and os.path.exists(test_path):
-            response = input("Merge train and test sets? (y/n): ").lower()
-            self.merge_train_test = response == 'y'
-
-        if self.merge_train_test and os.path.exists(test_path):
-            # Merge test into train
-            print("Merging test set into training data...")
-            for class_name in os.listdir(test_path):
-                src_dir = os.path.join(test_path, class_name)
-                if os.path.isdir(src_dir):
-                    dst_dir = os.path.join(dst_train, class_name)
-                    if os.path.exists(dst_dir):
-                        # Merge directories
-                        for img in os.listdir(src_dir):
-                            if img.lower().endswith(('.png', '.jpg', '.jpeg')):
-                                shutil.copy2(
-                                    os.path.join(src_dir, img),
-                                    os.path.join(dst_dir, img)
-                                )
-                    else:
-                        shutil.copytree(src_dir, dst_dir)
-        elif os.path.exists(train_path):
-            # Just use existing train folder
-            print("Using existing training data")
-        else:
-            raise FileNotFoundError(f"No training data found in {train_path}")
-
-    def _copy_folder_contents(self, src: str, dst: str) -> None:
-        """Copy contents from src to dst, preserving subfolder structure"""
-        print(f"Copying from {src} to {dst}")
-        os.makedirs(dst, exist_ok=True)
-        for item in os.listdir(src):
-            src_path = os.path.join(src, item)
-            dst_path = os.path.join(dst, item)
-
-            if os.path.isdir(src_path):
-                # Only copy if it contains image files
-                if any(f.lower().endswith(('.png', '.jpg', '.jpeg')) for f in os.listdir(src_path)):
-                    shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-                    print(f"Copied class folder {item}")
-                else:
-                    print(f"Skipping {item} - no images found")
-            elif item.lower().endswith(('.png', '.jpg', '.jpeg')):
-                shutil.copy2(src_path, dst_path)
-                print(f"Copied image {item}")
-
-    def _handle_only_train_exists(self) -> None:
-        """Handle case when only train folder exists"""
-        src_train = os.path.join(self.datafolder, "train")
-        print(f"Found only train folder in {self.datafolder}")
-
-        if self.interactive:
-            response = input("Create test split from train? (y/n): ").lower()
-            if response == 'y':
-                self._create_test_split(src_train)
-            else:
-                # Just move to data/galaxies/train
-                self._merge_folders(src_train, self.train_dir)
-        else:
-            # Default behavior - just move to data/galaxies/train
-            self._merge_folders(src_train, self.train_dir)
-
-    def _handle_only_test_exists(self) -> None:
-        """Handle case when only test folder exists"""
-        src_test = os.path.join(self.datafolder, "test")
-        print(f"Found only test folder in {self.datafolder}")
-
-        if self.interactive:
-            response = input("Use test as training data? (y/n): ").lower()
-            if response == 'y':
-                self._merge_folders(src_test, self.train_dir)
-            else:
-                print("Please provide training data")
-                exit(1)
-        else:
-            # Default behavior - use test as training data
-            self._merge_folders(src_test, self.train_dir)
-
-    def _handle_raw_class_folders(self) -> None:
-        """Handle case when class folders are directly in datafolder"""
-        print(f"No train/test folders found in {self.datafolder}, looking for class folders...")
-
-        class_folders = [f for f in os.listdir(self.datafolder)
-                        if os.path.isdir(os.path.join(self.datafolder, f))]
-
-        if not class_folders:
-            print("No class folders found. Please organize your data.")
-            exit(1)
-
-        if self.interactive:
-            response = input(f"Found {len(class_folders)} class folders. Create train/test split? (y/n): ").lower()
-            if response == 'y':
-                self._create_train_test_split(class_folders)
-            else:
-                # Put everything in data/galaxies/train
-                for folder in class_folders:
-                    src = os.path.join(self.datafolder, folder)
-                    dst = os.path.join(self.train_dir, folder)
-                    self._merge_folders(src, dst)
-        else:
-            # Default behavior - put everything in data/galaxies/train
-            for folder in class_folders:
-                src = os.path.join(self.datafolder, folder)
-                dst = os.path.join(self.train_dir, folder)
-                self._merge_folders(src, dst)
-
-    def _merge_folders(self, src: str, dst: str) -> None:
-        """Merge contents of src folder into dst folder"""
-        os.makedirs(dst, exist_ok=True)
-        for item in os.listdir(src):
-            src_path = os.path.join(src, item)
-            dst_path = os.path.join(dst, item)
-
-            if os.path.isdir(src_path):
-                if os.path.exists(dst_path):
-                    # Recursively merge directories
-                    self._merge_folders(src_path, dst_path)
-                else:
-                    shutil.move(src_path, dst)
-            else:
-                shutil.move(src_path, dst_path)
-
-    def _create_test_split(self, train_src: str, test_ratio: float = 0.2) -> None:
-        """Create test split from training data"""
-        os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
-
-        for class_name in os.listdir(train_src):
-            class_path = os.path.join(train_src, class_name)
-            if os.path.isdir(class_path):
-                # Get all images in class
-                images = [f for f in os.listdir(class_path)
-                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-
-                # Split into train/test
-                split_idx = int(len(images) * (1 - test_ratio))
-                train_images = images[:split_idx]
-                test_images = images[split_idx:]
-
-                # Create class directories
-                os.makedirs(os.path.join(self.train_dir, "train", class_name), exist_ok=True)
-                os.makedirs(os.path.join(self.train_dir, "test", class_name), exist_ok=True)
-
-                # Move images
-                for img in train_images:
-                    src = os.path.join(class_path, img)
-                    dst = os.path.join(self.train_dir, "train", class_name, img)
-                    shutil.move(src, dst)
-
-                for img in test_images:
-                    src = os.path.join(class_path, img)
-                    dst = os.path.join(self.train_dir, "test", class_name, img)
-                    shutil.move(src, dst)
-
-                # Remove empty class directory
-                try:
-                    os.rmdir(class_path)
-                except OSError:
-                    pass
-
-    def _create_train_test_split(self, class_folders: List[str], test_ratio: float = 0.2) -> None:
-        """Create train/test split from raw class folders"""
-        os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
-
-        for folder in class_folders:
-            src = os.path.join(self.datafolder, folder)
-
-            # Get all images in class
-            images = [f for f in os.listdir(src)
-                     if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-
-            # Split into train/test
-            split_idx = int(len(images) * (1 - test_ratio))
-            train_images = images[:split_idx]
-            test_images = images[split_idx:]
-
-            # Create class directories
-            os.makedirs(os.path.join(self.train_dir, "train", folder), exist_ok=True)
-            os.makedirs(os.path.join(self.train_dir, "test", folder), exist_ok=True)
-
-            # Move images
-            for img in train_images:
-                src_path = os.path.join(src, img)
-                dst_path = os.path.join(self.train_dir, "train", folder, img)
-                shutil.move(src_path, dst_path)
-
-            for img in test_images:
-                src_path = os.path.join(src, img)
-                dst_path = os.path.join(self.train_dir, "test", folder, img)
-                shutil.move(src_path, dst_path)
-
-            # Remove empty source folder
-            try:
-                os.rmdir(src)
-            except OSError:
-                pass
 
 
     def _merge_train_test_sets(self) -> None:
@@ -1229,25 +987,26 @@ def main():
                        help="Run in interactive mode with prompts")
     args = parser.parse_args()
 
-    # Ensure datafolder is under data/
-    base_name = args.datafolder
-    datafolder = os.path.join("data", base_name)
-    os.makedirs(datafolder, exist_ok=True)
-    print(f"\nSetting up data structure in {datafolder}")
-    print("Searching for training data...")
+    # Set up destination path
+    dest_dir = os.path.join("data", args.dataset)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    print(f"\nSetting up data structure in {dest_dir}")
+    print(f"Source data from: {args.source}")
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
-        datafolder=datafolder,
+        source_dir=args.source,
+        datafolder=dest_dir,
         merge_train_test=args.merge_train_test,
         interactive=args.interactive
     )
+
     if args.mode in ["train", "train_and_predict"]:
         print("\nStarting training...")
         class_mapping = pipeline.train()
         print("\nTraining completed successfully!")
         print("Class mapping:", class_mapping)
-
     # Handle prediction
     if args.predict_dir:
         # Set default output path if not specified
