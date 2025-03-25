@@ -170,22 +170,18 @@ class FeatureExtractorPipeline:
         self._prepare_data_structure()
 
     def _initialize_config(self) -> Dict[str, Any]:
-        """Initialize or load configuration"""
-        if os.path.exists(self.config_path):
-            with open(self.config_path) as f:
+        """Initialize config file in data/<datafolder>/"""
+        config_path = os.path.join(self.datafolder, f"{self.dataset_name}.json")
+
+        if os.path.exists(config_path):
+            with open(config_path) as f:
                 config = json.load(f)
-            print(f"Loaded configuration from {self.config_path}")
+            print(f"Loaded configuration from {config_path}")
         else:
             config = self._create_default_config()
-            with open(self.config_path, 'w') as f:
+            with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
-            print(f"Created default configuration at {self.config_path}")
-
-        # Update paths in config
-        config["dataset"]["train_dir"] = self.train_dir
-        config["dataset"]["test_dir"] = self.test_dir
-        config["output"]["features_file"] = self.csv_path
-        config["output"]["model_dir"] = self.model_dir
+            print(f"Created default configuration at {config_path}")
 
         return config
 
@@ -201,8 +197,8 @@ class FeatureExtractorPipeline:
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],
                 "resize_images": True,
-                "train_dir": self.train_dir,
-                "test_dir": self.test_dir
+                "train_dir": os.path.join(self.datafolder, "train"),
+                "test_dir": os.path.join(self.datafolder, "train", "test") if not self.merge_train_test else None,
             },
             "model": {
                 "encoder_type": "cnn",
@@ -288,23 +284,25 @@ class FeatureExtractorPipeline:
                 "fresh_start": False
             },
             "output": {
-                "features_file": self.csv_path,
-                "model_dir": self.model_dir,
+            "features_file": os.path.join(self.datafolder, f"{self.dataset_name}.csv"),
+            "model_dir": self.model_dir,
                 "visualization_dir": os.path.join(self.datafolder, "visualizations")
             }
         }
 
     def _initialize_conf(self) -> Dict[str, Any]:
-        """Initialize or load .conf file"""
-        if os.path.exists(self.conf_path):
-            with open(self.conf_path) as f:
+        """Initialize .conf file in data/<datafolder>/"""
+        conf_path = os.path.join(self.datafolder, f"{self.dataset_name}.conf")
+
+        if os.path.exists(conf_path):
+            with open(conf_path) as f:
                 conf = json.load(f)
-            print(f"Loaded conf from {self.conf_path}")
+            print(f"Loaded conf from {conf_path}")
         else:
             conf = self._create_default_conf()
-            with open(self.conf_path, 'w') as f:
+            with open(conf_path, 'w') as f:
                 json.dump(conf, f, indent=4)
-            print(f"Created default conf at {self.conf_path}")
+            print(f"Created default conf at {conf_path}")
 
         return conf
 
@@ -383,49 +381,56 @@ class FeatureExtractorPipeline:
             print("Please copy your images into class subfolders in this directory.")
 
     def _prepare_data_structure(self) -> None:
-        """Handle all possible input folder structures and organize them properly"""
-        os.makedirs(self.train_dir, exist_ok=True)
+        """Handle all dataset organization scenarios with proper folder copying"""
+        # Create required directories
+        os.makedirs(os.path.join(self.datafolder, "train"), exist_ok=True)
+        os.makedirs(self.model_dir, exist_ok=True)
 
-        # Scenario 1: Both train and test folders exist
+        # Scenario 1: Both train and test folders exist in source
         if os.path.exists(os.path.join(self.datafolder, "train")) and os.path.exists(os.path.join(self.datafolder, "test")):
             self._handle_train_test_exists()
-        # Scenario 2: Only train exists
+        # Scenario 2: Only train exists in source
         elif os.path.exists(os.path.join(self.datafolder, "train")):
             self._handle_only_train_exists()
-        # Scenario 3: Only test exists
+        # Scenario 3: Only test exists in source
         elif os.path.exists(os.path.join(self.datafolder, "test")):
             self._handle_only_test_exists()
-        # Scenario 4: Neither exists - raw class folders
+        # Scenario 4: Raw class folders in source
         else:
             self._handle_raw_class_folders()
 
     def _handle_train_test_exists(self) -> None:
-        """Handle case when both train and test folders exist"""
+        """Handle case when both train and test folders exist in source"""
         src_train = os.path.join(self.datafolder, "train")
         src_test = os.path.join(self.datafolder, "test")
 
         if self.interactive:
-            response = input(f"Found both train and test folders in {self.datafolder}. Merge them? (y/n): ").lower()
+            response = input(f"Found both train and test folders. Merge them? (y/n): ").lower()
             self.merge_train_test = response == 'y'
 
         if self.merge_train_test:
             print("Merging train and test sets...")
-            # Move all content to data/galaxies/train
-            self._merge_folders(src_train, self.train_dir)
-            self._merge_folders(src_test, self.train_dir)
+            # Copy all content to data/<datafolder>/train/
+            self._copy_folder_contents(src_train, os.path.join(self.datafolder, "train"))
+            self._copy_folder_contents(src_test, os.path.join(self.datafolder, "train"))
         else:
-            # Create data/galaxies/train/train and data/galaxies/train/test
-            os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
-            os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
-            self._merge_folders(src_train, os.path.join(self.train_dir, "train"))
-            self._merge_folders(src_test, os.path.join(self.train_dir, "test"))
+            # Create data/<datafolder>/train/train and data/<datafolder>/train/test
+            os.makedirs(os.path.join(self.datafolder, "train", "train"), exist_ok=True)
+            os.makedirs(os.path.join(self.datafolder, "train", "test"), exist_ok=True)
+            self._copy_folder_contents(src_train, os.path.join(self.datafolder, "train", "train"))
+            self._copy_folder_contents(src_test, os.path.join(self.datafolder, "train", "test"))
 
-        # Remove original folders if empty
-        try:
-            os.rmdir(src_train)
-            os.rmdir(src_test)
-        except OSError:
-            pass
+    def _copy_folder_contents(self, src: str, dst: str) -> None:
+        """Copy contents from src to dst, preserving subfolder structure"""
+        os.makedirs(dst, exist_ok=True)
+        for item in os.listdir(src):
+            src_path = os.path.join(src, item)
+            dst_path = os.path.join(dst, item)
+
+            if os.path.isdir(src_path):
+                shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src_path, dst_path)
 
     def _handle_only_train_exists(self) -> None:
         """Handle case when only train folder exists"""
@@ -987,8 +992,8 @@ def main():
     args = parser.parse_args()
 
     # Ensure datafolder is under data/
-    base_datafolder = args.datafolder
-    args.datafolder = os.path.join("data", base_datafolder)
+    base_name = args.datafolder
+    args.datafolder = os.path.join("data", base_name)
     os.makedirs(args.datafolder, exist_ok=True)
 
     # Initialize pipeline
