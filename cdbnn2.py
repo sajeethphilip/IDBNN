@@ -421,7 +421,7 @@ class FeatureExtractorPipeline:
         class_folders = [
             f for f in os.listdir(source_dir)
             if os.path.isdir(os.path.join(source_dir, f)) and
-            any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
+            any(fname.lower().endswith(('.png', '.jpg', '.jpeg','gif','tiff'))
                 for fname in os.listdir(os.path.join(source_dir, f)))
         ]
 
