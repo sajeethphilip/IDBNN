@@ -398,39 +398,49 @@ class FeatureExtractorPipeline:
         # Scenario 4: Raw class folders in source
         else:
             self._handle_raw_class_folders()
+        train_path = os.path.join(self.datafolder, "train")
+        if not any(os.path.isdir(os.path.join(train_path, f)) for f in os.listdir(train_path)):
+            raise FileNotFoundError(f"No class folders found in {train_path}. Please ensure your input data contains subdirectories for each class.")
 
-    def _handle_train_test_exists(self) -> None:
+    def _handle_train_test_exists(self, source_dir: str) -> None:
         """Handle case when both train and test folders exist in source"""
-        src_train = os.path.join(self.datafolder, "train")
-        src_test = os.path.join(self.datafolder, "test")
+        src_train = os.path.join(source_dir, "train")
+        src_test = os.path.join(source_dir, "test")
+        dst_train = os.path.join(self.datafolder, "train")
 
         if self.interactive:
             response = input(f"Found both train and test folders. Merge them? (y/n): ").lower()
             self.merge_train_test = response == 'y'
 
         if self.merge_train_test:
-            print("Merging train and test sets...")
-            # Copy all content to data/<datafolder>/train/
-            self._copy_folder_contents(src_train, os.path.join(self.datafolder, "train"))
-            self._copy_folder_contents(src_test, os.path.join(self.datafolder, "train"))
+            print(f"Copying all images to {dst_train}")
+            self._copy_folder_contents(src_train, dst_train)
+            self._copy_folder_contents(src_test, dst_train)
         else:
-            # Create data/<datafolder>/train/train and data/<datafolder>/train/test
-            os.makedirs(os.path.join(self.datafolder, "train", "train"), exist_ok=True)
-            os.makedirs(os.path.join(self.datafolder, "train", "test"), exist_ok=True)
-            self._copy_folder_contents(src_train, os.path.join(self.datafolder, "train", "train"))
-            self._copy_folder_contents(src_test, os.path.join(self.datafolder, "train", "test"))
+            # Create train/train and train/test subdirectories
+            os.makedirs(os.path.join(dst_train, "train"), exist_ok=True)
+            os.makedirs(os.path.join(dst_train, "test"), exist_ok=True)
+            self._copy_folder_contents(src_train, os.path.join(dst_train, "train"))
+            self._copy_folder_contents(src_test, os.path.join(dst_train, "test"))
 
     def _copy_folder_contents(self, src: str, dst: str) -> None:
         """Copy contents from src to dst, preserving subfolder structure"""
+        print(f"Copying from {src} to {dst}")
         os.makedirs(dst, exist_ok=True)
         for item in os.listdir(src):
             src_path = os.path.join(src, item)
             dst_path = os.path.join(dst, item)
 
             if os.path.isdir(src_path):
-                shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-            else:
+                # Only copy if it contains image files
+                if any(f.lower().endswith(('.png', '.jpg', '.jpeg')) for f in os.listdir(src_path)):
+                    shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
+                    print(f"Copied class folder {item}")
+                else:
+                    print(f"Skipping {item} - no images found")
+            elif item.lower().endswith(('.png', '.jpg', '.jpeg')):
                 shutil.copy2(src_path, dst_path)
+                print(f"Copied image {item}")
 
     def _handle_only_train_exists(self) -> None:
         """Handle case when only train folder exists"""
@@ -995,6 +1005,7 @@ def main():
     base_name = args.datafolder
     args.datafolder = os.path.join("data", base_name)
     os.makedirs(args.datafolder, exist_ok=True)
+    print(f"\nSetting up data structure in {args.datafolder}")
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
