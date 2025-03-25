@@ -429,7 +429,7 @@ class FeatureExtractorPipeline:
     def _has_train_test_structure(self) -> bool:
         """Check if source has train/test folders"""
         return (os.path.exists(os.path.join(self.source_dir, "train")) or \
-               (os.path.exists(os.path.join(self.source_dir, "test")))
+               (os.path.exists(os.path.join(self.source_dir, "test"))))
 
     def _has_class_folders(self) -> bool:
         """Check if source has direct class folders"""
