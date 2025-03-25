@@ -362,15 +362,6 @@ class FeatureExtractorPipeline:
             }
         }
 
-    def _prepare_data_structure(self) -> None:
-        """Prepare the data folder structure"""
-        os.makedirs(self.train_dir, exist_ok=True)
-        os.makedirs(self.model_dir, exist_ok=True)
-
-        if self.interactive:
-            self._handle_interactive_setup()
-        elif self.merge_train_test:
-            self._merge_train_test_sets()
 
     def _handle_interactive_setup(self) -> None:
         """Handle interactive setup"""
@@ -390,6 +381,204 @@ class FeatureExtractorPipeline:
         if not os.listdir(self.train_dir):
             print(f"Warning: No images found in {self.train_dir}")
             print("Please copy your images into class subfolders in this directory.")
+
+    def _prepare_data_structure(self) -> None:
+        """Handle all possible input folder structures and organize them properly"""
+        os.makedirs(self.train_dir, exist_ok=True)
+
+        # Scenario 1: Both train and test folders exist
+        if os.path.exists(os.path.join(self.datafolder, "train")) and os.path.exists(os.path.join(self.datafolder, "test")):
+            self._handle_train_test_exists()
+        # Scenario 2: Only train exists
+        elif os.path.exists(os.path.join(self.datafolder, "train")):
+            self._handle_only_train_exists()
+        # Scenario 3: Only test exists
+        elif os.path.exists(os.path.join(self.datafolder, "test")):
+            self._handle_only_test_exists()
+        # Scenario 4: Neither exists - raw class folders
+        else:
+            self._handle_raw_class_folders()
+
+    def _handle_train_test_exists(self) -> None:
+        """Handle case when both train and test folders exist"""
+        src_train = os.path.join(self.datafolder, "train")
+        src_test = os.path.join(self.datafolder, "test")
+
+        if self.interactive:
+            response = input(f"Found both train and test folders in {self.datafolder}. Merge them? (y/n): ").lower()
+            self.merge_train_test = response == 'y'
+
+        if self.merge_train_test:
+            print("Merging train and test sets...")
+            # Move all content to data/galaxies/train
+            self._merge_folders(src_train, self.train_dir)
+            self._merge_folders(src_test, self.train_dir)
+        else:
+            # Create data/galaxies/train/train and data/galaxies/train/test
+            os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
+            os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
+            self._merge_folders(src_train, os.path.join(self.train_dir, "train"))
+            self._merge_folders(src_test, os.path.join(self.train_dir, "test"))
+
+        # Remove original folders if empty
+        try:
+            os.rmdir(src_train)
+            os.rmdir(src_test)
+        except OSError:
+            pass
+
+    def _handle_only_train_exists(self) -> None:
+        """Handle case when only train folder exists"""
+        src_train = os.path.join(self.datafolder, "train")
+        print(f"Found only train folder in {self.datafolder}")
+
+        if self.interactive:
+            response = input("Create test split from train? (y/n): ").lower()
+            if response == 'y':
+                self._create_test_split(src_train)
+            else:
+                # Just move to data/galaxies/train
+                self._merge_folders(src_train, self.train_dir)
+        else:
+            # Default behavior - just move to data/galaxies/train
+            self._merge_folders(src_train, self.train_dir)
+
+    def _handle_only_test_exists(self) -> None:
+        """Handle case when only test folder exists"""
+        src_test = os.path.join(self.datafolder, "test")
+        print(f"Found only test folder in {self.datafolder}")
+
+        if self.interactive:
+            response = input("Use test as training data? (y/n): ").lower()
+            if response == 'y':
+                self._merge_folders(src_test, self.train_dir)
+            else:
+                print("Please provide training data")
+                exit(1)
+        else:
+            # Default behavior - use test as training data
+            self._merge_folders(src_test, self.train_dir)
+
+    def _handle_raw_class_folders(self) -> None:
+        """Handle case when class folders are directly in datafolder"""
+        print(f"No train/test folders found in {self.datafolder}, looking for class folders...")
+
+        class_folders = [f for f in os.listdir(self.datafolder)
+                        if os.path.isdir(os.path.join(self.datafolder, f))]
+
+        if not class_folders:
+            print("No class folders found. Please organize your data.")
+            exit(1)
+
+        if self.interactive:
+            response = input(f"Found {len(class_folders)} class folders. Create train/test split? (y/n): ").lower()
+            if response == 'y':
+                self._create_train_test_split(class_folders)
+            else:
+                # Put everything in data/galaxies/train
+                for folder in class_folders:
+                    src = os.path.join(self.datafolder, folder)
+                    dst = os.path.join(self.train_dir, folder)
+                    self._merge_folders(src, dst)
+        else:
+            # Default behavior - put everything in data/galaxies/train
+            for folder in class_folders:
+                src = os.path.join(self.datafolder, folder)
+                dst = os.path.join(self.train_dir, folder)
+                self._merge_folders(src, dst)
+
+    def _merge_folders(self, src: str, dst: str) -> None:
+        """Merge contents of src folder into dst folder"""
+        os.makedirs(dst, exist_ok=True)
+        for item in os.listdir(src):
+            src_path = os.path.join(src, item)
+            dst_path = os.path.join(dst, item)
+
+            if os.path.isdir(src_path):
+                if os.path.exists(dst_path):
+                    # Recursively merge directories
+                    self._merge_folders(src_path, dst_path)
+                else:
+                    shutil.move(src_path, dst)
+            else:
+                shutil.move(src_path, dst_path)
+
+    def _create_test_split(self, train_src: str, test_ratio: float = 0.2) -> None:
+        """Create test split from training data"""
+        os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
+
+        for class_name in os.listdir(train_src):
+            class_path = os.path.join(train_src, class_name)
+            if os.path.isdir(class_path):
+                # Get all images in class
+                images = [f for f in os.listdir(class_path)
+                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+                # Split into train/test
+                split_idx = int(len(images) * (1 - test_ratio))
+                train_images = images[:split_idx]
+                test_images = images[split_idx:]
+
+                # Create class directories
+                os.makedirs(os.path.join(self.train_dir, "train", class_name), exist_ok=True)
+                os.makedirs(os.path.join(self.train_dir, "test", class_name), exist_ok=True)
+
+                # Move images
+                for img in train_images:
+                    src = os.path.join(class_path, img)
+                    dst = os.path.join(self.train_dir, "train", class_name, img)
+                    shutil.move(src, dst)
+
+                for img in test_images:
+                    src = os.path.join(class_path, img)
+                    dst = os.path.join(self.train_dir, "test", class_name, img)
+                    shutil.move(src, dst)
+
+                # Remove empty class directory
+                try:
+                    os.rmdir(class_path)
+                except OSError:
+                    pass
+
+    def _create_train_test_split(self, class_folders: List[str], test_ratio: float = 0.2) -> None:
+        """Create train/test split from raw class folders"""
+        os.makedirs(os.path.join(self.train_dir, "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.train_dir, "test"), exist_ok=True)
+
+        for folder in class_folders:
+            src = os.path.join(self.datafolder, folder)
+
+            # Get all images in class
+            images = [f for f in os.listdir(src)
+                     if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+            # Split into train/test
+            split_idx = int(len(images) * (1 - test_ratio))
+            train_images = images[:split_idx]
+            test_images = images[split_idx:]
+
+            # Create class directories
+            os.makedirs(os.path.join(self.train_dir, "train", folder), exist_ok=True)
+            os.makedirs(os.path.join(self.train_dir, "test", folder), exist_ok=True)
+
+            # Move images
+            for img in train_images:
+                src_path = os.path.join(src, img)
+                dst_path = os.path.join(self.train_dir, "train", folder, img)
+                shutil.move(src_path, dst_path)
+
+            for img in test_images:
+                src_path = os.path.join(src, img)
+                dst_path = os.path.join(self.train_dir, "test", folder, img)
+                shutil.move(src_path, dst_path)
+
+            # Remove empty source folder
+            try:
+                os.rmdir(src)
+            except OSError:
+                pass
+
 
     def _merge_train_test_sets(self) -> None:
         """Merge train and test sets into train folder"""
@@ -627,74 +816,125 @@ class FeatureExtractorPipeline:
                 return pickle.load(f)
         return None
 
-    def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
-        """
-        Predict features for images in a directory
+def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
+    """
+    Predict features for images in a directory and save to CSV
 
-        Args:
-            image_dir: Directory containing images (can have subfolders)
-            output_csv: Optional path to save predictions as CSV
+    Args:
+        image_dir: Directory containing images (can have subfolders)
+        output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
 
-        Returns:
-            DataFrame with columns: image_path, target_name, target, feature_0...feature_N
-        """
-        # Load label encoding if available
-        self.class_to_idx = self._load_label_encoding()
+    Returns:
+        DataFrame with columns: image_path, target_name, target, feature_0...feature_N
+    """
+    # Set default output path if not specified
+    if output_csv is None:
+        output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
 
-        # Create dataset without labels (using ImageFolder for consistent transforms)
-        dataset = datasets.ImageFolder(image_dir, transform=self.transform)
-        loader = DataLoader(
-            dataset,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=False,
-            num_workers=self.config["training"]["num_workers"]
-        )
+    # Load label encoding if available
+    self.class_to_idx = self._load_label_encoding()
 
-        # Get paths (ImageFolder doesn't preserve paths by default)
-        paths = []
-        for root, _, files in os.walk(image_dir):
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    paths.append(os.path.join(root, file))
+    # Create dataset and loader
+    dataset = datasets.ImageFolder(image_dir, transform=self.transform)
+    loader = DataLoader(
+        dataset,
+        batch_size=self.config["training"]["batch_size"],
+        shuffle=False,
+        num_workers=self.config["training"]["num_workers"]
+    )
 
-        # Extract features
-        self.model.eval()
-        features_list = []
+    # Get all image paths (including subdirectories)
+    image_paths = []
+    for root, _, files in os.walk(image_dir):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                image_paths.append(os.path.join(root, file))
 
-        with torch.no_grad():
-            for batch in tqdm(loader, desc="Predicting features"):
-                images = batch[0].to(self.device)
-                features = self.model(images).cpu().numpy()
-                features_list.append(features)
+    # Validate we found images
+    if not image_paths:
+        raise ValueError(f"No images found in {image_dir}")
 
-        # Create DataFrame
-        features_array = np.concatenate(features_list, axis=0)
-        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
+    # Extract features
+    self.model.eval()
+    features_list = []
 
-        df = pd.DataFrame(features_array, columns=feature_cols)
-        df["image_path"] = paths
+    with torch.no_grad():
+        for images, _ in tqdm(loader, desc="Extracting features"):
+            images = images.to(self.device)
+            features = self.model(images).cpu().numpy()
+            features_list.append(features)
 
-        # Add target information based on folder names
-        df["target_name"] = df["image_path"].apply(
-            lambda x: os.path.basename(os.path.dirname(x))
-        )
+    # Create DataFrame
+    features_array = np.concatenate(features_list, axis=0)
+    feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
 
-        # Set numeric targets if we have label encoding
-        if self.class_to_idx:
-            df["target"] = df["target_name"].map(self.class_to_idx).fillna(-1).astype(int)
-        else:
-            df["target"] = -1
+    df = pd.DataFrame(features_array, columns=feature_cols)
+    df["image_path"] = image_paths
 
-        # Reorder columns
-        df = df[["image_path", "target_name", "target"] + feature_cols]
+    # Add target information based on folder structure
+    df["target_name"] = df["image_path"].apply(
+        lambda x: os.path.basename(os.path.dirname(x))
+    )
 
-        # Save to CSV if requested
-        if output_csv:
-            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-            df.to_csv(output_csv, index=False)
-            print(f"Predictions saved to {output_csv}")
+    # Set numeric targets if we have label encoding
+    if self.class_to_idx:
+        df["target"] = df["target_name"].map(self.class_to_idx).fillna(-1).astype(int)
+    else:
+        df["target"] = -1
 
-        return df
+    # Ensure consistent column order
+    df = df[["image_path", "target_name", "target"] + feature_cols]
+
+    # Save results
+    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    df.to_csv(output_csv, index=False)
+
+    print(f"\nPrediction results saved to: {output_csv}")
+    print(f"Total images processed: {len(df)}")
+    if self.class_to_idx:
+        known = sum(df["target"] != -1)
+        print(f"Images with known classes: {known} ({known/len(df):.1%})")
+
+    return df
+
+def main():
+    parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
+    parser.add_argument("--datafolder", type=str, required=True,
+                       help="Base folder for dataset (e.g. 'galaxies' will use data/galaxies/)")
+    parser.add_argument("--predict_dir", type=str,
+                       help="Directory with images to predict on")
+    parser.add_argument("--predict_output", type=str,
+                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
+    # ... (other arguments remain the same)
+
+    args = parser.parse_args()
+
+    # Ensure datafolder is under data/
+    base_datafolder = args.datafolder
+    args.datafolder = os.path.join("data", base_datafolder)
+    os.makedirs(args.datafolder, exist_ok=True)
+
+    # Initialize pipeline
+    pipeline = FeatureExtractorPipeline(
+        datafolder=args.datafolder,
+        merge_train_test=args.merge_train_test,
+        interactive=args.interactive
+    )
+
+    # Handle prediction
+    if args.predict_dir:
+        # Set default output path if not specified
+        if args.predict_output is None:
+            args.predict_output = os.path.join(args.datafolder, f"{base_datafolder}.csv")
+
+        print(f"\nStarting prediction on images in: {args.predict_dir}")
+        print(f"Results will be saved to: {args.predict_output}")
+
+        predictions = pipeline.predict(args.predict_dir, args.predict_output)
+
+        # Print sample of results
+        print("\nSample predictions:")
+        print(predictions[["image_path", "target_name", "target"]].head())
 
     def _save_model(self) -> None:
         os.makedirs(self.model_dir, exist_ok=True)
@@ -772,18 +1012,24 @@ class FeatureExtractorPipeline:
 def main():
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
     parser.add_argument("--datafolder", type=str, required=True,
-                       help="Path to data folder (e.g., 'data/mnist')")
+                       help="Path to data folder (e.g., 'galaxies') - will be created under 'data/'")
     parser.add_argument("--mode", type=str, choices=["train", "predict", "train_and_predict"],
                        default="train_and_predict", help="Execution mode")
     parser.add_argument("--predict_dir", type=str,
                        help="Directory to predict on (required for predict mode)")
     parser.add_argument("--predict_output", type=str,
-                       help="Output CSV for predictions (default: <datafolder>/predictions.csv)")
+                       default="predictions.csv",
+                       help="Output CSV for predictions (will be saved in datafolder)")
     parser.add_argument("--merge_train_test", action="store_true",
-                       help="Merge train and test sets into single training set")
+                       help="Force merge of train and test sets without prompt")
     parser.add_argument("--interactive", action="store_true",
-                       help="Run in interactive mode")
+                       help="Run in interactive mode with prompts")
     args = parser.parse_args()
+
+    # Ensure datafolder is under data/
+    if not args.datafolder.startswith("data/"):
+        args.datafolder = os.path.join("data", args.datafolder)
+    os.makedirs(args.datafolder, exist_ok=True)
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
@@ -793,18 +1039,20 @@ def main():
     )
 
     # Execute based on mode
-    if args.mode == "train" or args.mode == "train_and_predict":
+    if args.mode in ["train", "train_and_predict"]:
         print("Starting training...")
-        pipeline.train()
+        class_mapping = pipeline.train()
+        print("Label mapping:", class_mapping)
 
-    if args.mode == "predict" or args.mode == "train_and_predict":
+    if args.mode in ["predict", "train_and_predict"]:
         if not args.predict_dir:
             raise ValueError("--predict_dir required for prediction mode")
 
-        output_csv = args.predict_output or os.path.join(args.datafolder, "predictions.csv")
+        output_csv = os.path.join(args.datafolder, args.predict_output)
         print(f"Predicting on images in {args.predict_dir}...")
         predictions = pipeline.predict(args.predict_dir, output_csv)
         print(f"Predicted features for {len(predictions)} images")
+        print(f"Results saved to {output_csv}")
 
 if __name__ == "__main__":
     main()
