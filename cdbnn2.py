@@ -84,7 +84,6 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 
-params['use_phase2'] =True
 
 class PredictionManager:
     """Manages the prediction phase for both CNN and Autoencoder models."""
