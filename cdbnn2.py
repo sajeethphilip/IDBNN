@@ -106,17 +106,35 @@ class KLDivergenceClusterer:
     """Handles KL-divergence based clustering"""
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        ae_config = config["model"]["autoencoder_config"]["enhancements"]
+        ae_config = config["model"]["CNN_config"]["enhancements"]
         self.temperature = ae_config["clustering_temperature"]
         self.min_confidence = ae_config["min_cluster_confidence"]
+        self.num_classes = config["dataset"]["num_classes"]
 
     def compute_kl_divergence(self, features: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute KL divergence between features and target distributions"""
+        # Convert targets to one-hot if needed
         if targets.dim() == 1:
-            targets = F.one_hot(targets, num_classes=self.config["dataset"]["num_classes"]).float()
+            targets = F.one_hot(targets, num_classes=self.num_classes).float()
 
+        # Normalize features to probability distribution
         features_dist = F.softmax(features / self.temperature, dim=1)
         targets_dist = F.softmax(targets / self.temperature, dim=1)
 
+        # Ensure targets match feature dimensions
+        if features.size(1) != targets.size(1):
+            # If feature dim > num_classes, pad targets with zeros
+            if features.size(1) > targets.size(1):
+                padding = torch.zeros(targets.size(0), features.size(1) - targets.size(1)).to(targets.device)
+                targets = torch.cat([targets, padding], dim=1)
+            # If feature dim < num_classes, truncate targets
+            else:
+                targets = targets[:, :features.size(1)]
+
+        # Normalize targets
+        targets_dist = F.softmax(targets / self.temperature, dim=1)
+
+        # Compute KL divergence
         return F.kl_div(
             features_dist.log(),
             targets_dist,
@@ -124,14 +142,20 @@ class KLDivergenceClusterer:
             log_target=False
         )
 
+
     def cluster_features(self, features: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Cluster features using KL divergence and target information"""
+        # Compute cluster probabilities
         similarities = torch.matmul(features, features.T)
         cluster_probs = F.softmax(similarities / self.temperature, dim=1)
 
+        # Filter by confidence
         max_probs = cluster_probs.max(dim=1)[0]
         confident_mask = max_probs > self.min_confidence
+        confident_features = features[confident_mask]
+        confident_targets = targets[confident_mask]
 
-        return features[confident_mask], targets[confident_mask]
+        return confident_features, confident_targets
 
 class ImageFolderWithPaths(datasets.ImageFolder):
     """Dataset that preserves image paths"""
@@ -155,6 +179,8 @@ class FeatureExtractorPipeline:
         self.dataset_name = os.path.basename(datafolder)
         self.interactive = interactive
         self.merge_train_test = merge_train_test
+        self.class_to_idx = None
+        self.num_classes = None
 
         # Setup paths
         self.config_path = os.path.join(datafolder, f"{self.dataset_name}.json")
@@ -229,7 +255,7 @@ class FeatureExtractorPipeline:
                     "min_lr": 1e-06,
                     "verbose": True
                 },
-                "autoencoder_config": {
+                "CNN_config": {
                     "reconstruction_weight": 1.0,
                     "feature_weight": 0.1,
                     "convergence_threshold": 0.001,
@@ -438,7 +464,31 @@ class FeatureExtractorPipeline:
                 print(f"Training directory exists, merging new data into {self.train_dir}")
 
         # Now ensure we have class folders in the training directory
+        self._count_actual_classes()
         self._ensure_class_folders_exist()
+
+    def _count_actual_classes(self) -> None:
+        """Count actual class folders with images in training directory"""
+        class_folders = []
+        for f in os.listdir(self.train_dir):
+            folder_path = os.path.join(self.train_dir, f)
+            if os.path.isdir(folder_path):
+                # Check if folder contains images
+                if any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
+                   for fname in os.listdir(folder_path)):
+                    class_folders.append(f)
+
+        if not class_folders:
+            raise FileNotFoundError(
+                f"No valid class folders found in {self.train_dir}\n"
+                "Please ensure the directory contains subfolders with images"
+            )
+
+        # Create class mapping and count
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(sorted(class_folders))}
+        self.num_classes = len(self.class_to_idx)
+
+        print(f"Found {self.num_classes} classes: {self.class_to_idx}")
 
     def _has_valid_source_structure(self) -> bool:
         """Check if source directory has valid structure"""
@@ -607,9 +657,19 @@ class FeatureExtractorPipeline:
             Dictionary mapping class names to numeric labels
         """
         # Create dataset and establish label encoding
-        train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         self.class_to_idx = train_dataset.class_to_idx
         self._save_label_encoding()
+        # Verify we have classes
+        if self.class_to_idx is None or self.num_classes is None:
+            raise RuntimeError("Classes not properly initialized")
+        # Create dataset using actual class folders
+        train_dataset = ImageFolderWithPaths(
+            self.train_dir,
+            transform=self.transform
+        )
+        # Update config with actual class count
+        self.config["dataset"]["num_classes"] = self.num_classes
+        self.clusterer = KLDivergenceClusterer(self.config)
 
         # Split into training and validation
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
@@ -663,7 +723,7 @@ class FeatureExtractorPipeline:
                     kl_loss = self.clusterer.compute_kl_divergence(features, target)
 
                     # Total loss with weighting
-                    loss = kl_loss * self.config["model"]["autoencoder_config"]["enhancements"]["kl_divergence_weight"]
+                    loss = kl_loss * self.config["model"]["CNN_config"]["enhancements"]["kl_divergence_weight"]
 
                 # Backward pass with scaling for mixed precision
                 scaler.scale(loss).backward()
