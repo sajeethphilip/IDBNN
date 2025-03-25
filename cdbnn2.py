@@ -84,6 +84,8 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 
+params['use_phase2'] =True
+
 class PredictionManager:
     """Manages the prediction phase for both CNN and Autoencoder models."""
 
@@ -2208,10 +2210,6 @@ def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dic
     phase1_epochs = params['epochs']//2 if params['use_phase2'] else params['epochs']
     phase1_best, phase1_hist = run_phase(1, phase1_epochs)
     history.update(phase1_hist)
-    use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
-    use_class_encoding = config['model']['autoencoder_config']['enhancements']['use_class_encoding']
-    if use_kl_divergence or use_class_encoding:
-        params['use_phase2']    =True
 
     # Phase 2: Enhancements (if enabled)
     if params['use_phase2']:
@@ -4402,6 +4400,7 @@ class FeatureExtractorCNN(nn.Module):
         # Phase 2 components
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
         self.use_class_encoding = config['model']['autoencoder_config']['enhancements']['use_class_encoding']
+        global params['use_phase2']
 
         if self.use_kl_divergence:
             num_clusters = config['dataset'].get('num_classes', 10)
