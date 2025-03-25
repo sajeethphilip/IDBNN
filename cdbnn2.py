@@ -176,7 +176,6 @@ class PredictionManager:
         Predict features for images from the input path (file, directory, or archive).
         Writes predictions to CSV batch-wise, including true class labels if available.
         """
-        # Validate input_path
         if not isinstance(input_path, (str, bytes, os.PathLike)):
             raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
@@ -194,84 +193,30 @@ class PredictionManager:
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Create a dataset for the model (if required)
-        if hasattr(self.model, 'set_dataset'):
-            logger.debug("Creating dataset...")
-            dataset = self._create_dataset(image_files, transform)
-            logger.debug(f"Dataset created with {len(dataset)} images.")
-            self.model.set_dataset(dataset)  # Set the dataset before processing images
-            logger.debug("Dataset set in the model.")
-
         # Initialize CSV file and write header
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            # Write header with distinct columns for Phase 1 and Phase 2
-            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            phase1_cols = [f'phase1_{col}' for col in feature_cols]
-            phase2_cols = [f'phase2_{col}' for col in feature_cols]
-            csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
+
+            # Write appropriate header based on model type
+            if self.is_cnn:
+                feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+                csv_writer.writerow(['filename', 'true_class'] + feature_cols)
+            else:
+                feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+                phase1_cols = [f'phase1_{col}' for col in feature_cols]
+                phase2_cols = [f'phase2_{col}' for col in feature_cols]
+                csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i + batch_size]
             batch_labels = class_labels[i:i + batch_size]
-            batch_images = []
 
-            # Load and transform images
-            for filename in batch_files:
-                try:
-                    image = Image.open(filename).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append(image_tensor)
-                except Exception as e:
-                    logger.error(f"Error loading image {filename}: {str(e)}")
-                    continue
-
-            if not batch_images:
-                continue
-
-            # Stack images into a batch
-            batch_tensor = torch.cat(batch_images, dim=0)
-
-            # Phase 1: Extract basic features
-            self.model.set_training_phase(1)
-            with torch.no_grad():
-                phase1_output = self.model(batch_tensor)
-                if isinstance(phase1_output, dict):
-                    phase1_embedding = phase1_output.get('embedding', phase1_output.get('features'))
-                elif isinstance(phase1_output, tuple):
-                    phase1_embedding = phase1_output[0]
-                else:
-                    phase1_embedding = phase1_output
-
-                phase1_embedding = phase1_embedding.cpu().numpy()
-
-            # Phase 2: Extract enhanced features with KL divergence and clustering
-            if hasattr(self.model, 'set_training_phase'):
-                self.model.set_training_phase(2)
-                with torch.no_grad():
-                    phase2_output = self.model(batch_tensor)
-                    if isinstance(phase2_output, dict):
-                        phase2_embedding = phase2_output.get('embedding', phase2_output.get('features'))
-                    elif isinstance(phase2_output, tuple):
-                        phase2_embedding = phase2_output[0]
-                    else:
-                        phase2_embedding = phase2_output
-
-                    phase2_embedding = phase2_embedding.cpu().numpy()
-
-            # Write predictions to CSV batch-wise
-            with open(output_csv, 'a', newline='') as csvfile:
-                csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    # Write Phase 1 features
-                    phase1_features = phase1_embedding[j].tolist()
-                    # Write Phase 2 features
-                    phase2_features = phase2_embedding[j].tolist()
-                    # Combine into a single row
-                    row = [os.path.basename(filename), true_class] + phase1_features + phase2_features
-                    csv_writer.writerow(row)
+            if self.is_cnn:
+                self._process_cnn_batch(batch_files, batch_labels, output_csv)
+            else:
+                self._process_autoencoder_batch(batch_files, batch_labels, output_csv)
 
         logger.info(f"Predictions saved to {output_csv}")
 
