@@ -632,22 +632,11 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 
     def train(self) -> Dict[str, int]:
-        """Train the feature extractor model and return label encoding dictionary
-
-        Returns:
-            Dictionary mapping class names to numeric labels
-        """
-        # Create dataset and establish label encoding
-        self._save_label_encoding()
-        # Verify we have classes
-        if self.class_to_idx is None or self.num_classes is None:
-            raise RuntimeError("Classes not properly initialized")
-        # Create dataset using actual class folders
-        train_dataset = ImageFolderWithPaths(
-            self.train_dir,
-            transform=self.transform
-        )
+        """Train until early stopping condition is met"""
+        train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         self.class_to_idx = train_dataset.class_to_idx
+        self.num_classes = len(self.class_to_idx)
+
         # Update config with actual class count
         self.config["dataset"]["num_classes"] = self.num_classes
         self.clusterer = KLDivergenceClusterer(self.config)
@@ -677,39 +666,36 @@ class FeatureExtractorPipeline:
         )
 
         # Training setup
-        num_epochs = self.config["training"]["epochs"]
         best_val_loss = float('inf')
         patience = self.config["training"]["early_stopping"]["patience"]
         patience_counter = 0
-
-        # Mixed precision training if enabled
-        scaler = torch.cuda.amp.GradScaler(enabled=self.config["execution_flags"]["mixed_precision"])
+        epoch = 0
 
         print(f"\nTraining on {len(train_dataset)} samples, validating on {len(val_dataset)} samples")
         print(f"Classes: {self.class_to_idx}")
+        print(f"Training until validation doesn't improve for {patience} epochs")
 
-        for epoch in range(num_epochs):
+        while True:  # Continue until early stopping
+            epoch += 1
             self.model.train()
             train_loss = 0.0
-            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}")
 
             for batch_idx, (data, target, _) in enumerate(progress_bar):
                 data, target = data.to(self.device), target.to(self.device)
 
                 self.optimizer.zero_grad()
 
-                # Mixed precision forward pass
-                with torch.cuda.amp.autocast(enabled=self.config["execution_flags"]["mixed_precision"]):
-                    features = self.model(data)
-                    kl_loss = self.clusterer.compute_kl_divergence(features, target)
+                # Forward pass
+                features = self.model(data)
+                kl_loss = self.clusterer.compute_kl_divergence(features, target)
 
-                    # Total loss with weighting
-                    loss = kl_loss * self.config["model"]["CNN_config"]["enhancements"]["kl_divergence_weight"]
+                # Total loss
+                loss = kl_loss * self.config["model"]["autoencoder_config"]["enhancements"]["kl_divergence_weight"]
 
-                # Backward pass with scaling for mixed precision
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
-                scaler.update()
+                # Backward pass
+                loss.backward()
+                self.optimizer.step()
 
                 train_loss += loss.item()
                 progress_bar.set_postfix({"train_loss": f"{train_loss/(batch_idx+1):.4f}"})
@@ -722,12 +708,12 @@ class FeatureExtractorPipeline:
             self.scheduler.step(val_loss)
 
             # Print epoch summary
-            print(f"Epoch {epoch+1} Summary:")
+            print(f"Epoch {epoch} Summary:")
             print(f"  Train Loss: {avg_train_loss:.4f}")
             print(f"  Val Loss:   {val_loss:.4f}")
             print(f"  LR:         {self.optimizer.param_groups[0]['lr']:.2e}")
 
-            # Early stopping and model checkpointing
+            # Check for improvement
             if val_loss < best_val_loss - self.config["training"]["early_stopping"]["min_delta"]:
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -737,14 +723,22 @@ class FeatureExtractorPipeline:
                 patience_counter += 1
                 print(f"  No improvement ({patience_counter}/{patience})")
                 if patience_counter >= patience:
-                    print(f"Early stopping after {epoch+1} epochs")
+                    print(f"\nEarly stopping triggered after {epoch} epochs")
                     break
 
-        # Load best model weights
-        self._load_model()
-        print("Training completed. Loaded best model weights.")
-
+        # Load best model weights before returning
+        self._load_best_model()
         return self.class_to_idx
+
+    def _load_best_model(self) -> None:
+        """Load the best saved model weights"""
+        model_path = os.path.join(self.model_dir, "feature_extractor.pth")
+        if os.path.exists(model_path):
+            checkpoint = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            print("Loaded best model weights")
+        else:
+            print("Warning: No saved model found to load")
 
     def _validate(self, val_loader: DataLoader) -> float:
         self.model.eval()
