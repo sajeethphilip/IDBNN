@@ -1,7 +1,7 @@
 # For the lazy guy
 ```
 git pull 
-To train/predcit using cdbnn2
+To train/predcit using cdbnn2 (For Image Feature Extraction)
   python cdbnn2.py [arguments]
     print("Welcome to Convolution DBNN")
 
@@ -20,7 +20,7 @@ To train/predcit using cdbnn2
 "--force", action="store_true",
                           help="Automatically overwrite existing files without prompt")
 
-To train/predcit using adbnn
+To train/predcit using adbnn  (For Difference Boosting Neural Network)
 
   python adbnn.py [arguments]
 
