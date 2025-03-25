@@ -142,9 +142,17 @@ class ImageFolderWithPaths(datasets.ImageFolder):
 
 class FeatureExtractorPipeline:
     """Complete feature extraction pipeline"""
-    def __init__(self, datafolder: str, merge_train_test: bool = False, interactive: bool = False):
-        self.datafolder = datafolder
-        self.dataset_name = os.path.basename(os.path.normpath(datafolder))
+    def __init__(self, source_dir: str, datafolder: str, merge_train_test: bool = False, interactive: bool = False):
+        """
+        Args:
+            source_dir: Path to source directory containing the original data
+            datafolder: Path to destination directory (under data/)
+            merge_train_test: Whether to merge train/test sets
+            interactive: Whether to prompt for user input
+        """
+        self.source_dir = os.path.abspath(source_dir)
+        self.datafolder = os.path.abspath(datafolder)
+        self.dataset_name = os.path.basename(datafolder)
         self.interactive = interactive
         self.merge_train_test = merge_train_test
 
