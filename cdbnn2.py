@@ -2695,7 +2695,7 @@ def _calculate_phase2_loss(outputs: Union[Dict, Tuple], inputs: torch.Tensor,
     return loss
 
 def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader,
-               config: Dict, device: torch.device) -> Dict[str, List]:
+               config: Dict) -> Dict[str, List]:
     """Universal training function for both CNN and Autoencoder models"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
