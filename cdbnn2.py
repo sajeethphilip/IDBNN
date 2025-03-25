@@ -63,304 +63,298 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
-import torch
-import pandas as pd
-from torchvision import transforms
-from PIL import Image
-from tqdm import tqdm
-import os
 import json
 import torch
 import logging
-from torch.utils.data import Dataset,DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 import pandas as pd
 from tqdm import tqdm
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from torchvision.transforms.functional import resize
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-
 class PredictionManager:
-    """Manages the prediction phase for both CNN and Autoencoder models."""
+    """Manages prediction on new images using a trained model."""
 
-    def __init__(self, config: Dict, model_path: str, output_dir: str):
+    def __init__(self, config: Dict, device: str = None):
         """
         Initialize the PredictionManager.
 
         Args:
-            config (Dict): Configuration dictionary containing dataset and model parameters.
-            model_path (str): Path to the trained model checkpoint.
-            output_dir (str): Directory where label encoders and other outputs will be saved.
+            config (Dict): Configuration dictionary.
+            device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
         """
         self.config = config
-        self.model_path = model_path
-        self.output_dir = output_dir
-        self.device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
-
-        # Load label encoders
-        self.label_encoder, self.reverse_encoder = self._load_or_generate_label_encoders()
-
-        # Load model with proper enhancement handling
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
-        self.model.eval()
+        self.is_cnn = isinstance(self.model, BaseFeatureExtractor)
 
-    def _load_model(self) -> torch.nn.Module:
-        """Load model with proper enhancement initialization"""
-        # Create base model
-        if self.config['model']['encoder_type'] == 'cnn':
-            model = FeatureExtractorCNN(
-                in_channels=self.config['dataset']['in_channels'],
-                feature_dims=self.config['model']['feature_dims'],
-                config=self.config
-            )
-        elif self.config['model']['encoder_type'] == 'autoenc':
-            model = EnhancedAutoEncoderFeatureExtractor(self.config)
+    def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
+        """Extract a compressed archive to a directory."""
+        if archive_path.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+        elif archive_path.endswith('.tar.gz') or archive_path.endswith('.tgz'):
+            with tarfile.open(archive_path, 'r:gz') as tar_ref:
+                tar_ref.extractall(extract_dir)
+        elif archive_path.endswith('.tar'):
+            with tarfile.open(archive_path, 'r:') as tar_ref:
+                tar_ref.extractall(extract_dir)
         else:
-            raise ValueError(f"Unsupported encoder type: {self.config['model']['encoder_type']}")
+            raise ValueError(f"Unsupported archive format: {archive_path}")
+        return extract_dir
 
-        # Load weights
-        checkpoint = torch.load(self.model_path, map_location=self.device)
+    def _get_image_files(self, input_path: str) -> List[str]:
+        """Get a list of image files from the input path."""
+        if not isinstance(input_path, (str, bytes, os.PathLike)):
+            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-        # Handle both unified and enhanced checkpoint formats
-        if 'model_states' in checkpoint:  # Enhanced model checkpoint
-            state_key = self._get_enhanced_state_key(checkpoint['model_states'])
-            if state_key not in checkpoint['model_states']:
-                available_keys = ", ".join(checkpoint['model_states'].keys())
-                raise ValueError(f"State key {state_key} not found. Available keys: {available_keys}")
-            model.load_state_dict(checkpoint['model_states'][state_key]['current']['state_dict'])
-        elif 'state_dict' in checkpoint:  # Standard checkpoint
-            model.load_state_dict(checkpoint['state_dict'])
+        image_files = []
+
+        if os.path.isfile(input_path):
+            # Single image file
+            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                return [input_path]
+            # Compressed archive
+            elif input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+                extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                self._extract_archive(input_path, extract_dir)
+                return self._get_image_files(extract_dir)  # Recursively process extracted files
+        elif os.path.isdir(input_path):
+            # Directory of images - recursively search for image files
+            for root, _, files in os.walk(input_path):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        image_files.append(os.path.join(root, file))
+            return image_files
         else:
-            raise ValueError("Invalid checkpoint format - missing both 'model_states' and 'state_dict'")
+            raise ValueError(f"Invalid input path: {input_path}")
 
-        # Initialize enhancements if needed
-        if self.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
-            if hasattr(model, '_initialize_cluster_centers'):
-                model._initialize_cluster_centers()
-            elif hasattr(model, 'cluster_centers'):
-                num_classes = self.config['dataset'].get('num_classes', 10)
-                model.cluster_centers = nn.Parameter(
-                    torch.randn(num_classes, self.config['model']['feature_dims']))
+    def _load_model(self) -> nn.Module:
+        """
+        Load the trained model from the checkpoint.
 
+        Returns:
+            nn.Module: The loaded model.
+        """
+        # Create the model based on the configuration
+        model = ModelFactory.create_model(self.config)
         model.to(self.device)
+
+        # Load the best model state from the checkpoint
+        checkpoint_path = self.checkpoint_manager.checkpoint_path
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+        # Load the checkpoint with proper device mapping
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.warning("CUDA not available. Falling back to CPU.")
+                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            else:
+                raise e
+
+        # Extract the state dictionary
+        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+
+        # Load the state dictionary into the model
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        logger.info("Model loaded successfully.")
         return model
 
-    def _get_enhanced_state_key(self, model_states: Dict) -> str:
-        """Generate state key considering all enhancement combinations"""
-        components = []
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
+        """
+        Predict features for images from the input path (file, directory, or archive).
+        Writes predictions to CSV batch-wise, including true class labels if available.
+        """
+        # Validate input_path
+        if not isinstance(input_path, (str, bytes, os.PathLike)):
+            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-        # Phase detection
-        phase = 2 if self.config['model']['autoencoder_config']['enhancements']['enable_phase2'] else 1
-        components.append(f'phase{phase}')
+        # Get list of image files and their corresponding class labels
+        image_files, class_labels = self._get_image_files_with_labels(input_path)
+        if not image_files:
+            raise ValueError(f"No valid images found in {input_path}")
 
-        # KL divergence
-        if phase == 2 and self.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
-            components.append('kld')
+        # Set default output CSV path if not provided
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
-        # Class encoding
-        if phase == 2 and self.config['model']['autoencoder_config']['enhancements']['use_class_encoding']:
-            components.append('cls')
+        # Get the image transform from the config
+        transform = self._get_transforms()
+        logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Image type enhancements
-        img_type = self.config['dataset'].get('image_type', 'general')
-        if img_type != 'general':
-            components.append(img_type)
+        # Create a dataset for the model (if required)
+        if hasattr(self.model, 'set_dataset'):
+            logger.debug("Creating dataset...")
+            dataset = self._create_dataset(image_files, transform)
+            logger.debug(f"Dataset created with {len(dataset)} images.")
+            self.model.set_dataset(dataset)  # Set the dataset before processing images
+            logger.debug("Dataset set in the model.")
 
-        # For CNN models, use a simplified key
-        if self.config['model']['encoder_type'] == 'cnn':
-            return 'cnn_' + '_'.join(components)
+        # Initialize CSV file and write header
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        with open(output_csv, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            # Write header with distinct columns for Phase 1 and Phase 2
+            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+            phase1_cols = [f'phase1_{col}' for col in feature_cols]
+            phase2_cols = [f'phase2_{col}' for col in feature_cols]
+            csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
 
-        return '_'.join(components)
+        # Process images in batches
+        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+            batch_files = image_files[i:i + batch_size]
+            batch_labels = class_labels[i:i + batch_size]
+            batch_images = []
 
-    def _get_state_key(self, model_states: Dict) -> str:
-        """Autoencoder-specific state key generation"""
-        if self.config['model']['encoder_type'] == 'cnn':
-            raise ValueError("CNN models don't use state keys")
+            # Load and transform images
+            for filename in batch_files:
+                try:
+                    image = Image.open(filename).convert('RGB')
+                    image_tensor = transform(image).unsqueeze(0).to(self.device)
+                    batch_images.append(image_tensor)
+                except Exception as e:
+                    logger.error(f"Error loading image {filename}: {str(e)}")
+                    continue
 
-        phase = 2 if self.config['model']['autoencoder_config']['enhancements']['enable_phase2'] else 1
-        components = [f"phase{phase}"]
+            if not batch_images:
+                continue
 
-        if phase == 2:
-            if self.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']:
-                components.append("kld")
-                if self.config['model']['autoencoder_config']['enhancements']['use_class_encoding']:
-                    components.append("cls")
+            # Stack images into a batch
+            batch_tensor = torch.cat(batch_images, dim=0)
 
-                image_type = self.config['dataset'].get('image_type', 'general')
-                if image_type != 'general':
-                    components.append(image_type)
+            # Phase 1: Extract basic features
+            self.model.set_training_phase(1)
+            with torch.no_grad():
+                phase1_output = self.model(batch_tensor)
+                if isinstance(phase1_output, dict):
+                    phase1_embedding = phase1_output.get('embedding', phase1_output.get('features'))
+                elif isinstance(phase1_output, tuple):
+                    phase1_embedding = phase1_output[0]
+                else:
+                    phase1_embedding = phase1_output
 
-            return "_".join(components)
+                phase1_embedding = phase1_embedding.cpu().numpy()
 
-    def _load_or_generate_label_encoders(self) -> Tuple[Dict, Dict]:
-        """Load label encoders if they exist, otherwise generate them from the input directory."""
-        label_encoder_path = os.path.join(self.output_dir, "label_encoder.json")
-        reverse_encoder_path = os.path.join(self.output_dir, "reverse_encoder.json")
+            # Phase 2: Extract enhanced features with KL divergence and clustering
+            if hasattr(self.model, 'set_training_phase'):
+                self.model.set_training_phase(2)
+                with torch.no_grad():
+                    phase2_output = self.model(batch_tensor)
+                    if isinstance(phase2_output, dict):
+                        phase2_embedding = phase2_output.get('embedding', phase2_output.get('features'))
+                    elif isinstance(phase2_output, tuple):
+                        phase2_embedding = phase2_output[0]
+                    else:
+                        phase2_embedding = phase2_output
 
-        if os.path.exists(label_encoder_path) and os.path.exists(reverse_encoder_path):
-            # Load existing label encoders
-            with open(label_encoder_path, 'r') as f:
-                label_encoder = json.load(f)
-            with open(reverse_encoder_path, 'r') as f:
-                reverse_encoder = json.load(f)
+                    phase2_embedding = phase2_embedding.cpu().numpy()
+
+            # Write predictions to CSV batch-wise
+            with open(output_csv, 'a', newline='') as csvfile:
+                csv_writer = csv.writer(csvfile)
+                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                    # Write Phase 1 features
+                    phase1_features = phase1_embedding[j].tolist()
+                    # Write Phase 2 features
+                    phase2_features = phase2_embedding[j].tolist()
+                    # Combine into a single row
+                    row = [os.path.basename(filename), true_class] + phase1_features + phase2_features
+                    csv_writer.writerow(row)
+
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
+        """
+        Get a list of image files and their corresponding class labels from the input path.
+        Assumes images are organized in subfolders under train/test folders.
+        """
+        image_files = []
+        class_labels = []
+
+        if os.path.isfile(input_path):
+            # Single image file (no class label)
+            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                image_files.append(input_path)
+                class_labels.append("unknown")  # No class label available
+        elif os.path.isdir(input_path):
+            # Directory of images - recursively search for image files
+            for root, dirs, files in os.walk(input_path):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        image_files.append(os.path.join(root, file))
+                        # Extract class label from subfolder name
+                        class_label = os.path.basename(root)
+                        class_labels.append(class_label)
         else:
-            # Generate new label encoders from the input directory
-            input_dir = self.config.get('dataset', {}).get('train_dir', None)
-            if not input_dir or not os.path.exists(input_dir):
-                raise FileNotFoundError(
-                    f"Training directory not found: {input_dir}. "
-                    "Please provide a valid training directory to generate label encoders."
-                )
+            raise ValueError(f"Invalid input path: {input_path}")
 
-            # Scan the training directory for class folders
-            class_dirs = [d for d in os.listdir(input_dir)
-                          if os.path.isdir(os.path.join(input_dir, d))]
-            if not class_dirs:
-                raise ValueError(f"No class directories found in {input_dir}.")
+        return image_files, class_labels
 
-            # Generate label encoders
-            label_encoder = {}
-            reverse_encoder = {}
-            for idx, class_name in enumerate(sorted(class_dirs)):
-                label_encoder[class_name] = idx
-                reverse_encoder[idx] = class_name
+    def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
+        """
+        Create a dataset from the list of image files.
 
-            # Save the label encoders
-            os.makedirs(self.output_dir, exist_ok=True)
-            with open(label_encoder_path, 'w') as f:
-                json.dump(label_encoder, f, indent=4)
-            with open(reverse_encoder_path, 'w') as f:
-                json.dump(reverse_encoder, f, indent=4)
+        Args:
+            image_files (List[str]): List of paths to image files.
+            transform (transforms.Compose): Transformations to apply to the images.
 
-        return label_encoder, reverse_encoder
+        Returns:
+            Dataset: A PyTorch dataset containing the images.
+        """
+        class DummyDataset(Dataset):
+            def __init__(self, image_files, transform):
+                self.image_files = image_files
+                self.transform = transform
 
-    def predict_from_folder(self, folder_path: str, output_csv_path: str) -> None:
-        """Predict features with full enhancement support"""
-        dataset = CustomImageDataset(folder_path, transform=self._get_transforms())
-        dataloader = DataLoader(dataset, batch_size=self.config['training']['batch_size'], shuffle=False)
+            def __len__(self):
+                return len(self.image_files)
 
-        # Initialize storage for all possible outputs
-        all_features = []
-        all_labels = []
-        all_filenames = []
-        all_class_names = []
-        cluster_data = []
-        enhancement_features = defaultdict(list)
-        # Initialize progress bar
-        pbar = tqdm(dataloader,
-                    desc="Predicting features",
-                    unit="batch",
-                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
-        try:
-            features_dict = self.model.extract_features(dataloader)
-            self._save_prediction_results(
-                all_features=features_dict['features'].numpy(),
-                all_labels=features_dict['labels'].tolist(),
-                all_filenames=features_dict['filenames'],
-                all_class_names=features_dict['class_names'],
-                enhancement_features={
-                    k: [v] for k, v in features_dict.items()
-                    if k not in ['features', 'labels', 'filenames', 'class_names']
-                },
-                output_csv_path=output_csv_path
-            )
-        except Exception as e:
-            logger.error(f"Feature extraction failed: {str(e)}")
-            raise
-        with torch.no_grad():
-            for batch_idx, (images, labels, file_indices, filenames) in enumerate(pbar):
-                images = images.to(self.device)
-                outputs = self.model(images)
+            def __getitem__(self, idx):
+                image_path = self.image_files[idx]
+                image = Image.open(image_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                return image, 0  # Dummy label
 
-                # Handle different model output formats
-                if isinstance(outputs, dict):  # Enhanced autoencoder
-                    features = outputs['embedding']
-
-                    # Store enhancement outputs
-                    for key in ['cluster_probabilities', 'class_probabilities', 'cluster_assignments']:
-                        if key in outputs:
-                            enhancement_features[key].append(outputs[key].cpu())
-
-                elif isinstance(outputs, tuple):  # Basic autoencoder
-                    features = outputs[0]
-                else:  # CNN output
-                    features = outputs
-
-                # Store core features
-                all_features.append(features.cpu())
-                all_labels.extend(labels.tolist())
-                all_filenames.extend(filenames)
-                all_class_names.extend([self.reverse_encoder[label.item()] for label in labels])
-
-        # Process and save all data
-        self._save_prediction_results(
-            all_features=torch.cat(all_features, dim=0).numpy(),
-            all_labels=all_labels,
-            all_filenames=all_filenames,
-            all_class_names=all_class_names,
-            enhancement_features=enhancement_features,
-            output_csv_path=output_csv_path
-        )
-
-    def _save_prediction_results(self, all_features, all_labels, all_filenames,
-                               all_class_names, enhancement_features, output_csv_path):
-        """Save all prediction data with enhancement support"""
-        feature_columns = [f'feature_{i}' for i in range(all_features.shape[1])]
-        data_dict = {col: all_features[:, i] for i, col in enumerate(feature_columns)}
-
-        # Core metadata
-        data_dict.update({
-            'target': all_labels,
-            'filename': all_filenames,
-            'class_name': all_class_names
-        })
-
-        # Add enhancement data if available
-        for key, values in enhancement_features.items():
-            if key == 'cluster_probabilities':
-                for i in range(values[0].shape[1]):
-                    data_dict[f'cluster_{i}_prob'] = torch.cat(values, dim=0)[:, i].numpy()
-            elif key == 'class_probabilities':
-                for i in range(values[0].shape[1]):
-                    data_dict[f'class_{i}_prob'] = torch.cat(values, dim=0)[:, i].numpy()
-            elif key == 'cluster_assignments':
-                data_dict['cluster_assignment'] = torch.cat(values, dim=0).numpy()
-
-        # Save to CSV
-        os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-        pd.DataFrame(data_dict).to_csv(output_csv_path, index=False)
-
-        # Save enhancement metadata
-        if enhancement_features:
-            meta_path = os.path.join(os.path.dirname(output_csv_path), 'enhancement_metadata.json')
-            with open(meta_path, 'w') as f:
-                json.dump({
-                    'enhancements_used': list(enhancement_features.keys()),
-                    'config': self.config['model']['autoencoder_config']['enhancements']
-                }, f, indent=4)
-
+        return DummyDataset(image_files, transform)
 
     def _get_transforms(self) -> transforms.Compose:
-        """Ensure consistent 256x256 input size"""
-        transform_list = [
-            transforms.Resize(256),  # First resize to 256x256
-            transforms.CenterCrop(256),  # Ensure exact dimensions
+        """Get the image transforms based on the config."""
+        return transforms.Compose([
+            transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=self.config['dataset']['mean'],
                 std=self.config['dataset']['std']
             )
-        ]
+        ])
 
-        if self.config['dataset']['in_channels'] == 1:
-            transform_list.insert(0, transforms.Grayscale(num_output_channels=1))
+    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
+        """Save predictions to a CSV file."""
+        # Convert features to a DataFrame
+        feature_cols = [f'feature_{i}' for i in range(len(predictions['features_phase1'][0]))]
+        df = pd.DataFrame(predictions['features_phase1'], columns=feature_cols)
+        df.insert(0, 'filename', predictions['filename'])
 
-        return transforms.Compose(transform_list)
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+        logger.info(f"Predictions saved to {output_csv}")
+        return model
+
+
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -381,10 +375,10 @@ class BaseEnhancementConfig:
                 'phase2_learning_rate': 0.005,
                 'reconstruction_weight': 1.0,
                 'feature_weight': 0.1,
-                'enable_phase2': True,
+                'enable_phase2': False,
                 'enhancements': {
                     'use_kl_divergence': True,
-                    'use_class_encoding': True,
+                    'use_class_encoding': False,
                     'kl_divergence_weight': 0.1,
                     'classification_weight': 0.1,
                     'clustering_temperature': 1.0,
@@ -514,7 +508,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
@@ -656,7 +650,7 @@ class BaseAutoencoder(nn.Module):
         # Initialize enhancement components
         self.use_kl_divergence = (config['model']
                                  .get('autoencoder_config', {})
-                                 .get('enhancements', {})
+                                 .get('enhancements', True)
                                  .get('use_kl_divergence', True))
 
         self.use_class_encoding = (config['model']
@@ -689,7 +683,6 @@ class BaseAutoencoder(nn.Module):
 
         # Training phase tracking
         self.training_phase = 1  # Start with phase 1
-        self.config = config  # Ensure config is stored
 
         # Initialize latent organization
         self._initialize_latent_organization()
@@ -746,50 +739,30 @@ class BaseAutoencoder(nn.Module):
 
     def _initialize_cluster_centers(self):
         """Initialize cluster centers using k-means"""
-        if not hasattr(self, 'cluster_centers'):
-            return
-
         self.eval()
         with torch.no_grad():
-            # Get a batch of features
-            loader = self.config.get('train_loader')
-            if loader is None:
-                return
+            if self.train_dataset is None:
+                raise ValueError("Dataset not set. Call set_dataset() before training.")
 
-            features = []
-            for inputs, _ in loader:
-                inputs = inputs.to(self.device)
-                outputs = self(inputs)
+            # Use stored dataset reference
+            dataloader = DataLoader(
+                self.train_dataset,
+                batch_size=1000,
+                shuffle=True
+            )
+            batch_data, _ = next(iter(dataloader))
+            embeddings = self.encode(batch_data.to(self.device))
+            if isinstance(embeddings, tuple):
+                embeddings = embeddings[0]
 
-                # Handle different output formats
-                if isinstance(outputs, dict):
-                    # For enhanced models, use the embeddings
-                    feats = outputs['embedding']
-                elif isinstance(outputs, tuple):
-                    # For basic autoencoders, use the first output (embeddings)
-                    feats = outputs[0]
-                else:
-                    # For CNN models, use the direct output
-                    feats = outputs
-
-                features.append(feats.cpu())
-                if len(features) * inputs.size(0) > 1000:  # Use first 1000 samples
-                    break
-
-            if not features:
-                return
-
-            features = torch.cat(features)
-
-            # K-means initialization
+            # Use k-means to initialize cluster centers
             from sklearn.cluster import KMeans
-            kmeans = KMeans(n_clusters=self.cluster_centers.size(0), n_init=10)
-            kmeans.fit(features.numpy())
+            kmeans = KMeans(n_clusters=self.cluster_centers.size(0), n_init=20)
+            kmeans.fit(embeddings.cpu().numpy())
             self.cluster_centers.data = torch.tensor(
                 kmeans.cluster_centers_,
                 device=self.device
             )
-        self.train()
 
     def _calculate_layer_sizes(self) -> List[int]:
         """Calculate progressive channel sizes for encoder/decoder"""
@@ -878,10 +851,6 @@ class BaseAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
-        # Verify input shape
-        if len(x.shape) != 4:
-            raise ValueError(f"Input must be 4D (batch, channels, height, width), got {x.shape}")
-
         embedding = self.encode(x)
         if isinstance(embedding, tuple):
             embedding = embedding[0]
@@ -971,7 +940,17 @@ class BaseAutoencoder(nn.Module):
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
 
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
+    def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
+        """
+        Extract features from a DataLoader.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
@@ -981,25 +960,33 @@ class BaseAutoencoder(nn.Module):
 
         try:
             with torch.no_grad():
-                for inputs, labels in tqdm(loader, desc="Extracting features"):
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
                     inputs = inputs.to(self.device)
                     labels = labels.to(self.device)
 
-                    # Get additional information (file_index and filename)
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
-                    # Get actual class names using reverse_encoder
-                    class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                    else:
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for indices
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]  # Placeholder for filenames
+                        class_names = [f"unavailable_{label.item()}" for label in labels]  # Placeholder for class names
 
+                    # Extract embeddings
                     embeddings = self.encode(inputs)
                     if isinstance(embeddings, tuple):
                         embeddings = embeddings[0]
 
+                    # Append to lists
                     all_embeddings.append(embeddings)
                     all_labels.append(labels)
-                    all_indices.extend(indices)  # Append file indices
-                    all_filenames.extend(filenames)  # Append filenames
-                    all_class_names.extend(class_names)  # Append actual class names
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
 
                 # Concatenate all results
                 embeddings = torch.cat(all_embeddings)
@@ -1018,6 +1005,7 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
+
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -1025,103 +1013,92 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, feature_dict: Dict[str, Any], output_path: str):
+    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
         """
-        Robust feature saving that handles:
-        - PyTorch tensors
-        - NumPy arrays
-        - Python lists
-        - Mixed dimensionalities
+        Save features for training and test sets based on the adaptive flag.
+
+        Args:
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
         """
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Convert all values to numpy arrays first
-            processed_dict = {}
-            for key, value in feature_dict.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.cpu().numpy()
-                elif isinstance(value, list):
-                    value = np.array(value)
-                # At this point, value should be numpy array
+            # Access enable_adaptive from training_params
+            try:
+                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+            except:
+                enable_adaptive = True
+                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+            if enable_adaptive:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features)
+                train_output_path = output_path
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features)
+                test_df = self._features_to_dataframe(test_features)
 
-                processed_dict[key] = value
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
 
-            # Verify we have the required fields
-            if 'features' not in processed_dict or 'labels' not in processed_dict:
-                raise ValueError("Feature dictionary must contain 'features' and 'labels'")
-
-            features = processed_dict['features']
-            labels = processed_dict['labels']
-
-            # Create DataFrame with feature columns
-            feature_columns = [f'feature_{i}' for i in range(features.shape[1])]
-            data_dict = {col: features[:, i] for i, col in enumerate(feature_columns)}
-            data_dict['target'] = labels
-
-            # Add optional metadata if available
-            for meta_key in ['filenames', 'class_names']:
-                if meta_key in processed_dict:
-                    data_dict[meta_key] = processed_dict[meta_key]
-
-            # Process all other features
-            for key, value in processed_dict.items():
-                if key not in ['features', 'labels', 'filenames', 'class_names']:
-                    # Ensure we have a numpy array
-                    if not isinstance(value, np.ndarray):
-                        value = np.array(value)
-
-                    # Handle different dimensionalities
-                    if value.ndim == 1:
-                        data_dict[key] = value
-                    elif value.ndim == 2:
-                        for i in range(value.shape[1]):
-                            data_dict[f'{key}_{i}'] = value[:, i]
-                    else:
-                        # Flatten higher dimensions
-                        flat_value = value.reshape(value.shape[0], -1)
-                        for i in range(flat_value.shape[1]):
-                            data_dict[f'{key}_flat_{i}'] = flat_value[:, i]
-
-            # Final validation before saving
-            sample_count = len(labels)
-            for key, value in data_dict.items():
-                if len(value) != sample_count:
-                    raise ValueError(f"Length mismatch for {key}: expected {sample_count}, got {len(value)}")
-
-            # Save to CSV in chunks
-            chunk_size = 1000
-            for start_idx in range(0, sample_count, chunk_size):
-                end_idx = min(start_idx + chunk_size, sample_count)
-                chunk = {k: v[start_idx:end_idx] for k, v in data_dict.items()}
-
-                pd.DataFrame(chunk).to_csv(
-                    output_path,
-                    mode='w' if start_idx == 0 else 'a',
-                    header=(start_idx == 0),
-                    index=False
-                )
-
-            # Save metadata
-            metadata = {
-                'timestamp': datetime.now().isoformat(),
-                'feature_columns': feature_columns,
-                'feature_dimensions': features.shape[1],
-                'samples': sample_count,
-                'enhancements': list(set(processed_dict.keys()) - {'features', 'labels', 'filenames', 'class_names'})
-            }
-
-            with open(os.path.join(os.path.dirname(output_path), 'metadata.json'), 'w') as f:
-                json.dump(metadata, f, indent=2)
-
-            logger.info(f"Successfully saved features to {output_path}")
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
 
         except Exception as e:
-            logger.error(f"Failed to save features: {str(e)}")
-            logger.error(f"Feature dict keys: {list(feature_dict.keys())}")
-            if 'features' in feature_dict:
-                logger.error(f"Features shape: {feature_dict['features'].shape if hasattr(feature_dict['features'], 'shape') else 'unknown'}")
+            logger.error(f"Error saving features: {str(e)}")
             raise
+
+    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
+        """
+        Convert features dictionary to a pandas DataFrame.
+
+        Args:
+            features (Dict[str, torch.Tensor]): Dictionary containing features and metadata.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the features and metadata.
+        """
+        data_dict = {}
+
+        # Process embeddings
+        if 'embeddings' in features:
+            embeddings = features['embeddings'].cpu().numpy()
+            for i in range(embeddings.shape[1]):
+                data_dict[f'feature_{i}'] = embeddings[:, i]
+        else:
+            raise ValueError("Mandatory field 'embeddings' is missing in features")
+
+        # Process labels/targets
+        if 'labels' in features:
+            data_dict['target'] = features['labels'].cpu().numpy()
+        else:
+            raise ValueError("Mandatory field 'labels' is missing in features")
+
+        '''# Process optional fields
+        optional_fields = ['indices', 'filenames', 'class_names']
+        for field in optional_fields:
+            if field in features:
+                data_dict[field] = features[field]
+                print(f"Found filed {data_dict[field]}")
+            else:
+                data_dict[field] = [f"unknown_{field}"] * len(data_dict['target'])
+                print(f"Dummy filed {data_dict[field]}")
+        '''
+        # Convert to DataFrame
+        try:
+            data_frame=pd.DataFrame(data_dict)
+        except:
+            print("Failed creating dataframe")
+        return data_frame
+
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
         enhancement_dict = {}
@@ -1189,7 +1166,7 @@ class BaseAutoencoder(nn.Module):
             q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
-            if labels is not None:
+            if labels is not None: # and self.use_class_encoding:
                 # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(self.cluster_centers.size(0)):
@@ -2069,7 +2046,9 @@ class ModelFactory:
 
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
-        """Factory function with proper enhancement initialization"""
+        """Create appropriate model based on configuration"""
+
+        # Create input shape tuple properly
         input_shape = (
             config['dataset']['in_channels'],
             config['dataset']['input_size'][0],
@@ -2077,212 +2056,108 @@ class ModelFactory:
         )
         feature_dims = config['model']['feature_dims']
 
-        if config['model']['encoder_type'] == 'cnn':
-            model = FeatureExtractorCNN(
-                in_channels=input_shape[0],
-                feature_dims=feature_dims,
-                config=config
-            )
+
+        # Determine device
+        device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                            and torch.cuda.is_available() else 'cpu')
+
+
+        # Get enabled enhancements
+        enhancements = []
+        if 'enhancement_modules' in config['model']:
+            for module_type, module_config in config['model']['enhancement_modules'].items():
+                if module_config.get('enabled', False):
+                    enhancements.append(module_type)
+
+        if enhancements:
+            logger.info(f"Creating model with enhancements: {', '.join(enhancements)}")
+
+        # Create appropriate model based on image type and enhancements
+        image_type = config['dataset'].get('image_type', 'general')
+        model = None
+
+        use_cnn = config['model'].get('use_cnn', True)  # New config flag
+
+        if use_cnn:
+            # CNN-based feature extractors
+            if image_type == 'astronomical':
+                model = AstronomicalCNNFeatureExtractor(config)
+            elif image_type == 'medical':
+                model = MedicalCNNFeatureExtractor(config)
+            elif image_type == 'agricultural':
+                model = AgriculturalCNNFeatureExtractor(config)
+            else:
+                model = CNNFeatureExtractor(config)
         else:
-            model = EnhancedAutoEncoderFeatureExtractor(config)
+            # Original autoencoder implementations
+            if image_type == 'astronomical':
+                model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif image_type == 'medical':
+                model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif image_type == 'agricultural':
+                model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
+            else:
+                model = BaseAutoencoder(input_shape, feature_dims, config)
 
-        # Initialize enhancements
-        enhancements = config['model']['autoencoder_config']['enhancements']
-        if enhancements['use_kl_divergence']:
-            if hasattr(model, '_initialize_cluster_centers'):
-                model._initialize_cluster_centers()
-            elif not hasattr(model, 'cluster_centers'):
-                num_classes = config['dataset'].get('num_classes', 10)
-                model.cluster_centers = nn.Parameter(
-                    torch.randn(num_classes, feature_dims)
-                )
+        return model.to(device)
 
-        return model.to(torch.device('cuda' if config['execution_flags']['use_gpu'] else 'cpu'))
 
 # Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader, config: Dict) -> Dict[str, List]:
-    """
-    Ultra-robust two-phase training with complete output format handling.
-    Safely works with:
-    - Basic CNN models (outputs Tensor)
-    - Enhanced models (outputs Dict)
-    - Hybrid models (various output formats)
-    """
+def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
 
-    # 1. Configuration with fail-safe defaults
-    training_config = config.get('training', {})
-    model_config = config.get('model', {})
-    ae_config = model_config.get('autoencoder_config', {})
-    enh_config = ae_config.get('enhancements', {})
-    use_kl_divergence = model.config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
-    use_class_encoding = model.config['model']['autoencoder_config']['enhancements']['use_class_encoding']
-    if use_class_encoding or use_kl_divergence:
-        use_phase2=True
-    params = {
-        'epochs': training_config.get('epochs', 20),
-        'lr': model_config.get('learning_rate', 0.001),
-        'use_phase2':use_phase2,
-        'use_kl': use_kl_divergence,
-        'kl_weight': enh_config.get('kl_divergence_weight', 0.1),
-        'patience': training_config.get('early_stopping', {}).get('patience', 5),
-        'min_delta': 0.001
-    }
-
-    device = next(model.parameters()).device
-    optimizer = optim.Adam(model.parameters(), lr=params['lr'])
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
     history = defaultdict(list)
 
-    def get_predicted(outputs):
-        """Safe prediction extraction from any model output format"""
-        if isinstance(outputs, dict):
-            if 'class_logits' in outputs:
-                return outputs['class_logits'].max(1)[1]
-            elif 'features' in outputs:
-                return outputs['features'].max(1)[1]
-            return outputs.get('predictions', None)
-        return outputs.max(1)[1] if outputs.dim() > 1 else outputs.round().long()
+    # Initialize starting epoch and phase
+    start_epoch = getattr(model, 'current_epoch', 0)
+    current_phase = getattr(model, 'training_phase', 1)
 
-    def get_loss(outputs, targets, phase):
-        """Safe loss calculation for any model output format"""
-        if phase == 1:
-            if isinstance(outputs, dict):
-                if 'features' in outputs:
-                    return F.cross_entropy(outputs['features'], targets)
-                elif 'class_logits' in outputs:
-                    return F.cross_entropy(outputs['class_logits'], targets)
-            return F.cross_entropy(outputs, targets)
+    # Phase 1: Pure reconstruction (if not already completed)
+    if current_phase == 1:
+        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
+        model.set_training_phase(1)
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
 
-        else:  # Phase 2
-            base_loss = 0
-            kl_loss = 0
+        phase1_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch
+        )
+        history.update(phase1_history)
 
-            if isinstance(outputs, dict):
-                # Classification loss from any available output
-                if 'class_logits' in outputs:
-                    base_loss = F.cross_entropy(outputs['class_logits'], targets)
-                elif 'features' in outputs:
-                    base_loss = F.cross_entropy(outputs['features'], targets)
+        # Reset start_epoch for phase 2
+        start_epoch = 0
+    else:
+        logger.info("Phase 1 already completed, skipping")
 
-                # KL divergence if enabled and available
-                if params['use_kl'] and 'cluster_probabilities' in outputs:
-                    kl_loss = F.kl_div(
-                        outputs['cluster_probabilities'].log(),
-                        outputs.get('target_distribution', outputs['cluster_probabilities'].detach()),
-                        reduction='batchmean'
-                    ) * params['kl_weight']
-
-
-            else:
-                base_loss = F.cross_entropy(outputs, targets)
-
-            return base_loss + kl_loss
-
-    def run_phase(phase, max_epochs):
-        best_loss = float('inf')
-        patience = 0
-        phase_history = defaultdict(list)
-
-        for epoch in range(max_epochs):
-            model.train()
-            running_loss = 0.0
-            correct = 0
-            total = 0
-
-            for inputs, targets in train_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                optimizer.zero_grad()
-
-                outputs = model(inputs)
-                loss = get_loss(outputs, targets, phase)
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item()
-                preds = get_predicted(outputs)
-                if preds is not None:
-                    correct += preds.eq(targets).sum().item()
-                total += targets.size(0)
-
-            epoch_loss = running_loss / len(train_loader)
-            epoch_acc = 100. * correct / total if total > 0 else 0
-
-            phase_history[f'phase{phase}_loss'].append(epoch_loss)
-            phase_history[f'phase{phase}_acc'].append(epoch_acc)
-
-            if phase == 1:
-                scheduler.step(epoch_loss)
-
-            # Early stopping logic
-            if epoch_loss < best_loss - params['min_delta']:
-                best_loss = epoch_loss
-                patience = 0
-            else:
-                patience += 1
-                if patience >= params['patience']:
-                    print(f'Phase {phase} early stopping at epoch {epoch+1}')
-                    break
-
-            print(f'Phase {phase} | Epoch {epoch+1} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.2f}%')
-
-        return best_loss, phase_history
-
-    # Phase 1: Core training
-    print("=== Phase 1: Core Feature Learning ===")
-    phase1_epochs = params['epochs']//2 if params['use_phase2'] else params['epochs']
-    phase1_best, phase1_hist = run_phase(1, phase1_epochs)
-    history.update(phase1_hist)
-
-    # Phase 2: Enhancements (if enabled)
-    if params['use_phase2']:
-        print("\n=== Phase 2: Enhancement Training ===")
-
-        # Safe phase transition
-        if hasattr(model, 'set_training_phase'):
+    # Phase 2: Latent space organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        if current_phase < 2:
+            logger.info("Starting Phase 2: Latent space organization")
             model.set_training_phase(2)
+        else:
+            logger.info("Resuming Phase 2: Latent space organization")
 
-        # Cluster initialization if needed
-        if params['use_kl'] and hasattr(model, 'cluster_centers'):
-            print("Initializing cluster centers...")
-            model.eval()
-            features = []
-            with torch.no_grad():
-                for inputs, _ in train_loader:
-                    out = model(inputs.to(device))
-                    feats = out['features'] if isinstance(out, dict) else out
-                    features.append(feats.cpu())
+        # Lower learning rate for fine-tuning
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
 
-            if features:  # Only initialize if we got features
-                features = torch.cat(features).numpy()
-                from sklearn.cluster import KMeans
-                kmeans = KMeans(
-                    n_clusters=model.cluster_centers.size(0),
-                    n_init=10
-                ).fit(features)
-                model.cluster_centers.data = torch.tensor(
-                    kmeans.cluster_centers_,
-                    device=device,
-                    dtype=model.cluster_centers.dtype
-                )
+        phase2_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch if current_phase == 2 else 0
+        )
 
-        # Run phase 2
-        remaining_epochs = params['epochs'] - len(phase1_hist[f'phase1_loss'])
-        phase2_best, phase2_hist = run_phase(2, remaining_epochs)
-        history.update(phase2_hist)
-
-        # Optional refinement phase
-        if phase2_best >= phase1_best:
-            print("\nPhase 2 did not improve results. Refining Phase 1...")
-            if hasattr(model, 'set_training_phase'):
-                model.set_training_phase(1)
-
-            refine_epochs = params['epochs'] - len(phase1_hist[f'phase1_loss']) - len(phase2_hist[f'phase2_loss'])
-            if refine_epochs > 0:
-                _, refine_hist = run_phase(1, refine_epochs)
-                history['phase1_refine_loss'] = refine_hist[f'phase1_loss']
-                history['phase1_refine_acc'] = refine_hist[f'phase1_acc']
+        # Merge histories
+        for key, value in phase2_history.items():
+            history[f"phase2_{key}"] = value
 
     return history
+
+
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
     Generate unique identifier for checkpoint based on phase and active enhancements.
@@ -2301,7 +2176,7 @@ def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> st
         # Add specialized enhancements
         if config['dataset'].get('image_type') != 'general':
             image_type = config['dataset']['image_type']
-            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', False):
+            if config['model']['enhancement_modules'].get(image_type, {}).get('enabled', True):
                 active_enhancements.append(image_type)
 
         if active_enhancements:
@@ -2350,6 +2225,187 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
 
     logger.info(f"Saved checkpoint for {identifier} at epoch {epoch + 1}")
 
+def load_best_checkpoint(model: nn.Module, phase: int, config: Dict) -> Optional[Dict]:
+    """
+    Load the best checkpoint for the given phase and enhancement combination.
+    """
+    checkpoint_dir = config['training']['checkpoint_dir']
+    identifier = _get_checkpoint_identifier(model, phase, config)
+    dataset_name = config['dataset']['name']
+    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+
+    if os.path.exists(best_path):
+        logger.info(f"Loading best checkpoint for {identifier}")
+        return torch.load(best_path, map_location=model.device)
+    return None
+
+def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) -> Dict[str, Any]:
+    """
+    Track and return phase-specific metrics and best values.
+    """
+    metrics = {}
+    identifier = _get_checkpoint_identifier(model, phase, config)
+
+    # Try to load existing best metrics
+    checkpoint = load_best_checkpoint(model, phase, config)
+    if checkpoint:
+        metrics['best_loss'] = checkpoint.get('loss', float('inf'))
+        metrics['best_epoch'] = checkpoint.get('epoch', 0)
+    else:
+        metrics['best_loss'] = float('inf')
+        metrics['best_epoch'] = 0
+
+    return metrics
+
+def _train_phase(model: nn.Module, train_loader: DataLoader,
+                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for each phase with enhanced checkpoint handling"""
+    history = defaultdict(list)
+    device = next(model.parameters()).device
+
+    # Get phase-specific metrics
+    # Initialize unified checkpoint
+    checkpoint_manager = UnifiedCheckpoint(config)
+
+    # Load best loss from checkpoint
+    best_loss = checkpoint_manager.get_best_loss(phase, model)
+    patience_counter = 0
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            running_loss = 0.0
+            num_batches = len(train_loader)  # Get total number of batches
+
+            # Training loop
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            for batch_idx, (data, labels) in enumerate(pbar):
+                try:
+                    # Move data to correct device
+                    if isinstance(data, (list, tuple)):
+                        data = data[0]
+                    data = data.to(device)
+                    labels = labels.to(device)
+
+                    # Zero gradients
+                    optimizer.zero_grad()
+
+                    # Forward pass based on phase
+                    if phase == 1:
+                        # Phase 1: Only reconstruction
+                        embeddings = model.encode(data)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+                        reconstruction = model.decode(embeddings)
+                        loss = F.mse_loss(reconstruction, data)
+                    else:
+                        # Phase 2: Include clustering and classification
+                        output = model(data)
+                        if isinstance(output, dict):
+                            reconstruction = output['reconstruction']
+                            embedding = output['embedding']
+                        else:
+                            embedding, reconstruction = output
+
+                        # Calculate base loss
+                        loss = loss_manager.calculate_loss(
+                            reconstruction, data,
+                            config['dataset'].get('image_type', 'general')
+                        )['loss']
+
+                        # Add KL divergence loss if enabled
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(embedding, labels)
+                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
+                                kl_loss = F.kl_div(
+                                    latent_info['cluster_probabilities'].log(),
+                                    latent_info['target_distribution'],
+                                    reduction='batchmean'
+                                )
+                                loss += kl_weight * kl_loss
+
+                        # Add classification loss if enabled
+                        if model.use_class_encoding and hasattr(model, 'classifier'):
+                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+                            class_logits = model.classifier(embedding)
+                            class_loss = F.cross_entropy(class_logits, labels)
+                            loss += class_weight * class_loss
+
+                    # Backward pass and optimization
+                    loss.backward()
+                    optimizer.step()
+
+                    # Update running loss - handle possible NaN or inf
+                    current_loss = loss.item()
+                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
+                        running_loss += current_loss
+
+                    # Calculate current average loss safely
+                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
+
+                    # Update progress bar with safe values
+                    pbar.set_postfix({
+                        'loss': f'{current_avg_loss:.4f}',
+                        'best': f'{best_loss:.4f}'
+                    })
+
+                    # Memory cleanup
+                    del data, loss
+                    if phase == 2:
+                        del output
+                    torch.cuda.empty_cache()
+
+                except Exception as e:
+                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    continue
+
+            # Safely calculate epoch average loss
+            if num_batches > 0:
+                avg_loss = running_loss / num_batches
+            else:
+                avg_loss = float('inf')
+                logger.warning("No valid batches in epoch!")
+
+            # Record history
+            history[f'phase{phase}_loss'].append(avg_loss)
+
+            # Save checkpoint and check for best model
+            is_best = avg_loss < best_loss
+            if is_best:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            checkpoint_manager.save_model_state(
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                epoch=epoch,
+                loss=avg_loss,
+                is_best=is_best
+            )
+            # Early stopping check
+            patience = config['training'].get('early_stopping', {}).get('patience', 5)
+            if patience_counter >= patience:
+                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
+                break
+
+            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+
+            # Clean up at end of epoch
+            pbar.close()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    except Exception as e:
+        logger.error(f"Error in training phase {phase}: {str(e)}")
+        raise
+
+    return history
 
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
@@ -2951,11 +3007,149 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BaseFeatureExtractor(ABC):
-    """Abstract base class for feature extraction models"""
+class AstronomicalCNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN feature extractor specialized for astronomical imaging"""
+
+    def _create_model(self) -> nn.Module:
+        # Enhanced CNN with astronomical-specific layers
+        return nn.Sequential(
+            # Initial layers with star detection
+            nn.Conv2d(self.config['dataset']['in_channels'], 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2),
+
+            # Multi-scale detail extraction
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool2d(2),
+
+            # Star detection pathway
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.Sigmoid(),
+
+            # Galaxy feature extraction
+            nn.Conv2d(64, 128, 3, padding=2, dilation=2),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2),
+            nn.AdaptiveAvgPool2d(1),
+
+            # Final feature projection
+            nn.Flatten(),
+            nn.Linear(128, self.feature_dims),
+            nn.BatchNorm1d(self.feature_dims)
+        )
+
+    def _calculate_loss(self, outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Custom loss for astronomical features"""
+        # Base classification loss
+        loss = F.cross_entropy(outputs, targets)
+
+        # Add astronomical-specific regularization
+        if hasattr(self, 'star_detector'):
+            star_features = self.star_detector(outputs)
+            loss += 0.1 * star_features.mean()  # Encourage star detection
+
+        return loss
+
+class MedicalCNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN feature extractor specialized for medical imaging"""
+
+    def _create_model(self) -> nn.Module:
+        # Medical imaging specific architecture
+        return nn.Sequential(
+            # Initial contrast enhancement
+            nn.Conv2d(self.config['dataset']['in_channels'], 32, 5, padding=2),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+
+            # Boundary detection pathway
+            nn.Conv2d(32, 32, 3, padding=1, groups=4),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+
+            # Lesion detection at multiple scales
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.PReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 64, 3, padding=2, dilation=2),
+            nn.InstanceNorm2d(64),
+            nn.PReLU(),
+
+            # Final feature projection
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, self.feature_dims),
+            nn.BatchNorm1d(self.feature_dims)
+        )
+
+    def _calculate_loss(self, outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Medical-specific loss with boundary preservation"""
+        loss = F.cross_entropy(outputs, targets)
+
+        # Add boundary preservation term
+        if hasattr(self, 'boundary_detector'):
+            boundaries = self.boundary_detector(outputs)
+            loss += 0.2 * boundaries.mean()
+
+        return loss
+
+class AgriculturalCNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN feature extractor specialized for agricultural imaging"""
+
+    def _create_model(self) -> nn.Module:
+        # Agricultural pattern-specific architecture
+        return nn.Sequential(
+            # Texture analysis pathway
+            nn.Conv2d(self.config['dataset']['in_channels'], 32, 3, padding=1),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+
+            # Multi-scale texture analysis
+            nn.Conv2d(32, 32, 3, padding=1, groups=4),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+
+            # Damage pattern detection
+            nn.Conv2d(32, 64, 5, padding=2),
+            nn.InstanceNorm2d(64),
+            nn.PReLU(),
+            nn.MaxPool2d(2),
+
+            # Color anomaly detection
+            nn.Conv2d(64, 64, 1),
+            nn.InstanceNorm2d(64),
+            nn.PReLU(),
+
+            # Final feature projection
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, self.feature_dims),
+            nn.BatchNorm1d(self.feature_dims)
+        )
+
+    def _calculate_loss(self, outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Agricultural-specific loss with texture preservation"""
+        loss = F.cross_entropy(outputs, targets)
+
+        # Add texture preservation term
+        if hasattr(self, 'texture_analyzer'):
+            textures = self.texture_analyzer(outputs)
+            loss += 0.15 * textures.mean()
+
+        return loss
+
+
+
+class BaseFeatureExtractor(nn.Module, ABC):
+    """Abstract base class for feature extraction models."""
     def __init__(self, config: Dict, device: str = None):
-        """Initialize base feature extractor"""
+        super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
+
 
         # Set device
         if device is None:
@@ -3003,9 +3197,10 @@ class BaseFeatureExtractor(ABC):
         """Create and return the feature extraction model"""
         pass
 
-    def load_state_dict(self, state_dict: Dict):
+    def load_state_dict(self, state_dict: Dict, strict: bool = True):
         """Load model state from a state dictionary."""
-        self.feature_extractor.load_state_dict(state_dict)
+        # Pass the strict parameter to the underlying model's load_state_dict
+        self.feature_extractor.load_state_dict(state_dict, strict=strict)
         self.feature_extractor.eval()
 
     def save_checkpoint(self, path: str, is_best: bool = False):
@@ -3131,7 +3326,7 @@ class BaseFeatureExtractor(ABC):
         autoencoder_config = model.setdefault('autoencoder_config', {})
         autoencoder_config.setdefault('enhancements', {
             'use_kl_divergence': True,
-            'use_class_encoding': True,
+            'use_class_encoding': False,
             'kl_divergence_weight': 0.1,
             'classification_weight': 0.1,
             'clustering_temperature': 1.0,
@@ -3393,7 +3588,13 @@ class BaseFeatureExtractor(ABC):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                # Extract features
+                train_features = self.extract_features(train_loader, dataset_type="train")
+                test_features = self.extract_features(test_loader, dataset_type="test")
 
+                # Save features
+                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
+                self.save_features(train_features, test_features, output_path)
             return self.history
 
         except Exception as e:
@@ -3522,12 +3723,8 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                                 'training_decoder_output', f'epoch_{self.current_epoch}')
         os.makedirs(output_dir, exist_ok=True)
 
-        # Initialize tqdm progress bar
-        pbar = tqdm(enumerate(train_loader),
-                    total=len(train_loader),
-                    desc=f"Epoch {self.current_epoch + 1}",
-                    unit="batch",
-                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
 
         for batch_idx, (inputs, _) in enumerate(pbar):
             try:
@@ -4207,6 +4404,13 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
+                # Extract features
+                train_features = self.extract_features(train_loader, dataset_type="train")
+                test_features = self.extract_features(test_loader, dataset_type="test")
+
+                # Save features
+                output_path = os.path.join(f"data/{self.config['dataset']['name']}/{self.config['dataset']['name']}.csv")
+                self.save_features(train_features, test_features, output_path)
             return self.history
 
         except Exception as e:
@@ -4354,338 +4558,144 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """Enhanced 7-layer CNN with support for multiple enhancement types and phase 2 training"""
-
-    def __init__(self, in_channels: int, feature_dims: int, config: Dict):
+    """CNN-based feature extractor model with self-attention"""
+    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
-        self.config = config
-        self.feature_dims = feature_dims
-        self.dropout_prob = 0.5
-        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
-                                 and torch.cuda.is_available() else 'cpu')
-        self.training_phase = 1  # Start with phase 1
+        self.dropout_prob = dropout_prob
 
-        # Original 7-layer architecture
-        self.conv_layers = nn.Sequential(
-            # Layer 1: 256x256 -> 128x128
+        # Layer 1
+        self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 2: 128x128 -> 64x64
+        # Layer 2
+        self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 3: 64x64 -> 32x32
+        # Layer 3
+        self.conv3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 4: 32x32 -> 16x16
+        # Self-attention after Layer 3
+        self.attention1 = SelfAttention(128)
+
+        # Layer 4
+        self.conv4 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 5: 16x16 -> 8x8
+        # Layer 5
+        self.conv5 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 6: 8x8 -> 4x4
+        # Layer 6
+        self.conv6 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Dropout(self.dropout_prob),
+            nn.Dropout(dropout_prob)
+        )
 
-            # Layer 7: 4x4 -> 1x1
+        # Self-attention after Layer 6
+        self.attention2 = SelfAttention(512)
+
+        # Layer 7
+        self.conv7 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
+        )
+
+        # Fully connected layer
+        self.fc = nn.Linear(512, feature_dims)
+        self.batch_norm = nn.BatchNorm1d(feature_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # Add batch dimension
+
+        # Forward pass through layers
+        x1 = self.conv1(x)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
+
+        # Apply self-attention
+        x3 = self.attention1(x3)
+
+        x4 = self.conv4(x3)
+        x5 = self.conv5(x4)
+        x6 = self.conv6(x5)
+
+        # Apply self-attention
+        x6 = self.attention2(x6)
+
+        x7 = self.conv7(x6)
+
+        # Flatten and fully connected layer
+        x7 = x7.view(x7.size(0), -1)
+        x7 = self.fc(x7)
+        if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x7 = self.batch_norm(x7)
+
+        return x7
+class FeatureExtractorCNN_old(nn.Module):
+    """CNN-based feature extractor model"""
+    def __init__(self, in_channels: int = 3, feature_dims: int = 128):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
         )
 
-        self.fc = nn.Linear(512, feature_dims)
+        self.fc = nn.Linear(128, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
 
-        # Phase 2 components
-        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
-        self.use_class_encoding = config['model']['autoencoder_config']['enhancements']['use_class_encoding']
-
-        if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(torch.randn(num_clusters, feature_dims))
-            self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-
-        if self.use_class_encoding:
-            num_classes = config['dataset'].get('num_classes', 10)
-            self.classifier = nn.Sequential(
-                nn.Linear(feature_dims, feature_dims // 2),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(feature_dims // 2, num_classes)
-            )
-
-        # Initialize all enhancements
-        self._init_enhancements(config)
-        self.to(self.device)
-        if self.use_kl_divergence:
-            self._init_cluster_centers(config)
-
-
-    def _init_cluster_centers(self, config: Dict):
-        """Proper cluster center initialization"""
-        num_classes = config['dataset'].get('num_classes', 10)
-        self.cluster_centers = nn.Parameter(
-            torch.randn(num_classes, self.feature_dims, device=self.device)
-        )
-        self.clustering_temperature = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-
-    def _init_enhancements(self, config: Dict):
-        """Initialize all enhancement modules based on config"""
-        self.enhancement_modules = nn.ModuleDict()
-        enh_config = config['model']['enhancement_modules']
-
-        # Astronomical enhancements
-        if enh_config.get('astronomical', {}).get('enabled', False):
-            self.enhancement_modules['astronomical'] = nn.ModuleDict({
-                'star_detection': nn.Sequential(
-                    nn.Conv2d(512, 512, kernel_size=3, padding=1),
-                    nn.ReLU(),
-                    nn.Conv2d(512, 1, kernel_size=1),
-                    nn.Sigmoid()
-                ),
-                'galaxy_structure': nn.Sequential(
-                    nn.Conv2d(512, 512, kernel_size=3, dilation=2, padding=2),
-                    nn.BatchNorm2d(512),
-                    nn.ReLU()
-                )
-            })
-
-    def set_training_phase(self, phase: int):
-        """Set the training phase (1 or 2)"""
-        self.training_phase = phase
-        if phase == 2 and self.use_kl_divergence and not hasattr(self, 'cluster_centers'):
-            num_classes = self.config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(torch.randn(num_classes, self.feature_dims))
-
-    def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict]:
-        """Forward pass with phase-specific outputs"""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # Add batch dimension
         x = self.conv_layers(x)
         x = x.view(x.size(0), -1)
-        features = self.fc(x)
-        features = self.batch_norm(features) if features.size(0) > 1 else features
-
-        if self.training_phase == 1:
-            return features
-
-        # Phase 2 outputs
-        output = {'features': features}
-
-        if self.use_class_encoding and hasattr(self, 'classifier'):
-            class_logits = self.classifier(features)
-            output.update({
-                'class_logits': class_logits,
-                'class_predictions': class_logits.argmax(dim=1)
-            })
-
-        if self.use_kl_divergence:
-            output.update(self.organize_latent_space(features))
-
-        # Apply enhancements if any
-        if hasattr(self, 'enhancement_modules'):
-            intermediate_features = self.conv_layers[:-2](x)  # Get features before final layers
-            for enh_type, modules in self.enhancement_modules.items():
-                for name, module in modules.items():
-                    output[f'{enh_type}_{name}'] = module(intermediate_features)
-
-        return output
-
-    def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict:
-        """KL divergence clustering"""
-        device = embeddings.device
-        cluster_centers = self.cluster_centers.to(device)
-
-        distances = torch.cdist(embeddings, cluster_centers)
-        q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
-        q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
-
-        if labels is not None and self.training:
-            p_dist = torch.zeros_like(q_dist)
-            for i in range(cluster_centers.size(0)):
-                mask = (labels == i)
-                if mask.any():
-                    p_dist[mask, i] = 1.0
-        else:
-            p_dist = (q_dist ** 2) / q_dist.sum(dim=0, keepdim=True)
-            p_dist = p_dist / p_dist.sum(dim=1, keepdim=True)
-
-        return {
-            'cluster_probabilities': q_dist,
-            'target_distribution': p_dist,
-            'cluster_assignments': q_dist.argmax(dim=1)
-        }
-
-    def extract_features(self, loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """Robust feature extraction with metadata synchronization"""
-        self.eval()
-        all_features = []
-        all_labels = []
-        all_filenames = []
-        all_class_names = []
-        enhancement_features = defaultdict(list)
-
-        with torch.no_grad():
-            for inputs, labels in tqdm(loader, desc="Extracting features"):
-                inputs = inputs.to(self.device)
-                outputs = self(inputs)
-
-                # Handle output formats
-                if isinstance(outputs, dict):
-                    features = outputs['features']
-                    # Store enhancements
-                    for key, value in outputs.items():
-                        if key != 'features':
-                            enhancement_features[key].append(value.cpu())
-                else:
-                    features = outputs
-
-                all_features.append(features.cpu())
-                all_labels.append(labels)
-
-                # Get metadata if available
-                if hasattr(loader.dataset, 'get_additional_info'):
-                    batch_metadata = [
-                        loader.dataset.get_additional_info(i)
-                        for i in range(len(inputs))
-                    ]
-                    if batch_metadata:
-                        indices, filenames = zip(*batch_metadata)
-                        all_filenames.extend(filenames)
-
-                # Get class names if available
-                if hasattr(loader.dataset, 'reverse_encoder'):
-                    try:
-                        all_class_names.extend([
-                            loader.dataset.reverse_encoder[label.item()]
-                            for label in labels
-                        ])
-                    except KeyError as e:
-                        logger.error(f"Missing class mapping for label {e}")
-
-        # Prepare output dictionary
-        feature_dict = {
-            'features': torch.cat(all_features),
-            'labels': torch.cat(all_labels),
-        }
-
-        # Add metadata if available
-        if all_filenames and len(all_filenames) == len(feature_dict['features']):
-            feature_dict['filenames'] = all_filenames
-        if all_class_names and len(all_class_names) == len(feature_dict['features']):
-            feature_dict['class_names'] = all_class_names
-
-        # Add enhancement features
-        for key, values in enhancement_features.items():
-            if values:
-                feature_dict[key] = torch.cat(values, dim=0)
-
-        return feature_dict
-
-    def save_features(self, feature_dict: Dict[str, Any], output_path: str):
-        """
-        Robust feature saving that handles:
-        - Both tensors and numpy arrays
-        - Mixed types in feature_dict
-        - Multi-dimensional features
-        - Metadata preservation
-        """
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # Convert all tensors to numpy and ensure correct shapes
-            processed_data = {}
-            for key, value in feature_dict.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.cpu().numpy()
-
-                # Handle different data types and shapes
-                if isinstance(value, (list, tuple)):
-                    # Convert lists to numpy arrays
-                    value = np.array(value)
-
-                if isinstance(value, np.ndarray):
-                    if value.ndim == 1:
-                        processed_data[key] = value
-                    elif value.ndim == 2:
-                        # Split 2D arrays into multiple columns
-                        for i in range(value.shape[1]):
-                            processed_data[f"{key}_{i}"] = value[:, i]
-                    else:
-                        # Flatten higher-dimensional arrays
-                        flat_value = value.reshape(value.shape[0], -1)
-                        for i in range(flat_value.shape[1]):
-                            processed_data[f"{key}_flat_{i}"] = flat_value[:, i]
-                else:
-                    # Handle scalar values
-                    processed_data[key] = [value] * len(next(iter(processed_data.values())))
-
-            # Verify all arrays have same length
-            base_length = len(next(iter(processed_data.values())))
-            for key, value in processed_data.items():
-                if len(value) != base_length:
-                    raise ValueError(f"Length mismatch for {key}: expected {base_length}, got {len(value)}")
-
-            # Save in chunks
-            chunk_size = 1000
-            total_samples = base_length
-
-            for start_idx in range(0, total_samples, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_samples)
-
-                chunk_dict = {
-                    key: value[start_idx:end_idx]
-                    for key, value in processed_data.items()
-                }
-
-                df = pd.DataFrame(chunk_dict)
-                mode = 'w' if start_idx == 0 else 'a'
-                header = start_idx == 0
-                df.to_csv(output_path, mode=mode, index=False, header=header)
-
-                del df, chunk_dict
-                gc.collect()
-
-            # Save metadata
-            metadata = {
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'feature_dimensions': self.feature_dims,
-                'phase': self.training_phase,
-                'enhancements_used': list(self.enhancement_modules.keys()) if hasattr(self, 'enhancement_modules') else [],
-                'kl_divergence': self.use_kl_divergence,
-                'class_encoding': self.use_class_encoding
-            }
-
-            metadata_path = os.path.join(os.path.dirname(output_path), 'feature_metadata.json')
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=4)
-
-            logger.info(f"Successfully saved features to {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error saving features: {str(e)}")
-            raise
+        x = self.fc(x)
+        if x.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x = self.batch_norm(x)
+        return x
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
@@ -4857,6 +4867,238 @@ class AutoencoderLoss(nn.Module):
 
         return self.reconstruction_weight * recon_loss + \
                self.feature_weight * feature_loss
+
+
+class CNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN-based feature extractor implementation"""
+
+    def _create_model(self) -> nn.Module:
+        """Create CNN model"""
+        return FeatureExtractorCNN(
+            in_channels=self.config['dataset']['in_channels'],
+            feature_dims=self.feature_dims
+        ).to(self.device)
+
+    def _load_from_checkpoint(self):
+        """Load model from checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Try to find latest checkpoint
+        checkpoint_path = self._find_latest_checkpoint()
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            try:
+                logger.info(f"Loading checkpoint from {checkpoint_path}")
+
+                # Debug: Ensure model is initialized
+                if not hasattr(self, 'feature_extractor') or self.feature_extractor is None:
+                    logger.error("Model (feature_extractor) is not initialized. Initializing now...")
+                    self.feature_extractor = self._create_model()
+
+                # Determine the appropriate device for loading
+                if torch.cuda.is_available():
+                    map_location = self.device  # Use GPU if available
+                else:
+                    map_location = torch.device('cpu')  # Fallback to CPU
+
+                # Load checkpoint with weights_only=True for security
+                checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+
+                # Debug: Verify checkpoint contents
+                if 'state_dict' not in checkpoint:
+                    logger.error("Checkpoint does not contain 'state_dict'. Cannot load model.")
+                    raise KeyError("Checkpoint missing 'state_dict'")
+
+                # Load model state
+                self.feature_extractor.load_state_dict(checkpoint['state_dict'])
+
+                # Initialize and load optimizer
+                self.optimizer = self._initialize_optimizer()
+                if 'optimizer_state_dict' in checkpoint:
+                    try:
+                        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        logger.info("Optimizer state loaded")
+                    except Exception as e:
+                        logger.warning(f"Failed to load optimizer state: {str(e)}")
+
+                # Load training state
+                self.current_epoch = checkpoint.get('epoch', 0)
+                self.best_accuracy = checkpoint.get('best_accuracy', 0.0)
+                self.best_loss = checkpoint.get('best_loss', float('inf'))
+
+                # Load history
+                if 'history' in checkpoint:
+                    self.history = defaultdict(list, checkpoint['history'])
+
+                logger.info("Checkpoint loaded successfully")
+
+            except Exception as e:
+                logger.error(f"Error loading checkpoint: {str(e)}")
+                self.optimizer = self._initialize_optimizer()
+        else:
+            logger.info("No checkpoint found, starting from scratch")
+            self.optimizer = self._initialize_optimizer()
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint file"""
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+
+        if not os.path.exists(checkpoint_dir):
+            return None
+
+        # Check for best model first
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        if os.path.exists(best_path):
+            return best_path
+
+        # Check for latest checkpoint
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        if os.path.exists(checkpoint_path):
+            return checkpoint_path
+
+        return None
+
+    def _save_checkpoint(self, is_best: bool = False):
+        """Save model checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config
+        }
+
+        # Save latest checkpoint
+        dataset_name = self.config['dataset']['name']
+        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        checkpoint_path = os.path.join(checkpoint_dir, filename)
+
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {checkpoint_path}")
+
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        try:
+            for batch_idx, (inputs, targets) in enumerate(pbar):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                self.optimizer.zero_grad()
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = 100. * correct / total
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'acc': f'{batch_acc:.2f}%'
+                })
+
+                # Cleanup
+                del inputs, outputs, loss
+                if batch_idx % 50 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Error in batch {batch_idx}: {str(e)}")
+            raise
+
+        pbar.close()
+        return running_loss / len(train_loader), 100. * correct / total
+
+    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
+        """Validate model"""
+        self.feature_extractor.eval()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Cleanup
+                del inputs, outputs, loss
+
+        return running_loss / len(val_loader), 100. * correct / total
+
+    def extract_features(self, loader: DataLoader) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract features from data"""
+        self.feature_extractor.eval()
+        features = []
+        labels = []
+
+        try:
+            with torch.no_grad():
+                for inputs, targets in tqdm(loader, desc="Extracting features"):
+                    inputs = inputs.to(self.device)
+                    outputs = self.feature_extractor(inputs)
+                    features.append(outputs.cpu())
+                    labels.append(targets)
+
+                    # Cleanup
+                    del inputs, outputs
+                    if len(features) % 50 == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+            return torch.cat(features), torch.cat(labels)
+
+        except Exception as e:
+            logger.error(f"Error extracting features: {str(e)}")
+            raise
+
+    def get_feature_shape(self) -> Tuple[int, ...]:
+        """Get shape of extracted features"""
+        return (self.feature_dims,)
+
+    def plot_feature_distribution(self, loader: DataLoader, save_path: Optional[str] = None):
+        """Plot distribution of extracted features"""
+        features, _ = self.extract_features(loader)
+        features = features.numpy()
+
+        plt.figure(figsize=(12, 6))
+        plt.hist(features.flatten(), bins=50, density=True)
+        plt.title('Feature Distribution')
+        plt.xlabel('Feature Value')
+        plt.ylabel('Density')
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            logger.info(f"Feature distribution plot saved to {save_path}")
+        plt.close()
 
 
 class EnhancedAutoEncoderFeatureExtractor(AutoEncoderFeatureExtractor):
@@ -5082,17 +5324,36 @@ class StructurePreservingAutoencoder(DynamicAutoencoder):
         return embedding, reconstruction
 
 
+def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFeatureExtractor:
+    """Get appropriate feature extractor with enhanced image handling"""
+    encoder_type = config['model'].get('encoder_type', 'cnn').lower()
+
+    if encoder_type == 'cnn':
+        return CNNFeatureExtractor(config, device)
+    elif encoder_type == 'autoenc':
+        # Always use enhanced version for autoencoder
+        return EnhancedAutoEncoderFeatureExtractor(config, device)
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
-    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None):
+    def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
+                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
+        self.target_size = target_size  # Store target_size as an instance variable
+        self.overlap = overlap
         self.image_files = []
         self.labels = []
         self.file_indices = []  # Store file indices
         self.filenames = []  # Initialize filenames list
         self.label_encoder = {}
         self.reverse_encoder = {}
+        self.preprocessed_images = []  # Store preprocessed images or paths
+
+        # Load config
+        self.config = config if config is not None else {}
+        self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -5112,6 +5373,70 @@ class CustomImageDataset(Dataset):
                             self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
                             self.filenames.append(img_name)  # Populate filenames list
 
+        # Preprocess all images during initialization
+        self._preprocess_all_images()
+
+    def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Preprocess an image tensor to ensure it is suitable for the CNN.
+        - If the image is smaller than target_size and resize_images is True, resize it to target_size.
+        - If the image is larger than target_size, split it into sliding windows of target_size.
+
+        Args:
+            image_tensor (torch.Tensor): Input image tensor of shape (C, H, W).
+
+        Returns:
+            torch.Tensor: Processed image tensor(s). If windowing is used, returns a batch of tensors.
+        """
+        _, h, w = image_tensor.shape
+
+        # Resize if image is smaller than target_size and resize_images is True
+        if self.resize_images and (h < self.target_size or w < self.target_size):
+            image_tensor = resize(image_tensor, (self.target_size, self.target_size), antialias=True)
+            return image_tensor.unsqueeze(0)  # Add batch dimension
+
+        # Split into sliding windows if image is larger than target_size
+        if h > self.target_size or w > self.target_size:
+            stride = int(self.target_size * (1 - self.overlap))  # Stride based on overlap
+            windows = []
+
+            # Extract windows
+            for y in range(0, h - self.target_size + 1, stride):
+                for x in range(0, w - self.target_size + 1, stride):
+                    window = image_tensor[:, y:y + self.target_size, x:x + self.target_size]
+                    windows.append(window)
+
+            # Stack windows into a batch
+            return torch.stack(windows)
+
+        # If image is already target_size, return as is
+        return image_tensor.unsqueeze(0)
+
+
+    def _preprocess_all_images(self):
+        """
+        Preprocess all images to ensure consistent shapes (256x256).
+        """
+        # Create a directory to store preprocessed images (if saving to disk)
+        self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
+        os.makedirs(self.preprocessed_dir, exist_ok=True)
+
+        # Preprocess images with a progress bar
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {self.target_size}x{self.target_size}")):
+            image = Image.open(img_path).convert('RGB')
+            image_tensor = transforms.ToTensor()(image)
+
+            # Resize or window the image
+            preprocessed_tensors = self._preprocess_image(image_tensor)
+
+            # Save preprocessed images to disk (optional)
+            for i, tensor in enumerate(preprocessed_tensors):
+                save_path = os.path.join(self.preprocessed_dir, f"{self.filenames[idx]}_window{i}.pt")
+                torch.save(tensor, save_path)
+
+            # Store preprocessed tensors (or paths to the preprocessed images)
+            self.preprocessed_images.append(preprocessed_tensors)
+
     def __len__(self):
         return len(self.image_files)
 
@@ -5128,7 +5453,6 @@ class CustomImageDataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
-            image = transforms.functional.resize(image, (256, 256),antialias=True)
 
         # Return only image and label during training
         return image, label
@@ -5147,10 +5471,11 @@ class DatasetProcessor:
     SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
 
     def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
-                 output_dir: str = "data"):
+                 output_dir: str = "data", config: Optional[Dict] = None):
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
+        self.config = config if config is not None else {}  # Initialize config
 
         if self.datatype == 'torchvision':
             self.dataset_name = self.datafile.lower()
@@ -5230,23 +5555,54 @@ class DatasetProcessor:
             processed_path = self._process_data_path(self.datafile)
             return self._process_custom(processed_path)
 
+    def _handle_existing_directory(self, path: str):
+        """Handle existing directory by either removing it or merging its contents."""
+        if os.path.exists(path):
+            response = input(f"The directory '{path}' already exists. Do you want to (R)emove it or (M)erge its contents? [R/M]: ").lower()
+            if response == 'r':
+                shutil.rmtree(path)
+                os.makedirs(path)
+            elif response == 'm':
+                # Merge contents (no action needed, as shutil.copytree will handle it with dirs_exist_ok=True)
+                pass
+            else:
+                raise ValueError("Invalid choice. Please choose 'R' to remove or 'M' to merge.")
+
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
         """Process custom dataset structure"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
+        # Access enable_adaptive from training_params
+        try:
+             enable_adaptive = self.config['model'].get('enable_adaptive', True)
+        except:
+            enable_adaptive = True
+            print(f"Enable Adaptive mode is set {enable_adaptive} in process custom")
         # Check if dataset already has train/test structure
         if os.path.isdir(os.path.join(data_path, "train")) and \
            os.path.isdir(os.path.join(data_path, "test")):
-            if os.path.exists(train_dir):
-                shutil.rmtree(train_dir)
-            if os.path.exists(test_dir):
-                shutil.rmtree(test_dir)
+            # Check if adaptive_fit_predict is active
+            if enable_adaptive:
+                # Handle existing train directory
+                self._handle_existing_directory(train_dir)
+                # Merge train and test folders into a single train folder
 
-            shutil.copytree(os.path.join(data_path, "train"), train_dir)
-            shutil.copytree(os.path.join(data_path, "test"), test_dir)
-            return train_dir, test_dir
+                # Copy train data
+                shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
 
+                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
+
+            else:
+                # Normal processing with separate train and test folders
+                if os.path.exists(train_dir):
+                    shutil.rmtree(train_dir)
+                if os.path.exists(test_dir):
+                    shutil.rmtree(test_dir)
+
+                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                shutil.copytree(os.path.join(data_path, "test"), test_dir)
+                return train_dir, test_dir
         # Handle single directory with class subdirectories
         if not os.path.isdir(data_path):
             raise ValueError(f"Invalid dataset path: {data_path}")
@@ -5281,10 +5637,7 @@ class DatasetProcessor:
 #------------------------
     def get_transforms(self, config: Dict, is_train: bool = True) -> transforms.Compose:
         """Get transforms based on configuration"""
-        transform_list = [
-                    transforms.Resize(256),  # First resize to ensure minimum size
-                    transforms.CenterCrop(256),  # Then crop to exact size
-                ]
+        transform_list = []
 
         # Handle resolution and channel conversion first
         target_size = tuple(config['dataset']['input_size'])
@@ -5338,11 +5691,13 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
+                "resize_images": False,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
              "model": {
                 "encoder_type": "autoenc",
+                'enable_adaptive': True,  # Default value
                 "feature_dims": 128,
                 "learning_rate": 0.001,
                 "optimizer": {
@@ -5369,7 +5724,7 @@ class DatasetProcessor:
                     "enhancements": {
                         "enabled": True,
                         "use_kl_divergence": True,
-                        "use_class_encoding": True,
+                        "use_class_encoding": False,
                         "kl_divergence_weight": 0.5,
                         "classification_weight": 0.5,
                         "clustering_temperature": 1.0,
@@ -5546,7 +5901,7 @@ class DatasetProcessor:
             "modelType": "Histogram",
             "feature_group_size": 2,
             "max_combinations": 10000,
-            "bin_sizes": [21],
+            "bin_sizes": [128],
             "active_learning": {
                 "tolerance": 1.0,
                 "cardinality_threshold_percentile": 95,
@@ -6512,18 +6867,18 @@ def configure_enhancements(config: Dict) -> Dict:
     print("\nConfiguring Enhanced Autoencoder Features:")
 
     # KL Divergence configuration
-    if input("Enable KL divergence clustering? (y/n) [y]: ").lower() != 'n':
+    if input("Enable KL divergence clustering? (y/n) [n]: ").lower() != 'n':
         enhancements['use_kl_divergence'] = True
         enhancements['kl_divergence_weight'] = float(input("Enter KL divergence weight (0-1) [0.1]: ") or 0.1)
     else:
         enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
-        enhancements['use_class_encoding'] = True
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
+        enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
-        enhancements['use_class_encoding'] = False
+        enhancements['use_class_encoding'] = True
 
     # Clustering configuration
     if enhancements['use_kl_divergence']:
@@ -6668,15 +7023,22 @@ def main():
             # Initialize the PredictionManager
             predictor = PredictionManager(
                 config=config,
-                model_path=args.model_path,
-                output_dir=args.output_dir
+                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
+
+            # Set the dataset (if required)
+            if hasattr(predictor.model, 'set_dataset'):
+                # Create a dataset with the images in the input directory
+                transform = predictor._get_transforms()  # Get the image transforms
+                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
+                predictor.model.set_dataset(dataset)  # Set the dataset in the model
+                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
 
             # Perform predictions
             logger.info("Starting prediction process...")
-            predictor.predict_from_folder(
-                folder_path=args.input_dir,
-                output_csv_path=args.output_csv
+            predictor.predict_images(
+                input_path=args.input_dir,
+                output_csv=args.output_csv
             )
             logger.info(f"Predictions saved to {args.output_csv}")
 
@@ -6738,7 +7100,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         features_dict = perform_training_and_extraction(
             model, train_loader, test_loader, config, loss_manager, logger
         )
-        print("Features Extracted")
+
         # Save results
         save_training_results(features_dict, model, config, data_dir, data_name, logger)
 
@@ -6855,7 +7217,26 @@ def get_training_confirmation(logger: logging.Logger) -> bool:
         return False
     return True
 
+# Original dataset creation point
+def perform_training_and_extraction(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader],
+    config: Dict,
+    loss_manager: EnhancedLossManager,
+    logger: logging.Logger
+) -> Dict:
+    """Perform model training and feature extraction"""
+    # Training
+    logger.info("Starting model training...")
+    # HERE: train_loader is passed but train_dataset isn't stored anywhere
+    history = train_model(model, train_loader, config, loss_manager)
 
+    # Feature extraction
+    logger.info("Extracting features...")
+    # HERE: We need train_dataset but it's not accessible
+    features_dict = extract_features_from_model(model, train_loader, test_loader)
+    return features_dict
 
 def extract_features_from_model(
     model: nn.Module,
@@ -6897,7 +7278,7 @@ def perform_training_and_extraction(
     """Perform model training and feature extraction"""
     # Training
     logger.info("Starting model training...")
-    history = train_model(model, train_loader, config)
+    history = train_model(model, train_loader, config, loss_manager)
 
     # Feature extraction
     logger.info("Extracting features...")
@@ -6921,7 +7302,7 @@ def save_training_results(
     """Save training results and features"""
     # Save features
     output_path = os.path.join(data_dir, f"{data_name}.csv")
-    model.save_features(features_dict, output_path)
+    model.save_features(features_dict,features_dict, output_path)
 
     # Save training history if available
     if hasattr(model, 'history') and model.history:
