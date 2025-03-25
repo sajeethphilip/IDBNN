@@ -1081,7 +1081,7 @@ def main():
     args = parser.parse_args()
 
     # Ensure datafolder is under data/
-    base_name = args.data_folder
+    base_name = args.datafolder
     datafolder = os.path.join("data", base_name)
     os.makedirs(args.datafolder, exist_ok=True)
     print(f"\nSetting up data structure in {args.datafolder}")
