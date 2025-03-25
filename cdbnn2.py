@@ -4415,7 +4415,6 @@ class FeatureExtractorCNN(nn.Module):
         # Initialize all enhancements
         self._init_enhancements(config)
         self.to(self.device)
-
         if self.use_kl_divergence:
             self._init_cluster_centers(config)
 
