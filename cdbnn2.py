@@ -407,38 +407,38 @@ class FeatureExtractorPipeline:
 
         return train_path, test_path, image_subfolders
 
-def _prepare_data_structure(self) -> None:
-    """Ensure proper training directory structure exists with class folders"""
-    # First verify the source directory contains valid data
-    if not self._has_valid_source_structure():
-        raise FileNotFoundError(
-            f"No valid training data found in {self.source_dir}\n"
-            "Expected either:\n"
-            "1. Class folders directly in this directory\n"
-            "2. 'train/' and optionally 'test/' subdirectories"
-        )
+    def _prepare_data_structure(self) -> None:
+        """Ensure proper training directory structure exists with class folders"""
+        # First verify the source directory contains valid data
+        if not self._has_valid_source_structure():
+            raise FileNotFoundError(
+                f"No valid training data found in {self.source_dir}\n"
+                "Expected either:\n"
+                "1. Class folders directly in this directory\n"
+                "2. 'train/' and optionally 'test/' subdirectories"
+            )
 
-    # Handle existing training directory
-    if os.path.exists(self.train_dir):
-        if self.interactive:
-            print(f"Warning: Training directory already exists at {self.train_dir}")
-            response = input("Do you want to: [R]eplace, [M]erge, or [A]bort? ").lower()
-            if response == 'a':
-                raise FileExistsError("Aborted by user")
-            elif response == 'r':
-                print(f"Removing existing directory {self.train_dir}")
-                shutil.rmtree(self.train_dir)
-                os.makedirs(self.train_dir)
-            elif response == 'm':
-                print("Merging with existing data")
+        # Handle existing training directory
+        if os.path.exists(self.train_dir):
+            if self.interactive:
+                print(f"Warning: Training directory already exists at {self.train_dir}")
+                response = input("Do you want to: [R]eplace, [M]erge, or [A]bort? ").lower()
+                if response == 'a':
+                    raise FileExistsError("Aborted by user")
+                elif response == 'r':
+                    print(f"Removing existing directory {self.train_dir}")
+                    shutil.rmtree(self.train_dir)
+                    os.makedirs(self.train_dir)
+                elif response == 'm':
+                    print("Merging with existing data")
+                else:
+                    print("Invalid choice, defaulting to merge")
             else:
-                print("Invalid choice, defaulting to merge")
-        else:
-            # Non-interactive mode - default to merge
-            print(f"Training directory exists, merging new data into {self.train_dir}")
+                # Non-interactive mode - default to merge
+                print(f"Training directory exists, merging new data into {self.train_dir}")
 
-    # Now ensure we have class folders in the training directory
-    self._ensure_class_folders_exist()
+        # Now ensure we have class folders in the training directory
+        self._ensure_class_folders_exist()
 
     def _has_valid_source_structure(self) -> bool:
         """Check if source directory has valid structure"""
