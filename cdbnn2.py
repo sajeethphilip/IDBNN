@@ -773,86 +773,86 @@ class FeatureExtractorPipeline:
                 return pickle.load(f)
         return None
 
-def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
-    """
-    Predict features for images in a directory and save to CSV
+    def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
+        """
+        Predict features for images in a directory and save to CSV
 
-    Args:
-        image_dir: Directory containing images (can have subfolders)
-        output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
+        Args:
+            image_dir: Directory containing images (can have subfolders)
+            output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
 
-    Returns:
-        DataFrame with columns: image_path, target_name, target, feature_0...feature_N
-    """
-    # Set default output path if not specified
-    if output_csv is None:
-        output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
+        Returns:
+            DataFrame with columns: image_path, target_name, target, feature_0...feature_N
+        """
+        # Set default output path if not specified
+        if output_csv is None:
+            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
 
-    # Load label encoding if available
-    self.class_to_idx = self._load_label_encoding()
+        # Load label encoding if available
+        self.class_to_idx = self._load_label_encoding()
 
-    # Create dataset and loader
-    dataset = datasets.ImageFolder(image_dir, transform=self.transform)
-    loader = DataLoader(
-        dataset,
-        batch_size=self.config["training"]["batch_size"],
-        shuffle=False,
-        num_workers=self.config["training"]["num_workers"]
-    )
+        # Create dataset and loader
+        dataset = datasets.ImageFolder(image_dir, transform=self.transform)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=self.config["training"]["num_workers"]
+        )
 
-    # Get all image paths (including subdirectories)
-    image_paths = []
-    for root, _, files in os.walk(image_dir):
-        for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                image_paths.append(os.path.join(root, file))
+        # Get all image paths (including subdirectories)
+        image_paths = []
+        for root, _, files in os.walk(image_dir):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    image_paths.append(os.path.join(root, file))
 
-    # Validate we found images
-    if not image_paths:
-        raise ValueError(f"No images found in {image_dir}")
+        # Validate we found images
+        if not image_paths:
+            raise ValueError(f"No images found in {image_dir}")
 
-    # Extract features
-    self.model.eval()
-    features_list = []
+        # Extract features
+        self.model.eval()
+        features_list = []
 
-    with torch.no_grad():
-        for images, _ in tqdm(loader, desc="Extracting features"):
-            images = images.to(self.device)
-            features = self.model(images).cpu().numpy()
-            features_list.append(features)
+        with torch.no_grad():
+            for images, _ in tqdm(loader, desc="Extracting features"):
+                images = images.to(self.device)
+                features = self.model(images).cpu().numpy()
+                features_list.append(features)
 
-    # Create DataFrame
-    features_array = np.concatenate(features_list, axis=0)
-    feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
+        # Create DataFrame
+        features_array = np.concatenate(features_list, axis=0)
+        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
 
-    df = pd.DataFrame(features_array, columns=feature_cols)
-    df["image_path"] = image_paths
+        df = pd.DataFrame(features_array, columns=feature_cols)
+        df["image_path"] = image_paths
 
-    # Add target information based on folder structure
-    df["target_name"] = df["image_path"].apply(
-        lambda x: os.path.basename(os.path.dirname(x))
-    )
+        # Add target information based on folder structure
+        df["target_name"] = df["image_path"].apply(
+            lambda x: os.path.basename(os.path.dirname(x))
+        )
 
-    # Set numeric targets if we have label encoding
-    if self.class_to_idx:
-        df["target"] = df["target_name"].map(self.class_to_idx).fillna(-1).astype(int)
-    else:
-        df["target"] = -1
+        # Set numeric targets if we have label encoding
+        if self.class_to_idx:
+            df["target"] = df["target_name"].map(self.class_to_idx).fillna(-1).astype(int)
+        else:
+            df["target"] = -1
 
-    # Ensure consistent column order
-    df = df[["image_path", "target_name", "target"] + feature_cols]
+        # Ensure consistent column order
+        df = df[["image_path", "target_name", "target"] + feature_cols]
 
-    # Save results
-    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-    df.to_csv(output_csv, index=False)
+        # Save results
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
 
-    print(f"\nPrediction results saved to: {output_csv}")
-    print(f"Total images processed: {len(df)}")
-    if self.class_to_idx:
-        known = sum(df["target"] != -1)
-        print(f"Images with known classes: {known} ({known/len(df):.1%})")
+        print(f"\nPrediction results saved to: {output_csv}")
+        print(f"Total images processed: {len(df)}")
+        if self.class_to_idx:
+            known = sum(df["target"] != -1)
+            print(f"Images with known classes: {known} ({known/len(df):.1%})")
 
-    return df
+        return df
 
     def _save_model(self) -> None:
         os.makedirs(self.model_dir, exist_ok=True)
