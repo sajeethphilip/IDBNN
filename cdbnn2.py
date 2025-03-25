@@ -691,7 +691,7 @@ class FeatureExtractorPipeline:
                 kl_loss = self.clusterer.compute_kl_divergence(features, target)
 
                 # Total loss
-                loss = kl_loss * self.config["model"]["autoencoder_config"]["enhancements"]["kl_divergence_weight"]
+                loss = kl_loss * self.config["model"]["CNN_config"]["enhancements"]["kl_divergence_weight"]
 
                 # Backward pass
                 loss.backward()
