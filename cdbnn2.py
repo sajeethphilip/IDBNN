@@ -144,11 +144,13 @@ class ImageDataset(Dataset):
         return img, label, str(img_path)
 
 # -------------------- Configuration Management --------------------
+# In the ConfigManager class, modify both methods to convert Path objects to strings:
+
 class ConfigManager:
     @staticmethod
     def generate_conf_file(output_path: Path, feature_dim: int, dataset_name: str):
         conf = {
-            "file_path": str(output_path/f"{dataset_name}.csv"),
+            "file_path": str(output_path/f"{dataset_name}.csv"),  # Convert to string
             "column_names": [f"feature_{i}" for i in range(feature_dim)] + [
                 "target", "file_path", "assigned_class", "assigned_class_label", "confidence"
             ],
@@ -183,7 +185,7 @@ class ConfigManager:
                 "feedback_strength": 0.3,
                 "inverse_learning_rate": 0.001,
                 "Save_training_epochs": True,
-                "training_save_path": "training_data",
+                "training_save_path": str(output_path/"training_data"),  # Convert to string
                 "enable_vectorized": False,
                 "vectorization_warning_acknowledged": False,
                 "compute_device": "auto",
@@ -203,7 +205,7 @@ class ConfigManager:
 
     @staticmethod
     def generate_json_config(output_path: Path, config: Dict, dataset_name: str):
-        # Convert Path objects to strings
+        # Convert all Path objects to strings
         base_config = {
             "dataset": {
                 "name": dataset_name,
