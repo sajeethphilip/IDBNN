@@ -65,20 +65,20 @@ class FeatureExtractorCNN(nn.Module):
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
 
-        # Feature projection head
+        # Projection head with proper closure
         self.projection_head = nn.Sequential(
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Linear(512, feature_dims))
+            nn.Linear(512, feature_dims)
+        )  # This closes the Sequential block
 
-        # Classification head (for supervised clustering)
+        # Classification head
         if num_classes:
             self.classifier = nn.Sequential(
                 nn.Linear(feature_dims, 256),
                 nn.ReLU(),
                 nn.Linear(256, num_classes))
-
     def _conv_block(self, in_c, out_c, residual=False):
         layers = [
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
