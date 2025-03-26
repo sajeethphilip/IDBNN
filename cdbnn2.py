@@ -63,7 +63,7 @@ class FeatureExtractorCNN(nn.Module):
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
+            nn.AdaptiveAvgPool2d((1, 1)))
 
         # Projection head with proper closure
         self.projection_head = nn.Sequential(
