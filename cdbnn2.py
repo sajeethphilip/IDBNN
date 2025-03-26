@@ -862,7 +862,7 @@ class FeatureExtractorPipeline:
                 self.optimizer.zero_grad()
 
                 # Forward pass - returns both features and cluster logits
-                features, cluster_logits = self.model(data, return_clusters=True)
+                features, cluster_logits = self.model(data)
 
                 # Calculate all loss components
                 # 1. KL divergence loss for clustering
@@ -893,7 +893,7 @@ class FeatureExtractorPipeline:
                 )
                 # Modified forward pass
                 if hasattr(self.model, 'cluster_head'):
-                    features, cluster_logits = self.model(data, return_clusters=True)
+                    features, cluster_logits = self.model(data)
                     # Calculate your losses using both features and cluster_logits
                     kl_loss = self.clusterer.compute_kl_divergence(features, target)
                     cls_loss = F.cross_entropy(cluster_logits, target)
