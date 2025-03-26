@@ -16,6 +16,7 @@ from PIL import Image
 from typing import Dict, Any, List, Tuple, Optional
 from tqdm import tqdm
 import warnings
+from pytorch_metric_learning import miners, losses
 
 class SelfAttention(nn.Module):
     """Self-attention module for feature maps"""
