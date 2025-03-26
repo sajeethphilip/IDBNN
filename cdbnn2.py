@@ -535,6 +535,12 @@ class FeatureExtractorPipeline:
                         "triplet_weight": 0.2,
                         "alignment_update_freq": 1
                     }
+                    "clustering": {
+                        "triplet_margin": 0.3,
+                        "uniformity_weight": 0.1,
+                        "prototype_lr": 0.01,
+                        "temperature_init": 0.1
+                    }
                 }
             },
             "training": {
