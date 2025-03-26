@@ -836,82 +836,94 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """Complete GPU-optimized training with proper validation setup"""
-        # Initialize with device awareness
-        self.model = self.model.to(self.device)
-        self.cluster_loss = DeepClusteringLoss(
-            num_classes=self.config["dataset"]["num_classes"],
-            feature_dim=self.config["model"]["feature_dims"],
-            device=self.device
-        )
+        """Complete fixed training implementation with proper accuracy tracking"""
+        # 1. Proper Model Initialization
+        self.model = self._initialize_model().to(self.device)
 
-        # Data loading with GPU optimizations
+        # 2. Enhanced Cluster Head Setup
+        if hasattr(self.model, 'cluster_head'):
+            # Proper initialization for classification
+            nn.init.xavier_normal_(self.model.cluster_head[0].weight)
+            nn.init.zeros_(self.model.cluster_head[0].bias)
+            self.model.temperature.data.fill_(1.0)  # Initialize temperature
+
+        # 3. Data Loading with Correct Class Mapping
         train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         self.class_to_idx = train_dataset.class_to_idx
         self.num_classes = len(self.class_to_idx)
 
-        # Train/val split - moved before loader creation
+        # 4. Proper Train/Val Split
         val_size = int(len(train_dataset) * self.config["training"].get("validation_split", 0.2))
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [len(train_dataset) - val_size, val_size]
         )
 
-        # Create BOTH loaders properly
+        # 5. Data Loaders with Correct Batch Sizes
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=min(4, os.cpu_count()),
-            pin_memory=True,
-            persistent_workers=True
-        )
-
-        val_loader = DataLoader(  # This was missing in previous version
-            val_dataset,
-            batch_size=self.config["training"]["batch_size"] * 2,
-            shuffle=False,
-            num_workers=min(2, os.cpu_count()),
+            num_workers=4,
             pin_memory=True
         )
 
-        # Training setup
-        best_val_loss = float('inf')
-        patience = self.config["training"]["early_stopping"]["patience"]
-        scaler = torch.cuda.amp.GradScaler(enabled=self.config["execution_flags"].get("mixed_precision", False))
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True
+        )
 
+        # 6. Enhanced Loss Setup
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.AdamW([
+            {'params': self.model.parameters()},
+            {'params': self.model.cluster_head.parameters(), 'lr': 1e-3}  # Higher LR for head
+        ], lr=self.config["model"]["learning_rate"])
+
+        # 7. Training Loop with Proper Accuracy Tracking
+        best_acc = 0.0
         for epoch in range(1, self.config["training"]["epochs"] + 1):
             self.model.train()
             train_loss = 0.0
+            correct = 0
+            total = 0
 
             for data, target, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
-                data = data.to(self.device, non_blocking=True)
-                target = target.to(self.device, non_blocking=True)
+                data, target = data.to(self.device), target.to(self.device)
+                self.optimizer.zero_grad()
 
-                with torch.cuda.amp.autocast(
-                    enabled=self.config["execution_flags"].get("mixed_precision", False)
-                ):
-                    features, _ = self.model(data, return_logits=True)
-                    loss_dict = self.cluster_loss(features, target)
-                    loss = loss_dict['total']
+                # Forward pass with proper head activation
+                features, logits = self.model(data, return_logits=True)
+                probs = F.softmax(logits, dim=1)
 
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
-                scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
+                # Calculate loss and accuracy
+                loss = self.criterion(logits, target)
+                _, predicted = torch.max(probs.data, 1)
+                correct += (predicted == target).sum().item()
+                total += target.size(0)
 
+                # Backward pass
+                loss.backward()
+                self.optimizer.step()
                 train_loss += loss.item()
 
-            # Validation - now using properly defined val_loader
-            val_loss = self._validate(val_loader)  # This now works
-            self.scheduler.step(val_loss)
+            # 8. Proper Validation
+            val_acc, val_loss = self._validate(val_loader)
+            train_acc = correct / total
 
-            # Early stopping check
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            print(f"\nEpoch {epoch}:")
+            print(f"  Train Loss: {train_loss/len(train_loader):.4f} | Acc: {train_acc:.2%}")
+            print(f"  Val Loss: {val_loss:.4f} | Acc: {val_acc:.2%}")
+
+            # Save best model
+            if val_acc > best_acc:
+                best_acc = val_acc
                 self._save_model()
+                print("  Saved best model")
 
         return self.class_to_idx
-
     def _extract_features(self, input_dir: str) -> Dict[str, Any]:
         """Unified feature extraction that returns features and targets"""
         if self._is_timeseries_data(input_dir):
@@ -948,66 +960,28 @@ class FeatureExtractorPipeline:
             )
         self.model.train()
 
-    def _validate(self, val_loader):
-        """GPU-optimized validation with metrics and device safety"""
-        self.model.eval()
-        val_loss = 0.0
-        total_correct = 0
-        total_samples = 0
+ def _validate(self, val_loader):
+    """Fixed validation with proper accuracy calculation"""
+    self.model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
 
-        with torch.no_grad(), torch.cuda.amp.autocast(
-            enabled=self.config["execution_flags"].get("mixed_precision", False)
-        ):
-            for data, target, _ in val_loader:
-                # Automatic device placement with non-blocking transfers
-                data = data.to(self.device, non_blocking=True)
-                target = target.to(self.device, non_blocking=True)
+    with torch.no_grad():
+        for data, target, _ in val_loader:
+            data, target = data.to(self.device), target.to(self.device)
 
-                # Forward pass - get both features and logits if available
-                features = self.model(data)
+            # Get proper predictions
+            features, logits = self.model(data, return_logits=True)
+            probs = F.softmax(logits, dim=1)
 
-                if hasattr(self.model, 'cluster_head'):
-                    # Get cluster predictions if available
-                    cluster_logits = self.model.cluster_head(features)
+            # Calculate metrics
+            val_loss += self.criterion(logits, target).item()
+            _, predicted = torch.max(probs.data, 1)
+            correct += (predicted == target).sum().item()
+            total += target.size(0)
 
-                    # GPU-optimized alignment
-                    if hasattr(self, 'aligner'):
-                        aligned_probs = self.aligner(cluster_logits)
-                    else:
-                        aligned_probs = F.softmax(cluster_logits, dim=1)
-
-                    # Calculate validation loss
-                    val_loss += F.cross_entropy(
-                        aligned_probs,
-                        target,
-                        reduction='sum'  # More accurate accumulation
-                    ).item()
-
-                    # Calculate accuracy
-                    _, predicted = torch.max(aligned_probs, 1)
-                    total_correct += (predicted == target).sum().item()
-                else:
-                    # Fallback to feature validation
-                    val_loss += self.cluster_loss(features, target)['total'].item()
-
-                total_samples += target.size(0)
-
-        # Compute metrics
-        accuracy = total_correct / max(total_samples, 1)  # Avoid division by zero
-        avg_loss = val_loss / max(total_samples, 1)  # Sample-wise average
-
-        # Enhanced logging
-        log_msg = []
-        if hasattr(self.model, 'cluster_head'):
-            log_msg.append(f"Val Accuracy: {accuracy:.2%}")
-        log_msg.append(f"Val Loss: {avg_loss:.4f}")
-
-        if torch.cuda.is_available():
-            log_msg.append(f"GPU Mem: {torch.cuda.max_memory_allocated()/1024**2:.1f}MB")
-
-        print("  " + " | ".join(log_msg))
-
-        return avg_loss
+    return correct/max(total,1), val_loss/len(val_loader)
 
 
 #------------------------------------------------
