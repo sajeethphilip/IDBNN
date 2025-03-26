@@ -973,7 +973,7 @@ class FeatureExtractorPipeline:
         with torch.no_grad():
             for data, target, _ in loader:
                 data, target = data.to(self.device), target.to(self.device)
-                features, cluster_logits = self.model(data, return_clusters=True)
+                features, cluster_logits = self.model(data)
                 features_all.append(features)
                 targets_all.append(target)
                 clusters_all.append(cluster_logits.argmax(1))
@@ -996,7 +996,7 @@ class FeatureExtractorPipeline:
         with torch.no_grad():
             for data, target, _ in val_loader:
                 data, target = data.to(self.device), target.to(self.device)
-                features, cluster_logits = self.model(data, return_clusters=True)
+                features, cluster_logits = self.model(data)
                 aligned_probs = self.aligner(cluster_logits)
 
                 # Calculate validation loss (focused on classification)
@@ -1099,7 +1099,7 @@ class FeatureExtractorPipeline:
             self.model.eval()
             with torch.no_grad():
                 for batch, window_indices in loader:
-                    features, cluster_logits = self.model(batch.to(self.device), return_clusters=True)
+                    features, cluster_logits = self.model(batch.to(self.device))
                     aligned_probs = self.aligner(cluster_logits)
 
                     # Get predictions
@@ -1152,7 +1152,7 @@ class FeatureExtractorPipeline:
                 self.model.eval()
                 with torch.no_grad():
                     for images, _, paths in loader:
-                        features, cluster_logits = self.model(images.to(self.device), return_clusters=True)
+                        features, cluster_logits = self.model(images.to(self.device))
                         aligned_probs = self.aligner(cluster_logits)
 
                         # Get predictions
