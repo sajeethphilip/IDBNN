@@ -14,6 +14,7 @@ from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 from PIL import Image
 from torchvision import transforms
+from torch.utils.data import DataLoader, Dataset, ConcatDataset
 
 # -------------------- Model Architecture --------------------
 class UniversalFeatureExtractor(nn.Module):
