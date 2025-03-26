@@ -18,6 +18,123 @@ from tqdm import tqdm
 import warnings
 from pytorch_metric_learning import miners, losses
 import umap.umap_ as umap #pip install umap-learn
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from pytorch_metric_learning import miners, losses
+
+class PrototypeClusterHead(nn.Module):
+    """Learnable prototype-based cluster head with temperature scaling"""
+    def __init__(self, feature_dim, num_classes, init_temp=0.1):
+        super().__init__()
+        self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim))
+        self.temperature = nn.Parameter(torch.tensor(init_temp))
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, x):
+        # Normalized prototype similarity
+        x_norm = F.normalize(x, dim=1)
+        p_norm = F.normalize(self.prototypes, dim=1)
+        return self.scale * (x_norm @ p_norm.T) / self.temperature
+
+class ImprovedFeatureExtractorCNN(nn.Module):
+    def __init__(self, in_channels=3, feature_dims=128, dropout_prob=0.3, num_classes=None):
+        super().__init__()
+        # Backbone remains similar but with better normalization
+        self.conv1 = self._conv_block(in_channels, 32)
+        self.conv2 = self._conv_block(32, 64)
+        self.conv3 = self._conv_block(64, 128)
+        self.attention1 = SelfAttention(128)
+
+        self.conv4 = self._conv_block(128, 256)
+        self.conv5 = self._conv_block(256, 512)
+        self.conv6 = self._conv_block(512, 512)
+        self.attention2 = SelfAttention(512)
+
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Enhanced projection head
+        self.projection_head = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Linear(512, feature_dims),
+            nn.LayerNorm(feature_dims)
+        )
+
+        # Cluster head if classes specified
+        if num_classes:
+            self.cluster_head = PrototypeClusterHead(feature_dims, num_classes)
+
+    def _conv_block(self, in_c, out_c):
+        return nn.Sequential(
+            nn.Conv2d(in_c, out_c, 3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.GELU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.3)
+        )
+
+    def forward(self, x, return_logits=False):
+        # Feature extraction
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.attention1(x)
+
+        x = self.conv4(x)
+        x = self.conv5(x)
+        x = self.conv6(x)
+        x = self.attention2(x)
+
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        features = self.projection_head(x)
+
+        if return_logits and hasattr(self, 'cluster_head'):
+            return features, self.cluster_head(features)
+        return features
+
+class ClusterOptimizer:
+    """Handles all clustering-related optimization"""
+    def __init__(self, config, num_classes, feature_dim):
+        self.triplet_margin = config["clustering"]["triplet_margin"]
+        self.uniformity_weight = config["clustering"]["uniformity_weight"]
+
+        # Loss components
+        self.triplet_miner = miners.TripletMarginMarginMiner(margin=self.triplet_margin)
+        self.triplet_loss = losses.TripletMarginLoss(margin=self.triplet_margin)
+        self.cluster_loss = nn.KLDivLoss(reduction='batchmean')
+
+    def compute_loss(self, model, features, targets):
+        # Cluster assignment loss
+        features_norm = F.normalize(features, dim=1)
+        logits = model.cluster_head(features_norm)
+
+        # Sharpened target distribution
+        targets_onehot = F.one_hot(targets, num_classes=logits.size(1)).float()
+        targets_smooth = targets_onehot * 0.9 + 0.1/logits.size(1)
+
+        # Metric learning
+        triplets = self.triplet_miner(features_norm, targets)
+        metric_loss = self.triplet_loss(features_norm, targets, triplets)
+
+        # Feature uniformity
+        cov = torch.mm(features_norm, features_norm.T)
+        uni_loss = (cov.fill_diagonal_(0).pow(2).mean())
+
+        # Combined loss
+        total_loss = (self.cluster_loss(F.log_softmax(logits, dim=1), targets_smooth) +
+                    0.3 * metric_loss +
+                    self.uniformity_weight * uni_loss)
+
+        return {
+            "total": total_loss,
+            "cluster": cluster_loss.item(),
+            "metric": metric_loss.item(),
+            "uniformity": uni_loss.item()
+        }
+
 
 class SelfAttention(nn.Module):
     """Self-attention module for feature maps"""
@@ -794,8 +911,211 @@ class FeatureExtractorPipeline:
             ))
 
         return transforms.Compose(transform_list)
-#--------------------Train---------------------
+#--------------Train Prototype Clustering ------------------------
     def train(self) -> Dict[str, int]:
+        """Train until early stopping condition with unified 1D/image handling"""
+        # Initialize data loaders based on data type
+        if self._is_timeseries_data():
+            train_dataset = TimeSeriesDataset(self.train_dir, self.config["dataset"]["window_size"])
+            self.num_classes = self.config["dataset"]["num_classes"]  # For 1D data, use config value
+        else:
+            train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
+            self.class_to_idx = train_dataset.class_to_idx
+            self.num_classes = len(self.class_to_idx)
+
+        # Update config with actual class count
+        self.config["dataset"]["num_classes"] = self.num_classes
+
+        # Initialize improved model and clustering components
+        self.model = ImprovedFeatureExtractorCNN(
+            in_channels=self.config["dataset"]["in_channels"],
+            feature_dims=self.config["model"]["feature_dims"],
+            dropout_prob=self.config["model"].get("dropout_prob", 0.3),
+            num_classes=self.num_classes
+        ).to(self.device)
+
+        self.cluster_optimizer = ClusterOptimizer(
+            self.config,
+            self.num_classes,
+            self.config["model"]["feature_dims"]
+        )
+
+        # Split into training and validation
+        val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
+        train_size = len(train_dataset) - val_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            train_dataset, [train_size, val_size]
+        )
+
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config["training"]["batch_size"],
+            shuffle=True,
+            num_workers=self.config["training"]["num_workers"],
+            pin_memory=True
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=self.config["training"]["num_workers"],
+            pin_memory=True
+        )
+
+        # Training setup
+        best_val_metric = float('inf')
+        patience = self.config["training"]["early_stopping"]["patience"]
+        patience_counter = 0
+        epoch = 0
+
+        print(f"\nTraining on {len(train_dataset)} samples, validating on {len(val_dataset)} samples")
+        print(f"Classes: {getattr(self, 'class_to_idx', 'Predefined classes from config')}")
+        print(f"Training until validation doesn't improve for {patience} epochs")
+
+        while True:  # Continue until early stopping
+            epoch += 1
+            self.model.train()
+            train_loss = 0.0
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}")
+
+            for batch_idx, (data, target, _) in enumerate(progress_bar):
+                data, target = data.to(self.device), target.to(self.device)
+                self.optimizer.zero_grad()
+
+                # Forward pass - get both features and cluster logits
+                features, cluster_logits = self.model(data, return_logits=True)
+
+                # Compute all losses
+                losses = self.cluster_optimizer.compute_loss(self.model, features, target)
+
+                # Backward pass
+                losses["total"].backward()
+                self.optimizer.step()
+
+                # Update prototypes more aggressively
+                if hasattr(self.model, 'cluster_head'):
+                    with torch.no_grad():
+                        self.model.cluster_head.prototypes.data = (
+                            0.95 * self.model.cluster_head.prototypes.data +
+                            0.05 * F.normalize(features.detach(), dim=1).mean(0))
+
+                train_loss += losses["total"].item()
+                progress_bar.set_postfix({
+                    "loss": f"{train_loss/(batch_idx+1):.4f}",
+                    "cluster": f"{losses['cluster']:.2f}",
+                    "metric": f"{losses['metric']:.2f}",
+                    "uniform": f"{losses['uniformity']:.2f}"
+                })
+
+            # Validation
+            val_metrics = self._validate(val_loader)
+            avg_train_loss = train_loss / len(train_loader)
+
+            # Update learning rate scheduler
+            self.scheduler.step(val_metrics["total_loss"])
+
+            # Print epoch summary
+            print(f"\nEpoch {epoch} Summary:")
+            print(f"  Train Loss: {avg_train_loss:.4f}")
+            print(f"  Val Loss: {val_metrics['total_loss']:.4f}")
+            print(f"  Val Purity: {val_metrics['purity']:.2%}")
+            print(f"  Val NMI: {val_metrics['nmi']:.3f}")
+            print(f"  LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+
+            # Check for improvement (using purity as primary metric)
+            if val_metrics["purity"] > best_val_metric + self.config["training"]["early_stopping"]["min_delta"]:
+                best_val_metric = val_metrics["purity"]
+                patience_counter = 0
+                self._save_model()
+                print("  Saved best model")
+            else:
+                patience_counter += 1
+                print(f"  No improvement ({patience_counter}/{patience})")
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping triggered after {epoch} epochs")
+                    break
+
+        # Post-training processing
+        self._load_best_model()
+
+        # Save features and visualizations
+        train_csv_path = os.path.join(self.output_dir, f"{self.dataname}_train_features.csv")
+        self._extract_and_save_features(self.train_dir, train_csv_path)
+
+        if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
+            val_csv_path = os.path.join(self.output_dir, f"{self.dataname}_val_features.csv")
+            self._extract_and_save_features(self.val_dir, val_csv_path)
+
+        # Visualize feature space
+        train_features = self._extract_features(self.train_dir)
+        self.visualize_features(
+            train_features['features'],
+            train_features['target'],
+            os.path.join(self.output_dir, "feature_space.png")
+        )
+
+        return getattr(self, 'class_to_idx', None) or {str(i):i for i in range(self.num_classes)}
+
+    def _validate(self, val_loader):
+        """Enhanced validation with clustering metrics"""
+        self.model.eval()
+        all_features, all_labels = [], []
+        total_loss = 0.0
+
+        with torch.no_grad():
+            for data, target, _ in val_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                features, logits = self.model(data, return_logits=True)
+
+                # Store for metrics
+                all_features.append(features.cpu())
+                all_labels.append(target.cpu())
+
+                # Calculate validation loss
+                losses = self.cluster_optimizer.compute_loss(self.model, features, target)
+                total_loss += losses["total"].item()
+
+        # Calculate clustering metrics
+        features = torch.cat(all_features)
+        labels = torch.cat(all_labels)
+
+        purity = self._calculate_purity(features, labels)
+        nmi = self._calculate_nmi(features, labels)
+
+        return {
+            "total_loss": total_loss / len(val_loader),
+            "purity": purity,
+            "nmi": nmi
+        }
+
+    def _calculate_purity(self, features, labels):
+        """Calculate cluster purity using learned prototypes"""
+        with torch.no_grad():
+            features = features.to(self.device)
+            if hasattr(self.model, 'cluster_head'):
+                # Get cluster assignments
+                cluster_probs = F.softmax(self.model.cluster_head(features), dim=1)
+                cluster_assign = cluster_probs.argmax(dim=1)
+
+                # Calculate purity
+                correct = (cluster_assign.cpu() == labels).sum().item()
+                return correct / len(labels)
+        return 0.0
+
+    def _calculate_nmi(self, features, labels):
+        """Calculate normalized mutual information"""
+        from sklearn.metrics import normalized_mutual_info_score
+        with torch.no_grad():
+            if hasattr(self.model, 'cluster_head'):
+                features = features.to(self.device)
+                cluster_assign = self.model.cluster_head(features).argmax(dim=1).cpu()
+                return normalized_mutual_info_score(labels.numpy(), cluster_assign.numpy())
+        return 0.0
+
+#--------------------Train---------------------
+    def train_KLDivergence(self) -> Dict[str, int]:
         """Train until early stopping condition is met with unified 1D/image handling"""
         # Initialize loss functions
         miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
@@ -1002,7 +1322,7 @@ class FeatureExtractorPipeline:
             )
         self.model.train()
 
-    def _validate(self, val_loader):
+    def _validate_KLDivergence(self, val_loader):
         """Enhanced validation with multiple metrics"""
         self.model.eval()
         val_loss = 0.0
