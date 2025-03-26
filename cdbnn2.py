@@ -303,7 +303,7 @@ class FeatureExtractorPipeline:
         """Create default configuration"""
         return {
             "dataset": {
-                "name": self.dataset_name,
+                "name": self.dataname,
                 "type": "image_folder",
                 "in_channels": 3,
                 "num_classes": 10,
@@ -398,7 +398,7 @@ class FeatureExtractorPipeline:
                 "fresh_start": False
             },
             "output": {
-            "features_file": os.path.join(self.output_dir, f"{self.dataset_name}.csv"),
+            "features_file": os.path.join(self.output_dir, f"{self.dataname}.csv"),
             "model_dir": self.model_dir,
                 "visualization_dir": os.path.join(self.output_dir, "visualizations")
             }
@@ -477,7 +477,7 @@ class FeatureExtractorPipeline:
 
     def _handle_interactive_setup(self) -> None:
         """Handle interactive setup"""
-        print(f"\nSetting up data structure for {self.dataset_name}")
+        print(f"\nSetting up data structure for {self.dataname}")
 
         # Ask about train/test merge
         if not os.path.exists(self.test_dir):
@@ -832,12 +832,12 @@ class FeatureExtractorPipeline:
         # Load best model weights before returning
         self._load_best_model()
         # After training completes, extract and save features
-        train_csv_path = os.path.join(self.output_dir, f"{self.dataset_name}_train_features.csv")
+        train_csv_path = os.path.join(self.output_dir, f"{self.dataname}_train_features.csv")
         self._extract_and_save_features(self.train_dir, train_csv_path)
 
         # If validation exists, save those features too
         if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
-            val_csv_path = os.path.join(self.output_dir, f"{self.dataset_name}_val_features.csv")
+            val_csv_path = os.path.join(self.output_dir, f"{self.dataname}_val_features.csv")
             self._extract_and_save_features(self.val_dir, val_csv_path)
         return self.class_to_idx
 
@@ -882,7 +882,7 @@ class FeatureExtractorPipeline:
         """Predict features from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataset_name}_predictions.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}_predictions.csv")
 
         # Verify input directory exists
         if not os.path.exists(input_dir):
@@ -1029,7 +1029,7 @@ class FeatureExtractorPipeline:
         """
         # Set default output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataset_name}_features.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}_features.csv")
 
         # Initialize results storage
         results = {
