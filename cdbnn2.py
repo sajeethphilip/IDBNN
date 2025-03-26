@@ -30,7 +30,7 @@ class UniversalFeatureExtractor(nn.Module):
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1),
                 nn.Flatten(),
-                nn.Linear(64, feature_dim)
+                nn.Linear(64, feature_dim))
         else:  # Image data
             self.encoder = nn.Sequential(
                 nn.Conv2d(input_dims[0], 32, kernel_size=3),
