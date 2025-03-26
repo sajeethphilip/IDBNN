@@ -113,7 +113,7 @@ class FeatureExtractorCNN(nn.Module):
         # Project to feature space
         features = self.projection_head(x)
 
-        if return_clusters and self.cluster_head is not None:
+        if return_logits and self.cluster_head is not None:
             cluster_logits = self.cluster_head(features)
             return features, cluster_logits
         return features
@@ -1170,7 +1170,7 @@ class FeatureExtractorPipeline:
                 self.model.eval()
                 with torch.no_grad():
                     for images, _, paths in loader:
-                        features = self.model(images.to(self.device))  # Removed return_clusters=True
+                        features = self.model(images.to(self.device), return_logits=True)
 
                         if hasattr(self.model, 'cluster_head'):
                             cluster_logits = self.model.cluster_head(features)
