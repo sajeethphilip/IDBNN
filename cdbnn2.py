@@ -70,7 +70,7 @@ class FeatureExtractorCNN(nn.Module):
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Linear(512, feature_dims)
+            nn.Linear(512, feature_dims))
 
         # Classification head (for supervised clustering)
         if num_classes:
