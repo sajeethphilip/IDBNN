@@ -42,48 +42,60 @@ class SelfAttention(nn.Module):
         return self.gamma * out + x
 
 class FeatureExtractorCNN(nn.Module):
-    """7-layer CNN feature extractor with self-attention"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
+    def __init__(self, in_channels=3, feature_dims=128, dropout_prob=0.5, num_classes=None):
         super().__init__()
         self.dropout_prob = dropout_prob
+        self.num_classes = num_classes
 
-        # Layer 1-3
-        self.conv1 = self._conv_block(in_channels, 32)
-        self.conv2 = self._conv_block(32, 64)
-        self.conv3 = self._conv_block(64, 128)
+        # Enhanced convolutional blocks with residual connections
+        self.conv1 = self._conv_block(in_channels, 32, residual=True)
+        self.conv2 = self._conv_block(32, 64, residual=True)
+        self.conv3 = self._conv_block(64, 128, residual=True)
         self.attention1 = SelfAttention(128)
 
-        # Layer 4-6
-        self.conv4 = self._conv_block(128, 256)
-        self.conv5 = self._conv_block(256, 512)
-        self.conv6 = self._conv_block(512, 512)
+        self.conv4 = self._conv_block(128, 256, residual=True)
+        self.conv5 = self._conv_block(256, 512, residual=True)
+        self.conv6 = self._conv_block(512, 512, residual=True)
         self.attention2 = SelfAttention(512)
 
-        # Layer 7
+        # Final feature extraction
         self.conv7 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1))
-        )
 
-        # Output
-        self.fc = nn.Linear(512, feature_dims)
-        self.batch_norm = nn.BatchNorm1d(feature_dims)
+        # Feature projection head
+        self.projection_head = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, feature_dims)
 
-    def _conv_block(self, in_c: int, out_c: int) -> nn.Sequential:
-        return nn.Sequential(
+        # Classification head (for supervised clustering)
+        if num_classes:
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dims, 256),
+                nn.ReLU(),
+                nn.Linear(256, num_classes))
+
+    def _conv_block(self, in_c, out_c, residual=False):
+        layers = [
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_c),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Dropout(self.dropout_prob)
-        )
+        ]
+        if residual and in_c == out_c:
+            layers.append(ResidualBlock(out_c))
+        return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, return_logits=False):
         if x.dim() == 3:
             x = x.unsqueeze(0)
 
+        # Feature extraction
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
@@ -96,12 +108,26 @@ class FeatureExtractorCNN(nn.Module):
 
         x = self.conv7(x)
         x = x.view(x.size(0), -1)
-        x = self.fc(x)
 
-        if x.size(0) > 1:
-            x = self.batch_norm(x)
+        # Project to feature space
+        features = self.projection_head(x)
 
-        return x
+        if return_logits and self.num_classes:
+            return self.classifier(features)
+        return features
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels))
+
+    def forward(self, x):
+        return F.relu(x + self.conv(x))
 
 class KLDivergenceClusterer:
     """Handles KL-divergence based clustering"""
@@ -109,8 +135,11 @@ class KLDivergenceClusterer:
         self.config = config
         ae_config = config["model"]["CNN_config"]["enhancements"]
         self.temperature = ae_config["clustering_temperature"]
-        self.min_confidence = ae_config["min_cluster_confidence"]
+        self.min_confidence = config["model"]["CNN_config"]["enhancements"]["min_cluster_confidence"]
         self.num_classes = config["dataset"]["num_classes"]
+        # Add contrastive learning components
+        self.contrastive_weight = 0.3  # Weight for contrastive loss
+        self.margin = 1.0  # Margin for contrastive loss
 
     def compute_kl_divergence(self, features: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute KL divergence between features and target distributions"""
@@ -136,27 +165,53 @@ class KLDivergenceClusterer:
         targets_dist = F.softmax(targets / self.temperature, dim=1)
 
         # Compute KL divergence
-        return F.kl_div(
+        kl_loss = F.kl_div(
             features_dist.log(),
             targets_dist,
             reduction='batchmean',
             log_target=False
         )
 
+        # Add contrastive loss
+        contrastive_loss = self._compute_contrastive_loss(features, targets)
 
-    def cluster_features(self, features: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Cluster features using KL divergence and target information"""
-        # Compute cluster probabilities
-        similarities = torch.matmul(features, features.T)
-        cluster_probs = F.softmax(similarities / self.temperature, dim=1)
+        return kl_loss + self.contrastive_weight * contrastive_loss
 
-        # Filter by confidence
-        max_probs = cluster_probs.max(dim=1)[0]
-        confident_mask = max_probs > self.min_confidence
-        confident_features = features[confident_mask]
-        confident_targets = targets[confident_mask]
+    def _compute_contrastive_loss(self, features, targets):
+        # Compute pairwise distances
+        pairwise_dist = torch.cdist(features, features, p=2)
 
-        return confident_features, confident_targets
+        # Create mask for positive pairs (same class)
+        if targets.dim() == 1:
+            target_mask = targets.unsqueeze(0) == targets.unsqueeze(1)
+        else:
+            # For one-hot targets
+            target_mask = torch.argmax(targets, dim=1).unsqueeze(0) == torch.argmax(targets, dim=1).unsqueeze(1)
+
+        # Contrastive loss
+        pos_loss = (pairwise_dist ** 2) * target_mask.float()
+        neg_loss = (torch.clamp(self.margin - pairwise_dist, min=0) ** 2 * (~target_mask).float()
+
+        return (pos_loss + neg_loss).mean()
+
+    def cluster_features(self, features, targets):
+        # Compute class centroids
+        unique_classes = torch.unique(targets)
+        centroids = torch.stack([
+            features[targets == cls].mean(dim=0)
+            for cls in unique_classes
+        ])
+
+        # Assign to nearest centroid
+        distances = torch.cdist(features, centroids)
+        cluster_assignments = torch.argmin(distances, dim=1)
+
+        # Compute cluster confidence
+        min_distances = torch.min(distances, dim=1)[0]
+        confidence = 1.0 / (1.0 + min_distances)
+        confident_mask = confidence > self.min_confidence
+
+        return features[confident_mask], targets[confident_mask]
 
 # Supported image formats
 SUPPORTED_IMAGE_FORMATS = {
@@ -344,11 +399,14 @@ class FeatureExtractorPipeline:
                     "enhancements": {
                         "enabled": True,
                         "use_kl_divergence": True,
-                        "use_class_encoding": False,
-                        "kl_divergence_weight": 0.5,
+                        "use_class_encoding": True,
+                        "kl_divergence_weight": 0.7,  # Increased weight
                         "classification_weight": 0.5,
-                        "clustering_temperature": 1.0,
-                        "min_cluster_confidence": 0.7
+                        "contrastive_weight": 0.3,
+                        "clustering_temperature": 0.5,  # Lower temperature for sharper distributions
+                        "min_cluster_confidence": 0.8,   # Higher confidence threshold
+                        "triplet_weight": 0.2,
+                        "alignment_update_freq": 1
                     }
                 }
             },
@@ -725,16 +783,29 @@ class FeatureExtractorPipeline:
             ))
 
         return transforms.Compose(transform_list)
-
+#--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """Train until early stopping condition is met"""
-        train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
-        self.class_to_idx = train_dataset.class_to_idx
-        self.num_classes = len(self.class_to_idx)
+        """Train until early stopping condition is met with unified 1D/image handling"""
+        # Initialize data loaders based on data type
+        if self._is_timeseries_data():
+            train_dataset = TimeSeriesDataset(self.train_dir, self.config["dataset"]["window_size"])
+            self.num_classes = self.config["dataset"]["num_classes"]  # For 1D data, use config value
+        else:
+            train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
+            self.class_to_idx = train_dataset.class_to_idx
+            self.num_classes = len(self.class_to_idx)
 
         # Update config with actual class count
         self.config["dataset"]["num_classes"] = self.num_classes
+
+        # Initialize enhanced clustering components
         self.clusterer = KLDivergenceClusterer(self.config)
+        self.aligner = ClusterClassAligner(self.num_classes)
+
+        # Initialize loss functions
+        miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
+        triplet_loss = losses.TripletMarginLoss(margin=0.2)
+        criterion = nn.CrossEntropyLoss()
 
         # Split into training and validation
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
@@ -767,7 +838,7 @@ class FeatureExtractorPipeline:
         epoch = 0
 
         print(f"\nTraining on {len(train_dataset)} samples, validating on {len(val_dataset)} samples")
-        print(f"Classes: {self.class_to_idx}")
+        print(f"Classes: {getattr(self, 'class_to_idx', 'Predefined classes from config')}")
         print(f"Training until validation doesn't improve for {patience} epochs")
 
         while True:  # Continue until early stopping
@@ -781,19 +852,51 @@ class FeatureExtractorPipeline:
 
                 self.optimizer.zero_grad()
 
-                # Forward pass
-                features = self.model(data)
+                # Forward pass - returns both features and cluster logits
+                features, cluster_logits = self.model(data, return_clusters=True)
+
+                # Calculate all loss components
+                # 1. KL divergence loss for clustering
                 kl_loss = self.clusterer.compute_kl_divergence(features, target)
 
-                # Total loss
-                loss = kl_loss * self.config["model"]["CNN_config"]["enhancements"]["kl_divergence_weight"]
+                # 2. Classification loss (aligned with original classes)
+                aligned_probs = self.aligner(cluster_logits)
+                cls_loss = criterion(aligned_probs, target)
+
+                # 3. Triplet loss for metric learning
+                triplets = miner(features, target)
+                trip_loss = triplet_loss(features, target, triplets)
+
+                # 4. Cluster consistency loss
+                cluster_consistency_loss = F.kl_div(
+                    F.log_softmax(cluster_logits, dim=1),
+                    F.softmax(aligned_probs.detach(), dim=1),
+                    reduction='batchmean'
+                )
+
+                # Combined loss with configurable weights
+                loss_weights = self.config["model"]["CNN_config"]["enhancements"]
+                loss = (
+                    loss_weights["kl_divergence_weight"] * kl_loss +
+                    loss_weights["classification_weight"] * cls_loss +
+                    loss_weights["triplet_weight"] * trip_loss +
+                    0.1 * cluster_consistency_loss  # Small weight for consistency
+                )
 
                 # Backward pass
                 loss.backward()
                 self.optimizer.step()
 
                 train_loss += loss.item()
-                progress_bar.set_postfix({"train_loss": f"{train_loss/(batch_idx+1):.4f}"})
+                progress_bar.set_postfix({
+                    "loss": f"{train_loss/(batch_idx+1):.4f}",
+                    "kl": f"{kl_loss.item():.2f}",
+                    "cls": f"{cls_loss.item():.2f}"
+                })
+
+            # Update cluster-class alignment
+            if epoch % self.config["cluster_alignment"]["update_frequency"] == 0:
+                self._update_cluster_alignment(train_loader)
 
             # Validation
             val_loss = self._validate(val_loader)
@@ -803,8 +906,8 @@ class FeatureExtractorPipeline:
             self.scheduler.step(val_loss)
 
             # Print epoch summary
-            print(f"Epoch {epoch} Summary:")
-            print(f"  Train Loss: {avg_train_loss:.4f}")
+            print(f"\nEpoch {epoch} Summary:")
+            print(f"  Train Loss: {avg_train_loss:.4f} (KL: {kl_loss.item():.4f}, Cls: {cls_loss.item():.4f})")
             print(f"  Val Loss:   {val_loss:.4f}")
             print(f"  LR:         {self.optimizer.param_groups[0]['lr']:.2e}")
 
@@ -821,17 +924,97 @@ class FeatureExtractorPipeline:
                     print(f"\nEarly stopping triggered after {epoch} epochs")
                     break
 
-        # Load best model weights before returning
+        # Post-training processing
         self._load_best_model()
-        # After training completes, extract and save features
+
+        # Save features and visualizations
         train_csv_path = os.path.join(self.output_dir, f"{self.dataname}_train_features.csv")
         self._extract_and_save_features(self.train_dir, train_csv_path)
 
-        # If validation exists, save those features too
         if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
             val_csv_path = os.path.join(self.output_dir, f"{self.dataname}_val_features.csv")
             self._extract_and_save_features(self.val_dir, val_csv_path)
-        return self.class_to_idx
+
+        # Visualize feature space
+        train_features = self._extract_features(self.train_dir)
+        self.visualize_features(
+            train_features['features'],
+            train_features['target'],
+            os.path.join(self.output_dir, "feature_space.png")
+        )
+
+        return getattr(self, 'class_to_idx', None) or {str(i):i for i in range(self.num_classes)}
+
+    def _update_cluster_alignment(self, loader):
+        """Update the cluster-class alignment matrix"""
+        self.model.eval()
+        features_all, targets_all, clusters_all = [], [], []
+
+        with torch.no_grad():
+            for data, target, _ in loader:
+                data, target = data.to(self.device), target.to(self.device)
+                features, cluster_logits = self.model(data, return_clusters=True)
+                features_all.append(features)
+                targets_all.append(target)
+                clusters_all.append(cluster_logits.argmax(1))
+
+        # Update alignment
+        self.aligner.align_clusters(
+            torch.cat(features_all),
+            torch.cat(targets_all),
+            torch.cat(clusters_all)
+        )
+        self.model.train()
+
+    def _validate(self, val_loader):
+        """Enhanced validation with multiple metrics"""
+        self.model.eval()
+        val_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for data, target, _ in val_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                features, cluster_logits = self.model(data, return_clusters=True)
+                aligned_probs = self.aligner(cluster_logits)
+
+                # Calculate validation loss (focused on classification)
+                val_loss += F.cross_entropy(aligned_probs, target).item()
+
+                # Calculate accuracy
+                _, predicted = torch.max(aligned_probs, 1)
+                total_correct += (predicted == target).sum().item()
+                total_samples += target.size(0)
+
+        accuracy = total_correct / total_samples
+        avg_loss = val_loss / len(val_loader)
+        print(f"  Val Accuracy: {accuracy:.2%}")
+        return avg_loss
+
+
+#------------------------------------------------
+
+    def visualize_features(self, features, labels, output_path):
+        """Visualize feature space using UMAP/t-SNE"""
+        import umap
+        import matplotlib.pyplot as plt
+
+        # Reduce dimensions
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        embedding = reducer.fit_transform(features)
+
+        # Plot
+        plt.figure(figsize=(10, 8))
+        scatter = plt.scatter(
+            embedding[:, 0], embedding[:, 1],
+            c=labels, cmap='Spectral', s=5,
+            alpha=0.7
+        )
+        plt.colorbar(scatter)
+        plt.title("Feature Space Visualization")
+        plt.savefig(output_path)
+        plt.close()
 
     def _load_best_model(self) -> None:
         """Load the best saved model weights"""
@@ -843,18 +1026,6 @@ class FeatureExtractorPipeline:
         else:
             print("Warning: No saved model found to load")
 
-    def _validate(self, val_loader: DataLoader) -> float:
-        self.model.eval()
-        val_loss = 0.0
-
-        with torch.no_grad():
-            for data, target, _ in val_loader:
-                data, target = data.to(self.device), target.to(self.device)
-                features = self.model(data)
-                kl_loss = self.clusterer.compute_kl_divergence(features, target)
-                val_loss += kl_loss.item()
-
-        return val_loss / len(val_loader)
 
     def _save_label_encoding(self) -> None:
         """Save label encoding to file"""
@@ -871,46 +1042,143 @@ class FeatureExtractorPipeline:
         return None
 
     def predict(self, input_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
-        """Predict features from input directory"""
+        """Predict features and aligned clusters from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataname}.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}_predictions.csv")
 
-        # Verify input directory exists
+        # Verify input exists
         if not os.path.exists(input_dir):
-            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+            raise FileNotFoundError(f"Input not found: {input_dir}")
 
-        # Create temporary prediction directory structure
-        temp_pred_dir = os.path.join(self.output_dir, "temp_pred")
-        if os.path.exists(temp_pred_dir):
-            shutil.rmtree(temp_pred_dir)
-        os.makedirs(temp_pred_dir)
+        # Initialize results storage
+        results = {
+            'file_path': [],
+            'predicted_class': [],
+            'confidence': [],
+            'cluster_assignment': [],
+            'cluster_confidence': []
+        }
 
-        try:
-            # Copy input files to temporary directory (maintaining structure)
-            if os.path.isdir(input_dir):
-                # Handle directory input
-                for root, _, files in os.walk(input_dir):
-                    for file in files:
-                        ext = os.path.splitext(file)[1].lower()
-                        if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}:
-                            rel_path = os.path.relpath(root, input_dir)
-                            os.makedirs(os.path.join(temp_pred_dir, rel_path), exist_ok=True)
-                            shutil.copy2(os.path.join(root, file),
-                                       os.path.join(temp_pred_dir, rel_path, file))
-            else:
-                # Handle single file input
-                ext = os.path.splitext(input_dir)[1].lower()
-                if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}:
-                    shutil.copy2(input_dir, temp_pred_dir)
+        # Add feature columns placeholder
+        feature_cols = [f'feature_{i}' for i in range(self.config["model"]["feature_dims"])]
+        for col in feature_cols:
+            results[col] = []
+
+        # Handle different input types
+        if self._is_timeseries_data(input_dir):
+            # 1D Time-series prediction
+            dataset = TimeSeriesDataset(input_dir, self.config["dataset"]["window_size"])
+            loader = DataLoader(
+                dataset,
+                batch_size=self.config["training"]["batch_size"],
+                shuffle=False,
+                num_workers=self.config["training"]["num_workers"]
+            )
+
+            self.model.eval()
+            with torch.no_grad():
+                for batch, window_indices in loader:
+                    features, cluster_logits = self.model(batch.to(self.device), return_clusters=True)
+                    aligned_probs = self.aligner(cluster_logits)
+
+                    # Get predictions
+                    confidences, pred_classes = torch.max(aligned_probs, 1)
+                    cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+
+                    # Store results
+                    for i in range(len(batch)):
+                        results['file_path'].append(input_dir)  # Original file path
+                        results['predicted_class'].append(pred_classes[i].item())
+                        results['confidence'].append(confidences[i].item())
+                        results['cluster_assignment'].append(cluster_assign[i].item())
+                        results['cluster_confidence'].append(cluster_confidences[i].item())
+
+                        # Add features
+                        for j, val in enumerate(features[i].cpu().numpy()):
+                            results[f'feature_{j}'].append(val)
+        else:
+            # Image data prediction
+            temp_pred_dir = os.path.join(self.output_dir, "temp_pred")
+            os.makedirs(temp_pred_dir, exist_ok=True)
+
+            try:
+                # Copy supported files to temp dir
+                if os.path.isdir(input_dir):
+                    for root, _, files in os.walk(input_dir):
+                        for file in files:
+                            ext = os.path.splitext(file)[1].lower()
+                            if ext in SUPPORTED_IMAGE_FORMATS:
+                                rel_path = os.path.relpath(root, input_dir)
+                                os.makedirs(os.path.join(temp_pred_dir, rel_path), exist_ok=True)
+                                shutil.copy2(os.path.join(root, file),
+                                           os.path.join(temp_pred_dir, rel_path, file))
                 else:
-                    raise ValueError(f"Unsupported file format: {input_dir}")
+                    ext = os.path.splitext(input_dir)[1].lower()
+                    if ext in SUPPORTED_IMAGE_FORMATS:
+                        shutil.copy2(input_dir, temp_pred_dir)
+                    else:
+                        raise ValueError(f"Unsupported file format: {input_dir}")
 
-            # Extract features - this will overwrite any existing output file
-            return self._extract_and_save_features(temp_pred_dir, output_csv)
-        finally:
-            # Clean up temporary directory
-            shutil.rmtree(temp_pred_dir)
+                # Create dataset and loader
+                dataset = ImageFolderWithPaths(temp_pred_dir, transform=self.transform)
+                loader = DataLoader(
+                    dataset,
+                    batch_size=self.config["training"]["batch_size"],
+                    shuffle=False,
+                    num_workers=self.config["training"]["num_workers"]
+                )
+
+                self.model.eval()
+                with torch.no_grad():
+                    for images, _, paths in loader:
+                        features, cluster_logits = self.model(images.to(self.device), return_clusters=True)
+                        aligned_probs = self.aligner(cluster_logits)
+
+                        # Get predictions
+                        confidences, pred_classes = torch.max(aligned_probs, 1)
+                        cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+
+                        # Store results
+                        for i in range(len(paths)):
+                            results['file_path'].append(paths[i])
+                            results['predicted_class'].append(pred_classes[i].item())
+                            results['confidence'].append(confidences[i].item())
+                            results['cluster_assignment'].append(cluster_assign[i].item())
+                            results['cluster_confidence'].append(cluster_confidences[i].item())
+
+                            # Add features
+                            for j, val in enumerate(features[i].cpu().numpy()):
+                                results[f'feature_{j}'].append(val)
+            finally:
+                # Clean up temp directory
+                shutil.rmtree(temp_pred_dir, ignore_errors=True)
+
+        # Create DataFrame
+        df = pd.DataFrame(results)
+
+        # Map predicted classes to class names if available
+        if hasattr(self, 'class_to_idx'):
+            idx_to_class = {v: k for k, v in self.class_to_idx.items()}
+            df['predicted_class_name'] = df['predicted_class'].map(idx_to_class)
+
+        # Save results
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+
+        print(f"\nPrediction complete. Results saved to {output_csv}")
+        print(f"Total samples processed: {len(df)}")
+        if 'predicted_class_name' in df:
+            print("Class distribution:")
+            print(df['predicted_class_name'].value_counts())
+
+        return df
+
+    def _is_timeseries_data(self, input_dir=None):
+        """Check if data is 1D time-series"""
+        input_dir = input_dir or self.train_dir
+        return any(f.endswith('.npy') for f in os.listdir(input_dir)) if os.path.isdir(input_dir) else input_dir.endswith('.npy')
+
 
     def _extract_and_save_features(self, input_dir: str, output_csv: str) -> pd.DataFrame:
         """Unified feature extraction and CSV saving"""
@@ -1146,6 +1414,52 @@ class FeatureExtractorPipeline:
         print(f"Columns: {df.columns.tolist()}")
 
         return df
+class ClusterClassAligner:
+    def __init__(self, num_classes):
+        self.num_classes = num_classes
+        self.alignment_matrix = nn.Parameter(torch.eye(num_classes))
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, cluster_logits):
+        """Convert cluster probabilities to class probabilities"""
+        return self.softmax(cluster_logits @ self.alignment_matrix)
+
+    def align_clusters(self, features, labels):
+        """Learn optimal alignment between clusters and classes"""
+        with torch.no_grad():
+            # Compute cluster centroids
+            unique_labels = torch.unique(labels)
+            class_centroids = torch.stack([
+                features[labels == lbl].mean(0)
+                for lbl in unique_labels
+            ])
+
+            # Compute cluster assignments
+            cluster_assignments = torch.argmax(
+                F.softmax(cluster_logits, dim=1), dim=1)
+
+            # Update alignment matrix (cluster x class)
+            for cls in range(self.num_classes):
+                cls_mask = (labels == cls)
+                if cls_mask.sum() > 0:
+                    cluster_counts = torch.bincount(
+                        cluster_assignments[cls_mask],
+                        minlength=self.num_classes)
+                    self.alignment_matrix[:, cls] = cluster_counts.float() / cls_mask.sum()
+class AlignedFeatureExtractor(nn.Module):
+    def __init__(self, in_channels, feature_dims, num_classes):
+        super().__init__()
+        self.encoder = FeatureExtractorCNN(in_channels, feature_dims)
+        self.cluster_head = nn.Linear(feature_dims, num_classes)
+        self.aligner = ClusterClassAligner(num_classes)
+
+    def forward(self, x, return_aligned=False):
+        features = self.encoder(x)
+        cluster_logits = self.cluster_head(features)
+
+        if return_aligned:
+            return features, self.aligner(cluster_logits)
+        return features, cluster_logits
 
 def main():
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
