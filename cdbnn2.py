@@ -12,13 +12,15 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Union
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
+from PIL import Image
+from torchvision import transforms
 
 # -------------------- Model Architecture --------------------
 class UniversalFeatureExtractor(nn.Module):
     """Handles both 1D (EEG) and 2D (image) inputs"""
     def __init__(self, input_dims: Tuple, feature_dim: int = 128):
         super().__init__()
-        self.input_dims = input_dims  # Store input dimensions
+        self.input_dims = input_dims
 
         if len(input_dims) == 1:  # 1D data
             self.encoder = nn.Sequential(
@@ -33,11 +35,11 @@ class UniversalFeatureExtractor(nn.Module):
                 nn.Linear(64, feature_dim))
         else:  # Image data
             self.encoder = nn.Sequential(
-                nn.Conv2d(input_dims[0], 32, kernel_size=3),
+                nn.Conv2d(input_dims[0], 32, kernel_size=3, padding=1),
                 nn.BatchNorm2d(32),
                 nn.ReLU(),
                 nn.MaxPool2d(2),
-                nn.Conv2d(32, 64, kernel_size=3),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
                 nn.BatchNorm2d(64),
                 nn.ReLU(),
                 nn.AdaptiveAvgPool2d(1),
@@ -69,13 +71,53 @@ class PrototypeClusterer(nn.Module):
         probs = F.softmax(sim / self.temperature.clamp(min=0.1), dim=1)
         return torch.argmax(probs, dim=1), probs
 
+# -------------------- Data Loading --------------------
+class ImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = Path(root_dir)
+        self.transform = transform or transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+
+        # Find all class directories
+        self.class_dirs = [d for d in self.root_dir.iterdir() if d.is_dir()]
+        if not self.class_dirs:
+            raise ValueError(f"No class directories found in {root_dir}")
+
+        # Create label encoder
+        self.classes = sorted([d.name for d in self.class_dirs])
+        self.label_encoder = LabelEncoder().fit(self.classes)
+
+        # Get all image paths with their labels
+        self.samples = []
+        for class_dir in self.class_dirs:
+            class_name = class_dir.name
+            label = self.label_encoder.transform([class_name])[0]
+            for img_path in class_dir.glob("*.*"):
+                if img_path.suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                    self.samples.append((img_path, label))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        img = Image.open(img_path).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, label, str(img_path)
+
 # -------------------- Configuration Management --------------------
 class ConfigManager:
     @staticmethod
     def generate_conf_file(output_path: Path, feature_dim: int, dataset_name: str):
         conf = {
             "file_path": str(output_path/f"{dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dim)] + ["target"],
+            "column_names": [f"feature_{i}" for i in range(feature_dim)] + ["target", "file_path"],
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -130,14 +172,14 @@ class ConfigManager:
         base_config = {
             "dataset": {
                 "name": dataset_name,
-                "type": "image_folder" if config["data_type"] == "image" else "1d_signal",
-                "in_channels": 3 if config["data_type"] == "image" else 1,
+                "type": "image_folder",
+                "in_channels": 3,
                 "num_classes": config["n_classes"],
-                "input_size": [224, 224] if config["data_type"] == "image" else [1000],
-                "mean": [0.485, 0.456, 0.406] if config["data_type"] == "image" else [0.0],
-                "std": [0.229, 0.224, 0.225] if config["data_type"] == "image" else [1.0],
-                "train_dir": str(output_path/"train"),
-                "test_dir": str(output_path/"test") if (output_path/"test").exists() else None
+                "input_size": [224, 224],
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+                "train_dir": str(output_path),
+                "test_dir": None
             },
             "model": {
                 "encoder_type": "universal",
@@ -180,7 +222,7 @@ class DeepClusteringPipeline:
         return {
             "feature_dim": 128,
             "lr": 0.001,
-            "prototype_lr": 0.01,
+            "prototype_lr": 0.01,  # Fixed: Added prototype_lr to default config
             "epochs": 20,
             "batch_size": 32,
             "save_dir": "data"
@@ -191,37 +233,17 @@ class DeepClusteringPipeline:
         data_path = Path(data_path)
         self.dataset_name = data_path.name
 
-        # Find all class directories
-        class_dirs = []
-        if (data_path/"train").exists():
-            class_dirs = [d for d in (data_path/"train").iterdir() if d.is_dir()]
-        else:
-            class_dirs = [d for d in data_path.iterdir() if d.is_dir()]
-
-        if not class_dirs:
-            # Alternative check for case where images are directly in subfolders
-            class_dirs = [data_path]
-            print(f"Warning: No class subdirectories found, using all files in {data_path} as one class")
-
-        # Initialize label encoder
-        classes = sorted([d.name for d in class_dirs])
-        self.label_encoder = LabelEncoder().fit(classes)
-        self.config["n_classes"] = len(classes)
-
-        # Detect data type from first file
-        sample_files = []
-        for d in class_dirs:
-            sample_files.extend(f for f in d.iterdir() if f.is_file())
-            if sample_files: break
-
-        if not sample_files:
-            raise ValueError("No data files found in the directory structure")
-
-        sample_ext = sample_files[0].suffix.lower()
-        self.config["data_type"] = "image" if sample_ext in ('.jpg','.png','.jpeg') else "1d"
+        # Create dataset to detect classes
+        try:
+            dataset = ImageDataset(data_path)
+            self.label_encoder = dataset.label_encoder
+            self.config["n_classes"] = len(dataset.classes)
+            self.config["data_type"] = "image"
+        except Exception as e:
+            raise ValueError(f"Failed to initialize from data: {str(e)}")
 
         # Initialize model
-        input_dims = (3, 224, 224) if self.config["data_type"] == "image" else (1,)
+        input_dims = (3, 224, 224)
         self.model = UniversalFeatureExtractor(input_dims, self.config["feature_dim"]).to(self.device)
         self.clusterer = PrototypeClusterer(self.config["feature_dim"], self.config["n_classes"]).to(self.device)
         self.optimizer = torch.optim.AdamW([
@@ -238,28 +260,62 @@ class DeepClusteringPipeline:
 
             print(f"\nTraining Configuration:")
             print(f"- Dataset: {self.dataset_name}")
-            print(f"- Classes: {self.label_encoder.classes_}")
-            print(f"- Data type: {self.config['data_type']}")
+            print(f"- Classes: {list(self.label_encoder.classes_)}")
+            print(f"- Number of classes: {self.config['n_classes']}")
             print(f"- Feature dimension: {self.config['feature_dim']}")
             print(f"- Output directory: {output_dir}")
 
-            # Dummy training loop (replace with actual implementation)
+            # Create data loader
+            transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                   std=[0.229, 0.224, 0.225])
+            ])
+            dataset = ImageDataset(data_path, transform=transform)
+            loader = DataLoader(dataset, batch_size=self.config["batch_size"], shuffle=True)
+
+            # Training loop
             print("\nTraining model...")
-            for epoch in tqdm(range(self.config["epochs"])):
-                pass  # Real training would happen here
+            self.model.train()
+            self.clusterer.train()
+
+            for epoch in range(self.config["epochs"]):
+                epoch_loss = 0.0
+                for batch_idx, (images, labels, _) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}/{self.config['epochs']}")):
+                    images = images.to(self.device)
+                    labels = labels.to(self.device)
+
+                    # Forward pass
+                    features = self.model(images)
+                    assignments, probs = self.clusterer(features)
+
+                    # Loss calculation
+                    loss = F.cross_entropy(probs, labels)
+
+                    # Backward pass
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+
+                    epoch_loss += loss.item()
+
+                print(f"Epoch {epoch+1} Loss: {epoch_loss/len(loader):.4f}")
 
             # Save artifacts
             self._save_model(output_dir)
-            self._save_features(output_dir)
+            self._save_features(output_dir, dataset)
 
             # Generate config files
             ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
             ConfigManager.generate_json_config(output_dir, self.config, self.dataset_name)
 
-            print(f"\nTraining complete. Results saved to:\n{output_dir}")
-            print(f"- Features: {output_dir}/{self.dataset_name}.csv")
+            print(f"\nTraining complete. Results saved to:")
+            print(f"- Features CSV: {output_dir}/{self.dataset_name}.csv")
             print(f"- Model: {output_dir}/models/model.pth")
-            print(f"- Configurations: {output_dir}/{self.dataset_name}.{{conf,json}}")
+            print(f"- Label encoder: {output_dir}/models/label_encoder.pkl")
+            print(f"- Config files: {output_dir}/{self.dataset_name}.{{conf,json}}")
 
         except Exception as e:
             print(f"\nError during training: {str(e)}", file=sys.stderr)
@@ -280,21 +336,36 @@ class DeepClusteringPipeline:
         with open(model_dir/"label_encoder.pkl", "wb") as f:
             pickle.dump(self.label_encoder, f)
 
-    def _save_features(self, output_dir: Path):
-        """Save features to CSV"""
-        # Generate dummy features (replace with real features)
-        n_samples = 100
-        features = np.random.randn(n_samples, self.config["feature_dim"])
-        labels = np.random.randint(0, self.config["n_classes"], n_samples)
+    def _save_features(self, output_dir: Path, dataset: ImageDataset):
+        """Extract and save features to CSV"""
+        loader = DataLoader(dataset, batch_size=self.config["batch_size"], shuffle=False)
+        self.model.eval()
 
-        df = pd.DataFrame(
-            {f"feature_{i}": features[:,i] for i in range(features.shape[1])},
-            columns=[f"feature_{i}" for i in range(features.shape[1])]
-        )
-        df["target"] = labels
-        df["file_path"] = [f"sample_{i}.ext" for i in range(n_samples)]
-        df["class_name"] = self.label_encoder.inverse_transform(labels)
+        all_features = []
+        all_labels = []
+        all_paths = []
 
+        with torch.no_grad():
+            for images, labels, paths in loader:
+                features = self.model(images.to(self.device))
+                all_features.append(features.cpu().numpy())
+                all_labels.append(labels.numpy())
+                all_paths.extend(paths)
+
+        features = np.concatenate(all_features)
+        labels = np.concatenate(all_labels)
+
+        # Create DataFrame
+        feature_cols = {f"feature_{i}": features[:,i] for i in range(features.shape[1])}
+        df = pd.DataFrame({
+            **feature_cols,
+            "target": labels,
+            "file_path": all_paths,
+            "class_name": self.label_encoder.inverse_transform(labels)
+        })
+
+        # Ensure output directory exists
+        output_dir.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_dir/f"{self.dataset_name}.csv", index=False)
 
 # -------------------- Command Line Interface --------------------
@@ -362,7 +433,10 @@ class DeepClusteringApp:
         config = {
             "save_dir": output_dir,
             "feature_dim": 128,
-            "epochs": 20
+            "lr": 0.001,
+            "prototype_lr": 0.01,  # Fixed: Added prototype learning rate
+            "epochs": 20,
+            "batch_size": 32
         }
         self.pipeline = DeepClusteringPipeline(config)
 
