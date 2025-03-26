@@ -190,7 +190,7 @@ class KLDivergenceClusterer:
 
         # Contrastive loss
         pos_loss = (pairwise_dist ** 2) * target_mask.float()
-        neg_loss = (torch.clamp(self.margin - pairwise_dist, min=0) ** 2 * (~target_mask).float()
+        neg_loss = (torch.clamp(self.margin - pairwise_dist, min=0) ** 2 * (~target_mask).float())
 
         return (pos_loss + neg_loss).mean()
 
