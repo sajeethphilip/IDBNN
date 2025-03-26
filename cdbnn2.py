@@ -248,7 +248,7 @@ class ImageFolderWithPaths(datasets.ImageFolder):
 
 class FeatureExtractorPipeline:
     """Complete feature extraction pipeline"""
-    def __init__(self, source_dir: str, datafolder: str, merge_train_test: bool = False, interactive: bool = False):
+    def __init__(self, source_dir: str, dataname: str, merge_train_test: bool = False, interactive: bool = False):
         """
         Args:
             source_dir: Path to source directory containing the original data
@@ -257,7 +257,7 @@ class FeatureExtractorPipeline:
             interactive: Whether to prompt for user input
         """
         self.source_dir = os.path.abspath(source_dir)
-        self.datafolder = os.path.abspath(datafolder)
+        self.dataname = dataname
         self.dataset_name = os.path.basename(datafolder)
         self.interactive = interactive
         self.merge_train_test = merge_train_test
@@ -269,8 +269,14 @@ class FeatureExtractorPipeline:
         self.conf_path = os.path.join(datafolder, f"{self.dataset_name}.conf")
         self.csv_path = os.path.join(datafolder, f"{self.dataset_name}.csv")
         self.model_dir = os.path.join(datafolder, "models")
-        self.train_dir = os.path.join(datafolder, "train")
+        # Create output directory structure
+        self.output_dir = os.path.join("data", self.dataname)  # data/<dataname>/
+        self.model_dir = os.path.join(self.output_dir, "models")
+        self.train_dir = os.path.join(self.output_dir, "train")
         self.test_dir = os.path.join(datafolder, "test")
+        # Config paths
+        self.config_path = os.path.join(self.output_dir, f"{self.dataname}.json")
+        self.conf_path = os.path.join(self.output_dir, f"{self.dataname}.conf")
 
         # Initialize
         self.config = self._initialize_config()
@@ -1144,10 +1150,9 @@ class FeatureExtractorPipeline:
 
         return df
 
-def main():
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
-    parser.add_argument("--datafolder", type=str, required=True,
-                      help="Output directory under data/")
+    parser.add_argument("--dataname", type=str, required=True,
+                      help="Name for the dataset (will create data/<dataname>/ directory)")
     parser.add_argument("--mode", choices=["train", "predict", "full"],
                       default="full", help="Execution mode")
     parser.add_argument("--input", type=str, required=True,
@@ -1156,11 +1161,12 @@ def main():
                       help="Optional custom CSV output path")
     parser.add_argument("--force", action="store_true",
                       help="Force overwrite without prompts")
+
     args = parser.parse_args()
 
-    # Initialize pipeline
+    # Initialize pipeline with new dataname parameter
     pipeline = FeatureExtractorPipeline(
-        datafolder=os.path.join("data", args.datafolder),
+        dataname=args.dataname,  # Changed from datafolder
         source_dir=args.input,
         interactive=not args.force
     )
@@ -1175,7 +1181,7 @@ def main():
         if args.mode in ["predict", "full"]:
             print("\n===== Prediction Mode =====")
             features_df = pipeline.predict(args.input, args.output_csv)
-            print(f"\nPrediction complete. Features saved to {args.output_csv or pipeline.datafolder}")
+            print(f"\nPrediction complete. Features saved to {args.output_csv or pipeline.output_dir}")
             print(f"Total samples processed: {len(features_df)}")
 
     except Exception as e:
