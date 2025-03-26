@@ -836,11 +836,14 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """Unified training for both 1D and image data with proper parameter groups"""
+        """Complete training solution with proper loss initialization"""
         # 1. Model Initialization
         self.model = self._initialize_model().to(self.device)
 
-        # 2. Parameter Group Setup (Fixes the duplicate parameter error)
+        # 2. Loss Function Initialization (Added this critical missing piece)
+        self.criterion = nn.CrossEntropyLoss()
+
+        # 3. Parameter Groups
         param_groups = [
             {'params': [p for n,p in self.model.named_parameters()
                        if 'cluster_head' not in n]},
@@ -852,13 +855,13 @@ class FeatureExtractorPipeline:
                 'lr': self.config["model"].get("cluster_head_lr", 1e-3)
             })
 
-        # 3. Optimizer with separate groups
+        # 4. Optimizer Setup
         self.optimizer = optim.AdamW(
             param_groups,
             lr=self.config["model"]["learning_rate"]
         )
 
-        # 4. Unified Data Loading
+        # 5. Data Loading (Unified for 1D and images)
         if self._is_timeseries_data():
             train_dataset = TimeSeriesDataset(
                 self.train_dir,
@@ -873,13 +876,13 @@ class FeatureExtractorPipeline:
             self.class_to_idx = train_dataset.class_to_idx
             self.num_classes = len(self.class_to_idx)
 
-        # 5. Train/Val Split
+        # 6. Train/Val Split
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [len(train_dataset) - val_size, val_size]
         )
 
-        # 6. Data Loaders
+        # 7. Data Loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
@@ -896,33 +899,26 @@ class FeatureExtractorPipeline:
             pin_memory=True
         )
 
-        # 7. Training Loop
-        best_metric = 0.0
+        # 8. Training Loop
+        best_acc = 0.0
         for epoch in range(1, self.config["training"]["epochs"] + 1):
             self.model.train()
             train_metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
 
             for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
-                # Unified batch processing
-                if self._is_timeseries_data():
-                    data, target = batch[0].to(self.device), batch[1].to(self.device)
-                else:
-                    data, target, _ = batch
-                    data, target = data.to(self.device), target.to(self.device)
+                data, target = self._process_batch(batch)
 
                 self.optimizer.zero_grad()
-
-                # Forward pass
                 features, logits = self.model(data, return_logits=True)
-                loss = F.cross_entropy(logits, target)
 
-                # Backward pass
+                # Using initialized criterion
+                loss = self.criterion(logits, target)
                 loss.backward()
                 self.optimizer.step()
 
-                # Metrics
-                train_metrics['loss'] += loss.item()
+                # Update metrics
                 preds = logits.argmax(dim=1)
+                train_metrics['loss'] += loss.item()
                 train_metrics['correct'] += (preds == target).sum().item()
                 train_metrics['total'] += target.size(0)
 
@@ -936,12 +932,20 @@ class FeatureExtractorPipeline:
             print(f"  Train Loss: {train_loss:.4f} | Acc: {train_acc:.2%}")
             print(f"  Val Loss: {val_metrics['loss']:.4f} | Acc: {val_metrics['acc']:.2%}")
 
-            # Save best model
-            if val_metrics['acc'] > best_metric:
-                best_metric = val_metrics['acc']
+            if val_metrics['acc'] > best_acc:
+                best_acc = val_metrics['acc']
                 self._save_model()
 
         return self.class_to_idx if hasattr(self, 'class_to_idx') else {}
+
+    def _process_batch(self, batch):
+        """Unified batch processing for both data types"""
+        if self._is_timeseries_data():
+            return batch[0].to(self.device), batch[1].to(self.device)
+        else:
+            data, target, _ = batch
+            return data.to(self.device), target.to(self.device)
+
 
     def _extract_features(self, input_dir: str) -> Dict[str, Any]:
         """Unified feature extraction that returns features and targets"""
@@ -980,24 +984,17 @@ class FeatureExtractorPipeline:
         self.model.train()
 
     def _validate(self, val_loader) -> Dict[str, float]:
-        """Unified validation for both data types"""
+        """Validation using initialized criterion"""
         self.model.eval()
         metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
 
         with torch.no_grad():
             for batch in val_loader:
-                # Handle both data types
-                if self._is_timeseries_data():
-                    data, target = batch[0].to(self.device), batch[1].to(self.device)
-                else:
-                    data, target, _ = batch
-                    data, target = data.to(self.device), target.to(self.device)
-
-                # Forward pass
+                data, target = self._process_batch(batch)
                 features, logits = self.model(data, return_logits=True)
 
-                # Metrics
-                metrics['loss'] += F.cross_entropy(logits, target).item()
+                # Using the same criterion as training
+                metrics['loss'] += self.criterion(logits, target).item()
                 preds = logits.argmax(dim=1)
                 metrics['correct'] += (preds == target).sum().item()
                 metrics['total'] += target.size(0)
