@@ -836,52 +836,45 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """GPU-optimized training with automatic device management and config safeguards"""
-        # Ensure config has required clustering parameters
-        self.config.setdefault("clustering", {
-            "prototype_learning_rate": 0.01,
-            "triplet_margin": 0.2,
-            "uniformity_weight": 0.1
-        })
-
+        """Complete GPU-optimized training with proper validation setup"""
         # Initialize with device awareness
         self.model = self.model.to(self.device)
         self.cluster_loss = DeepClusteringLoss(
             num_classes=self.config["dataset"]["num_classes"],
             feature_dim=self.config["model"]["feature_dims"],
-            device=self.device  # Pass device explicitly
+            device=self.device
         )
-
-        # Configure optimizer with prototype learning rate
-        proto_lr = self.config["clustering"].get("prototype_learning_rate", 0.01)
-        if not any('prototypes' in pg for pg in self.optimizer.param_groups):
-            self.optimizer.add_param_group({
-                'params': self.cluster_loss.prototypes,
-                'lr': proto_lr
-            })
 
         # Data loading with GPU optimizations
         train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         self.class_to_idx = train_dataset.class_to_idx
         self.num_classes = len(self.class_to_idx)
 
-        # Train/val split
+        # Train/val split - moved before loader creation
         val_size = int(len(train_dataset) * self.config["training"].get("validation_split", 0.2))
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [len(train_dataset) - val_size, val_size]
         )
 
-        # GPU-optimized data loaders
+        # Create BOTH loaders properly
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=min(4, os.cpu_count()),  # Optimal worker count
+            num_workers=min(4, os.cpu_count()),
             pin_memory=True,
             persistent_workers=True
         )
 
-        # Training loop with mixed precision
+        val_loader = DataLoader(  # This was missing in previous version
+            val_dataset,
+            batch_size=self.config["training"]["batch_size"] * 2,
+            shuffle=False,
+            num_workers=min(2, os.cpu_count()),
+            pin_memory=True
+        )
+
+        # Training setup
         best_val_loss = float('inf')
         patience = self.config["training"]["early_stopping"]["patience"]
         scaler = torch.cuda.amp.GradScaler(enabled=self.config["execution_flags"].get("mixed_precision", False))
@@ -891,11 +884,9 @@ class FeatureExtractorPipeline:
             train_loss = 0.0
 
             for data, target, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
-                # Automatic device placement
                 data = data.to(self.device, non_blocking=True)
                 target = target.to(self.device, non_blocking=True)
 
-                # Mixed precision forward
                 with torch.cuda.amp.autocast(
                     enabled=self.config["execution_flags"].get("mixed_precision", False)
                 ):
@@ -903,7 +894,6 @@ class FeatureExtractorPipeline:
                     loss_dict = self.cluster_loss(features, target)
                     loss = loss_dict['total']
 
-                # Optimized backward pass
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
@@ -911,8 +901,8 @@ class FeatureExtractorPipeline:
 
                 train_loss += loss.item()
 
-            # Validation
-            val_loss = self._validate(val_loader)
+            # Validation - now using properly defined val_loader
+            val_loss = self._validate(val_loader)  # This now works
             self.scheduler.step(val_loss)
 
             # Early stopping check
