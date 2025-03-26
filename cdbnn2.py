@@ -17,6 +17,11 @@ from PIL import Image
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+# First, add these imports at the top of your file
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 # -------------------- Enhanced Model Architecture --------------------
 class DeepFeatureExtractor(nn.Module):
@@ -468,44 +473,89 @@ class DeepClusteringPipeline:
         self.clusterer.eval()
 
         all_features = []
-        all_labels = []
+        all_true_labels = []
         all_paths = []
         all_assignments = []
         all_confidences = []
+        all_predicted_labels = []
 
         with torch.no_grad():
             for images, labels, paths in tqdm(loader, desc="Extracting features"):
-                features = self.model(images.to(self.device))
+                images = images.to(self.device)
+                features = self.model(images)
                 assignments, probs = self.clusterer(features)
                 confidences = probs.gather(1, assignments.unsqueeze(1)).squeeze()
 
                 all_features.append(features.cpu().numpy())
-                all_labels.append(labels.numpy())
+                all_true_labels.append(labels.numpy())
                 all_paths.extend(paths)
                 all_assignments.append(assignments.cpu().numpy())
                 all_confidences.append(confidences.cpu().numpy())
+                all_predicted_labels.append(assignments.cpu().numpy())
 
         # Concatenate all batches
         features = np.concatenate(all_features)
-        labels = np.concatenate(all_labels)
+        true_labels = np.concatenate(all_true_labels)
         assignments = np.concatenate(all_assignments)
         confidences = np.concatenate(all_confidences)
+        predicted_labels = np.concatenate(all_predicted_labels)
+
+        # Generate confusion matrix
+        self._generate_confusion_matrix(true_labels, predicted_labels, output_dir)
 
         # Create DataFrame with all information
         feature_cols = {f"feature_{i}": features[:,i] for i in range(features.shape[1])}
         df = pd.DataFrame({
             **feature_cols,
-            "target": labels,
+            "true_label": true_labels,
+            "true_class_name": self.label_encoder.inverse_transform(true_labels),
             "file_path": all_paths,
             "assigned_class": assignments,
-            "assigned_class_label": self.label_encoder.inverse_transform(assignments),
-            "confidence": confidences,
-            "class_name": self.label_encoder.inverse_transform(labels)
+            "predicted_class_name": self.label_encoder.inverse_transform(assignments),
+            "confidence": confidences
         })
 
         # Ensure output directory exists
         output_dir.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_dir/f"{self.dataset_name}.csv", index=False)
+
+    def _generate_confusion_matrix(self, true_labels, predicted_labels, output_dir):
+        """Generate and save a confusion matrix"""
+        # Calculate confusion matrix
+        cm = confusion_matrix(true_labels, predicted_labels)
+        accuracy = np.trace(cm) / np.sum(cm)
+
+        # Plot confusion matrix
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=self.label_encoder.classes_,
+                    yticklabels=self.label_encoder.classes_)
+        plt.title(f'Confusion Matrix\nAccuracy: {accuracy:.2%}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+
+        # Save the figure
+        cm_path = output_dir / "confusion_matrix.png"
+        plt.savefig(cm_path)
+        plt.close()
+
+        # Print colored confusion matrix to console
+        print("\nConfusion Matrix:")
+        print(f"Accuracy: {accuracy:.2%}\n")
+
+        # Create a colored text version for console
+        class_names = self.label_encoder.classes_
+        max_len = max(len(name) for name in class_names)
+        header = " " * (max_len + 2) + " ".join([f"{name:^{max_len}}" for name in class_names])
+        print(header)
+
+        for i, true_name in enumerate(class_names):
+            row = f"{true_name:<{max_len}} "
+            for j in range(len(class_names)):
+                count = cm[i, j]
+                color_code = 32 if i == j else 31  # Green for correct, red for incorrect
+                row += f"\033[{color_code}m{count:^{max_len}}\033[0m "
+            print(row)
 
 # -------------------- Command Line Interface --------------------
 class DeepClusteringApp:
