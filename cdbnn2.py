@@ -343,12 +343,17 @@ class FeatureExtractorPipeline:
         """Initialize config file in data/<datafolder>/"""
         config_path = self.config_path
 
+        # Ensure output directory exists
+        os.makedirs(self.output_dir, exist_ok=True)
+
         if os.path.exists(config_path):
             with open(config_path) as f:
                 config = json.load(f)
             print(f"Loaded configuration from {config_path}")
         else:
             config = self._create_default_config()
+            # Ensure directory exists before writing
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
             print(f"Created default configuration at {config_path}")
