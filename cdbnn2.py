@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Dict, List, Union
 import pickle
 from sklearn.preprocessing import LabelEncoder
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Dict, Tuple, Any, List, Union
 
 class ConfigManager:
     """Handles configuration files generation"""
@@ -207,10 +212,6 @@ class EnhancedClusteringPipeline:
                 for i in range(n_samples)]
         return features, labels, paths
 
-import argparse
-import os
-import sys
-from pathlib import Path
 
 class DeepClusteringApp:
     def __init__(self):
