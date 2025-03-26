@@ -113,7 +113,7 @@ class StabilizedDeepClustering(nn.Module):
             if valid_classes.sum() == len(self.clusterer.prototypes):
                 # Direct initialization if all classes represented
                 self.clusterer.prototypes.data.copy_(
-                    F.normalize(self.feature_bank[valid_classes], dim=1)
+                    F.normalize(self.feature_bank[valid_classes], dim=1))
             else:
                 # K-means fallback
                 kmeans = KMeans(n_clusters=len(self.clusterer.prototypes))
