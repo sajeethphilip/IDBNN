@@ -534,7 +534,7 @@ class FeatureExtractorPipeline:
                         "min_cluster_confidence": 0.8,   # Higher confidence threshold
                         "triplet_weight": 0.2,
                         "alignment_update_freq": 1
-                    }
+                    },
                     "clustering": {
                         "triplet_margin": 0.3,
                         "uniformity_weight": 0.1,
