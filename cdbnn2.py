@@ -18,6 +18,8 @@ class UniversalFeatureExtractor(nn.Module):
     """Handles both 1D (EEG) and 2D (image) inputs"""
     def __init__(self, input_dims: Tuple, feature_dim: int = 128):
         super().__init__()
+        self.input_dims = input_dims  # Store input dimensions
+
         if len(input_dims) == 1:  # 1D data
             self.encoder = nn.Sequential(
                 nn.Conv1d(1, 32, kernel_size=5, stride=2),
@@ -28,7 +30,7 @@ class UniversalFeatureExtractor(nn.Module):
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1),
                 nn.Flatten(),
-                nn.Linear(64, feature_dim))
+                nn.Linear(64, feature_dim)
         else:  # Image data
             self.encoder = nn.Sequential(
                 nn.Conv2d(input_dims[0], 32, kernel_size=3),
@@ -156,8 +158,8 @@ class ConfigManager:
             "training": config,
             "output": {
                 "features_file": str(output_path/f"{dataset_name}.csv"),
-                "model_dir": str(output_dir/"models"),
-                "visualization_dir": str(output_dir/"visualizations")
+                "model_dir": str(output_path/"models"),
+                "visualization_dir": str(output_path/"visualizations")
             }
         }
         with open(output_path/f"{dataset_name}.json", "w") as f:
@@ -189,25 +191,34 @@ class DeepClusteringPipeline:
         data_path = Path(data_path)
         self.dataset_name = data_path.name
 
-        # Detect classes
+        # Find all class directories
+        class_dirs = []
         if (data_path/"train").exists():
-            class_dirs = list((data_path/"train").iterdir())
+            class_dirs = [d for d in (data_path/"train").iterdir() if d.is_dir()]
         else:
-            class_dirs = list(data_path.iterdir())
+            class_dirs = [d for d in data_path.iterdir() if d.is_dir()]
 
         if not class_dirs:
-            raise ValueError("No class directories found")
+            # Alternative check for case where images are directly in subfolders
+            class_dirs = [data_path]
+            print(f"Warning: No class subdirectories found, using all files in {data_path} as one class")
 
         # Initialize label encoder
-        classes = sorted([d.name for d in class_dirs if d.is_dir()])
+        classes = sorted([d.name for d in class_dirs])
         self.label_encoder = LabelEncoder().fit(classes)
         self.config["n_classes"] = len(classes)
 
-        # Detect data type
-        sample_file = next((f for d in class_dirs for f in d.iterdir() if f.is_file()), None)
-        if not sample_file:
-            raise ValueError("No data files found")
-        self.config["data_type"] = "image" if sample_file.suffix.lower() in ('.jpg','.png','.jpeg') else "1d"
+        # Detect data type from first file
+        sample_files = []
+        for d in class_dirs:
+            sample_files.extend(f for f in d.iterdir() if f.is_file())
+            if sample_files: break
+
+        if not sample_files:
+            raise ValueError("No data files found in the directory structure")
+
+        sample_ext = sample_files[0].suffix.lower()
+        self.config["data_type"] = "image" if sample_ext in ('.jpg','.png','.jpeg') else "1d"
 
         # Initialize model
         input_dims = (3, 224, 224) if self.config["data_type"] == "image" else (1,)
@@ -220,24 +231,39 @@ class DeepClusteringPipeline:
 
     def train(self, data_path: str):
         """Complete training workflow"""
-        self.initialize_from_data(data_path)
-        output_dir = Path(self.config["save_dir"])/self.dataset_name
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.initialize_from_data(data_path)
+            output_dir = Path(self.config["save_dir"])/self.dataset_name
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Dummy training loop (replace with actual implementation)
-        print(f"Training with {self.config['n_classes']} classes...")
-        for epoch in tqdm(range(self.config["epochs"])):
-            pass  # Real training would happen here
+            print(f"\nTraining Configuration:")
+            print(f"- Dataset: {self.dataset_name}")
+            print(f"- Classes: {self.label_encoder.classes_}")
+            print(f"- Data type: {self.config['data_type']}")
+            print(f"- Feature dimension: {self.config['feature_dim']}")
+            print(f"- Output directory: {output_dir}")
 
-        # Save artifacts
-        self._save_model(output_dir)
-        self._save_features(output_dir)
+            # Dummy training loop (replace with actual implementation)
+            print("\nTraining model...")
+            for epoch in tqdm(range(self.config["epochs"])):
+                pass  # Real training would happen here
 
-        # Generate config files
-        ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
-        ConfigManager.generate_json_config(output_dir, self.config, self.dataset_name)
+            # Save artifacts
+            self._save_model(output_dir)
+            self._save_features(output_dir)
 
-        print(f"\nTraining complete. Results saved to:\n{output_dir}")
+            # Generate config files
+            ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
+            ConfigManager.generate_json_config(output_dir, self.config, self.dataset_name)
+
+            print(f"\nTraining complete. Results saved to:\n{output_dir}")
+            print(f"- Features: {output_dir}/{self.dataset_name}.csv")
+            print(f"- Model: {output_dir}/models/model.pth")
+            print(f"- Configurations: {output_dir}/{self.dataset_name}.{{conf,json}}")
+
+        except Exception as e:
+            print(f"\nError during training: {str(e)}", file=sys.stderr)
+            raise
 
     def _save_model(self, output_dir: Path):
         """Save model and label encoder"""
@@ -247,7 +273,8 @@ class DeepClusteringPipeline:
         torch.save({
             'model_state': self.model.state_dict(),
             'clusterer_state': self.clusterer.state_dict(),
-            'config': self.config
+            'config': self.config,
+            'classes': self.label_encoder.classes_.tolist()
         }, model_dir/"model.pth")
 
         with open(model_dir/"label_encoder.pkl", "wb") as f:
@@ -256,15 +283,17 @@ class DeepClusteringPipeline:
     def _save_features(self, output_dir: Path):
         """Save features to CSV"""
         # Generate dummy features (replace with real features)
-        features = np.random.randn(100, self.config["feature_dim"])
-        labels = np.random.randint(0, self.config["n_classes"], 100)
+        n_samples = 100
+        features = np.random.randn(n_samples, self.config["feature_dim"])
+        labels = np.random.randint(0, self.config["n_classes"], n_samples)
 
         df = pd.DataFrame(
             {f"feature_{i}": features[:,i] for i in range(features.shape[1])},
             columns=[f"feature_{i}" for i in range(features.shape[1])]
         )
         df["target"] = labels
-        df["file_path"] = [f"sample_{i}.ext" for i in range(100)]
+        df["file_path"] = [f"sample_{i}.ext" for i in range(n_samples)]
+        df["class_name"] = self.label_encoder.inverse_transform(labels)
 
         df.to_csv(output_dir/f"{self.dataset_name}.csv", index=False)
 
@@ -305,9 +334,11 @@ class DeepClusteringApp:
         params["mode"] = "predict" if model_path.exists() else "train"
 
         if model_path.exists():
-            choice = input(f"Found existing model. Train anyway? [y/N]: ").lower()
+            choice = input(f"Found existing model at {model_path}. Train anyway? [y/N]: ").lower()
             if choice == 'y':
                 params["mode"] = "train"
+            else:
+                print("Using existing model for prediction")
 
         return params
 
@@ -337,7 +368,7 @@ class DeepClusteringApp:
 
         # Run pipeline
         try:
-            if mode == "train":
+            if mode in ("train", "auto"):
                 print(f"\nStarting training on {data_path}...")
                 self.pipeline.train(data_path)
             else:
