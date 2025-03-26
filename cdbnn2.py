@@ -431,6 +431,13 @@ class FeatureExtractorPipeline:
                     "min_lr": 1e-06,
                     "verbose": True
                 },
+                    "clustering": {  # New section
+                    "prototype_learning_rate": 0.01,
+                    "triplet_margin": 0.2,
+                    "uniformity_weight": 0.1,
+                    "temperature": 0.1,
+                    "update_frequency": 5
+                },
                 "CNN_config": {
                     "reconstruction_weight": 1.0,
                     "feature_weight": 0.1,
@@ -829,131 +836,89 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """GPU-optimized training with automatic device management"""
-        # Initialize components on correct device
-        self.cluster_loss = DeepClusteringLoss(
-            self.config["dataset"]["num_classes"],
-            self.config["model"]["feature_dims"]
-        ).to(self.device)
+        """GPU-optimized training with automatic device management and config safeguards"""
+        # Ensure config has required clustering parameters
+        self.config.setdefault("clustering", {
+            "prototype_learning_rate": 0.01,
+            "triplet_margin": 0.2,
+            "uniformity_weight": 0.1
+        })
 
-        # Prototype learning rate (add to existing optimizer)
+        # Initialize with device awareness
+        self.model = self.model.to(self.device)
+        self.cluster_loss = DeepClusteringLoss(
+            num_classes=self.config["dataset"]["num_classes"],
+            feature_dim=self.config["model"]["feature_dims"],
+            device=self.device  # Pass device explicitly
+        )
+
+        # Configure optimizer with prototype learning rate
+        proto_lr = self.config["clustering"].get("prototype_learning_rate", 0.01)
         if not any('prototypes' in pg for pg in self.optimizer.param_groups):
             self.optimizer.add_param_group({
                 'params': self.cluster_loss.prototypes,
-                'lr': self.config["clustering"].get("prototype_learning_rate", 0.01)
+                'lr': proto_lr
             })
 
-        # Data loading setup
+        # Data loading with GPU optimizations
         train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
         self.class_to_idx = train_dataset.class_to_idx
         self.num_classes = len(self.class_to_idx)
-        self.config["dataset"]["num_classes"] = self.num_classes
 
-        # Train/val split with pinned memory
-        val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
+        # Train/val split
+        val_size = int(len(train_dataset) * self.config["training"].get("validation_split", 0.2))
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [len(train_dataset) - val_size, val_size]
         )
 
+        # GPU-optimized data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=self.config["training"]["num_workers"],
-            pin_memory=True,  # Enables faster CPU->GPU transfer
-            persistent_workers=True  # Maintains workers between epochs
-        )
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config["training"]["batch_size"] * 2,  # Larger batches for validation
-            shuffle=False,
-            num_workers=self.config["training"]["num_workers"],
+            num_workers=min(4, os.cpu_count()),  # Optimal worker count
             pin_memory=True,
             persistent_workers=True
         )
 
-        # Training state
+        # Training loop with mixed precision
         best_val_loss = float('inf')
         patience = self.config["training"]["early_stopping"]["patience"]
-        patience_counter = 0
-
-        print(f"\nTraining on {len(train_dataset)} samples (GPU: {torch.cuda.get_device_name(0)})")
-        print(f"Batch size: {self.config['training']['batch_size']} | Workers: {self.config['training']['num_workers']}")
+        scaler = torch.cuda.amp.GradScaler(enabled=self.config["execution_flags"].get("mixed_precision", False))
 
         for epoch in range(1, self.config["training"]["epochs"] + 1):
             self.model.train()
             train_loss = 0.0
-            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}",
-                              bar_format='{l_bar}{bar:20}{r_bar}{bar:-20b}')
 
-            for data, target, _ in progress_bar:
-                # Ensure all data on GPU
+            for data, target, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
+                # Automatic device placement
                 data = data.to(self.device, non_blocking=True)
                 target = target.to(self.device, non_blocking=True)
 
-                self.optimizer.zero_grad(set_to_none=True)  # Slightly faster
-
-                # Mixed precision forward pass
-                with torch.cuda.amp.autocast(enabled=self.config["execution_flags"]["mixed_precision"]):
-                    features, cluster_logits = self.model(data, return_logits=True)
+                # Mixed precision forward
+                with torch.cuda.amp.autocast(
+                    enabled=self.config["execution_flags"].get("mixed_precision", False)
+                ):
+                    features, _ = self.model(data, return_logits=True)
                     loss_dict = self.cluster_loss(features, target)
                     loss = loss_dict['total']
 
-                # Backward pass with gradient scaling
-                if self.config["execution_flags"]["mixed_precision"]:
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    self.optimizer.step()
+                # Optimized backward pass
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer)
+                scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
 
-                # Update progress bar
                 train_loss += loss.item()
-                progress_bar.set_postfix({
-                    'loss': f"{train_loss/(progress_bar.n+1):.4f}",
-                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
-                }, refresh=False)
 
-            # Validation - no gradients
-            val_loss = 0.0
-            self.model.eval()
-            with torch.no_grad(), torch.cuda.amp.autocast():
-                for data, target, _ in val_loader:
-                    data = data.to(self.device, non_blocking=True)
-                    target = target.to(self.device, non_blocking=True)
-
-                    features, cluster_logits = self.model(data, return_logits=True)
-                    val_loss += self.cluster_loss(features, target)['total'].item()
-
-            val_loss /= len(val_loader)
+            # Validation
+            val_loss = self._validate(val_loader)
             self.scheduler.step(val_loss)
 
             # Early stopping check
-            if val_loss < best_val_loss - self.config["training"]["early_stopping"]["min_delta"]:
+            if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
                 self._save_model()
-                print(f"  Val loss improved to {val_loss:.4f} - model saved")
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"\nEarly stopping after {epoch} epochs")
-                    break
-
-        # Post-training
-        self._load_best_model()
-        print("\nGenerating final features...")
-
-        # GPU-accelerated feature extraction
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            train_features = self._extract_features(self.train_dir)
-            self.visualize_features(
-                train_features['features'],
-                train_features['target'],
-                os.path.join(self.output_dir, "feature_space.png")
-            )
 
         return self.class_to_idx
 
