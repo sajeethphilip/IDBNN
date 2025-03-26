@@ -1,3 +1,37 @@
+# For the lazy guy
+```
+git pull 
+To train/predcit using cdbnn2 (For Image Feature Extraction)
+  python cdbnn2.py [arguments]
+    print("Welcome to Convolution DBNN")
+
+"--source", type=str, required=True,
+                      help="Path to source directory containing the data")
+"--dataset", type=str, required=True,
+                      help="Name for the dataset (will create data/<dataset>/)")
+"--mode", type=str, choices=["train", "predict", "train_and_predict"],
+                       default="train_and_predict", help="Execution mode")
+"--predict_dir", type=str,
+                       help="Directory to predict on (required for predict mode)")
+"--predict_output", type=str,
+                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
+"--merge_train_test", action="store_true",
+                       help="Force merge of train and test sets without prompt")
+"--force", action="store_true",
+                          help="Automatically overwrite existing files without prompt")
+
+To train/predcit using adbnn  (For Difference Boosting Neural Network)
+
+  python adbnn.py [arguments]
+
+"--file_path", nargs='?', help="Path to dataset file or folder")
+'--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
+                        required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
+'--interactive', action='store_true', help="Enable interactive mode to modify settings.")
+
+
+```
+
 # What is Difference Boosting Neural Network?
 
 Information is in the differences and not in the details. That is the key concept behind the Nov 2000 paper on  Boosting the differences: A fast Bayesian classifier neural network (https://doi.org/10.3233/IDA-2000-4602). It is an extension to the basic nonparametric Bayesian Probability estimate for classification.
