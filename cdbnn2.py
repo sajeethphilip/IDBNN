@@ -794,6 +794,10 @@ class FeatureExtractorPipeline:
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
         """Train until early stopping condition is met with unified 1D/image handling"""
+        # Initialize loss functions
+        miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
+        triplet_loss = losses.TripletMarginLoss(margin=0.2)
+        criterion = nn.CrossEntropyLoss()
         # Initialize data loaders based on data type
         if self._is_timeseries_data():
             train_dataset = TimeSeriesDataset(self.train_dir, self.config["dataset"]["window_size"])
@@ -810,10 +814,6 @@ class FeatureExtractorPipeline:
         self.clusterer = KLDivergenceClusterer(self.config)
         self.aligner = ClusterClassAligner(self.num_classes)
 
-        # Initialize loss functions
-        miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
-        triplet_loss = losses.TripletMarginLoss(margin=0.2)
-        criterion = nn.CrossEntropyLoss()
 
         # Split into training and validation
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
