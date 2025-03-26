@@ -21,93 +21,395 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
+import os
+import sys
+import json
+import pickle
+import argparse
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from pathlib import Path
+from copy import deepcopy
+from typing import Dict, List, Tuple, Union
+from sklearn.preprocessing import LabelEncoder
+from tqdm import tqdm
+from PIL import Image
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
 
+class EMA:
+    """Exponential Moving Average for prototype stabilization"""
+    def __init__(self, decay=0.99):
+        self.decay = decay
+        self.shadow = {}
 
-# -------------------- Enhanced Model Architecture --------------------
-class DeepFeatureExtractor(nn.Module):
-    """7-layer CNN with dropout for better feature extraction"""
-    def __init__(self, input_dims: Tuple, feature_dim: int = 128, dropout_prob: float = 0.3):
+    def __call__(self, name, x):
+        if name not in self.shadow:
+            self.shadow[name] = x.clone()
+        else:
+            self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * x
+        return self.shadow[name]
+
+class StabilizedDeepClustering(nn.Module):
+    def __init__(self, input_dims, num_classes, feature_dim=128, warmup_epochs=10):
         super().__init__()
-        self.input_dims = input_dims
+        self.warmup_epochs = warmup_epochs
+        self.current_epoch = 0
 
-        if len(input_dims) == 1:  # 1D data
-            self.encoder = nn.Sequential(
-                nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2),
-                nn.BatchNorm1d(32),
-                nn.ReLU(),
-                nn.Dropout(dropout_prob),
-                nn.Conv1d(32, 64, kernel_size=3, padding=1),
-                nn.BatchNorm1d(64),
-                nn.ReLU(),
-                nn.MaxPool1d(2),
-                nn.Dropout(dropout_prob),
-                nn.Conv1d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm1d(128),
-                nn.ReLU(),
-                nn.Dropout(dropout_prob),
-                nn.Conv1d(128, 256, kernel_size=3, padding=1),
-                nn.BatchNorm1d(256),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool1d(1),
-                nn.Flatten(),
-                nn.Linear(256, feature_dim))
-        else:  # Image data
-            self.encoder = nn.Sequential(
-                nn.Conv2d(input_dims[0], 32, kernel_size=3, padding=1),
-                nn.BatchNorm2d(32),
-                nn.ReLU(),
-                nn.Dropout(dropout_prob),
-                nn.Conv2d(32, 64, kernel_size=3, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Dropout(dropout_prob),
-                nn.Conv2d(64, 128, kernel_size=3, padding=1),
-                nn.BatchNorm2d(128),
-                nn.ReLU(),
-                nn.Dropout(dropout_prob),
-                nn.Conv2d(128, 256, kernel_size=3, padding=1),
-                nn.BatchNorm2d(256),
-                nn.ReLU(),
-                nn.MaxPool2d(2),
-                nn.Dropout(dropout_prob),
-                nn.Conv2d(256, 512, kernel_size=3, padding=1),
-                nn.BatchNorm2d(512),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(512, feature_dim))
-
+        # Feature extractor with projection head
+        self.feature_extractor = DeepFeatureExtractor(input_dims, feature_dim)
         self.projector = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.LayerNorm(feature_dim),
             nn.ReLU(),
-            nn.Dropout(dropout_prob)
+            nn.Linear(feature_dim, feature_dim)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 2 and len(self.input_dims) == 1:
-            x = x.unsqueeze(1)
-        features = self.encoder(x)
-        return self.projector(features)
+        # Prototype clusterer with EMA stabilization
+        self.clusterer = StabilizedPrototypeClusterer(feature_dim, num_classes)
 
-class PrototypeClusterer(nn.Module):
-    """Enhanced prototype clustering with temperature scaling"""
-    def __init__(self, feature_dim: int, num_classes: int):
+        # Classification head for warmup phase
+        self.classifier = nn.Linear(feature_dim, num_classes)
+
+        # Feature memory bank
+        self.register_buffer('feature_bank', torch.zeros(num_classes, feature_dim))
+        self.register_buffer('feature_counts', torch.zeros(num_classes))
+        self.ema = EMA(decay=0.99)
+
+    def forward(self, x):
+        features = F.normalize(self.projector(self.feature_extractor(x)), dim=1)
+
+        if self.training and self.current_epoch < self.warmup_epochs:
+            return self.classifier(features), None
+        else:
+            assignments, probs, proto_reg = self.clusterer(features)
+            return None, (assignments, probs, proto_reg)
+
+    def update_feature_bank(self, features, labels):
+        """Update feature direction memory bank"""
+        with torch.no_grad():
+            for cls_idx in torch.unique(labels):
+                mask = (labels == cls_idx)
+                if mask.any():
+                    cls_features = features[mask]
+                    self.feature_bank[cls_idx] = self.ema(
+                        f'proto_{cls_idx}',
+                        cls_features.mean(dim=0)
+                    )
+                    self.feature_counts[cls_idx] = mask.sum().item()
+
+    def initialize_prototypes(self):
+        """Initialize prototypes using feature bank statistics"""
+        with torch.no_grad():
+            valid_classes = self.feature_counts > 0
+            if valid_classes.sum() == len(self.clusterer.prototypes):
+                # Direct initialization if all classes represented
+                self.clusterer.prototypes.data.copy_(
+                    F.normalize(self.feature_bank[valid_classes], dim=1)
+            else:
+                # K-means fallback
+                kmeans = KMeans(n_clusters=len(self.clusterer.prototypes))
+                kmeans.fit(self.feature_bank.cpu().numpy())
+                self.clusterer.prototypes.data.copy_(
+                    torch.from_numpy(kmeans.cluster_centers_).to(self.feature_bank.device))
+
+class StabilizedPrototypeClusterer(nn.Module):
+    def __init__(self, feature_dim, num_classes):
         super().__init__()
-        self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim))
-        self.temperature = nn.Parameter(torch.tensor(0.5))  # Start with lower temperature
-        self.epsilon = 1e-6  # Small constant for numerical stability
+        self.prototypes = nn.Parameter(torch.empty(num_classes, feature_dim))
+        nn.init.xavier_normal_(self.prototypes)
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+        self.reg_weight = 0.1
+        self.epsilon = 1e-6
 
-    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Normalized prototype similarity
+    def forward(self, features):
+        # Normalized similarity
         norm_features = F.normalize(features, dim=1)
         norm_prototypes = F.normalize(self.prototypes, dim=1)
         sim = torch.matmul(norm_features, norm_prototypes.T)
 
         # Temperature-scaled probabilities
-        probs = F.softmax(sim / self.temperature.clamp(min=self.epsilon), dim=1)
-        return torch.argmax(probs, dim=1), probs
+        temp = self.temperature.clamp(min=self.epsilon)
+        probs = F.softmax(sim / temp, dim=1)
+
+        # Prototype regularization
+        proto_reg = self.prototype_regularization(norm_prototypes)
+
+        return torch.argmax(probs, dim=1), probs, proto_reg
+
+    def prototype_regularization(self, prototypes):
+        """Diversity and uniformity regularization"""
+        # Orthogonality constraint
+        proto_sim = prototypes @ prototypes.T
+        eye = torch.eye(len(prototypes), device=prototypes.device)
+        ortho_loss = F.mse_loss(proto_sim, eye)
+
+        # Uniform distribution constraint
+        avg_sim = proto_sim.mean()
+        uniform_loss = (avg_sim - 0.5)**2
+
+        return self.reg_weight * (ortho_loss + uniform_loss)
+
+class DeepClusteringPipeline:
+    def __init__(self, config=None):
+        self.config = config or self._default_config()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.label_encoder = None
+        self.model = None
+        self.optimizer = None
+        self.scheduler = None
+        self.best_loss = float('inf')
+
+    def _default_config(self):
+        return {
+            "feature_dim": 128,
+            "lr": 0.001,
+            "prototype_lr": 0.01,
+            "warmup_epochs": 10,
+            "dropout_prob": 0.3,
+            "epochs": 50,
+            "batch_size": 32,
+            "patience": 5,
+            "min_delta": 0.001,
+            "save_dir": "results"
+        }
+
+    def initialize_from_data(self, data_path):
+        data_path = Path(data_path)
+        self.dataset_name = data_path.name
+
+        try:
+            dataset = ImageDataset(data_path)
+            self.label_encoder = dataset.label_encoder
+            self.config["n_classes"] = len(dataset.classes)
+
+            # Initialize stabilized model
+            self.model = StabilizedDeepClustering(
+                input_dims=(3, 224, 224),
+                num_classes=self.config["n_classes"],
+                feature_dim=self.config["feature_dim"],
+                warmup_epochs=self.config["warmup_epochs"]
+            ).to(self.device)
+
+            # Optimizer with separate learning rates
+            self.optimizer = torch.optim.AdamW([
+                {'params': self.model.feature_extractor.parameters()},
+                {'params': self.model.projector.parameters()},
+                {'params': self.model.classifier.parameters(), 'lr': self.config["lr"]},
+                {'params': self.model.clusterer.parameters(), 'lr': self.config["prototype_lr"]}
+            ], lr=self.config["lr"], weight_decay=1e-4)
+
+            # Cosine annealing scheduler
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=self.config["epochs"],
+                eta_min=1e-6
+            )
+
+        except Exception as e:
+            raise ValueError(f"Initialization failed: {str(e)}")
+
+    def train(self, data_path):
+        try:
+            self.initialize_from_data(data_path)
+            output_dir = Path(self.config["save_dir"]) / self.dataset_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Data loading with strong augmentation
+            transform = transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                   std=[0.229, 0.224, 0.225])
+            ])
+
+            dataset = ImageDataset(data_path, transform)
+            loader = DataLoader(dataset, batch_size=self.config["batch_size"],
+                              shuffle=True, num_workers=4, pin_memory=True)
+
+            # Training loop
+            for epoch in range(self.config["epochs"]):
+                self.model.current_epoch = epoch
+                train_loss = self._train_epoch(loader, epoch)
+
+                # Update learning rate
+                self.scheduler.step()
+
+                # Initialize prototypes after warmup
+                if epoch == self.config["warmup_epochs"] - 1:
+                    self.model.initialize_prototypes()
+                    print("\nInitialized prototypes from feature bank")
+
+                # Early stopping check
+                if train_loss < self.best_loss - self.config["min_delta"]:
+                    self.best_loss = train_loss
+                    self._save_model(output_dir, best=True)
+
+                if epoch - self.best_epoch > self.config["patience"]:
+                    print(f"\nEarly stopping at epoch {epoch}")
+                    break
+
+            # Final evaluation
+            self._load_best_model(output_dir)
+            self._save_features(output_dir, dataset)
+            ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
+
+            print(f"\nTraining complete. Results saved to {output_dir}")
+
+        except Exception as e:
+            print(f"Training error: {str(e)}", file=sys.stderr)
+            raise
+
+    def _train_epoch(self, loader, epoch):
+        self.model.train()
+        total_loss = 0
+
+        for batch_idx, (images, labels, _) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}")):
+            images, labels = images.to(self.device), labels.to(self.device)
+
+            # Forward pass
+            self.optimizer.zero_grad()
+            logits, cluster_output = self.model(images)
+
+            # Loss calculation
+            if epoch < self.config["warmup_epochs"]:
+                # Supervised warmup
+                loss = F.cross_entropy(logits, labels)
+            else:
+                # Clustering phase
+                assignments, probs, proto_reg = cluster_output
+                cls_loss = F.cross_entropy(probs, labels)
+                loss = cls_loss + proto_reg
+
+                # Update feature bank
+                with torch.no_grad():
+                    features = self.model.feature_extractor(images)
+                    self.model.update_feature_bank(features, labels)
+
+            # Backward pass
+            loss.backward()
+            self.optimizer.step()
+            total_loss += loss.item()
+
+            # Logging
+            if batch_idx % 50 == 0:
+                print(f"\nBatch {batch_idx}: Loss={loss.item():.4f}")
+                if epoch >= self.config["warmup_epochs"]:
+                    print(f"Class distribution: {torch.softmax(probs,1).mean(0).detach().cpu().numpy()}")
+
+        return total_loss / len(loader)
+
+    def _save_features(self, output_dir, dataset):
+        loader = DataLoader(dataset, batch_size=self.config["batch_size"], shuffle=False)
+
+        self.model.eval()
+        all_features, all_labels, all_preds = [], [], []
+
+        with torch.no_grad():
+            for images, labels, paths in tqdm(loader, desc="Extracting features"):
+                features = self.model.feature_extractor(images.to(self.device))
+                _, probs, _ = self.model.clusterer(features)
+                preds = torch.argmax(probs, dim=1)
+
+                all_features.append(features.cpu())
+                all_labels.append(labels)
+                all_preds.append(preds.cpu())
+
+        # Save results
+        features = torch.cat(all_features).numpy()
+        labels = torch.cat(all_labels).numpy()
+        preds = torch.cat(all_preds).numpy()
+
+        df = pd.DataFrame({
+            **{f"feature_{i}": features[:,i] for i in range(features.shape[1])},
+            "true_label": labels,
+            "predicted_label": preds,
+            "true_class": self.label_encoder.inverse_transform(labels),
+            "predicted_class": self.label_encoder.inverse_transform(preds)
+        })
+
+        df.to_csv(output_dir / f"{self.dataset_name}_features.csv", index=False)
+
+        # Generate confusion matrix
+        self._generate_confusion_matrix(labels, preds, output_dir)
+
+    def _save_model(self, output_dir: Path, best: bool = False):
+        """Save model and label encoder"""
+        model_dir = output_dir/"models"
+        model_dir.mkdir(exist_ok=True)
+
+        suffix = "_best" if best else ""
+        torch.save({
+            'model_state': self.model.state_dict(),
+            'clusterer_state': self.clusterer.state_dict(),
+            'optimizer_state': self.optimizer.state_dict(),
+            'config': self.config,
+            'classes': self.label_encoder.classes_.tolist(),
+            'loss': self.best_loss
+        }, model_dir/f"model{suffix}.pth")
+
+        with open(model_dir/f"label_encoder{suffix}.pkl", "wb") as f:
+            pickle.dump(self.label_encoder, f)
+
+    def _load_best_model(self, output_dir: Path):
+        """Load the best saved model"""
+        model_path = output_dir/"models"/"model_best.pth"
+        if model_path.exists():
+            checkpoint = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state'])
+            self.clusterer.load_state_dict(checkpoint['clusterer_state'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            self.best_loss = checkpoint['loss']
+            print("Loaded best model weights")
+
+
+    def _generate_confusion_matrix(self, true_labels, predicted_labels, output_dir):
+        """Generate and save a confusion matrix"""
+        # Calculate confusion matrix
+        cm = confusion_matrix(true_labels, predicted_labels)
+        accuracy = np.trace(cm) / np.sum(cm)
+
+        # Plot confusion matrix
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=self.label_encoder.classes_,
+                    yticklabels=self.label_encoder.classes_)
+        plt.title(f'Confusion Matrix\nAccuracy: {accuracy:.2%}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+
+        # Save the figure
+        cm_path = output_dir / "confusion_matrix.png"
+        plt.savefig(cm_path)
+        plt.close()
+
+        # Print colored confusion matrix to console
+        print("\nConfusion Matrix:")
+        print(f"Accuracy: {accuracy:.2%}\n")
+
+        # Create a colored text version for console
+        class_names = self.label_encoder.classes_
+        max_len = max(len(name) for name in class_names)
+        header = " " * (max_len + 2) + " ".join([f"{name:^{max_len}}" for name in class_names])
+        print(header)
+
+        for i, true_name in enumerate(class_names):
+            row = f"{true_name:<{max_len}} "
+            for j in range(len(class_names)):
+                count = cm[i, j]
+                color_code = 32 if i == j else 31  # Green for correct, red for incorrect
+                row += f"\033[{color_code}m{count:^{max_len}}\033[0m "
+            print(row)
 
 # -------------------- Data Loading --------------------
 class ImageDataset(Dataset):
@@ -431,131 +733,7 @@ class DeepClusteringPipeline:
             print(f"\nError during training: {str(e)}", file=sys.stderr)
             raise
 
-    def _save_model(self, output_dir: Path, best: bool = False):
-        """Save model and label encoder"""
-        model_dir = output_dir/"models"
-        model_dir.mkdir(exist_ok=True)
 
-        suffix = "_best" if best else ""
-        torch.save({
-            'model_state': self.model.state_dict(),
-            'clusterer_state': self.clusterer.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
-            'config': self.config,
-            'classes': self.label_encoder.classes_.tolist(),
-            'loss': self.best_loss
-        }, model_dir/f"model{suffix}.pth")
-
-        with open(model_dir/f"label_encoder{suffix}.pkl", "wb") as f:
-            pickle.dump(self.label_encoder, f)
-
-    def _load_best_model(self, output_dir: Path):
-        """Load the best saved model"""
-        model_path = output_dir/"models"/"model_best.pth"
-        if model_path.exists():
-            checkpoint = torch.load(model_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state'])
-            self.clusterer.load_state_dict(checkpoint['clusterer_state'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-            self.best_loss = checkpoint['loss']
-            print("Loaded best model weights")
-
-    def _save_features(self, output_dir: Path, dataset: ImageDataset):
-        """Extract and save features to CSV with cluster assignments"""
-        loader = DataLoader(
-            dataset,
-            batch_size=self.config["batch_size"],
-            shuffle=False,
-            num_workers=4
-        )
-
-        self.model.eval()
-        self.clusterer.eval()
-
-        all_features = []
-        all_true_labels = []
-        all_paths = []
-        all_assignments = []
-        all_confidences = []
-        all_predicted_labels = []
-
-        with torch.no_grad():
-            for images, labels, paths in tqdm(loader, desc="Extracting features"):
-                images = images.to(self.device)
-                features = self.model(images)
-                assignments, probs = self.clusterer(features)
-                confidences = probs.gather(1, assignments.unsqueeze(1)).squeeze()
-
-                all_features.append(features.cpu().numpy())
-                all_true_labels.append(labels.numpy())
-                all_paths.extend(paths)
-                all_assignments.append(assignments.cpu().numpy())
-                all_confidences.append(confidences.cpu().numpy())
-                all_predicted_labels.append(assignments.cpu().numpy())
-
-        # Concatenate all batches
-        features = np.concatenate(all_features)
-        true_labels = np.concatenate(all_true_labels)
-        assignments = np.concatenate(all_assignments)
-        confidences = np.concatenate(all_confidences)
-        predicted_labels = np.concatenate(all_predicted_labels)
-
-        # Generate confusion matrix
-        self._generate_confusion_matrix(true_labels, predicted_labels, output_dir)
-
-        # Create DataFrame with all information
-        feature_cols = {f"feature_{i}": features[:,i] for i in range(features.shape[1])}
-        df = pd.DataFrame({
-            **feature_cols,
-            "true_label": true_labels,
-            "true_class_name": self.label_encoder.inverse_transform(true_labels),
-            "file_path": all_paths,
-            "assigned_class": assignments,
-            "predicted_class_name": self.label_encoder.inverse_transform(assignments),
-            "confidence": confidences
-        })
-
-        # Ensure output directory exists
-        output_dir.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_dir/f"{self.dataset_name}.csv", index=False)
-
-    def _generate_confusion_matrix(self, true_labels, predicted_labels, output_dir):
-        """Generate and save a confusion matrix"""
-        # Calculate confusion matrix
-        cm = confusion_matrix(true_labels, predicted_labels)
-        accuracy = np.trace(cm) / np.sum(cm)
-
-        # Plot confusion matrix
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                    xticklabels=self.label_encoder.classes_,
-                    yticklabels=self.label_encoder.classes_)
-        plt.title(f'Confusion Matrix\nAccuracy: {accuracy:.2%}')
-        plt.xlabel('Predicted')
-        plt.ylabel('True')
-
-        # Save the figure
-        cm_path = output_dir / "confusion_matrix.png"
-        plt.savefig(cm_path)
-        plt.close()
-
-        # Print colored confusion matrix to console
-        print("\nConfusion Matrix:")
-        print(f"Accuracy: {accuracy:.2%}\n")
-
-        # Create a colored text version for console
-        class_names = self.label_encoder.classes_
-        max_len = max(len(name) for name in class_names)
-        header = " " * (max_len + 2) + " ".join([f"{name:^{max_len}}" for name in class_names])
-        print(header)
-
-        for i, true_name in enumerate(class_names):
-            row = f"{true_name:<{max_len}} "
-            for j in range(len(class_names)):
-                count = cm[i, j]
-                color_code = 32 if i == j else 31  # Green for correct, red for incorrect
-                row += f"\033[{color_code}m{count:^{max_len}}\033[0m "
-            print(row)
 
 # -------------------- Command Line Interface --------------------
 class DeepClusteringApp:
@@ -642,6 +820,74 @@ class DeepClusteringApp:
         except Exception as e:
             print(f"\nError: {str(e)}", file=sys.stderr)
             sys.exit(1)
+# -------------------- Enhanced Model Architecture --------------------
+class DeepFeatureExtractor(nn.Module):
+    """7-layer CNN with dropout for better feature extraction"""
+    def __init__(self, input_dims: Tuple, feature_dim: int = 128, dropout_prob: float = 0.3):
+        super().__init__()
+        self.input_dims = input_dims
+
+        if len(input_dims) == 1:  # 1D data
+            self.encoder = nn.Sequential(
+                nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2),
+                nn.BatchNorm1d(32),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm1d(64),
+                nn.ReLU(),
+                nn.MaxPool1d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm1d(128),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm1d(256),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool1d(1),
+                nn.Flatten(),
+                nn.Linear(256, feature_dim))
+        else:  # Image data
+            self.encoder = nn.Sequential(
+                nn.Conv2d(input_dims[0], 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(256, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(512, feature_dim))
+
+        self.projector = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_prob)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2 and len(self.input_dims) == 1:
+            x = x.unsqueeze(1)
+        features = self.encoder(x)
+        return self.projector(features)
+
 
 if __name__ == "__main__":
     DeepClusteringApp().run()
