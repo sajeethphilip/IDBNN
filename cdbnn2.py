@@ -834,7 +834,7 @@ class FeatureExtractorPipeline:
         if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
             val_csv_path = os.path.join(self.datafolder, f"{self.dataset_name}_val_features.csv")
             self._extract_and_save_features(self.val_dir, val_csv_path)
-       return self.class_to_idx
+        return self.class_to_idx
 
     def _load_best_model(self) -> None:
         """Load the best saved model weights"""
