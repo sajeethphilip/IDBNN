@@ -826,7 +826,15 @@ class FeatureExtractorPipeline:
 
         # Load best model weights before returning
         self._load_best_model()
-        return self.class_to_idx
+        # After training completes, extract and save features
+        train_csv_path = os.path.join(self.datafolder, f"{self.dataset_name}_train_features.csv")
+        self._extract_and_save_features(self.train_dir, train_csv_path)
+
+        # If validation exists, save those features too
+        if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
+            val_csv_path = os.path.join(self.datafolder, f"{self.dataset_name}_val_features.csv")
+            self._extract_and_save_features(self.val_dir, val_csv_path)
+       return self.class_to_idx
 
     def _load_best_model(self) -> None:
         """Load the best saved model weights"""
@@ -943,6 +951,96 @@ class FeatureExtractorPipeline:
         if self.class_to_idx:
             known = sum(df["target"] != -1)
             print(f"Images with known classes: {known} ({known/len(df):.1%})")
+        if output_csv is None:
+            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
+            saved_df=self._extract_and_save_features(input_dir, output_csv)
+
+        return saved_df
+    def _extract_and_save_features(self, input_dir: str, output_csv: str) -> pd.DataFrame:
+        """Unified feature extraction and CSV saving"""
+        # Determine data type
+        if any(f.endswith('.npy') for f in os.listdir(input_dir)):
+            df = self._extract_timeseries_features(input_dir)
+        else:
+            df = self._extract_image_features(input_dir)
+
+        # Save to CSV
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        df.to_csv(output_csv, index=False)
+        print(f"Features saved to {output_csv}")
+        return df
+
+    def _extract_timeseries_features(self, timeseries_dir: str) -> pd.DataFrame:
+        """Extract features from time-series data"""
+        results = {
+            'file_path': [],
+            'window_start': [],
+            'window_end': [],
+            'features': []
+        }
+
+        for ts_file in tqdm(sorted(glob.glob(os.path.join(timeseries_dir, '*.npy'))),
+                          desc="Processing time-series"):
+            ts_data = np.load(ts_file)
+            dataset = TimeSeriesDataset(ts_data, self.window_size)
+            loader = DataLoader(dataset, batch_size=self.config["training"]["batch_size"], shuffle=False)
+
+            self.model.eval()
+            with torch.no_grad():
+                for batch in loader:
+                    features = self.model(batch.to(self.device)).cpu().numpy()
+
+                    for i in range(batch.size(0)):
+                        idx = len(results['features'])
+                        results['file_path'].append(ts_file)
+                        results['window_start'].append(idx * self.window_size)
+                        results['window_end'].append((idx + 1) * self.window_size - 1)
+                        results['features'].append(features[i])
+
+        return self._create_feature_dataframe(results)
+
+    def _extract_image_features(self, image_dir: str) -> pd.DataFrame:
+        """Extract features from image dataset"""
+        dataset = ImageFolderWithPaths(image_dir, transform=self.transform)
+        loader = DataLoader(dataset, batch_size=self.config["training"]["batch_size"], shuffle=False)
+
+        results = {
+            'file_path': [],
+            'subfolder': [],
+            'target_name': [],
+            'target': [],
+            'format': [],
+            'features': []
+        }
+
+        self.model.eval()
+        with torch.no_grad():
+            for images, targets, paths in tqdm(loader, desc="Extracting image features"):
+                features = self.model(images.to(self.device)).cpu().numpy()
+
+                for i in range(len(paths)):
+                    path = paths[i]
+                    results['file_path'].append(path)
+                    results['subfolder'].append(os.path.basename(os.path.dirname(path)))
+                    results['target_name'].append(dataset.classes[targets[i]])
+                    results['target'].append(targets[i].item())
+                    results['format'].append(os.path.splitext(path)[1][1:].lower())
+                    results['features'].append(features[i])
+
+        return self._create_feature_dataframe(results)
+
+    def _create_feature_dataframe(self, results: Dict) -> pd.DataFrame:
+        """Convert extraction results to DataFrame"""
+        feature_cols = [f'feature_{i}' for i in range(len(results['features'][0]))]
+        df = pd.DataFrame(np.vstack(results['features']), columns=feature_cols)
+
+        # Add metadata columns
+        for col in [k for k in results.keys() if k != 'features']:
+            df.insert(0, col, results[col])
+
+        # Make paths relative to datafolder
+        df['file_path'] = df['file_path'].apply(
+            lambda x: os.path.relpath(x, self.datafolder) if x.startswith(self.datafolder) else x)
 
         return df
 
@@ -963,75 +1061,116 @@ class FeatureExtractorPipeline:
 
     def extract_features(self, output_csv: Optional[str] = None) -> pd.DataFrame:
         """
-        Extract features and save to CSV with complete tracking information
+        Extract features from both images and time-series data, preserving all metadata
 
         Args:
-            output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
+            output_csv: Optional output path (default: data/<datafolder>/<datafolder>_features.csv)
 
         Returns:
-            DataFrame with columns:
-            image_path, subfolder_name, target_name, target, feature_0...feature_N
+            DataFrame with complete tracking information including:
+            - For images: file_path, subfolder, target, format, timestamp (if available)
+            - For time-series: window_start, window_end, channel_stats, original_file
         """
-        # Set default output path if not specified
+        # Set default output path
         if output_csv is None:
-            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
+            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}_features.csv")
 
-        # Create dataset from training directory
-        dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
-        loader = DataLoader(
-            dataset,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=False,
-            num_workers=self.config["training"]["num_workers"]
+        # Initialize results storage
+        results = {
+            'type': [],               # 'image' or 'timeseries'
+            'file_path': [],          # Original file path
+            'subfolder': [],          # For images
+            'target_name': [],        # Class name
+            'target': [],             # Numeric label
+            'format': [],             # File format
+            'timestamp': [],          # For time-series
+            'window_start': [],       # For time-series
+            'window_end': [],         # For time-series
+            'features': []            # Extracted features
+        }
+
+        # Process image data if available
+        if hasattr(self, 'train_dir') and os.path.exists(self.train_dir):
+            image_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
+            image_loader = DataLoader(
+                image_dataset,
+                batch_size=self.config["training"]["batch_size"],
+                shuffle=False,
+                num_workers=self.config["training"]["num_workers"]
+            )
+
+            self.model.eval()
+            with torch.no_grad():
+                for images, targets, paths in tqdm(image_loader, desc="Processing images"):
+                    features = self.model(images.to(self.device)).cpu().numpy()
+
+                    for i in range(len(paths)):
+                        path = paths[i]
+                        results['type'].append('image')
+                        results['file_path'].append(path)
+                        results['subfolder'].append(os.path.basename(os.path.dirname(path)))
+                        results['target_name'].append(image_dataset.classes[targets[i]])
+                        results['target'].append(targets[i].item())
+                        results['format'].append(os.path.splitext(path)[1][1:].lower())
+                        results['timestamp'].append(os.path.getmtime(path))
+                        results['window_start'].append(None)
+                        results['window_end'].append(None)
+                        results['features'].append(features[i])
+
+        # Process time-series data if available
+        if hasattr(self, 'timeseries_dir') and os.path.exists(self.timeseries_dir):
+            for ts_file in tqdm(sorted(glob.glob(os.path.join(self.timeseries_dir, '*.npy'))),
+                              desc="Processing time-series"):
+                # Load time-series data (channels x timepoints)
+                ts_data = np.load(ts_file)
+
+                # Create sliding window dataset
+                ts_dataset = TimeSeriesDataset(ts_data, window_size=256)
+                ts_loader = DataLoader(
+                    ts_dataset,
+                    batch_size=self.config["training"]["batch_size"],
+                    shuffle=False
+                )
+
+                # Extract features for each window
+                self.model.eval()
+                with torch.no_grad():
+                    for batch in ts_loader:
+                        batch_features = self.model(batch.to(self.device)).cpu().numpy()
+
+                        for i in range(batch.size(0)):
+                            idx = len(results['features'])
+                            window_idx = ts_dataset.indices[idx] if hasattr(ts_dataset, 'indices') else idx
+
+                            results['type'].append('timeseries')
+                            results['file_path'].append(ts_file)
+                            results['subfolder'].append(os.path.basename(os.path.dirname(ts_file)))
+                            results['target_name'].append(os.path.splitext(os.path.basename(ts_file))[0])
+                            results['target'].append(-1)  # Can be set during post-processing
+                            results['format'].append('npy')
+                            results['timestamp'].append(os.path.getmtime(ts_file))
+                            results['window_start'].append(window_idx)
+                            results['window_end'].append(window_idx + 255)
+                            results['features'].append(batch_features[i])
+
+        # Convert to DataFrame
+        if not results['features']:
+            raise ValueError("No features extracted - check input data paths")
+
+        feature_cols = [f'feature_{i}' for i in range(len(results['features'][0]))]
+        df = pd.DataFrame(
+            np.vstack(results['features']),
+            columns=feature_cols
         )
 
-        # Initialize lists to store results
-        image_paths = []
-        subfolder_names = []
-        target_names = []
-        targets = []
-        features_list = []
+        # Add metadata columns
+        for col in ['type', 'file_path', 'subfolder', 'target_name', 'target',
+                   'format', 'timestamp', 'window_start', 'window_end']:
+            df.insert(0, col, results[col])
 
-        # Extract features
-        self.model.eval()
-        with torch.no_grad():
-            for images, batch_targets, batch_paths in tqdm(loader, desc="Extracting features"):
-                images = images.to(self.device)
-                batch_features = self.model(images).cpu().numpy()
-
-                features_list.append(batch_features)
-
-                # Extract path information
-                image_paths.extend(batch_paths)
-
-                # Get subfolder names (class names)
-                subfolder_names.extend([
-                    os.path.basename(os.path.dirname(p)) for p in batch_paths
-                ])
-
-                # Get target names (using class_to_idx mapping)
-                target_names.extend([
-                    list(self.class_to_idx.keys())[list(self.class_to_idx.values()).index(t)]
-                    for t in batch_targets.numpy()
-                ])
-
-                targets.extend(batch_targets.numpy())
-
-        # Create DataFrame
-        features_array = np.concatenate(features_list, axis=0)
-        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
-
-        df = pd.DataFrame(features_array, columns=feature_cols)
-
-        # Add tracking information
-        df.insert(0, "image_path", image_paths)
-        df.insert(1, "subfolder_name", subfolder_names)
-        df.insert(2, "target_name", target_names)
-        df.insert(3, "target", targets)
-
-        # Make paths relative to datafolder if possible
+        # Make paths relative to datafolder when possible
         try:
-            df["image_path"] = df["image_path"].apply(
+            df['file_path'] = df['file_path'].apply(
                 lambda x: os.path.relpath(x, start=self.datafolder))
         except ValueError:
             pass  # Keep absolute paths if they're not under datafolder
@@ -1041,66 +1180,46 @@ class FeatureExtractorPipeline:
         df.to_csv(output_csv, index=False)
 
         print(f"\nFeature extraction complete. Results saved to {output_csv}")
-        print(f"Total images processed: {len(df)}")
-        print("Columns:", df.columns.tolist())
+        print(f"Total samples processed: {len(df)}")
+        print(f"Breakdown by type:\n{df['type'].value_counts()}")
+        print(f"Columns: {df.columns.tolist()}")
 
         return df
 
-
-
 def main():
-    print("Welcome to Convolution DBNN")
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
-    parser.add_argument("--source", type=str, required=True,
-                      help="Path to source directory containing the data")
-    parser.add_argument("--dataset", type=str, required=True,
-                      help="Name for the dataset (will create data/<dataset>/)")
-    parser.add_argument("--mode", type=str, choices=["train", "predict", "train_and_predict"],
-                       default="train_and_predict", help="Execution mode")
-    parser.add_argument("--predict_dir", type=str,
-                       help="Directory to predict on (required for predict mode)")
-    parser.add_argument("--predict_output", type=str,
-                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
-    parser.add_argument("--merge_train_test", action="store_true",
-                       help="Force merge of train and test sets without prompt")
-    parser.add_argument("--force", action="store_true",
-                          help="Automatically overwrite existing files without prompt")
+    parser.add_argument("--datafolder", type=str, required=True,
+                      help="Output directory under data/")
+    parser.add_argument("--mode", choices=["train", "predict", "full"],
+                      default="full", help="Execution mode")
+    parser.add_argument("--input", type=str, required=True,
+                      help="Input directory (for predict) or source directory (for train)")
+    parser.add_argument("--output_csv", type=str, default=None,
+                      help="Optional custom CSV output path")
     args = parser.parse_args()
-
-    # Set up destination path
-    dest_dir = os.path.join("data", args.dataset)
-    #os.makedirs(dest_dir, exist_ok=True)
-
-    print(f"\nSetting up data structure in {dest_dir}")
-    print(f"Source data from: {args.source}")
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
-        source_dir=args.source,
-        datafolder=dest_dir,
-        merge_train_test=args.merge_train_test,
-        interactive=not args.force
+        datafolder=os.path.join("data", args.datafolder),
+        source_dir=args.input
     )
 
-    if args.mode in ["train", "train_and_predict"]:
-        print("\nStarting training...")
-        class_mapping = pipeline.train()
-        print("\nTraining completed successfully!")
-        print("Class mapping:", class_mapping)
-    # Handle prediction
-    if args.predict_dir:
-        # Set default output path if not specified
-        if args.predict_output is None:
-            args.predict_output = os.path.join(datafolder, f"{base_datafolder}.csv")
+    try:
+        if args.mode in ["train", "full"]:
+            print("Starting training...")
+            class_mapping = pipeline.train()
+            print(f"Training complete. Class mapping: {class_mapping}")
 
-        print(f"\nStarting prediction on images in: {args.predict_dir}")
-        print(f"Results will be saved to: {args.predict_output}")
+            # Save training features CSV is already handled in train()
 
-        predictions = pipeline.predict(args.predict_dir, args.predict_output)
+        if args.mode in ["predict", "full"]:
+            print("Extracting features...")
+            features_df = pipeline.predict(args.input, args.output_csv)
+            print(f"Extracted {len(features_df)} samples")
 
-        # Print sample of results
-        print("\nSample predictions:")
-        print(predictions[["image_path", "target_name", "target"]].head())
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
