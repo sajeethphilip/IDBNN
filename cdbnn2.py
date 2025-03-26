@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from tqdm import tqdm
 import warnings
 from pytorch_metric_learning import miners, losses
+import umap.umap_ as umap #pip install umap-learn
 
 class SelfAttention(nn.Module):
     """Self-attention module for feature maps"""
@@ -704,7 +705,8 @@ class FeatureExtractorPipeline:
         model = FeatureExtractorCNN(
             in_channels=self.config["dataset"]["in_channels"],
             feature_dims=self.config["model"]["feature_dims"],
-            dropout_prob=self.config["model"].get("dropout_prob", 0.5)
+            dropout_prob=self.config["model"].get("dropout_prob", 0.5),
+            num_classes=self.config["dataset"]["num_classes"]  # Add this line
         ).to(self.device)
 
         # Check for existing best model
@@ -1335,6 +1337,7 @@ class FeatureExtractorPipeline:
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'class_to_idx': getattr(self, 'class_to_idx', None),  # Save class mapping
             'config': self.config
         }, model_path)
 
