@@ -21,6 +21,9 @@ from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+import torch
+from torch import Tensor
+from typing import Optional, Tuple
 
 class EMA:
     """Exponential Moving Average for prototype stabilization"""

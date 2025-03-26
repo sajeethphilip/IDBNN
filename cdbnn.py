@@ -73,9 +73,6 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Dict, List, Optional
 from torchvision.transforms.functional import resize
-import torch
-from torch import Tensor
-from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
