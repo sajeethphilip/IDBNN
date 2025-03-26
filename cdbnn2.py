@@ -891,6 +891,17 @@ class FeatureExtractorPipeline:
                     loss_weights["triplet_weight"] * trip_loss +
                     0.1 * cluster_consistency_loss  # Small weight for consistency
                 )
+                # Modified forward pass
+                if hasattr(self.model, 'cluster_head'):
+                    features, cluster_logits = self.model(data, return_clusters=True)
+                    # Calculate your losses using both features and cluster_logits
+                    kl_loss = self.clusterer.compute_kl_divergence(features, target)
+                    cls_loss = F.cross_entropy(cluster_logits, target)
+                    loss = kl_loss + cls_loss
+                else:
+                    features = self.model(data)
+                    # Calculate loss without clustering
+                    loss = self.clusterer.compute_kl_divergence(features, target)
 
                 # Backward pass
                 loss.backward()
