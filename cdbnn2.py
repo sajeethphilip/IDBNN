@@ -600,78 +600,7 @@ class FeatureExtractorPipeline:
             }
         }
 
-    def _initialize_conf(self) -> Dict[str, Any]:
-        """Initialize .conf file in data/<datafolder>/"""
-        conf_path = self.conf_path
-
-        if os.path.exists(conf_path):
-            with open(conf_path) as f:
-                conf = json.load(f)
-            print(f"Loaded conf from {conf_path}")
-        else:
-            conf = self._create_default_conf()
-            with open(conf_path, 'w') as f:
-                json.dump(conf, f, indent=4)
-            print(f"Created default conf at {conf_path}")
-
-        return conf
-
-    def _create_default_conf(self) -> Dict[str, Any]:
-        """Create default .conf file"""
-        feature_columns = [f"feature_{i}" for i in range(128)] + ["target"]
-
-        return {
-            "file_path": self.csv_path,
-            "column_names": feature_columns,
-            "separator": ",",
-            "has_header": True,
-            "target_column": "target",
-            "modelType": "Histogram",
-            "feature_group_size": 2,
-            "max_combinations": 10000,
-            "bin_sizes": [128],
-            "active_learning": {
-                "tolerance": 1.0,
-                "cardinality_threshold_percentile": 95,
-                "strong_margin_threshold": 0.3,
-                "marginal_margin_threshold": 0.1,
-                "min_divergence": 0.1
-            },
-            "training_params": {
-                "trials": 100,
-                "epochs": 1000,
-                "learning_rate": 0.001,
-                "batch_size": 128,
-                "test_fraction": 0.2,
-                "random_seed": 42,
-                "minimum_training_accuracy": 0.95,
-                "cardinality_threshold": 0.9,
-                "cardinality_tolerance": 4,
-                "n_bins_per_dim": 21,
-                "enable_adaptive": True,
-                "invert_DBNN": True,
-                "reconstruction_weight": 0.5,
-                "feedback_strength": 0.3,
-                "inverse_learning_rate": 0.001,
-                "Save_training_epochs": True,
-                "training_save_path": "training_data",
-                "enable_vectorized": False,
-                "vectorization_warning_acknowledged": False,
-                "compute_device": "auto",
-                "use_interactive_kbd": False
-            },
-            "execution_flags": {
-                "train": True,
-                "train_only": False,
-                "predict": True,
-                "fresh_start": False,
-                "use_previous_model": True,
-                "gen_samples": False
-            }
-        }
-
-
-    def _handle_interactive_setup(self) -> None:
+     def _handle_interactive_setup(self) -> None:
         """Handle interactive setup"""
         print(f"\nSetting up data structure for {self.dataname}")
 
@@ -830,6 +759,8 @@ class FeatureExtractorPipeline:
 
     def _initialize_model(self) -> nn.Module:
         """Initialize model, loading previous best if available"""
+        # Ensure num_classes exists in config
+        num_classes = self.config["dataset"].get("num_classes", 10)
         model = FeatureExtractorCNN(
             in_channels=self.config["dataset"]["in_channels"],
             feature_dims=self.config["model"]["feature_dims"],
