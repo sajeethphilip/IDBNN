@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
+from copy import deepcopy
 from typing import Dict, List, Tuple, Union
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
@@ -205,26 +206,40 @@ class ConfigManager:
 
     @staticmethod
     def generate_json_config(output_path: Path, config: Dict, dataset_name: str):
-        # Convert all Path objects to strings
+        # Create a deep copy of the config to avoid modifying the original
+        config_copy = deepcopy(config)
+
+        # Convert any Path objects in the config to strings
+        def convert_paths(obj):
+            if isinstance(obj, Path):
+                return str(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_paths(x) for x in obj]
+            return obj
+
+        config_copy = convert_paths(config_copy)
+
         base_config = {
             "dataset": {
                 "name": dataset_name,
                 "type": "image_folder",
                 "in_channels": 3,
-                "num_classes": config["n_classes"],
+                "num_classes": config_copy["n_classes"],
                 "input_size": [224, 224],
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],
-                "train_dir": str(output_path),  # Convert to string
+                "train_dir": str(output_path),
                 "test_dir": None
             },
             "model": {
                 "encoder_type": "deep_cnn",
-                "feature_dims": config["feature_dim"],
-                "learning_rate": config["lr"],
-                "prototype_learning_rate": config["prototype_lr"],
+                "feature_dims": config_copy["feature_dim"],
+                "learning_rate": config_copy["lr"],
+                "prototype_learning_rate": config_copy["prototype_lr"],
                 "temperature": 0.5,
-                "dropout_prob": config.get("dropout_prob", 0.3),
+                "dropout_prob": config_copy.get("dropout_prob", 0.3),
                 "enhancement_modules": {
                     "prototype_clustering": {
                         "enabled": True,
@@ -235,13 +250,14 @@ class ConfigManager:
                     }
                 }
             },
-            "training": config,
+            "training": config_copy,
             "output": {
-                "features_file": str(output_path/f"{dataset_name}.csv"),  # Convert to string
-                "model_dir": str(output_path/"models"),  # Convert to string
-                "visualization_dir": str(output_path/"visualizations")  # Convert to string
+                "features_file": str(output_path/f"{dataset_name}.csv"),
+                "model_dir": str(output_path/"models"),
+                "visualization_dir": str(output_path/"visualizations")
             }
         }
+
         with open(output_path/f"{dataset_name}.json", "w") as f:
             json.dump(base_config, f, indent=4)
 # -------------------- Enhanced Training Pipeline --------------------
