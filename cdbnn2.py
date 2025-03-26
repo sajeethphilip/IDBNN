@@ -285,7 +285,7 @@ class FeatureExtractorPipeline:
 
     def _initialize_config(self) -> Dict[str, Any]:
         """Initialize config file in data/<datafolder>/"""
-        config_path = os.path.join(self.datafolder, f"{self.dataset_name}.json")
+        config_path = self.config_path
 
         if os.path.exists(config_path):
             with open(config_path) as f:
