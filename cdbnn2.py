@@ -325,6 +325,7 @@ class FeatureExtractorPipeline:
         # Config paths
         self.config_path = os.path.join(self.output_dir, f"{self.dataname}.json")
         self.conf_path = os.path.join(self.output_dir, f"{self.dataname}.conf")
+        self.csv_path = os.path.join(self.output_dir, f"{self.dataname}.csv")
 
         # Initialize components
         self.config = self._initialize_config()
