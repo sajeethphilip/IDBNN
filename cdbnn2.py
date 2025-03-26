@@ -964,6 +964,18 @@ class FeatureExtractorPipeline:
 
         return getattr(self, 'class_to_idx', None) or {str(i):i for i in range(self.num_classes)}
 
+    def _extract_features(self, input_dir: str) -> Dict[str, Any]:
+        """Unified feature extraction that returns features and targets"""
+        if self._is_timeseries_data(input_dir):
+            df = self._extract_timeseries_features(input_dir)
+        else:
+            df = self._extract_image_features(input_dir)
+
+        return {
+            'features': df[[c for c in df.columns if c.startswith('feature_')]].values,
+            'target': df['target'].values
+        }
+
     def _update_cluster_alignment(self, loader):
         """Update the cluster-class alignment matrix"""
         self.model.eval()
