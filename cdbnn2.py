@@ -515,73 +515,79 @@ class FeatureExtractorPipeline:
 
         return train_path, test_path, image_subfolders
 
-    def _prepare_data_structure(self) -> None:
-        """Handle all dataset organization scenarios"""
-        # First handle the training directory existence
-        if os.path.exists(self.train_dir):
-            if self.interactive:
-                print(f"Warning: Training directory already exists at {self.train_dir}")
-                response = input("Do you want to: [R]eplace, [M]erge, or [A]bort? ").lower()
-                if response == 'a':
-                    raise FileExistsError("Aborted by user")
-                elif response == 'r':
-                    print(f"Removing existing directory {self.train_dir}")
-                    shutil.rmtree(self.train_dir)
-                    os.makedirs(self.train_dir)
-                elif response == 'm':
-                    print("Merging with existing data")
-                else:
-                    print("Invalid choice, defaulting to merge")
-            else:
-                # Non-interactive mode - default to merge
-                print(f"Training directory exists, merging new data into {self.train_dir}")
-        else:
+    def _prepare_data_structure(self, mode: str = 'train') -> None:
+        """Prepare data structure for training or prediction"""
+        # Create necessary directories
+        os.makedirs(self.model_dir, exist_ok=True)
+
+        # Handle train directory based on mode
+        if mode == 'train':
+            # Clear existing training data if needed
+            if os.path.exists(self.train_dir):
+                if self.interactive:
+                    response = input(f"Training directory exists at {self.train_dir}. Overwrite? [y/n] ").lower()
+                    if response != 'y':
+                        raise FileExistsError("Training directory exists and user chose not to overwrite")
+                shutil.rmtree(self.train_dir)
             os.makedirs(self.train_dir)
 
-        # Now copy data from source to training directory
-        self._copy_data_from_source()
+            # Copy data from source to training directory
+            self._copy_data_from_source()
 
-        # Finally count the actual classes
-        self._count_actual_classes()
+        elif mode == 'predict':
+            # For prediction, we don't need a train directory
+            if os.path.exists(self.train_dir):
+                shutil.rmtree(self.train_dir)
+
+        # Verify we have either training data or a trained model
+        if mode == 'train' and not os.listdir(self.train_dir):
+            raise FileNotFoundError(f"No valid training data found in {self.train_dir}")
+        elif mode == 'predict' and not os.path.exists(os.path.join(self.model_dir, "feature_extractor.pth")):
+            raise FileNotFoundError("No trained model found for prediction")
 
     def _copy_data_from_source(self) -> None:
-        """Copy data from source to training directory"""
-        print(f"Copying data from {self.source_dir} to {self.train_dir}")
+        """Copy only supported files from source to training directory"""
+        # First check for supported image files
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}
+        found_files = False
 
-        # Case 1: Source has direct class folders
-        class_folders = [f for f in os.listdir(self.source_dir)
-                        if os.path.isdir(os.path.join(self.source_dir, f)) and
-                        any(fname.lower().endswith(('.png', '.jpg', '.jpeg'))
-                            for fname in os.listdir(os.path.join(self.source_dir, f)))]
+        for root, dirs, files in os.walk(self.source_dir):
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext in image_extensions:
+                    found_files = True
+                    break
+            if found_files:
+                break
 
-        if class_folders:
-            print(f"Found {len(class_folders)} class folders in source directory")
+        if not found_files:
+            raise ValueError(f"No supported image files found in {self.source_dir}. Supported formats: {image_extensions}")
+
+        print(f"Copying supported files from {self.source_dir} to {self.train_dir}")
+
+        # Create class folders and copy files
+        class_folders = [d for d in os.listdir(self.source_dir)
+                        if os.path.isdir(os.path.join(self.source_dir, d))]
+
+        if not class_folders:
+            # Handle case with no subdirectories (all files in root)
+            os.makedirs(os.path.join(self.train_dir, "unclassified"), exist_ok=True)
+            self._copy_supported_files(self.source_dir, os.path.join(self.train_dir, "unclassified"))
+        else:
             for class_name in class_folders:
-                src = os.path.join(self.source_dir, class_name)
-                dst = os.path.join(self.train_dir, class_name)
-                print(f"Copying {class_name}...")
-                shutil.copytree(src, dst)
-            return
+                src_dir = os.path.join(self.source_dir, class_name)
+                dst_dir = os.path.join(self.train_dir, class_name)
+                os.makedirs(dst_dir, exist_ok=True)
+                self._copy_supported_files(src_dir, dst_dir)
 
-        # Case 2: Source has train/test structure
-        train_path = os.path.join(self.source_dir, "train")
-        if os.path.exists(train_path):
-            print("Copying from train/ directory...")
-            for class_name in os.listdir(train_path):
-                src = os.path.join(train_path, class_name)
-                if os.path.isdir(src):
-                    dst = os.path.join(self.train_dir, class_name)
-                    print(f"Copying {class_name}...")
-                    shutil.copytree(src, dst)
-            return
+    def _copy_supported_files(self, src_dir: str, dst_dir: str) -> None:
+        """Copy only supported files from source to destination"""
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}
 
-        raise FileNotFoundError(
-            f"No valid training data found in {self.source_dir}\n"
-            "Expected either:\n"
-            "1. Class folders directly in this directory\n"
-            "2. 'train/' subdirectory with class folders"
-        )
-
+        for file in os.listdir(src_dir):
+            src_path = os.path.join(src_dir, file)
+            if os.path.isfile(src_path) and os.path.splitext(file)[1].lower() in image_extensions:
+                shutil.copy2(src_path, dst_dir)
 
     def _count_actual_classes(self) -> None:
         """Count actual class folders with images in training directory"""
@@ -874,89 +880,40 @@ class FeatureExtractorPipeline:
                 return pickle.load(f)
         return None
 
-    def predict(self, image_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
-        """
-        Predict features for images in a directory and save to CSV
-
-        Args:
-            image_dir: Directory containing images (can have subfolders)
-            output_csv: Optional custom output path. Defaults to data/<datafolder>/<datafolder>.csv
-
-        Returns:
-            DataFrame with columns: image_path, target_name, target, feature_0...feature_N
-        """
-        # Set default output path if not specified
+    def predict(self, input_dir: str, output_csv: Optional[str] = None) -> pd.DataFrame:
+        """Predict features from input directory"""
+        # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
+            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}_predictions.csv")
 
-        # Load label encoding if available
-        self.class_to_idx = self._load_label_encoding()
+        # Verify input directory exists
+        if not os.path.exists(input_dir):
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-        # Create dataset and loader
-        dataset = datasets.ImageFolder(image_dir, transform=self.transform)
-        loader = DataLoader(
-            dataset,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=False,
-            num_workers=self.config["training"]["num_workers"]
-        )
+        # Create temporary prediction directory structure
+        temp_pred_dir = os.path.join(self.datafolder, "temp_pred")
+        if os.path.exists(temp_pred_dir):
+            shutil.rmtree(temp_pred_dir)
+        os.makedirs(temp_pred_dir)
 
-        # Get all image paths (including subdirectories)
-        image_paths = []
-        for root, _, files in os.walk(image_dir):
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    image_paths.append(os.path.join(root, file))
+        try:
+            # Copy input files to temporary directory (maintaining structure)
+            if os.path.isdir(input_dir):
+                self._copy_supported_files(input_dir, temp_pred_dir)
+            else:
+                # Handle single file input
+                ext = os.path.splitext(input_dir)[1].lower()
+                if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}:
+                    shutil.copy2(input_dir, temp_pred_dir)
+                else:
+                    raise ValueError(f"Unsupported file format: {input_dir}")
 
-        # Validate we found images
-        if not image_paths:
-            raise ValueError(f"No images found in {image_dir}")
+            # Extract features
+            return self._extract_and_save_features(temp_pred_dir, output_csv)
+        finally:
+            # Clean up temporary directory
+            shutil.rmtree(temp_pred_dir)
 
-        # Extract features
-        self.model.eval()
-        features_list = []
-
-        with torch.no_grad():
-            for images, _ in tqdm(loader, desc="Extracting features"):
-                images = images.to(self.device)
-                features = self.model(images).cpu().numpy()
-                features_list.append(features)
-
-        # Create DataFrame
-        features_array = np.concatenate(features_list, axis=0)
-        feature_cols = [f"feature_{i}" for i in range(features_array.shape[1])]
-
-        df = pd.DataFrame(features_array, columns=feature_cols)
-        df["image_path"] = image_paths
-
-        # Add target information based on folder structure
-        df["target_name"] = df["image_path"].apply(
-            lambda x: os.path.basename(os.path.dirname(x))
-        )
-
-        # Set numeric targets if we have label encoding
-        if self.class_to_idx:
-            df["target"] = df["target_name"].map(self.class_to_idx).fillna(-1).astype(int)
-        else:
-            df["target"] = -1
-
-        # Ensure consistent column order
-        df = df[["image_path", "target_name", "target"] + feature_cols]
-
-        # Save results
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        df.to_csv(output_csv, index=False)
-
-        print(f"\nPrediction results saved to: {output_csv}")
-        print(f"Total images processed: {len(df)}")
-        if self.class_to_idx:
-            known = sum(df["target"] != -1)
-            print(f"Images with known classes: {known} ({known/len(df):.1%})")
-        if output_csv is None:
-            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}.csv")
-            saved_df=self._extract_and_save_features(input_dir, output_csv)
-
-        return saved_df
     def _extract_and_save_features(self, input_dir: str, output_csv: str) -> pd.DataFrame:
         """Unified feature extraction and CSV saving"""
         # Determine data type
@@ -1194,32 +1151,35 @@ def main():
     parser.add_argument("--mode", choices=["train", "predict", "full"],
                       default="full", help="Execution mode")
     parser.add_argument("--input", type=str, required=True,
-                      help="Input directory (for predict) or source directory (for train)")
+                      help="Input directory containing data")
     parser.add_argument("--output_csv", type=str, default=None,
                       help="Optional custom CSV output path")
+    parser.add_argument("--force", action="store_true",
+                      help="Force overwrite without prompts")
     args = parser.parse_args()
 
     # Initialize pipeline
     pipeline = FeatureExtractorPipeline(
         datafolder=os.path.join("data", args.datafolder),
-        source_dir=args.input
+        source_dir=args.input,
+        interactive=not args.force
     )
 
     try:
         if args.mode in ["train", "full"]:
-            print("Starting training...")
+            print("\n===== Training Mode =====")
+            pipeline._prepare_data_structure(mode='train')
             class_mapping = pipeline.train()
-            print(f"Training complete. Class mapping: {class_mapping}")
-
-            # Save training features CSV is already handled in train()
+            print(f"\nTraining complete. Class mapping: {class_mapping}")
 
         if args.mode in ["predict", "full"]:
-            print("Extracting features...")
+            print("\n===== Prediction Mode =====")
             features_df = pipeline.predict(args.input, args.output_csv)
-            print(f"Extracted {len(features_df)} samples")
+            print(f"\nPrediction complete. Features saved to {args.output_csv or pipeline.datafolder}")
+            print(f"Total samples processed: {len(features_df)}")
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"\nError: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
