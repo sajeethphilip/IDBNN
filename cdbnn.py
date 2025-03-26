@@ -136,22 +136,14 @@ class PredictionManager:
             raise ValueError(f"Invalid input path: {input_path}")
 
     def _load_model(self) -> nn.Module:
-        """
-        Load the trained model from the checkpoint.
-
-        Returns:
-            nn.Module: The loaded model.
-        """
-        # Create the model based on the configuration
+        """Load the trained model with all clustering parameters"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
-        # Load the best model state from the checkpoint
         checkpoint_path = self.checkpoint_manager.checkpoint_path
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-        # Load the checkpoint with proper device mapping
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
         except RuntimeError as e:
@@ -161,55 +153,40 @@ class PredictionManager:
             else:
                 raise e
 
-        # Extract the state dictionary
+        # Load the best model state for phase 2 with KL divergence
         state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
-
-        # Load the state dictionary into the model
         model.load_state_dict(state_dict, strict=False)
+
+        # Force phase 2 for prediction to use clustering
+        model.set_training_phase(2)
         model.eval()
-        logger.info("Model loaded successfully.")
+
+        logger.info("Model loaded successfully with clustering parameters.")
         return model
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
-        """
-        Predict features for images from the input path (file, directory, or archive).
-        Writes predictions to CSV batch-wise, including true class labels if available.
-        """
-        # Validate input_path
-        if not isinstance(input_path, (str, bytes, os.PathLike)):
-            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
-        # Get list of image files and their corresponding class labels
+    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
+        """Predict features with consistent clustering output"""
         image_files, class_labels = self._get_image_files_with_labels(input_path)
         if not image_files:
             raise ValueError(f"No valid images found in {input_path}")
 
-        # Set default output CSV path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
-        # Get the image transform from the config
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Create a dataset for the model (if required)
-        if hasattr(self.model, 'set_dataset'):
-            logger.debug("Creating dataset...")
-            dataset = self._create_dataset(image_files, transform)
-            logger.debug(f"Dataset created with {len(dataset)} images.")
-            self.model.set_dataset(dataset)  # Set the dataset before processing images
-            logger.debug("Dataset set in the model.")
-
-        # Initialize CSV file and write header
+        # Initialize CSV with cluster information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            # Write header with distinct columns for Phase 1 and Phase 2
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            phase1_cols = [f'phase1_{col}' for col in feature_cols]
-            phase2_cols = [f'phase2_{col}' for col in feature_cols]
-            csv_writer.writerow(['filename', 'true_class'] + phase1_cols + phase2_cols)
+            csv_writer.writerow(
+                ['filename', 'true_class', 'cluster_assignment', 'cluster_confidence'] +
+                feature_cols
+            )
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -217,7 +194,6 @@ class PredictionManager:
             batch_labels = class_labels[i:i + batch_size]
             batch_images = []
 
-            # Load and transform images
             for filename in batch_files:
                 try:
                     image = Image.open(filename).convert('RGB')
@@ -230,49 +206,42 @@ class PredictionManager:
             if not batch_images:
                 continue
 
-            # Stack images into a batch
             batch_tensor = torch.cat(batch_images, dim=0)
 
-            # Phase 1: Extract basic features
-            self.model.set_training_phase(1)
+            # Get predictions with clustering
             with torch.no_grad():
-                phase1_output = self.model(batch_tensor)
-                if isinstance(phase1_output, dict):
-                    phase1_embedding = phase1_output.get('embedding', phase1_output.get('features'))
-                elif isinstance(phase1_output, tuple):
-                    phase1_embedding = phase1_output[0]
+                output = self.model(batch_tensor)
+
+                if isinstance(output, dict):
+                    embedding = output.get('embedding', output.get('features'))
+                    latent_info = output
                 else:
-                    phase1_embedding = phase1_output
+                    embedding = output[0]
+                    latent_info = self.model.organize_latent_space(embedding)
 
-                phase1_embedding = phase1_embedding.cpu().numpy()
+                features = embedding.cpu().numpy()
 
-            # Phase 2: Extract enhanced features with KL divergence and clustering
-            if hasattr(self.model, 'set_training_phase'):
-                self.model.set_training_phase(2)
-                with torch.no_grad():
-                    phase2_output = self.model(batch_tensor)
-                    if isinstance(phase2_output, dict):
-                        phase2_embedding = phase2_output.get('embedding', phase2_output.get('features'))
-                    elif isinstance(phase2_output, tuple):
-                        phase2_embedding = phase2_output[0]
-                    else:
-                        phase2_embedding = phase2_output
+                # Get cluster information
+                if 'cluster_assignments' in latent_info:
+                    cluster_assign = latent_info['cluster_assignments'].cpu().numpy()
+                    cluster_conf = latent_info['cluster_probabilities'].max(1)[0].cpu().numpy()
+                else:
+                    cluster_assign = ['NA'] * len(batch_files)
+                    cluster_conf = ['NA'] * len(batch_files)
 
-                    phase2_embedding = phase2_embedding.cpu().numpy()
-
-            # Write predictions to CSV batch-wise
+            # Write predictions to CSV
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    # Write Phase 1 features
-                    phase1_features = phase1_embedding[j].tolist()
-                    # Write Phase 2 features
-                    phase2_features = phase2_embedding[j].tolist()
-                    # Combine into a single row
-                    row = [os.path.basename(filename), true_class] + phase1_features + phase2_features
+                    row = [
+                        os.path.basename(filename),
+                        true_class,
+                        cluster_assign[j],
+                        cluster_conf[j]
+                    ] + features[j].tolist()
                     csv_writer.writerow(row)
 
-        logger.info(f"Predictions saved to {output_csv}")
+        logger.info(f"Predictions with clustering saved to {output_csv}")
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
@@ -728,13 +697,19 @@ class BaseAutoencoder(nn.Module):
             self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
 
     def set_training_phase(self, phase: int):
-        """Set the training phase (1 or 2)"""
+        """Set the training phase (1 or 2) with proper cluster initialization"""
         self.training_phase = phase
-        if phase == 2:
-            # Initialize cluster centers if in phase 2
-            if self.use_kl_divergence:
-                # ERROR HERE: Trying to access config['dataset']['train_dataset']
-                self._initialize_cluster_centers()
+        if phase == 2 and self.use_kl_divergence:
+            if not hasattr(self, 'cluster_centers'):
+                # Initialize only if not already initialized
+                num_clusters = self.config['dataset'].get('num_classes', 10)
+                self.cluster_centers = nn.Parameter(
+                    torch.randn(num_clusters, self.feature_dims, device=self.device)
+                )
+                self.clustering_temperature = self.config['model']\
+                    .get('autoencoder_config', {})\
+                    .get('enhancements', {})\
+                    .get('clustering_temperature', 1.0)
 
     def _initialize_cluster_centers(self):
         """Initialize cluster centers using k-means"""
@@ -1150,11 +1125,12 @@ class BaseAutoencoder(nn.Module):
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=4)
 
+
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Organize latent space using KL divergence and class labels"""
+        """Organize latent space using KL divergence with consistent behavior for prediction"""
         output = {'embeddings': embeddings}  # Keep on same device as input
 
-        if self.use_kl_divergence:
+        if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
 
@@ -1165,7 +1141,7 @@ class BaseAutoencoder(nn.Module):
             q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
-            if labels is not None: # and self.use_class_encoding:
+            if labels is not None:
                 # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(self.cluster_centers.size(0)):
@@ -1173,19 +1149,17 @@ class BaseAutoencoder(nn.Module):
                     if mask.any():
                         p_dist[mask, i] = 1.0
             else:
-                # Self-supervised target distribution
-                p_dist = (q_dist ** 2) / q_dist.sum(dim=0, keepdim=True)
-                p_dist = p_dist / p_dist.sum(dim=1, keepdim=True)
+                # During prediction, use current distribution as target
+                p_dist = q_dist.detach()  # Stop gradient for target
 
             output.update({
                 'cluster_probabilities': q_dist,
                 'target_distribution': p_dist,
-                'cluster_assignments': q_dist.argmax(dim=1)
+                'cluster_assignments': q_dist.argmax(dim=1),
+                'cluster_confidence': q_dist.max(dim=1)[0]
             })
 
         if self.use_class_encoding and hasattr(self, 'classifier'):
-            # Move classifier to same device if needed
-            self.classifier = self.classifier.to(embeddings.device)
             class_logits = self.classifier(embeddings)
             output.update({
                 'class_logits': class_logits,
@@ -1957,16 +1931,18 @@ class UnifiedCheckpoint:
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                          phase: int, epoch: int, loss: float, is_best: bool = False):
-        """Save current model state to unified checkpoint."""
+        """Save model state including all clustering parameters"""
         state_key = self.get_state_key(phase, model)
 
-        # Prepare state dictionary
+        # Prepare state dictionary with clustering parameters
         state_dict = {
             'state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'epoch': epoch,
             'phase': phase,
             'loss': loss,
+            'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
+            'clustering_temperature': getattr(model, 'clustering_temperature', 1.0),
             'timestamp': datetime.now().isoformat(),
             'config': {
                 'kl_divergence': model.use_kl_divergence,
@@ -1989,7 +1965,7 @@ class UnifiedCheckpoint:
 
         # Save checkpoint
         torch.save(self.current_state, self.checkpoint_path)
-        logger.info(f"Saved state {state_key} to unified checkpoint")
+        logger.info(f"Saved state {state_key} with clustering parameters to unified checkpoint")
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
@@ -3054,11 +3030,30 @@ class BaseFeatureExtractor(nn.Module, ABC):
         """Create and return the feature extraction model"""
         pass
 
-    def load_state_dict(self, state_dict: Dict, strict: bool = True):
-        """Load model state from a state dictionary."""
-        # Pass the strict parameter to the underlying model's load_state_dict
-        self.feature_extractor.load_state_dict(state_dict, strict=strict)
-        self.feature_extractor.eval()
+    def state_dict(self, *args, **kwargs):
+        """Extend state dict to include clustering parameters"""
+        state = super().state_dict(*args, **kwargs)
+        if hasattr(self, 'cluster_centers'):
+            state['cluster_centers'] = self.cluster_centers.data
+            state['clustering_temperature'] = torch.tensor([self.clustering_temperature])
+        return state
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load state dict including clustering parameters"""
+        cluster_centers = state_dict.pop('cluster_centers', None)
+        clustering_temp = state_dict.pop('clustering_temperature', None)
+
+        super().load_state_dict(state_dict, strict)
+
+        if cluster_centers is not None:
+            if not hasattr(self, 'cluster_centers'):
+                self.cluster_centers = nn.Parameter(
+                    torch.empty_like(cluster_centers)
+                )
+            self.cluster_centers.data = cluster_centers
+
+        if clustering_temp is not None:
+            self.clustering_temperature = clustering_temp.item()
 
     def save_checkpoint(self, path: str, is_best: bool = False):
         """Save model checkpoint."""
