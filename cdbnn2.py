@@ -123,14 +123,17 @@ class ClusterOptimizer:
         cov = torch.mm(features_norm, features_norm.T)
         uni_loss = (cov.fill_diagonal_(0).pow(2).mean())
 
+        # Compute cluster loss (KL divergence)
+        cluster_loss_value = self.cluster_loss(F.log_softmax(logits, dim=1), targets_smooth)
+
         # Combined loss
-        total_loss = (self.cluster_loss(F.log_softmax(logits, dim=1), targets_smooth) +
+        total_loss = (cluster_loss_value +
                     0.3 * metric_loss +
                     self.uniformity_weight * uni_loss)
 
         return {
             "total": total_loss,
-            "cluster": cluster_loss.item(),
+            "cluster": cluster_loss_value.item(),  # Fixed: use the computed value
             "metric": metric_loss.item(),
             "uniformity": uni_loss.item()
         }
@@ -527,22 +530,22 @@ class FeatureExtractorPipeline:
                         "enabled": True,
                         "use_kl_divergence": True,
                         "use_class_encoding": True,
-                        "kl_divergence_weight": 0.7,  # Increased weight
+                        "kl_divergence_weight": 0.7,
                         "classification_weight": 0.5,
                         "contrastive_weight": 0.3,
-                        "clustering_temperature": 0.5,  # Lower temperature for sharper distributions
-                        "min_cluster_confidence": 0.8,   # Higher confidence threshold
+                        "clustering_temperature": 0.5,
+                        "min_cluster_confidence": 0.8,
                         "triplet_weight": 0.2,
                         "alignment_update_freq": 1
                     }
                 },
-                "clustering": {
-                    "triplet_margin": 0.3,          # Margin for triplet loss
-                    "uniformity_weight": 0.1,       # Weight for uniformity regularization
-                    "prototype_lr": 0.01,           # Learning rate multiplier for prototypes
-                    "temperature_init": 0.1,        # Initial temperature for softmax
-                    "max_prototype_updates": 0.05,  # Maximum prototype update per batch
-                    "label_smoothing": 0.1         # Amount of label smoothing
+                "clustering": {  # Add this section
+                    "triplet_margin": 0.3,
+                    "uniformity_weight": 0.1,
+                    "prototype_lr": 0.01,
+                    "temperature_init": 0.1,
+                    "max_prototype_updates": 0.05,
+                    "label_smoothing": 0.1
                 }
             },
 
