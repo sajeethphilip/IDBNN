@@ -98,6 +98,7 @@ class ImprovedFeatureExtractorCNN(nn.Module):
 class ClusterOptimizer:
     """Handles all clustering-related optimization"""
     def __init__(self, config, num_classes, feature_dim):
+        clustering_config = config.get("clustering", {})
         self.triplet_margin = config["clustering"]["triplet_margin"]
         self.uniformity_weight = config["clustering"]["uniformity_weight"]
 
