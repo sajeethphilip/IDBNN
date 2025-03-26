@@ -133,33 +133,33 @@ class ResidualBlock(nn.Module):
         return F.relu(x + self.conv(x))
 
 class DeepClusteringLoss(nn.Module):
-    def __init__(self, num_classes, feature_dim):
+    def __init__(self, num_classes, feature_dim, device='cuda'):
         super().__init__()
-        self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim))
-        self.triplet_loss = losses.TripletMarginLoss(margin=0.2)
-        self.triplet_miner = miners.TripletMarginMiner(margin=0.2)
+        self.device = device
+        self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim, device=device))
+        self.triplet_margin = 0.2
+        self.uniformity_weight = 0.1
 
     def forward(self, features, targets):
+        # Ensure tensors are on correct device
+        features = features.to(self.device)
+        targets = targets.to(self.device)
+
         # Normalized prototype similarity
         norm_features = F.normalize(features, dim=1)
         norm_protos = F.normalize(self.prototypes, dim=1)
-        logits = torch.matmul(norm_features, norm_protos.T)
+        logits = torch.mm(norm_features, norm_protos.t())
 
-        # Cluster assignment loss
+        # Classification loss
         cls_loss = F.cross_entropy(logits, targets)
 
-        # Metric learning components
-        triplets = self.triplet_miner(features, targets)
-        metric_loss = self.triplet_loss(features, targets, triplets)
-
-        # Feature uniformity regularization
-        cov = torch.mm(norm_features, norm_features.T)
-        uni_loss = cov.pow(2).mean()
+        # Uniformity regularization
+        cov = torch.mm(norm_features, norm_features.t())
+        uni_loss = torch.triu(cov, diagonal=1).pow(2).mean()
 
         return {
-            'total': cls_loss + 0.3*metric_loss + 0.1*uni_loss,
+            'total': cls_loss + self.uniformity_weight * uni_loss,
             'classification': cls_loss,
-            'metric': metric_loss,
             'uniformity': uni_loss
         }
 
@@ -959,36 +959,64 @@ class FeatureExtractorPipeline:
         self.model.train()
 
     def _validate(self, val_loader):
-        """Enhanced validation with multiple metrics"""
+        """GPU-optimized validation with metrics and device safety"""
         self.model.eval()
         val_loss = 0.0
         total_correct = 0
         total_samples = 0
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast(
+            enabled=self.config["execution_flags"].get("mixed_precision", False)
+        ):
             for data, target, _ in val_loader:
-                data, target = data.to(self.device), target.to(self.device)
-                features = self.model(data)  # Base features
+                # Automatic device placement with non-blocking transfers
+                data = data.to(self.device, non_blocking=True)
+                target = target.to(self.device, non_blocking=True)
+
+                # Forward pass - get both features and logits if available
+                features = self.model(data)
 
                 if hasattr(self.model, 'cluster_head'):
+                    # Get cluster predictions if available
                     cluster_logits = self.model.cluster_head(features)
-                    aligned_probs = self.aligner(cluster_logits)
+
+                    # GPU-optimized alignment
+                    if hasattr(self, 'aligner'):
+                        aligned_probs = self.aligner(cluster_logits)
+                    else:
+                        aligned_probs = F.softmax(cluster_logits, dim=1)
 
                     # Calculate validation loss
-                    val_loss += F.cross_entropy(aligned_probs, target).item()
+                    val_loss += F.cross_entropy(
+                        aligned_probs,
+                        target,
+                        reduction='sum'  # More accurate accumulation
+                    ).item()
 
                     # Calculate accuracy
                     _, predicted = torch.max(aligned_probs, 1)
                     total_correct += (predicted == target).sum().item()
                 else:
-                    # Fallback to just feature validation
-                    val_loss += self.clusterer.compute_kl_divergence(features, target).item()
+                    # Fallback to feature validation
+                    val_loss += self.cluster_loss(features, target)['total'].item()
 
                 total_samples += target.size(0)
 
-        accuracy = total_correct / total_samples if total_samples > 0 else 0
-        avg_loss = val_loss / len(val_loader) if len(val_loader) > 0 else float('inf')
-        print(f"  Val Accuracy: {accuracy:.2%}" if hasattr(self.model, 'cluster_head') else "  Val Loss: {avg_loss:.4f}")
+        # Compute metrics
+        accuracy = total_correct / max(total_samples, 1)  # Avoid division by zero
+        avg_loss = val_loss / max(total_samples, 1)  # Sample-wise average
+
+        # Enhanced logging
+        log_msg = []
+        if hasattr(self.model, 'cluster_head'):
+            log_msg.append(f"Val Accuracy: {accuracy:.2%}")
+        log_msg.append(f"Val Loss: {avg_loss:.4f}")
+
+        if torch.cuda.is_available():
+            log_msg.append(f"GPU Mem: {torch.cuda.max_memory_allocated()/1024**2:.1f}MB")
+
+        print("  " + " | ".join(log_msg))
+
         return avg_loss
 
 
