@@ -315,6 +315,7 @@ class FeatureExtractorPipeline:
         self.dataname = dataname
         self.source_dir = os.path.abspath(source_dir)
         self.interactive = interactive
+        self.merge_train_test = merge_train_test  # Initialize this first
 
         # Create output directory structure
         self.output_dir = os.path.join("data", self.dataname)  # data/<dataname>/
@@ -1473,6 +1474,8 @@ def main():
                       help="Optional custom CSV output path")
     parser.add_argument("--force", action="store_true",
                       help="Force overwrite without prompts")
+    parser.add_argument("--merge", action="store_true",
+                      help="Merge train and test sets")
 
     args = parser.parse_args()
 
@@ -1480,6 +1483,7 @@ def main():
     pipeline = FeatureExtractorPipeline(
         dataname=args.dataname,  # Changed from datafolder
         source_dir=args.input,
+        merge_train_test=args.merge,
         interactive=not args.force
     )
 
