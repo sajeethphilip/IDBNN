@@ -600,7 +600,7 @@ class FeatureExtractorPipeline:
             }
         }
 
-     def _handle_interactive_setup(self) -> None:
+    def _handle_interactive_setup(self) -> None:
         """Handle interactive setup"""
         print(f"\nSetting up data structure for {self.dataname}")
 
