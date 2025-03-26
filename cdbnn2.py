@@ -1150,6 +1150,7 @@ class FeatureExtractorPipeline:
 
         return df
 
+def main():
     parser = argparse.ArgumentParser(description="Feature Extraction Pipeline")
     parser.add_argument("--dataname", type=str, required=True,
                       help="Name for the dataset (will create data/<dataname>/ directory)")
