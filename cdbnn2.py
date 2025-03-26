@@ -256,29 +256,21 @@ class FeatureExtractorPipeline:
             merge_train_test: Whether to merge train/test sets
             interactive: Whether to prompt for user input
         """
-        self.source_dir = os.path.abspath(source_dir)
+        """Initialize with dataname instead of datafolder"""
         self.dataname = dataname
-        self.dataset_name = os.path.basename(dataname)
+        self.source_dir = os.path.abspath(source_dir)
         self.interactive = interactive
-        self.merge_train_test = merge_train_test
-        self.class_to_idx = None
-        self.num_classes = None
 
-        # Setup paths
-        self.config_path = os.path.join(datafolder, f"{self.dataset_name}.json")
-        self.conf_path = os.path.join(datafolder, f"{self.dataset_name}.conf")
-        self.csv_path = os.path.join(datafolder, f"{self.dataset_name}.csv")
-        self.model_dir = os.path.join(datafolder, "models")
         # Create output directory structure
         self.output_dir = os.path.join("data", self.dataname)  # data/<dataname>/
         self.model_dir = os.path.join(self.output_dir, "models")
         self.train_dir = os.path.join(self.output_dir, "train")
-        self.test_dir = os.path.join(datafolder, "test")
+
         # Config paths
         self.config_path = os.path.join(self.output_dir, f"{self.dataname}.json")
         self.conf_path = os.path.join(self.output_dir, f"{self.dataname}.conf")
 
-        # Initialize
+        # Initialize components
         self.config = self._initialize_config()
         self.conf = self._initialize_conf()
         self.device = self._setup_device()
