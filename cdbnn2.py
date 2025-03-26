@@ -960,28 +960,28 @@ class FeatureExtractorPipeline:
             )
         self.model.train()
 
- def _validate(self, val_loader):
-    """Fixed validation with proper accuracy calculation"""
-    self.model.eval()
-    val_loss = 0.0
-    correct = 0
-    total = 0
+    def _validate(self, val_loader):
+        """Fixed validation with proper accuracy calculation"""
+        self.model.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
 
-    with torch.no_grad():
-        for data, target, _ in val_loader:
-            data, target = data.to(self.device), target.to(self.device)
+        with torch.no_grad():
+            for data, target, _ in val_loader:
+                data, target = data.to(self.device), target.to(self.device)
 
-            # Get proper predictions
-            features, logits = self.model(data, return_logits=True)
-            probs = F.softmax(logits, dim=1)
+                # Get proper predictions
+                features, logits = self.model(data, return_logits=True)
+                probs = F.softmax(logits, dim=1)
 
-            # Calculate metrics
-            val_loss += self.criterion(logits, target).item()
-            _, predicted = torch.max(probs.data, 1)
-            correct += (predicted == target).sum().item()
-            total += target.size(0)
+                # Calculate metrics
+                val_loss += self.criterion(logits, target).item()
+                _, predicted = torch.max(probs.data, 1)
+                correct += (predicted == target).sum().item()
+                total += target.size(0)
 
-    return correct/max(total,1), val_loss/len(val_loader)
+        return correct/max(total,1), val_loss/len(val_loader)
 
 
 #------------------------------------------------
