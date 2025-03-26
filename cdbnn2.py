@@ -113,6 +113,9 @@ class FeatureExtractorCNN(nn.Module):
         # Project to feature space
         features = self.projection_head(x)
 
+        if return_clusters and self.cluster_head is not None:
+            cluster_logits = self.cluster_head(features)
+            return features, cluster_logits
         return features
 
 class ResidualBlock(nn.Module):
@@ -859,7 +862,7 @@ class FeatureExtractorPipeline:
                 self.optimizer.zero_grad()
 
                 # Forward pass - returns both features and cluster logits
-                features, cluster_logits = self.model(data)
+                features, cluster_logits = self.model(data, return_clusters=True)
 
                 # Calculate all loss components
                 # 1. KL divergence loss for clustering
@@ -890,7 +893,7 @@ class FeatureExtractorPipeline:
                 )
                 # Modified forward pass
                 if hasattr(self.model, 'cluster_head'):
-                    features, cluster_logits = self.model(data)
+                    features, cluster_logits = self.model(data, return_clusters=True)
                     # Calculate your losses using both features and cluster_logits
                     kl_loss = self.clusterer.compute_kl_divergence(features, target)
                     cls_loss = F.cross_entropy(cluster_logits, target)
@@ -970,17 +973,20 @@ class FeatureExtractorPipeline:
         with torch.no_grad():
             for data, target, _ in loader:
                 data, target = data.to(self.device), target.to(self.device)
-                features, cluster_logits = self.model(data)
-                features_all.append(features)
-                targets_all.append(target)
-                clusters_all.append(cluster_logits.argmax(1))
+                features = self.model(data)  # Get features first
+                if hasattr(self.model, 'cluster_head'):
+                    cluster_logits = self.model.cluster_head(features)
+                    features_all.append(features)
+                    targets_all.append(target)
+                    clusters_all.append(cluster_logits.argmax(1))
 
-        # Update alignment
-        self.aligner.align_clusters(
-            torch.cat(features_all),
-            torch.cat(targets_all),
-            torch.cat(clusters_all)
-        )
+        # Only update if we have cluster head
+        if hasattr(self.model, 'cluster_head') and features_all:
+            self.aligner.align_clusters(
+                torch.cat(features_all),
+                torch.cat(targets_all),
+                torch.cat(clusters_all)
+            )
         self.model.train()
 
     def _validate(self, val_loader):
@@ -993,20 +999,27 @@ class FeatureExtractorPipeline:
         with torch.no_grad():
             for data, target, _ in val_loader:
                 data, target = data.to(self.device), target.to(self.device)
-                features, cluster_logits = self.model(data)
-                aligned_probs = self.aligner(cluster_logits)
+                features = self.model(data)  # Base features
 
-                # Calculate validation loss (focused on classification)
-                val_loss += F.cross_entropy(aligned_probs, target).item()
+                if hasattr(self.model, 'cluster_head'):
+                    cluster_logits = self.model.cluster_head(features)
+                    aligned_probs = self.aligner(cluster_logits)
 
-                # Calculate accuracy
-                _, predicted = torch.max(aligned_probs, 1)
-                total_correct += (predicted == target).sum().item()
+                    # Calculate validation loss
+                    val_loss += F.cross_entropy(aligned_probs, target).item()
+
+                    # Calculate accuracy
+                    _, predicted = torch.max(aligned_probs, 1)
+                    total_correct += (predicted == target).sum().item()
+                else:
+                    # Fallback to just feature validation
+                    val_loss += self.clusterer.compute_kl_divergence(features, target).item()
+
                 total_samples += target.size(0)
 
-        accuracy = total_correct / total_samples
-        avg_loss = val_loss / len(val_loader)
-        print(f"  Val Accuracy: {accuracy:.2%}")
+        accuracy = total_correct / total_samples if total_samples > 0 else 0
+        avg_loss = val_loss / len(val_loader) if len(val_loader) > 0 else float('inf')
+        print(f"  Val Accuracy: {accuracy:.2%}" if hasattr(self.model, 'cluster_head') else "  Val Loss: {avg_loss:.4f}")
         return avg_loss
 
 
@@ -1095,13 +1108,22 @@ class FeatureExtractorPipeline:
 
             self.model.eval()
             with torch.no_grad():
-                for batch, window_indices in loader:
-                    features, cluster_logits = self.model(batch.to(self.device))
-                    aligned_probs = self.aligner(cluster_logits)
+                for batch in loader:  # This could be image or timeseries loader
+                    data = batch[0].to(self.device)
+                    features = self.model(data)
 
-                    # Get predictions
-                    confidences, pred_classes = torch.max(aligned_probs, 1)
-                    cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+                    if hasattr(self.model, 'cluster_head'):
+                        cluster_logits = self.model.cluster_head(features)
+                        aligned_probs = self.aligner(cluster_logits)
+                        # Get predictions and confidences
+                        confidences, pred_classes = torch.max(aligned_probs, 1)
+                        cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+                    else:
+                        # Just use features if no cluster head
+                        pred_classes = torch.zeros(len(data), dtype=torch.long, device=self.device)
+                        confidences = torch.ones(len(data), device=self.device)
+                        cluster_assign = pred_classes
+                        cluster_confidences = confidences
 
                     # Store results
                     for i in range(len(batch)):
@@ -1149,7 +1171,7 @@ class FeatureExtractorPipeline:
                 self.model.eval()
                 with torch.no_grad():
                     for images, _, paths in loader:
-                        features, cluster_logits = self.model(images.to(self.device))
+                        features, cluster_logits = self.model(images.to(self.device), return_clusters=True)
                         aligned_probs = self.aligner(cluster_logits)
 
                         # Get predictions
