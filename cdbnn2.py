@@ -531,17 +531,9 @@ class FeatureExtractorPipeline:
 
             # Copy data from source to training directory
             self._copy_data_from_source()
-
         elif mode == 'predict':
-            # For prediction, we don't need a train directory
-            if os.path.exists(self.train_dir):
-                shutil.rmtree(self.train_dir)
-
-        # Verify we have either training data or a trained model
-        if mode == 'train' and not os.listdir(self.train_dir):
-            raise FileNotFoundError(f"No valid training data found in {self.train_dir}")
-        elif mode == 'predict' and not os.path.exists(os.path.join(self.model_dir, "feature_extractor.pth")):
-            raise FileNotFoundError("No trained model found for prediction")
+            # For prediction, we don't need to modify the train directory at all
+            pass
 
     def _copy_data_from_source(self) -> None:
         """Copy only supported files from source to training directory"""
@@ -882,7 +874,7 @@ class FeatureExtractorPipeline:
         """Predict features from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataname}.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}_predictions.csv")
 
         # Verify input directory exists
         if not os.path.exists(input_dir):
@@ -897,7 +889,15 @@ class FeatureExtractorPipeline:
         try:
             # Copy input files to temporary directory (maintaining structure)
             if os.path.isdir(input_dir):
-                self._copy_supported_files(input_dir, temp_pred_dir)
+                # Handle directory input
+                for root, _, files in os.walk(input_dir):
+                    for file in files:
+                        ext = os.path.splitext(file)[1].lower()
+                        if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.fits'}:
+                            rel_path = os.path.relpath(root, input_dir)
+                            os.makedirs(os.path.join(temp_pred_dir, rel_path), exist_ok=True)
+                            shutil.copy2(os.path.join(root, file),
+                                       os.path.join(temp_pred_dir, rel_path, file))
             else:
                 # Handle single file input
                 ext = os.path.splitext(input_dir)[1].lower()
@@ -906,7 +906,7 @@ class FeatureExtractorPipeline:
                 else:
                     raise ValueError(f"Unsupported file format: {input_dir}")
 
-            # Extract features
+            # Extract features - this will overwrite any existing output file
             return self._extract_and_save_features(temp_pred_dir, output_csv)
         finally:
             # Clean up temporary directory
@@ -978,8 +978,13 @@ class FeatureExtractorPipeline:
                     path = paths[i]
                     results['file_path'].append(path)
                     results['subfolder'].append(os.path.basename(os.path.dirname(path)))
-                    results['target_name'].append(dataset.classes[targets[i]])
-                    results['target'].append(targets[i].item())
+                    # Handle case where there are no classes (prediction on unlabeled data)
+                    if hasattr(dataset, 'classes') and len(dataset.classes) > 0:
+                        results['target_name'].append(dataset.classes[targets[i]])
+                        results['target'].append(targets[i].item())
+                    else:
+                        results['target_name'].append('unknown')
+                        results['target'].append(-1)
                     results['format'].append(os.path.splitext(path)[1][1:].lower())
                     results['features'].append(features[i])
 
