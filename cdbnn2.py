@@ -882,7 +882,7 @@ class FeatureExtractorPipeline:
         """Predict features from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataname}_predictions.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}.csv")
 
         # Verify input directory exists
         if not os.path.exists(input_dir):
@@ -1020,7 +1020,7 @@ class FeatureExtractorPipeline:
         Extract features from both images and time-series data, preserving all metadata
 
         Args:
-            output_csv: Optional output path (default: data/<datafolder>/<datafolder>_features.csv)
+            output_csv: Optional output path (default: data/<datafolder>/<datafolder>.csv)
 
         Returns:
             DataFrame with complete tracking information including:
@@ -1029,7 +1029,7 @@ class FeatureExtractorPipeline:
         """
         # Set default output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataname}_features.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}.csv")
 
         # Initialize results storage
         results = {
