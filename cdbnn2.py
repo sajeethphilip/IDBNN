@@ -44,45 +44,43 @@ class SelfAttention(nn.Module):
         return self.gamma * out + x
 
 class FeatureExtractorCNN(nn.Module):
-    def __init__(self, in_channels=3, feature_dims=128, dropout_prob=0.3, num_classes=None):
+    def __init__(self, in_channels=3, feature_dims=128, dropout_prob=0.5, num_classes=None):
         super().__init__()
-        self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.num_classes = num_classes
 
-        # Enhanced backbone (same as original but with better normalization)
+        # Enhanced convolutional blocks with residual connections
         self.conv1 = self._conv_block(in_channels, 32, residual=True)
         self.conv2 = self._conv_block(32, 64, residual=True)
         self.conv3 = self._conv_block(64, 128, residual=True)
         self.attention1 = SelfAttention(128)
+
         self.conv4 = self._conv_block(128, 256, residual=True)
         self.conv5 = self._conv_block(256, 512, residual=True)
         self.conv6 = self._conv_block(512, 512, residual=True)
         self.attention2 = SelfAttention(512)
+
+        # Final feature extraction
         self.conv7 = nn.Sequential(
             nn.Conv2d(512, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
+            nn.AdaptiveAvgPool2d((1, 1)))
 
-        # Improved projection head
+        # Projection head with proper closure
         self.projection_head = nn.Sequential(
             nn.Linear(512, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(dropout_prob),
-            nn.Linear(512, feature_dims),
-            nn.LayerNorm(feature_dims)  # Added for better clustering
-        )
+            nn.Linear(512, feature_dims)
+        )  # This closes the Sequential block
 
-        # Enhanced cluster head (if num_classes provided)
+        # Classification head
         if num_classes:
-            self.cluster_head = nn.Sequential(
-                nn.Linear(feature_dims, num_classes),
-                nn.Tanh()  # Constrained output space
-            )
-            self.temperature = nn.Parameter(torch.tensor(1.0))  # Learnable temp
-
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dims, 256),
+                nn.ReLU(),
+                nn.Linear(256, num_classes))
     def _conv_block(self, in_c, out_c, residual=False):
         layers = [
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
@@ -104,18 +102,20 @@ class FeatureExtractorCNN(nn.Module):
         x = self.conv2(x)
         x = self.conv3(x)
         x = self.attention1(x)
+
         x = self.conv4(x)
         x = self.conv5(x)
         x = self.conv6(x)
         x = self.attention2(x)
+
         x = self.conv7(x)
         x = x.view(x.size(0), -1)
 
         # Project to feature space
         features = self.projection_head(x)
 
-        if return_logits and hasattr(self, 'cluster_head'):
-            cluster_logits = self.cluster_head(features) / self.temperature.clamp(min=0.1)
+        if return_logits and self.cluster_head is not None:
+            cluster_logits = self.cluster_head(features)
             return features, cluster_logits
         return features
 
@@ -131,37 +131,6 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x):
         return F.relu(x + self.conv(x))
-
-class DeepClusteringLoss(nn.Module):
-    def __init__(self, num_classes, feature_dim, device='cuda'):
-        super().__init__()
-        self.device = device
-        self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim, device=device))
-        self.triplet_margin = 0.2
-        self.uniformity_weight = 0.1
-
-    def forward(self, features, targets):
-        # Ensure tensors are on correct device
-        features = features.to(self.device)
-        targets = targets.to(self.device)
-
-        # Normalized prototype similarity
-        norm_features = F.normalize(features, dim=1)
-        norm_protos = F.normalize(self.prototypes, dim=1)
-        logits = torch.mm(norm_features, norm_protos.t())
-
-        # Classification loss
-        cls_loss = F.cross_entropy(logits, targets)
-
-        # Uniformity regularization
-        cov = torch.mm(norm_features, norm_features.t())
-        uni_loss = torch.triu(cov, diagonal=1).pow(2).mean()
-
-        return {
-            'total': cls_loss + self.uniformity_weight * uni_loss,
-            'classification': cls_loss,
-            'uniformity': uni_loss
-        }
 
 class KLDivergenceClusterer:
     """Handles KL-divergence based clustering"""
@@ -430,13 +399,6 @@ class FeatureExtractorPipeline:
                     "patience": 10,
                     "min_lr": 1e-06,
                     "verbose": True
-                },
-                    "clustering": {  # New section
-                    "prototype_learning_rate": 0.01,
-                    "triplet_margin": 0.2,
-                    "uniformity_weight": 0.1,
-                    "temperature": 0.1,
-                    "update_frequency": 5
                 },
                 "CNN_config": {
                     "reconstruction_weight": 1.0,
@@ -751,10 +713,8 @@ class FeatureExtractorPipeline:
         model_path = os.path.join(self.model_dir, "feature_extractor.pth")
         if os.path.exists(model_path) and not self.config["execution_flags"]["fresh_start"]:
             print("Loading previously trained model...")
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, map_location=self.device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            if 'prototypes' in checkpoint:
-                self.cluster_loss.prototypes.data = checkpoint['prototypes']
 
             # If class mapping exists in checkpoint, use it
             if 'class_to_idx' in checkpoint:
@@ -836,116 +796,175 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """Complete training solution with proper loss initialization"""
-        # 1. Model Initialization
-        self.model = self._initialize_model().to(self.device)
+        """Train until early stopping condition is met with unified 1D/image handling"""
+        # Initialize loss functions
+        miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
+        triplet_loss = losses.TripletMarginLoss(margin=0.2)
+        criterion = nn.CrossEntropyLoss()
 
-        # 2. Loss Function Initialization (Added this critical missing piece)
-        self.criterion = nn.CrossEntropyLoss()
-
-        # 3. Parameter Groups
-        param_groups = [
-            {'params': [p for n,p in self.model.named_parameters()
-                       if 'cluster_head' not in n]},
-        ]
-
-        if hasattr(self.model, 'cluster_head'):
-            param_groups.append({
-                'params': self.model.cluster_head.parameters(),
-                'lr': self.config["model"].get("cluster_head_lr", 1e-3)
-            })
-
-        # 4. Optimizer Setup
-        self.optimizer = optim.AdamW(
-            param_groups,
-            lr=self.config["model"]["learning_rate"]
-        )
-
-        # 5. Data Loading (Unified for 1D and images)
+        # Initialize data loaders based on data type
         if self._is_timeseries_data():
-            train_dataset = TimeSeriesDataset(
-                self.train_dir,
-                window_size=self.config["dataset"]["window_size"]
-            )
-            self.num_classes = self.config["dataset"]["num_classes"]
+            train_dataset = TimeSeriesDataset(self.train_dir, self.config["dataset"]["window_size"])
+            self.num_classes = self.config["dataset"]["num_classes"]  # For 1D data, use config value
         else:
-            train_dataset = ImageFolderWithPaths(
-                self.train_dir,
-                transform=self.transform
-            )
+            train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
             self.class_to_idx = train_dataset.class_to_idx
             self.num_classes = len(self.class_to_idx)
 
-        # 6. Train/Val Split
+        # Update config with actual class count
+        self.config["dataset"]["num_classes"] = self.num_classes
+
+        # Initialize enhanced clustering components
+        self.clusterer = KLDivergenceClusterer(self.config)
+        self.aligner = ClusterClassAligner(self.num_classes)
+
+        # Split into training and validation
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
+        train_size = len(train_dataset) - val_size
         train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [len(train_dataset) - val_size, val_size]
+            train_dataset, [train_size, val_size]
         )
 
-        # 7. Data Loaders
+        # Create data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=min(4, os.cpu_count()),
+            num_workers=self.config["training"]["num_workers"],
             pin_memory=True
         )
 
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config["training"]["batch_size"] * 2,
+            batch_size=self.config["training"]["batch_size"],
             shuffle=False,
-            num_workers=min(2, os.cpu_count()),
+            num_workers=self.config["training"]["num_workers"],
             pin_memory=True
         )
 
-        # 8. Training Loop
-        best_acc = 0.0
-        for epoch in range(1, self.config["training"]["epochs"] + 1):
+        # Training setup
+        best_val_loss = float('inf')
+        patience = self.config["training"]["early_stopping"]["patience"]
+        patience_counter = 0
+        epoch = 0
+
+        print(f"\nTraining on {len(train_dataset)} samples, validating on {len(val_dataset)} samples")
+        print(f"Classes: {getattr(self, 'class_to_idx', 'Predefined classes from config')}")
+        print(f"Training until validation doesn't improve for {patience} epochs")
+
+        while True:  # Continue until early stopping
+            epoch += 1
             self.model.train()
-            train_metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
+            train_loss = 0.0
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}")
 
-            for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
-                data, target = self._process_batch(batch)
-
+            for batch_idx, (data, target, _) in enumerate(progress_bar):
+                data, target = data.to(self.device), target.to(self.device)
                 self.optimizer.zero_grad()
-                features, logits = self.model(data, return_logits=True)
 
-                # Using initialized criterion
-                loss = self.criterion(logits, target)
+                # Forward pass - get features first
+                features = self.model(data)
+
+                # Initialize loss components
+                kl_loss = torch.tensor(0.0, device=self.device)
+                cls_loss = torch.tensor(0.0, device=self.device)
+                trip_loss = torch.tensor(0.0, device=self.device)
+                cluster_consistency_loss = torch.tensor(0.0, device=self.device)
+
+                # Calculate KL divergence loss
+                kl_loss = self.clusterer.compute_kl_divergence(features, target)
+
+                if hasattr(self.model, 'cluster_head'):
+                    # Get cluster predictions if available
+                    cluster_logits = self.model.cluster_head(features)
+                    aligned_probs = self.aligner(cluster_logits)
+
+                    # Calculate classification loss
+                    cls_loss = criterion(aligned_probs, target)
+
+                    # Calculate triplet loss
+                    triplets = miner(features, target)
+                    trip_loss = triplet_loss(features, target, triplets)
+
+                    # Calculate cluster consistency loss
+                    cluster_consistency_loss = F.kl_div(
+                        F.log_softmax(cluster_logits, dim=1),
+                        F.softmax(aligned_probs.detach(), dim=1),
+                        reduction='batchmean'
+                    )
+
+                # Combined loss with configurable weights
+                loss_weights = self.config["model"]["CNN_config"]["enhancements"]
+                loss = (
+                    loss_weights["kl_divergence_weight"] * kl_loss +
+                    loss_weights.get("classification_weight", 0.5) * cls_loss +
+                    loss_weights.get("triplet_weight", 0.3) * trip_loss +
+                    0.1 * cluster_consistency_loss  # Small weight for consistency
+                )
+
+                # Backward pass
                 loss.backward()
                 self.optimizer.step()
 
-                # Update metrics
-                preds = logits.argmax(dim=1)
-                train_metrics['loss'] += loss.item()
-                train_metrics['correct'] += (preds == target).sum().item()
-                train_metrics['total'] += target.size(0)
+                train_loss += loss.item()
+                progress_bar.set_postfix({
+                    "loss": f"{train_loss/(batch_idx+1):.4f}",
+                    "kl": f"{kl_loss.item():.2f}",
+                    "cls": f"{cls_loss.item():.2f}" if hasattr(self.model, 'cluster_head') else "0.0"
+                })
+
+            # Update cluster-class alignment
+            if hasattr(self.model, 'cluster_head') and \
+               epoch % self.config["cluster_alignment"].get("update_frequency", 1) == 0:
+                self._update_cluster_alignment(train_loader)
 
             # Validation
-            val_metrics = self._validate(val_loader)
+            val_loss = self._validate(val_loader)
+            avg_train_loss = train_loss / len(train_loader)
 
-            # Reporting
-            train_loss = train_metrics['loss'] / len(train_loader)
-            train_acc = train_metrics['correct'] / train_metrics['total']
-            print(f"\nEpoch {epoch}:")
-            print(f"  Train Loss: {train_loss:.4f} | Acc: {train_acc:.2%}")
-            print(f"  Val Loss: {val_metrics['loss']:.4f} | Acc: {val_metrics['acc']:.2%}")
+            # Update learning rate scheduler
+            self.scheduler.step(val_loss)
 
-            if val_metrics['acc'] > best_acc:
-                best_acc = val_metrics['acc']
+            # Print epoch summary
+            print(f"\nEpoch {epoch} Summary:")
+            print(f"  Train Loss: {avg_train_loss:.4f} (KL: {kl_loss.item():.4f}" +
+                  (f", Cls: {cls_loss.item():.4f}" if hasattr(self.model, 'cluster_head') else ""))
+            print(f"  Val Loss:   {val_loss:.4f}")
+            print(f"  LR:         {self.optimizer.param_groups[0]['lr']:.2e}")
+
+            # Check for improvement
+            if val_loss < best_val_loss - self.config["training"]["early_stopping"]["min_delta"]:
+                best_val_loss = val_loss
+                patience_counter = 0
                 self._save_model()
+                print("  Saved best model")
+            else:
+                patience_counter += 1
+                print(f"  No improvement ({patience_counter}/{patience})")
+                if patience_counter >= patience:
+                    print(f"\nEarly stopping triggered after {epoch} epochs")
+                    break
 
-        return self.class_to_idx if hasattr(self, 'class_to_idx') else {}
+        # Post-training processing
+        self._load_best_model()
 
-    def _process_batch(self, batch):
-        """Unified batch processing for both data types"""
-        if self._is_timeseries_data():
-            return batch[0].to(self.device), batch[1].to(self.device)
-        else:
-            data, target, _ = batch
-            return data.to(self.device), target.to(self.device)
+        # Save features and visualizations
+        train_csv_path = os.path.join(self.output_dir, f"{self.dataname}_train_features.csv")
+        self._extract_and_save_features(self.train_dir, train_csv_path)
 
+        if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
+            val_csv_path = os.path.join(self.output_dir, f"{self.dataname}_val_features.csv")
+            self._extract_and_save_features(self.val_dir, val_csv_path)
+
+        # Visualize feature space
+        train_features = self._extract_features(self.train_dir)
+        self.visualize_features(
+            train_features['features'],
+            train_features['target'],
+            os.path.join(self.output_dir, "feature_space.png")
+        )
+
+        return getattr(self, 'class_to_idx', None) or {str(i):i for i in range(self.num_classes)}
 
     def _extract_features(self, input_dir: str) -> Dict[str, Any]:
         """Unified feature extraction that returns features and targets"""
@@ -983,25 +1002,39 @@ class FeatureExtractorPipeline:
             )
         self.model.train()
 
-    def _validate(self, val_loader) -> Dict[str, float]:
-        """Validation using initialized criterion"""
+    def _validate(self, val_loader):
+        """Enhanced validation with multiple metrics"""
         self.model.eval()
-        metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
+        val_loss = 0.0
+        total_correct = 0
+        total_samples = 0
 
         with torch.no_grad():
-            for batch in val_loader:
-                data, target = self._process_batch(batch)
-                features, logits = self.model(data, return_logits=True)
+            for data, target, _ in val_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                features = self.model(data)  # Base features
 
-                # Using the same criterion as training
-                metrics['loss'] += self.criterion(logits, target).item()
-                preds = logits.argmax(dim=1)
-                metrics['correct'] += (preds == target).sum().item()
-                metrics['total'] += target.size(0)
+                if hasattr(self.model, 'cluster_head'):
+                    cluster_logits = self.model.cluster_head(features)
+                    aligned_probs = self.aligner(cluster_logits)
 
-        metrics['loss'] /= len(val_loader)
-        metrics['acc'] = metrics['correct'] / metrics['total']
-        return metrics
+                    # Calculate validation loss
+                    val_loss += F.cross_entropy(aligned_probs, target).item()
+
+                    # Calculate accuracy
+                    _, predicted = torch.max(aligned_probs, 1)
+                    total_correct += (predicted == target).sum().item()
+                else:
+                    # Fallback to just feature validation
+                    val_loss += self.clusterer.compute_kl_divergence(features, target).item()
+
+                total_samples += target.size(0)
+
+        accuracy = total_correct / total_samples if total_samples > 0 else 0
+        avg_loss = val_loss / len(val_loader) if len(val_loader) > 0 else float('inf')
+        print(f"  Val Accuracy: {accuracy:.2%}" if hasattr(self.model, 'cluster_head') else "  Val Loss: {avg_loss:.4f}")
+        return avg_loss
+
 
 #------------------------------------------------
 
@@ -1304,7 +1337,6 @@ class FeatureExtractorPipeline:
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'prototypes': self.cluster_loss.prototypes.data,  # Save prototypes
             'class_to_idx': getattr(self, 'class_to_idx', None),  # Save class mapping
             'config': self.config
         }, model_path)
