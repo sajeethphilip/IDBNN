@@ -836,94 +836,113 @@ class FeatureExtractorPipeline:
         return transforms.Compose(transform_list)
 #--------------------Train---------------------
     def train(self) -> Dict[str, int]:
-        """Complete fixed training implementation with proper accuracy tracking"""
-        # 1. Proper Model Initialization
+        """Unified training for both 1D and image data with proper parameter groups"""
+        # 1. Model Initialization
         self.model = self._initialize_model().to(self.device)
 
-        # 2. Enhanced Cluster Head Setup
+        # 2. Parameter Group Setup (Fixes the duplicate parameter error)
+        param_groups = [
+            {'params': [p for n,p in self.model.named_parameters()
+                       if 'cluster_head' not in n]},
+        ]
+
         if hasattr(self.model, 'cluster_head'):
-            # Proper initialization for classification
-            nn.init.xavier_normal_(self.model.cluster_head[0].weight)
-            nn.init.zeros_(self.model.cluster_head[0].bias)
-            self.model.temperature.data.fill_(1.0)  # Initialize temperature
+            param_groups.append({
+                'params': self.model.cluster_head.parameters(),
+                'lr': self.config["model"].get("cluster_head_lr", 1e-3)
+            })
 
-        # 3. Data Loading with Correct Class Mapping
-        train_dataset = ImageFolderWithPaths(self.train_dir, transform=self.transform)
-        self.class_to_idx = train_dataset.class_to_idx
-        self.num_classes = len(self.class_to_idx)
+        # 3. Optimizer with separate groups
+        self.optimizer = optim.AdamW(
+            param_groups,
+            lr=self.config["model"]["learning_rate"]
+        )
 
-        # 4. Proper Train/Val Split
-        val_size = int(len(train_dataset) * self.config["training"].get("validation_split", 0.2))
+        # 4. Unified Data Loading
+        if self._is_timeseries_data():
+            train_dataset = TimeSeriesDataset(
+                self.train_dir,
+                window_size=self.config["dataset"]["window_size"]
+            )
+            self.num_classes = self.config["dataset"]["num_classes"]
+        else:
+            train_dataset = ImageFolderWithPaths(
+                self.train_dir,
+                transform=self.transform
+            )
+            self.class_to_idx = train_dataset.class_to_idx
+            self.num_classes = len(self.class_to_idx)
+
+        # 5. Train/Val Split
+        val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
         train_dataset, val_dataset = torch.utils.data.random_split(
             train_dataset, [len(train_dataset) - val_size, val_size]
         )
 
-        # 5. Data Loaders with Correct Batch Sizes
+        # 6. Data Loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["training"]["batch_size"],
             shuffle=True,
-            num_workers=4,
+            num_workers=min(4, os.cpu_count()),
             pin_memory=True
         )
 
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config["training"]["batch_size"],
+            batch_size=self.config["training"]["batch_size"] * 2,
             shuffle=False,
-            num_workers=2,
+            num_workers=min(2, os.cpu_count()),
             pin_memory=True
         )
 
-        # 6. Enhanced Loss Setup
-        self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.AdamW([
-            {'params': self.model.parameters()},
-            {'params': self.model.cluster_head.parameters(), 'lr': 1e-3}  # Higher LR for head
-        ], lr=self.config["model"]["learning_rate"])
-
-        # 7. Training Loop with Proper Accuracy Tracking
-        best_acc = 0.0
+        # 7. Training Loop
+        best_metric = 0.0
         for epoch in range(1, self.config["training"]["epochs"] + 1):
             self.model.train()
-            train_loss = 0.0
-            correct = 0
-            total = 0
+            train_metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
 
-            for data, target, _ in tqdm(train_loader, desc=f"Epoch {epoch}"):
-                data, target = data.to(self.device), target.to(self.device)
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
+                # Unified batch processing
+                if self._is_timeseries_data():
+                    data, target = batch[0].to(self.device), batch[1].to(self.device)
+                else:
+                    data, target, _ = batch
+                    data, target = data.to(self.device), target.to(self.device)
+
                 self.optimizer.zero_grad()
 
-                # Forward pass with proper head activation
+                # Forward pass
                 features, logits = self.model(data, return_logits=True)
-                probs = F.softmax(logits, dim=1)
-
-                # Calculate loss and accuracy
-                loss = self.criterion(logits, target)
-                _, predicted = torch.max(probs.data, 1)
-                correct += (predicted == target).sum().item()
-                total += target.size(0)
+                loss = F.cross_entropy(logits, target)
 
                 # Backward pass
                 loss.backward()
                 self.optimizer.step()
-                train_loss += loss.item()
 
-            # 8. Proper Validation
-            val_acc, val_loss = self._validate(val_loader)
-            train_acc = correct / total
+                # Metrics
+                train_metrics['loss'] += loss.item()
+                preds = logits.argmax(dim=1)
+                train_metrics['correct'] += (preds == target).sum().item()
+                train_metrics['total'] += target.size(0)
 
+            # Validation
+            val_metrics = self._validate(val_loader)
+
+            # Reporting
+            train_loss = train_metrics['loss'] / len(train_loader)
+            train_acc = train_metrics['correct'] / train_metrics['total']
             print(f"\nEpoch {epoch}:")
-            print(f"  Train Loss: {train_loss/len(train_loader):.4f} | Acc: {train_acc:.2%}")
-            print(f"  Val Loss: {val_loss:.4f} | Acc: {val_acc:.2%}")
+            print(f"  Train Loss: {train_loss:.4f} | Acc: {train_acc:.2%}")
+            print(f"  Val Loss: {val_metrics['loss']:.4f} | Acc: {val_metrics['acc']:.2%}")
 
             # Save best model
-            if val_acc > best_acc:
-                best_acc = val_acc
+            if val_metrics['acc'] > best_metric:
+                best_metric = val_metrics['acc']
                 self._save_model()
-                print("  Saved best model")
 
-        return self.class_to_idx
+        return self.class_to_idx if hasattr(self, 'class_to_idx') else {}
+
     def _extract_features(self, input_dir: str) -> Dict[str, Any]:
         """Unified feature extraction that returns features and targets"""
         if self._is_timeseries_data(input_dir):
@@ -960,29 +979,32 @@ class FeatureExtractorPipeline:
             )
         self.model.train()
 
-    def _validate(self, val_loader):
-        """Fixed validation with proper accuracy calculation"""
+    def _validate(self, val_loader) -> Dict[str, float]:
+        """Unified validation for both data types"""
         self.model.eval()
-        val_loss = 0.0
-        correct = 0
-        total = 0
+        metrics = {'loss': 0.0, 'correct': 0, 'total': 0}
 
         with torch.no_grad():
-            for data, target, _ in val_loader:
-                data, target = data.to(self.device), target.to(self.device)
+            for batch in val_loader:
+                # Handle both data types
+                if self._is_timeseries_data():
+                    data, target = batch[0].to(self.device), batch[1].to(self.device)
+                else:
+                    data, target, _ = batch
+                    data, target = data.to(self.device), target.to(self.device)
 
-                # Get proper predictions
+                # Forward pass
                 features, logits = self.model(data, return_logits=True)
-                probs = F.softmax(logits, dim=1)
 
-                # Calculate metrics
-                val_loss += self.criterion(logits, target).item()
-                _, predicted = torch.max(probs.data, 1)
-                correct += (predicted == target).sum().item()
-                total += target.size(0)
+                # Metrics
+                metrics['loss'] += F.cross_entropy(logits, target).item()
+                preds = logits.argmax(dim=1)
+                metrics['correct'] += (preds == target).sum().item()
+                metrics['total'] += target.size(0)
 
-        return correct/max(total,1), val_loss/len(val_loader)
-
+        metrics['loss'] /= len(val_loader)
+        metrics['acc'] = metrics['correct'] / metrics['total']
+        return metrics
 
 #------------------------------------------------
 
