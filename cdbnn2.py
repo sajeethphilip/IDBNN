@@ -113,9 +113,6 @@ class FeatureExtractorCNN(nn.Module):
         # Project to feature space
         features = self.projection_head(x)
 
-        if  self.cluster_head is not None:
-            cluster_logits = self.cluster_head(features)
-            return features, cluster_logits
         return features
 
 class ResidualBlock(nn.Module):
