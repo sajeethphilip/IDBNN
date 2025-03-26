@@ -406,7 +406,7 @@ class FeatureExtractorPipeline:
 
     def _initialize_conf(self) -> Dict[str, Any]:
         """Initialize .conf file in data/<datafolder>/"""
-        conf_path = os.path.join(self.datafolder, f"{self.dataset_name}.conf")
+        conf_path = self.conf_path
 
         if os.path.exists(conf_path):
             with open(conf_path) as f:
