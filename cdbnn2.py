@@ -252,7 +252,7 @@ class FeatureExtractorPipeline:
         """
         Args:
             source_dir: Path to source directory containing the original data
-            datafolder: Path to destination directory (under data/)
+            output_dir: Path to destination directory (under data/)
             merge_train_test: Whether to merge train/test sets
             interactive: Whether to prompt for user input
         """
@@ -311,8 +311,8 @@ class FeatureExtractorPipeline:
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],
                 "resize_images": True,
-                "train_dir": os.path.join(self.datafolder, "train"),
-                "test_dir": os.path.join(self.datafolder, "train", "test") if not self.merge_train_test else None,
+                "train_dir": os.path.join(self.output_dir, "train"),
+                "test_dir": os.path.join(self.output_dir, "train", "test") if not self.merge_train_test else None,
             },
             "model": {
                 "encoder_type": "cnn",
@@ -398,9 +398,9 @@ class FeatureExtractorPipeline:
                 "fresh_start": False
             },
             "output": {
-            "features_file": os.path.join(self.datafolder, f"{self.dataset_name}.csv"),
+            "features_file": os.path.join(self.output_dir, f"{self.dataset_name}.csv"),
             "model_dir": self.model_dir,
-                "visualization_dir": os.path.join(self.datafolder, "visualizations")
+                "visualization_dir": os.path.join(self.output_dir, "visualizations")
             }
         }
 
@@ -832,12 +832,12 @@ class FeatureExtractorPipeline:
         # Load best model weights before returning
         self._load_best_model()
         # After training completes, extract and save features
-        train_csv_path = os.path.join(self.datafolder, f"{self.dataset_name}_train_features.csv")
+        train_csv_path = os.path.join(self.output_dir, f"{self.dataset_name}_train_features.csv")
         self._extract_and_save_features(self.train_dir, train_csv_path)
 
         # If validation exists, save those features too
         if hasattr(self, 'val_dir') and os.path.exists(self.val_dir):
-            val_csv_path = os.path.join(self.datafolder, f"{self.dataset_name}_val_features.csv")
+            val_csv_path = os.path.join(self.output_dir, f"{self.dataset_name}_val_features.csv")
             self._extract_and_save_features(self.val_dir, val_csv_path)
         return self.class_to_idx
 
@@ -882,14 +882,14 @@ class FeatureExtractorPipeline:
         """Predict features from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}_predictions.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataset_name}_predictions.csv")
 
         # Verify input directory exists
         if not os.path.exists(input_dir):
             raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
         # Create temporary prediction directory structure
-        temp_pred_dir = os.path.join(self.datafolder, "temp_pred")
+        temp_pred_dir = os.path.join(self.output_dir, "temp_pred")
         if os.path.exists(temp_pred_dir):
             shutil.rmtree(temp_pred_dir)
         os.makedirs(temp_pred_dir)
@@ -996,7 +996,7 @@ class FeatureExtractorPipeline:
 
         # Make paths relative to datafolder
         df['file_path'] = df['file_path'].apply(
-            lambda x: os.path.relpath(x, self.datafolder) if x.startswith(self.datafolder) else x)
+            lambda x: os.path.relpath(x, self.output_dir) if x.startswith(self.output_dir) else x)
 
         return df
 
@@ -1029,7 +1029,7 @@ class FeatureExtractorPipeline:
         """
         # Set default output path
         if output_csv is None:
-            output_csv = os.path.join(self.datafolder, f"{self.dataset_name}_features.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataset_name}_features.csv")
 
         # Initialize results storage
         results = {
@@ -1127,7 +1127,7 @@ class FeatureExtractorPipeline:
         # Make paths relative to datafolder when possible
         try:
             df['file_path'] = df['file_path'].apply(
-                lambda x: os.path.relpath(x, start=self.datafolder))
+                lambda x: os.path.relpath(x, start=self.output_dir))
         except ValueError:
             pass  # Keep absolute paths if they're not under datafolder
 
