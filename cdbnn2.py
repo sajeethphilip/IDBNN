@@ -44,6 +44,13 @@ from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple, Optional
+from torch import Tensor
+from sklearn.cluster import KMeans
+import numpy as np
 
 class EMA:
     """Exponential Moving Average for prototype stabilization"""
@@ -568,171 +575,231 @@ class ConfigManager:
         with open(output_path/f"{dataset_name}.json", "w") as f:
             json.dump(base_config, f, indent=4)
 # -------------------- Enhanced Training Pipeline --------------------
+
+class EnhancedPrototypeClusterer(nn.Module):
+    """Upgraded prototype clustering with:
+    - Learnable prototype temperature
+    - Prototype diversity regularization
+    - EMA prototype stabilization
+    - Adaptive prototype allocation
+    """
+    def __init__(self, feature_dim: int, num_classes: int,
+                 initial_temp: float = 0.1,
+                 reg_weight: float = 0.1,
+                 ema_decay: float = 0.99):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_classes = num_classes
+        self.reg_weight = reg_weight
+        self.ema_decay = ema_decay
+
+        # Prototypes with Xavier initialization
+        self.prototypes = nn.Parameter(torch.empty(num_classes, feature_dim))
+        nn.init.xavier_normal_(self.prototypes)
+
+        # Learnable temperature with softplus activation
+        self.temperature = nn.Parameter(torch.tensor(initial_temp))
+        self.temp_min = 0.01
+
+        # EMA stabilization
+        self.register_buffer('ema_prototypes', torch.zeros_like(self.prototypes))
+        self.register_buffer('ema_counts', torch.zeros(num_classes))
+
+        # Adaptive allocation
+        self.register_buffer('usage_stats', torch.zeros(num_classes))
+
+    def forward(self, features: Tensor, labels: Optional[Tensor] = None) -> Tuple[Tensor, Tensor, Tensor]:
+        """Returns:
+        - assignments: cluster assignments
+        - probs: soft assignment probabilities
+        - reg_loss: regularization loss term
+        """
+        # Normalize features and prototypes
+        norm_features = F.normalize(features, dim=1)
+        norm_prototypes = F.normalize(self.prototypes, dim=1)
+
+        # Calculate similarity
+        sim = torch.matmul(norm_features, norm_prototypes.T)
+
+        # Temperature scaling with minimum threshold
+        temp = F.softplus(self.temperature) + self.temp_min
+        probs = F.softmax(sim / temp, dim=1)
+
+        # Update EMA statistics if labels are provided
+        if labels is not None and self.training:
+            self._update_ema(norm_features.detach(), labels)
+
+        # Calculate regularization losses
+        reg_loss = self._calculate_regularization(norm_prototypes)
+
+        # Track prototype usage
+        self.usage_stats += probs.sum(dim=0).detach()
+
+        return torch.argmax(probs, dim=1), probs, reg_loss
+
+    def _update_ema(self, features: Tensor, labels: Tensor):
+        """Update EMA prototypes using ground truth labels"""
+        with torch.no_grad():
+            unique_labels = torch.unique(labels)
+            for cls_idx in unique_labels:
+                mask = labels == cls_idx
+                cls_features = features[mask]
+
+                if cls_features.size(0) > 0:
+                    cls_mean = cls_features.mean(dim=0)
+
+                    # Update EMA
+                    if self.ema_counts[cls_idx] == 0:
+                        self.ema_prototypes[cls_idx] = cls_mean
+                    else:
+                        self.ema_prototypes[cls_idx] = (
+                            self.ema_decay * self.ema_prototypes[cls_idx] +
+                            (1 - self.ema_decay) * cls_mean
+                        )
+                    self.ema_counts[cls_idx] += 1
+
+    def _calculate_regularization(self, prototypes: Tensor) -> Tensor:
+        """Calculate prototype regularization terms"""
+        # Diversity loss (encourage orthogonal prototypes)
+        proto_sim = prototypes @ prototypes.T
+        eye = torch.eye(self.num_classes, device=prototypes.device)
+        div_loss = F.mse_loss(proto_sim, eye)
+
+        # Uniformity loss (prevent degenerate solutions)
+        avg_sim = proto_sim.mean()
+        uniform_loss = (avg_sim - 0.5)**2
+
+        # Usage loss (encourage balanced prototype usage)
+        usage = self.usage_stats / (self.usage_stats.sum() + 1e-6)
+        usage_loss = (usage - 1/self.num_classes).pow(2).sum()
+
+        return self.reg_weight * (div_loss + uniform_loss + usage_loss)
+
+    def adapt_prototypes(self, features: Tensor):
+        """Adapt prototypes based on current feature distribution"""
+        with torch.no_grad():
+            # Use EMA prototypes if available
+            if self.ema_counts.sum() > 0:
+                valid = self.ema_counts > 0
+                self.prototypes.data[valid] = self.ema_prototypes[valid]
+
+                # Use k-means for unused prototypes
+                if not valid.all():
+                    unused = ~valid
+                    k = unused.sum().item()
+                    if k > 0 and len(features) >= k:
+                        km = KMeans(n_clusters=k)
+                        km.fit(features.cpu().numpy())
+                        self.prototypes.data[unused] = (
+                            torch.from_numpy(km.cluster_centers_)
+                            .to(features.device)
+                        )
+            else:
+                # Fallback to k-means initialization
+                km = KMeans(n_clusters=self.num_classes)
+                km.fit(features.cpu().numpy())
+                self.prototypes.data.copy_(
+                    torch.from_numpy(km.cluster_centers_)
+                    .to(features.device)
+                )
+
 class DeepClusteringPipeline:
-    def __init__(self, config: Dict = None):
+    def __init__(self, config=None):
         self.config = config or self._default_config()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.label_encoder = None
         self.model = None
         self.clusterer = None
         self.optimizer = None
-        self.scheduler = None
-        self.dataset_name = "dataset"
-        self.best_loss = float('inf')
-        self.patience_counter = 0
 
-    def _default_config(self) -> Dict:
+    def _default_config(self):
         return {
-            "feature_dim": 128,
+            "feature_dim": 256,
+            "num_classes": 10,
+            "warmup_epochs": 10,
             "lr": 0.001,
-            "prototype_lr": 0.01,
-            "dropout_prob": 0.3,
+            "proto_lr": 0.01,
+            "temp_init": 0.1,
+            "reg_weight": 0.1,
+            "ema_decay": 0.99,
             "epochs": 50,
-            "batch_size": 32,
-            "patience": 5,
-            "min_delta": 0.001,
-            "save_dir": "data"
+            "batch_size": 256
         }
 
-    def initialize_from_data(self, data_path: str):
-        """Initialize from directory structure"""
-        data_path = Path(data_path)
-        self.dataset_name = data_path.name
-
-        # Create dataset to detect classes
-        try:
-            dataset = ImageDataset(data_path)
-            self.label_encoder = dataset.label_encoder
-            self.config["n_classes"] = len(dataset.classes)
-            self.config["data_type"] = "image"
-        except Exception as e:
-            raise ValueError(f"Failed to initialize from data: {str(e)}")
-
-        # Initialize model with deeper architecture
-        input_dims = (3, 224, 224)
-        self.model = DeepFeatureExtractor(
-            input_dims,
-            self.config["feature_dim"],
-            dropout_prob=self.config["dropout_prob"]
+    def initialize_model(self):
+        """Initialize the complete model architecture"""
+        self.feature_extractor = DeepFeatureExtractor(
+            input_dims=(3, 224, 224),
+            feature_dim=self.config["feature_dim"]
         ).to(self.device)
 
-        self.clusterer = PrototypeClusterer(
-            self.config["feature_dim"],
-            self.config["n_classes"]
+        self.clusterer = EnhancedPrototypeClusterer(
+            feature_dim=self.config["feature_dim"],
+            num_classes=self.config["num_classes"],
+            initial_temp=self.config["temp_init"],
+            reg_weight=self.config["reg_weight"],
+            ema_decay=self.config["ema_decay"]
         ).to(self.device)
 
-        # Initialize optimizer and scheduler
+        # Separate optimizers for different components
         self.optimizer = torch.optim.AdamW([
-            {'params': self.model.parameters()},
-            {'params': self.clusterer.parameters(), 'lr': self.config["prototype_lr"]}
+            {'params': self.feature_extractor.parameters()},
+            {'params': self.clusterer.parameters(), 'lr': self.config["proto_lr"]}
         ], lr=self.config["lr"])
 
-        self.scheduler = ReduceLROnPlateau(
+        # Learning rate scheduler
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            mode='min',
-            factor=0.1,
-            patience=3,
-            verbose=True
+            T_max=self.config["epochs"],
+            eta_min=1e-6
         )
 
-    def train(self, data_path: str):
-        """Enhanced training with early stopping and model checkpointing"""
-        try:
-            self.initialize_from_data(data_path)
-            output_dir = Path(self.config["save_dir"])/self.dataset_name
-            output_dir.mkdir(parents=True, exist_ok=True)
+    def train_epoch(self, loader, epoch):
+        self.model.train()
+        total_loss = 0
 
-            print(f"\nTraining Configuration:")
-            print(f"- Dataset: {self.dataset_name}")
-            print(f"- Classes: {list(self.label_encoder.classes_)}")
-            print(f"- Number of classes: {self.config['n_classes']}")
-            print(f"- Feature dimension: {self.config['feature_dim']}")
-            print(f"- Output directory: {output_dir}")
+        for batch_idx, (images, labels, _) in enumerate(loader):
+            images, labels = images.to(self.device), labels.to(self.device)
 
-            # Create data loader
-            transform = transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                   std=[0.229, 0.224, 0.225])
-            ])
-            dataset = ImageDataset(data_path, transform=transform)
-            loader = DataLoader(
-                dataset,
-                batch_size=self.config["batch_size"],
-                shuffle=True,
-                num_workers=4,
-                pin_memory=True
-            )
+            # Forward pass
+            features = self.feature_extractor(images)
+            assignments, probs, reg_loss = self.clusterer(features, labels)
 
-            # Training loop with early stopping
-            print("\nTraining model...")
-            for epoch in range(self.config["epochs"]):
-                self.model.train()
-                self.clusterer.train()
-                epoch_loss = 0.0
+            # Loss calculation
+            cls_loss = F.cross_entropy(probs, labels)
+            loss = cls_loss + reg_loss
 
-                for batch_idx, (images, labels, _) in enumerate(tqdm(loader,
-                    desc=f"Epoch {epoch+1}/{self.config['epochs']}")):
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-                    images = images.to(self.device, non_blocking=True)
-                    labels = labels.to(self.device, non_blocking=True)
+            total_loss += loss.item()
 
-                    # Forward pass
-                    features = self.model(images)
-                    assignments, probs = self.clusterer(features)
+            # Periodic prototype adaptation
+            if batch_idx % 100 == 0 and epoch >= self.config["warmup_epochs"]:
+                self.clusterer.adapt_prototypes(features.detach())
 
-                    # Loss calculation
-                    loss = F.cross_entropy(probs, labels)
+        # Update learning rate
+        self.scheduler.step()
 
-                    # Backward pass
-                    self.optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    self.optimizer.step()
+        return total_loss / len(loader)
 
-                    epoch_loss += loss.item()
+    def predict(self, loader):
+        self.model.eval()
+        all_features, all_assignments = [], []
 
-                # Calculate average epoch loss
-                avg_loss = epoch_loss / len(loader)
-                self.scheduler.step(avg_loss)
+        with torch.no_grad():
+            for images, _, _ in loader:
+                features = self.feature_extractor(images.to(self.device))
+                assignments, _, _ = self.clusterer(features)
 
-                # Early stopping check
-                if avg_loss < self.best_loss - self.config["min_delta"]:
-                    self.best_loss = avg_loss
-                    self.patience_counter = 0
-                    # Save best model
-                    self._save_model(output_dir, best=True)
-                else:
-                    self.patience_counter += 1
+                all_features.append(features.cpu())
+                all_assignments.append(assignments.cpu())
 
-                print(f"Epoch {epoch+1} Loss: {avg_loss:.4f} (Best: {self.best_loss:.4f})")
-                print(f"LR: {self.optimizer.param_groups[0]['lr']:.2e}")
-
-                if self.patience_counter >= self.config["patience"]:
-                    print(f"\nEarly stopping at epoch {epoch+1}")
-                    break
-
-            # Load best model before saving features
-            self._load_best_model(output_dir)
-
-            # Save final artifacts
-            self._save_features(output_dir, dataset)
-            ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
-            ConfigManager.generate_json_config(output_dir, self.config, self.dataset_name)
-
-            print(f"\nTraining complete. Results saved to:")
-            print(f"- Features CSV: {output_dir}/{self.dataset_name}.csv")
-            print(f"- Model: {output_dir}/models/model.pth")
-            print(f"- Label encoder: {output_dir}/models/label_encoder.pkl")
-            print(f"- Config files: {output_dir}/{self.dataset_name}.{{conf,json}}")
-
-        except Exception as e:
-            print(f"\nError during training: {str(e)}", file=sys.stderr)
-            raise
-
+        return (
+            torch.cat(all_features).numpy(),
+            torch.cat(all_assignments).numpy()
+        )
 
 
 # -------------------- Command Line Interface --------------------
