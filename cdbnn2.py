@@ -799,6 +799,7 @@ class FeatureExtractorPipeline:
         miner = miners.TripletMarginMiner(margin=0.2, type_of_triplets="semihard")
         triplet_loss = losses.TripletMarginLoss(margin=0.2)
         criterion = nn.CrossEntropyLoss()
+
         # Initialize data loaders based on data type
         if self._is_timeseries_data():
             train_dataset = TimeSeriesDataset(self.train_dir, self.config["dataset"]["window_size"])
@@ -814,7 +815,6 @@ class FeatureExtractorPipeline:
         # Initialize enhanced clustering components
         self.clusterer = KLDivergenceClusterer(self.config)
         self.aligner = ClusterClassAligner(self.num_classes)
-
 
         # Split into training and validation
         val_size = int(len(train_dataset) * self.config["training"]["validation_split"])
@@ -858,50 +858,47 @@ class FeatureExtractorPipeline:
 
             for batch_idx, (data, target, _) in enumerate(progress_bar):
                 data, target = data.to(self.device), target.to(self.device)
-
                 self.optimizer.zero_grad()
 
-                # Forward pass - returns both features and cluster logits
-                features, cluster_logits = self.model(data, return_clusters=True)
+                # Forward pass - get features first
+                features = self.model(data)
 
-                # Calculate all loss components
-                # 1. KL divergence loss for clustering
+                # Initialize loss components
+                kl_loss = torch.tensor(0.0, device=self.device)
+                cls_loss = torch.tensor(0.0, device=self.device)
+                trip_loss = torch.tensor(0.0, device=self.device)
+                cluster_consistency_loss = torch.tensor(0.0, device=self.device)
+
+                # Calculate KL divergence loss
                 kl_loss = self.clusterer.compute_kl_divergence(features, target)
 
-                # 2. Classification loss (aligned with original classes)
-                aligned_probs = self.aligner(cluster_logits)
-                cls_loss = criterion(aligned_probs, target)
+                if hasattr(self.model, 'cluster_head'):
+                    # Get cluster predictions if available
+                    cluster_logits = self.model.cluster_head(features)
+                    aligned_probs = self.aligner(cluster_logits)
 
-                # 3. Triplet loss for metric learning
-                triplets = miner(features, target)
-                trip_loss = triplet_loss(features, target, triplets)
+                    # Calculate classification loss
+                    cls_loss = criterion(aligned_probs, target)
 
-                # 4. Cluster consistency loss
-                cluster_consistency_loss = F.kl_div(
-                    F.log_softmax(cluster_logits, dim=1),
-                    F.softmax(aligned_probs.detach(), dim=1),
-                    reduction='batchmean'
-                )
+                    # Calculate triplet loss
+                    triplets = miner(features, target)
+                    trip_loss = triplet_loss(features, target, triplets)
+
+                    # Calculate cluster consistency loss
+                    cluster_consistency_loss = F.kl_div(
+                        F.log_softmax(cluster_logits, dim=1),
+                        F.softmax(aligned_probs.detach(), dim=1),
+                        reduction='batchmean'
+                    )
 
                 # Combined loss with configurable weights
                 loss_weights = self.config["model"]["CNN_config"]["enhancements"]
                 loss = (
                     loss_weights["kl_divergence_weight"] * kl_loss +
-                    loss_weights["classification_weight"] * cls_loss +
-                    loss_weights["triplet_weight"] * trip_loss +
+                    loss_weights.get("classification_weight", 0.5) * cls_loss +
+                    loss_weights.get("triplet_weight", 0.3) * trip_loss +
                     0.1 * cluster_consistency_loss  # Small weight for consistency
                 )
-                # Modified forward pass
-                if hasattr(self.model, 'cluster_head'):
-                    features, cluster_logits = self.model(data, return_clusters=True)
-                    # Calculate your losses using both features and cluster_logits
-                    kl_loss = self.clusterer.compute_kl_divergence(features, target)
-                    cls_loss = F.cross_entropy(cluster_logits, target)
-                    loss = kl_loss + cls_loss
-                else:
-                    features = self.model(data)
-                    # Calculate loss without clustering
-                    loss = self.clusterer.compute_kl_divergence(features, target)
 
                 # Backward pass
                 loss.backward()
@@ -911,11 +908,12 @@ class FeatureExtractorPipeline:
                 progress_bar.set_postfix({
                     "loss": f"{train_loss/(batch_idx+1):.4f}",
                     "kl": f"{kl_loss.item():.2f}",
-                    "cls": f"{cls_loss.item():.2f}"
+                    "cls": f"{cls_loss.item():.2f}" if hasattr(self.model, 'cluster_head') else "0.0"
                 })
 
             # Update cluster-class alignment
-            if epoch % self.config["cluster_alignment"]["update_frequency"] == 0:
+            if hasattr(self.model, 'cluster_head') and \
+               epoch % self.config["cluster_alignment"].get("update_frequency", 1) == 0:
                 self._update_cluster_alignment(train_loader)
 
             # Validation
@@ -927,7 +925,8 @@ class FeatureExtractorPipeline:
 
             # Print epoch summary
             print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train Loss: {avg_train_loss:.4f} (KL: {kl_loss.item():.4f}, Cls: {cls_loss.item():.4f})")
+            print(f"  Train Loss: {avg_train_loss:.4f} (KL: {kl_loss.item():.4f}" +
+                  (f", Cls: {cls_loss.item():.4f}" if hasattr(self.model, 'cluster_head') else ""))
             print(f"  Val Loss:   {val_loss:.4f}")
             print(f"  LR:         {self.optimizer.param_groups[0]['lr']:.2e}")
 
@@ -1108,7 +1107,7 @@ class FeatureExtractorPipeline:
 
             self.model.eval()
             with torch.no_grad():
-                for batch in loader:  # This could be image or timeseries loader
+                for batch in loader:
                     data = batch[0].to(self.device)
                     features = self.model(data)
 
@@ -1127,7 +1126,7 @@ class FeatureExtractorPipeline:
 
                     # Store results
                     for i in range(len(batch)):
-                        results['file_path'].append(input_dir)  # Original file path
+                        results['file_path'].append(input_dir)
                         results['predicted_class'].append(pred_classes[i].item())
                         results['confidence'].append(confidences[i].item())
                         results['cluster_assignment'].append(cluster_assign[i].item())
@@ -1171,12 +1170,18 @@ class FeatureExtractorPipeline:
                 self.model.eval()
                 with torch.no_grad():
                     for images, _, paths in loader:
-                        features, cluster_logits = self.model(images.to(self.device), return_clusters=True)
-                        aligned_probs = self.aligner(cluster_logits)
+                        features = self.model(images.to(self.device))  # Removed return_clusters=True
 
-                        # Get predictions
-                        confidences, pred_classes = torch.max(aligned_probs, 1)
-                        cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+                        if hasattr(self.model, 'cluster_head'):
+                            cluster_logits = self.model.cluster_head(features)
+                            aligned_probs = self.aligner(cluster_logits)
+                            confidences, pred_classes = torch.max(aligned_probs, 1)
+                            cluster_confidences, cluster_assign = torch.max(F.softmax(cluster_logits, 1), 1)
+                        else:
+                            pred_classes = torch.zeros(len(images), dtype=torch.long, device=self.device)
+                            confidences = torch.ones(len(images), device=self.device)
+                            cluster_assign = pred_classes
+                            cluster_confidences = confidences
 
                         # Store results
                         for i in range(len(paths)):
