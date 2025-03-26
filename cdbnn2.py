@@ -874,7 +874,7 @@ class FeatureExtractorPipeline:
         """Predict features from input directory"""
         # Set output path
         if output_csv is None:
-            output_csv = os.path.join(self.output_dir, f"{self.dataname}_predictions.csv")
+            output_csv = os.path.join(self.output_dir, f"{self.dataname}.csv")
 
         # Verify input directory exists
         if not os.path.exists(input_dir):
