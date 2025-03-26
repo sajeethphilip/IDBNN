@@ -258,7 +258,7 @@ class FeatureExtractorPipeline:
         """
         self.source_dir = os.path.abspath(source_dir)
         self.dataname = dataname
-        self.dataset_name = os.path.basename(datafolder)
+        self.dataset_name = os.path.basename(dataname)
         self.interactive = interactive
         self.merge_train_test = merge_train_test
         self.class_to_idx = None
