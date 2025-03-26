@@ -14,62 +14,93 @@ from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 from PIL import Image
 from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# -------------------- Model Architecture --------------------
-class UniversalFeatureExtractor(nn.Module):
-    """Handles both 1D (EEG) and 2D (image) inputs"""
-    def __init__(self, input_dims: Tuple, feature_dim: int = 128):
+# -------------------- Enhanced Model Architecture --------------------
+class DeepFeatureExtractor(nn.Module):
+    """7-layer CNN with dropout for better feature extraction"""
+    def __init__(self, input_dims: Tuple, feature_dim: int = 128, dropout_prob: float = 0.3):
         super().__init__()
         self.input_dims = input_dims
 
         if len(input_dims) == 1:  # 1D data
             self.encoder = nn.Sequential(
-                nn.Conv1d(1, 32, kernel_size=5, stride=2),
+                nn.Conv1d(1, 32, kernel_size=5, stride=2, padding=2),
                 nn.BatchNorm1d(32),
                 nn.ReLU(),
-                nn.Conv1d(32, 64, kernel_size=3),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(32, 64, kernel_size=3, padding=1),
                 nn.BatchNorm1d(64),
+                nn.ReLU(),
+                nn.MaxPool1d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm1d(128),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv1d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm1d(256),
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1),
                 nn.Flatten(),
-                nn.Linear(64, feature_dim))
+                nn.Linear(256, feature_dim))
         else:  # Image data
             self.encoder = nn.Sequential(
                 nn.Conv2d(input_dims[0], 32, kernel_size=3, padding=1),
                 nn.BatchNorm2d(32),
                 nn.ReLU(),
-                nn.MaxPool2d(2),
+                nn.Dropout(dropout_prob),
                 nn.Conv2d(32, 64, kernel_size=3, padding=1),
                 nn.BatchNorm2d(64),
                 nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(128, 256, kernel_size=3, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Dropout(dropout_prob),
+                nn.Conv2d(256, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(),
                 nn.AdaptiveAvgPool2d(1),
                 nn.Flatten(),
-                nn.Linear(64, feature_dim))
+                nn.Linear(512, feature_dim))
 
         self.projector = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.LayerNorm(feature_dim),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(dropout_prob)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 2 and len(self.input_dims) == 1:  # Add channel dim for 1D
+        if x.ndim == 2 and len(self.input_dims) == 1:
             x = x.unsqueeze(1)
         features = self.encoder(x)
         return self.projector(features)
 
 class PrototypeClusterer(nn.Module):
-    """Learnable prototype-based clustering"""
+    """Enhanced prototype clustering with temperature scaling"""
     def __init__(self, feature_dim: int, num_classes: int):
         super().__init__()
         self.prototypes = nn.Parameter(torch.randn(num_classes, feature_dim))
-        self.temperature = nn.Parameter(torch.tensor(1.0))
+        self.temperature = nn.Parameter(torch.tensor(0.5))  # Start with lower temperature
+        self.epsilon = 1e-6  # Small constant for numerical stability
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        sim = torch.matmul(F.normalize(features, dim=1),
-                          F.normalize(self.prototypes, dim=1).T)
-        probs = F.softmax(sim / self.temperature.clamp(min=0.1), dim=1)
+        # Normalized prototype similarity
+        norm_features = F.normalize(features, dim=1)
+        norm_prototypes = F.normalize(self.prototypes, dim=1)
+        sim = torch.matmul(norm_features, norm_prototypes.T)
+
+        # Temperature-scaled probabilities
+        probs = F.softmax(sim / self.temperature.clamp(min=self.epsilon), dim=1)
         return torch.argmax(probs, dim=1), probs
 
 # -------------------- Data Loading --------------------
@@ -118,7 +149,9 @@ class ConfigManager:
     def generate_conf_file(output_path: Path, feature_dim: int, dataset_name: str):
         conf = {
             "file_path": str(output_path/f"{dataset_name}.csv"),
-            "column_names": [f"feature_{i}" for i in range(feature_dim)] + ["target", "file_path"],
+            "column_names": [f"feature_{i}" for i in range(feature_dim)] + [
+                "target", "file_path", "assigned_class", "assigned_class_label", "confidence"
+            ],
             "separator": ",",
             "has_header": True,
             "target_column": "target",
@@ -183,11 +216,12 @@ class ConfigManager:
                 "test_dir": None
             },
             "model": {
-                "encoder_type": "universal",
+                "encoder_type": "deep_cnn",
                 "feature_dims": config["feature_dim"],
                 "learning_rate": config["lr"],
                 "prototype_learning_rate": config["prototype_lr"],
-                "temperature": 1.0,
+                "temperature": 0.5,
+                "dropout_prob": config.get("dropout_prob", 0.3),
                 "enhancement_modules": {
                     "prototype_clustering": {
                         "enabled": True,
@@ -208,7 +242,7 @@ class ConfigManager:
         with open(output_path/f"{dataset_name}.json", "w") as f:
             json.dump(base_config, f, indent=4)
 
-# -------------------- Main Pipeline --------------------
+# -------------------- Enhanced Training Pipeline --------------------
 class DeepClusteringPipeline:
     def __init__(self, config: Dict = None):
         self.config = config or self._default_config()
@@ -217,15 +251,21 @@ class DeepClusteringPipeline:
         self.model = None
         self.clusterer = None
         self.optimizer = None
+        self.scheduler = None
         self.dataset_name = "dataset"
+        self.best_loss = float('inf')
+        self.patience_counter = 0
 
     def _default_config(self) -> Dict:
         return {
             "feature_dim": 128,
             "lr": 0.001,
-            "prototype_lr": 0.01,  # Fixed: Added prototype_lr to default config
-            "epochs": 20,
+            "prototype_lr": 0.01,
+            "dropout_prob": 0.3,
+            "epochs": 50,
             "batch_size": 32,
+            "patience": 5,
+            "min_delta": 0.001,
             "save_dir": "data"
         }
 
@@ -243,17 +283,35 @@ class DeepClusteringPipeline:
         except Exception as e:
             raise ValueError(f"Failed to initialize from data: {str(e)}")
 
-        # Initialize model
+        # Initialize model with deeper architecture
         input_dims = (3, 224, 224)
-        self.model = UniversalFeatureExtractor(input_dims, self.config["feature_dim"]).to(self.device)
-        self.clusterer = PrototypeClusterer(self.config["feature_dim"], self.config["n_classes"]).to(self.device)
+        self.model = DeepFeatureExtractor(
+            input_dims,
+            self.config["feature_dim"],
+            dropout_prob=self.config["dropout_prob"]
+        ).to(self.device)
+
+        self.clusterer = PrototypeClusterer(
+            self.config["feature_dim"],
+            self.config["n_classes"]
+        ).to(self.device)
+
+        # Initialize optimizer and scheduler
         self.optimizer = torch.optim.AdamW([
             {'params': self.model.parameters()},
             {'params': self.clusterer.parameters(), 'lr': self.config["prototype_lr"]}
         ], lr=self.config["lr"])
 
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.1,
+            patience=3,
+            verbose=True
+        )
+
     def train(self, data_path: str):
-        """Complete training workflow"""
+        """Enhanced training with early stopping and model checkpointing"""
         try:
             self.initialize_from_data(data_path)
             output_dir = Path(self.config["save_dir"])/self.dataset_name
@@ -270,23 +328,33 @@ class DeepClusteringPipeline:
             transform = transforms.Compose([
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                    std=[0.229, 0.224, 0.225])
             ])
             dataset = ImageDataset(data_path, transform=transform)
-            loader = DataLoader(dataset, batch_size=self.config["batch_size"], shuffle=True)
+            loader = DataLoader(
+                dataset,
+                batch_size=self.config["batch_size"],
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
 
-            # Training loop
+            # Training loop with early stopping
             print("\nTraining model...")
-            self.model.train()
-            self.clusterer.train()
-
             for epoch in range(self.config["epochs"]):
+                self.model.train()
+                self.clusterer.train()
                 epoch_loss = 0.0
-                for batch_idx, (images, labels, _) in enumerate(tqdm(loader, desc=f"Epoch {epoch+1}/{self.config['epochs']}")):
-                    images = images.to(self.device)
-                    labels = labels.to(self.device)
+
+                for batch_idx, (images, labels, _) in enumerate(tqdm(loader,
+                    desc=f"Epoch {epoch+1}/{self.config['epochs']}")):
+
+                    images = images.to(self.device, non_blocking=True)
+                    labels = labels.to(self.device, non_blocking=True)
 
                     # Forward pass
                     features = self.model(images)
@@ -296,19 +364,37 @@ class DeepClusteringPipeline:
                     loss = F.cross_entropy(probs, labels)
 
                     # Backward pass
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     self.optimizer.step()
 
                     epoch_loss += loss.item()
 
-                print(f"Epoch {epoch+1} Loss: {epoch_loss/len(loader):.4f}")
+                # Calculate average epoch loss
+                avg_loss = epoch_loss / len(loader)
+                self.scheduler.step(avg_loss)
 
-            # Save artifacts
-            self._save_model(output_dir)
+                # Early stopping check
+                if avg_loss < self.best_loss - self.config["min_delta"]:
+                    self.best_loss = avg_loss
+                    self.patience_counter = 0
+                    # Save best model
+                    self._save_model(output_dir, best=True)
+                else:
+                    self.patience_counter += 1
+
+                print(f"Epoch {epoch+1} Loss: {avg_loss:.4f} (Best: {self.best_loss:.4f})")
+                print(f"LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+
+                if self.patience_counter >= self.config["patience"]:
+                    print(f"\nEarly stopping at epoch {epoch+1}")
+                    break
+
+            # Load best model before saving features
+            self._load_best_model(output_dir)
+
+            # Save final artifacts
             self._save_features(output_dir, dataset)
-
-            # Generate config files
             ConfigManager.generate_conf_file(output_dir, self.config["feature_dim"], self.dataset_name)
             ConfigManager.generate_json_config(output_dir, self.config, self.dataset_name)
 
@@ -322,46 +408,80 @@ class DeepClusteringPipeline:
             print(f"\nError during training: {str(e)}", file=sys.stderr)
             raise
 
-    def _save_model(self, output_dir: Path):
+    def _save_model(self, output_dir: Path, best: bool = False):
         """Save model and label encoder"""
         model_dir = output_dir/"models"
         model_dir.mkdir(exist_ok=True)
 
+        suffix = "_best" if best else ""
         torch.save({
             'model_state': self.model.state_dict(),
             'clusterer_state': self.clusterer.state_dict(),
+            'optimizer_state': self.optimizer.state_dict(),
             'config': self.config,
-            'classes': self.label_encoder.classes_.tolist()
-        }, model_dir/"model.pth")
+            'classes': self.label_encoder.classes_.tolist(),
+            'loss': self.best_loss
+        }, model_dir/f"model{suffix}.pth")
 
-        with open(model_dir/"label_encoder.pkl", "wb") as f:
+        with open(model_dir/f"label_encoder{suffix}.pkl", "wb") as f:
             pickle.dump(self.label_encoder, f)
 
+    def _load_best_model(self, output_dir: Path):
+        """Load the best saved model"""
+        model_path = output_dir/"models"/"model_best.pth"
+        if model_path.exists():
+            checkpoint = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state'])
+            self.clusterer.load_state_dict(checkpoint['clusterer_state'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            self.best_loss = checkpoint['loss']
+            print("Loaded best model weights")
+
     def _save_features(self, output_dir: Path, dataset: ImageDataset):
-        """Extract and save features to CSV"""
-        loader = DataLoader(dataset, batch_size=self.config["batch_size"], shuffle=False)
+        """Extract and save features to CSV with cluster assignments"""
+        loader = DataLoader(
+            dataset,
+            batch_size=self.config["batch_size"],
+            shuffle=False,
+            num_workers=4
+        )
+
         self.model.eval()
+        self.clusterer.eval()
 
         all_features = []
         all_labels = []
         all_paths = []
+        all_assignments = []
+        all_confidences = []
 
         with torch.no_grad():
-            for images, labels, paths in loader:
+            for images, labels, paths in tqdm(loader, desc="Extracting features"):
                 features = self.model(images.to(self.device))
+                assignments, probs = self.clusterer(features)
+                confidences = probs.gather(1, assignments.unsqueeze(1)).squeeze()
+
                 all_features.append(features.cpu().numpy())
                 all_labels.append(labels.numpy())
                 all_paths.extend(paths)
+                all_assignments.append(assignments.cpu().numpy())
+                all_confidences.append(confidences.cpu().numpy())
 
+        # Concatenate all batches
         features = np.concatenate(all_features)
         labels = np.concatenate(all_labels)
+        assignments = np.concatenate(all_assignments)
+        confidences = np.concatenate(all_confidences)
 
-        # Create DataFrame
+        # Create DataFrame with all information
         feature_cols = {f"feature_{i}": features[:,i] for i in range(features.shape[1])}
         df = pd.DataFrame({
             **feature_cols,
             "target": labels,
             "file_path": all_paths,
+            "assigned_class": assignments,
+            "assigned_class_label": self.label_encoder.inverse_transform(assignments),
+            "confidence": confidences,
             "class_name": self.label_encoder.inverse_transform(labels)
         })
 
@@ -430,14 +550,17 @@ class DeepClusteringApp:
             output_dir = args.output or f"data/{Path(data_path).name}"
             force = args.force
 
-        # Initialize pipeline
+        # Initialize pipeline with enhanced configuration
         config = {
-            "save_dir": output_dir,
+            "save_dir": Path(output_dir).parent if output_dir.endswith(Path(data_path).name) else output_dir,
             "feature_dim": 128,
             "lr": 0.001,
-            "prototype_lr": 0.01,  # Fixed: Added prototype learning rate
-            "epochs": 20,
-            "batch_size": 32
+            "prototype_lr": 0.01,
+            "dropout_prob": 0.3,
+            "epochs": 50,
+            "batch_size": 32,
+            "patience": 5,
+            "min_delta": 0.001
         }
         self.pipeline = DeepClusteringPipeline(config)
 
