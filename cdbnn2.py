@@ -535,14 +535,17 @@ class FeatureExtractorPipeline:
                         "triplet_weight": 0.2,
                         "alignment_update_freq": 1
                     }
+                },
+                "clustering": {
+                    "triplet_margin": 0.3,          # Margin for triplet loss
+                    "uniformity_weight": 0.1,       # Weight for uniformity regularization
+                    "prototype_lr": 0.01,           # Learning rate multiplier for prototypes
+                    "temperature_init": 0.1,        # Initial temperature for softmax
+                    "max_prototype_updates": 0.05,  # Maximum prototype update per batch
+                    "label_smoothing": 0.1         # Amount of label smoothing
                 }
             },
-             "clustering": {
-                "triplet_margin": 0.3,
-                "uniformity_weight": 0.1,
-                "prototype_lr": 0.01,
-                "temperature_init": 0.1
-            },
+
             "training": {
                 "batch_size": 128,
                 "epochs": 20,
