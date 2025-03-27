@@ -300,15 +300,26 @@ class PredictionManager:
         return DummyDataset(image_files, transform)
 
     def _get_transforms(self) -> transforms.Compose:
-        """Get the image transforms based on the config."""
-        return transforms.Compose([
+        """Get the image transforms based on the config, handling channel differences."""
+        transform_list = [
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
-            transforms.Normalize(
-                mean=self.config['dataset']['mean'],
-                std=self.config['dataset']['std']
-            )
-        ])
+        ]
+
+        # Handle grayscale/RGB conversion
+        in_channels = self.config['dataset']['in_channels']
+        if in_channels == 1:
+            transform_list.append(transforms.Lambda(lambda x: x.repeat(3, 1, 1)))  # Convert to 3 channels
+        elif in_channels == 3:
+            transform_list.append(transforms.Lambda(lambda x: x if x.shape[0] == 3 else x.repeat(3, 1, 1)))
+
+        # Add normalization
+        transform_list.append(transforms.Normalize(
+            mean=self.config['dataset']['mean'],
+            std=self.config['dataset']['std']
+        ))
+
+        return transforms.Compose(transform_list)
 
     def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
         """Save predictions to a CSV file."""
@@ -2081,55 +2092,33 @@ class ModelFactory:
 
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
-        """Create appropriate model based on configuration"""
-
-        # Create input shape tuple properly
+        """Create model with proper channel handling."""
         input_shape = (
-            config['dataset']['in_channels'],
+            config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
         feature_dims = config['model']['feature_dims']
 
-
-        # Determine device
-        device = torch.device('cuda' if config['execution_flags']['use_gpu']
-                            and torch.cuda.is_available() else 'cpu')
-
-
-        # Get enabled enhancements
-        enhancements = []
-        if 'enhancement_modules' in config['model']:
-            for module_type, module_config in config['model']['enhancement_modules'].items():
-                if module_config.get('enabled', False):
-                    enhancements.append(module_type)
-
-        if enhancements:
-            logger.info(f"Creating model with enhancements: {', '.join(enhancements)}")
-
-        # Create appropriate model based on image type and enhancements
+        # Get model type
         image_type = config['dataset'].get('image_type', 'general')
-        model = None
 
-        try:
-            if image_type == 'astronomical':
-                model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
-            elif image_type == 'medical':
-                model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
-            elif image_type == 'agricultural':
-                model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
-            else:
-                # For 'general' type, use enhanced base autoencoder if enhancements are enabled
-                if enhancements:
-                    model = BaseAutoencoder(input_shape, feature_dims, config)
-                else:
-                    model = BaseAutoencoder(input_shape, feature_dims, config)
+        # Create appropriate model with proper channel handling
+        if image_type == 'astronomical':
+            model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+        elif image_type == 'medical':
+            model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+        elif image_type == 'agricultural':
+            model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
+        else:
+            model = BaseAutoencoder(input_shape, feature_dims, config)
 
-            return model.to(device)
+        # Verify channel compatibility
+        if hasattr(model, 'in_channels'):
+            if model.in_channels != config['dataset']['in_channels']:
+                logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
-        except Exception as e:
-            logger.error(f"Error creating model: {str(e)}")
-            raise
+        return model
 
 
 # Update the training loop to handle the new feature dictionary format
