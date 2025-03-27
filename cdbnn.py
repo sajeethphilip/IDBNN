@@ -6952,7 +6952,7 @@ def main():
                 output_csv=args.output,
                 batch_size=args.batch_size
             )
-            logger.info(f"Predictions saved to {args.output_csv}")
+            logger.info(f"Predictions saved to {args.output}")
 
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
