@@ -123,6 +123,8 @@ class DBNNPredictor:
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Config file not found: {config_path}")
+            self.target_column = self.config.get('target_column', 'target')
+            self.model_type = self.config.get('modelType', 'Histogram')
 
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
