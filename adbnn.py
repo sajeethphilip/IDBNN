@@ -172,7 +172,7 @@ class DBNNPredictor:
 
     def _load_feature_pairs(self, dataset_name: str):
         """Load feature combinations from saved file"""
-        components_file = os.path.join(self.model_dir, f'Best{self.model_type}_{dataset_name}_components.pkl')
+        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
         if os.path.exists(components_file):
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
@@ -4961,7 +4961,7 @@ class DBNN(GPUDBNN):
 
     def _get_model_components_filename(self):
         """Get filename for model components"""
-        return os.path.join('Model', f'Best{self.model_type}_{self.dataset_name}_components.pkl')
+        return os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
 #----------------Handling categorical variables across sessions -------------------------
     def _save_categorical_encoders(self):
         """Save categorical feature encoders"""
