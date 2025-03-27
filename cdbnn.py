@@ -6708,7 +6708,7 @@ def get_interactive_args():
         default = last_args.get('epochs', 20) if last_args else 20
         args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
 
-    default = last_args.get('output_dir', 'data') if last_args else 'data'
+    default = last_args.get('output', 'data') if last_args else 'data'
     args.output_dir = input(f"Enter output directory [{default}]: ").strip() or default
 
     # Set other defaults
@@ -6909,7 +6909,7 @@ def main():
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
+            config_path = os.path.join(args.output, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
             # Setup logging
@@ -6977,7 +6977,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
+        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output, 'data'))
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
