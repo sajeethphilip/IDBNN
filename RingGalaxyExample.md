@@ -406,6 +406,51 @@ Using original data order (no shuffling required)
 [DEBUG] Loading cached feature combinations from data/galaxies/training_data/galaxies/feature_combinations.pkl
 ---------------------BEWARE!! Remove if you get Error on retraining------------------------
 [DEBUG] Loaded feature combinations: torch.Size([1830, 2])
+
+
+The output of the training using the model on 27/03/2025
+
+---------------------------------------------------------------------------------------
+The best combined accuracy has improved from 0.9975459151361621 to 0.9994458518049398
+---------------------------------------------------------------------------------------
+Saved model components to Model/BestHistogram_galaxies_components.pkl
+Confusion Matrix and Class-wise Accuracy for [Training Data]:
+Actual/PredictedNonRingsRings   Accuracy
+-----------------------------------------
+NonRings       2       0       100.00%
+Rings          1       383      99.74%
+-----------------------------------------
+Overall Accuracy: 99.74%
+Best Overall Accuracy till now is: 99.94%
+Confusion Matrix and Class-wise Accuracy for [Test Data]:
+Actual/PredictedNonRingsRings   Accuracy
+-----------------------------------------
+NonRings       11429   6        99.95%
+Rings          0       811     100.00%
+-----------------------------------------
+Overall Accuracy: 99.95%
+Best Overall Accuracy till now is: 99.94%
+Confusion Matrix and Class-wise Accuracy for [Combined Data]:
+Actual/PredictedNonRingsRings   Accuracy
+-----------------------------------------
+NonRings       11431   6        99.95%
+Rings          1       1194     99.92%
+-----------------------------------------
+Overall Accuracy: 99.94%
+Best Overall Accuracy till now is: 99.94%
+Training accuracy: 0.9974         
+Improved training accuracy to 0.9974
+Last testing data is saved to galaxies_Last_testing.csv
+Last training data is saved to galaxies_Last_training.csv
+Saved model and data due to improved training accuracy
+ Batch size updated to- Optimal batch size: 4096
+Total samples selected: 0                                                           
+No suitable new samples found. Training complete.
+Adaptive training started at: 2025-03-27 18:14:00
+Adaptive training ended at: 2025-03-27 20:03:20
+Total adaptive training time: 6560.59 seconds
+[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:
+
 Dataset shape: torch.Size([12632, 110])
 Bin sizes: [64]
 
