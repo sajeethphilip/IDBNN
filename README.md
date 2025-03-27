@@ -2,7 +2,7 @@
 ```
 git pull 
 To train/predcit using cdbnn (For Image Feature Extraction)
-  python cdbnn2.py [arguments]
+  python cdbnn.py [arguments]
     print("Welcome to Convolution DBNN")
 
 "--data", type=str, required=True,
