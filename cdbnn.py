@@ -6936,7 +6936,7 @@ def main():
             if hasattr(predictor.model, 'set_dataset'):
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.input_dir, transform)  # Create the dataset
+                dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
 
