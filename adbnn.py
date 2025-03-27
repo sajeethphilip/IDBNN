@@ -162,7 +162,7 @@ class DBNNPredictor:
 
     def _load_label_encoder(self, dataset_name: str):
         """Load label encoder from saved file"""
-       encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
+        encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
         if os.path.exists(encoder_path):
             with open(encoder_path, 'rb') as f:
                 label_encoder = pickle.load(f)
