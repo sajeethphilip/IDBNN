@@ -185,7 +185,7 @@ class PredictionManager:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
             csv_writer.writerow(
-                ['filename', 'true_class', 'cluster_assignment', 'cluster_confidence'] +
+                ['filename', 'target', 'cluster_assignment', 'cluster_confidence'] +
                 feature_cols
             )
 
