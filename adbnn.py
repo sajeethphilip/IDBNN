@@ -117,16 +117,16 @@ class DBNNPredictor:
         self.global_std = None
 
     def load_model(self, dataset_name: str) -> bool:
-        """
-        Load all required model components for prediction.
+            """
+            Load all required model components for prediction.
 
-        Args:
-            dataset_name: Name of the dataset (matches saved model files)
+            Args:
+                dataset_name: Name of the dataset (matches saved model files)
 
-        Returns:
-            bool: True if loading succeeded, False otherwise
-        """
-        try:
+            Returns:
+                bool: True if loading succeeded, False otherwise
+            """
+            #try:
             # Load model configuration first
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
             if not os.path.exists(config_path):
@@ -156,9 +156,9 @@ class DBNNPredictor:
             self._is_initialized = True
             return True
 
-        except Exception as e:
-            print(f"Error loading model: {str(e)}")
-            return False
+        #except Exception as e:
+         #   print(f"Error loading model: {str(e)}")
+          #  return False
 
     def _load_label_encoder(self, dataset_name: str):
         """Load label encoder from saved file"""
