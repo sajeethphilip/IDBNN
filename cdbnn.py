@@ -6603,7 +6603,7 @@ def parse_arguments():
     parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
-    parser.add_argument('--output', type=str, default=None, help='output directory')
+    parser.add_argument('--output', type=str, default='', help='output directory')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
     parser.add_argument('--workers', type=int, default=4, help='number of workers')
@@ -6941,7 +6941,7 @@ def main():
                 dataset_name=str(args.data.split('/')[-1])
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
-            if args.output is None:
+            if args.output is '':
                 args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 print(f"Using default output path: {args.output}")
 
