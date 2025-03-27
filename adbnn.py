@@ -127,14 +127,13 @@ class DBNNPredictor:
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
 
-            # Load core components
+            # Load core components in proper order
             self.model_type = self.config.get('modelType', 'Histogram')
             self._load_label_encoder(dataset_name)
             self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
+            self._load_likelihood_params(dataset_name)  # This now initializes weight_updater
             self._load_weights(dataset_name)
 
-            # Make preprocessing params loading optional
             if hasattr(self, '_load_preprocessing_params'):
                 self._load_preprocessing_params(dataset_name)
 
@@ -142,7 +141,7 @@ class DBNNPredictor:
             required_attrs = [
                 'likelihood_params', 'feature_pairs',
                 'current_W', 'label_encoder',
-                'weight_updater', 'feature_columns'
+                'weight_updater'  # Now required
             ]
             missing = [attr for attr in required_attrs if not hasattr(self, attr)]
             if missing:
@@ -182,7 +181,7 @@ class DBNNPredictor:
                 self.feature_columns = components.get('feature_columns')
 
     def _load_likelihood_params(self, dataset_name: str):
-        """Load likelihood parameters from the comprehensive components file"""
+        """Load likelihood parameters and initialize weight updater"""
         components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
 
         if not os.path.exists(components_file):
@@ -192,36 +191,39 @@ class DBNNPredictor:
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
 
-            # First try loading from the structured likelihood_params
+            # Load likelihood params
             if 'likelihood_params' in components:
                 self.likelihood_params = components['likelihood_params']
-                print("\033[K" +f"Loaded likelihood_params from components file")
-                return
+                print("\033[K" + "Loaded likelihood_params from components file")
+            else:
+                # Fallback to direct component loading (backward compatibility)
+                if self.model_type == "Histogram":
+                    required = ['bin_probs', 'bin_edges', 'classes']
+                    if all(k in components for k in required):
+                        self.likelihood_params = {
+                            'bin_probs': components['bin_probs'],
+                            'bin_edges': components['bin_edges'],
+                            'classes': components['classes']
+                        }
+                elif self.model_type == "Gaussian":
+                    required = ['means', 'covs', 'classes']
+                    if all(k in components for k in required):
+                        self.likelihood_params = {
+                            'means': components['means'],
+                            'covs': components['covs'],
+                            'classes': components['classes']
+                        }
 
-            # Fallback to direct component loading (backward compatibility)
-            if self.model_type == "Histogram":
-                required = ['bin_probs', 'bin_edges', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'bin_probs': components['bin_probs'],
-                        'bin_edges': components['bin_edges'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required histogram components")
-
-            elif self.model_type == "Gaussian":
-                required = ['means', 'covs', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'means': components['means'],
-                        'covs': components['covs'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required Gaussian components")
-
-            print("\033[K" +f"Loaded {self.model_type} likelihood parameters from {components_file}")
+            # Initialize weight updater after loading likelihood params
+            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
+                n_classes = len(self.likelihood_params['classes'])
+                n_pairs = len(self.feature_pairs) if hasattr(self, 'feature_pairs') else 0
+                self.weight_updater = BinWeightUpdater(
+                    n_classes=n_classes,
+                    feature_pairs=self.feature_pairs,
+                    n_bins_per_dim=self.n_bins_per_dim if hasattr(self, 'n_bins_per_dim') else 128,
+                    batch_size=128
+                )
 
         except Exception as e:
             raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
