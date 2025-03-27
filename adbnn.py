@@ -169,7 +169,7 @@ class DBNNPredictor:
         else:
             encoders_file = os.path.join(self.model_dir, f'Best_{dataset_name}/label_encoder.pkl')
             with open(encoders_file, 'r') as f:
-                data = json.load(f)
+                data = pickle.load(f)
             # Reconstruct label encoder classes
             if 'label_encoder' in data:
                 self.label_encoder = LabelEncoder()
