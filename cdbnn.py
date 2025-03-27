@@ -175,7 +175,7 @@ class PredictionManager:
 
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
@@ -5492,7 +5492,7 @@ class DatasetProcessor:
         else:
             self.dataset_name = Path(self.datafile).stem.lower()
 
-        self.dataset_dir = os.path.join(output_dir, self.dataset_name)
+        self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
         self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
