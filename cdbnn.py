@@ -6977,7 +6977,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output, 'data'))
+        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output', 'data'))
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
