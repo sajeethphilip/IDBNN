@@ -6949,7 +6949,7 @@ def main():
             logger.info("Starting prediction process...")
             predictor.predict_images(
                 data_path=args.data,
-                output_csv=ouput,
+                output_csv=args.output,
                 batch_size=args.batch_size
             )
             logger.info(f"Predictions saved to {args.output_csv}")
