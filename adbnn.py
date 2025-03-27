@@ -1,4 +1,3 @@
-#Working, fully functional with predcition 27/March/2025
 import torch
 import time
 import argparse
@@ -1375,24 +1374,6 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
-        self.config = self.data_config  # Use self.config consistently
-        # Store execution flags from config
-        self.train = self.config.get('execution_flags', {}).get('train', True)
-        self.train_only = self.config.get('execution_flags', {}).get('train_only', False)
-        self.predict = self.config.get('execution_flags', {}).get('predict', True)
-        # Handle predict-only mode first
-        if self.predict and not self.train:
-            # Minimal initialization for prediction
-            print(f"Entering predict only mode for {dataset_name}")
-            self.device = self.config.get('training_params', {}).get('compute_device', 'auto')
-            if self.device == 'auto':
-                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-            # Load required components
-            self._load_model_components()
-            self._load_best_weights()
-            self._load_categorical_encoders()
-            return  # Skip rest of initialization
 
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
@@ -1406,8 +1387,6 @@ class DBNN(GPUDBNN):
             model_type=config.model_type  # Pass model type from config
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
-
-
 
         # Store model configuration
         self.model_config = config
@@ -1440,7 +1419,6 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
-
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -1581,14 +1559,6 @@ class DBNN(GPUDBNN):
         # Update dataset name
         self.dataset_name = dataset_name
 
-        # Handle predict-only mode
-        if self.predict and not self.train:
-            results = self._predict_only()
-            return {
-                'results_path': results['results_path'],
-                'predictions': results['predictions']
-            }
-
          # Load data using existing GPUDBNN method
         self.data =self._load_dataset()
         self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
@@ -1649,34 +1619,6 @@ class DBNN(GPUDBNN):
             'n_features': n_features,
             'n_excluded': n_excluded,
             'training_results': results
-        }
-
-    def _predict_only(self) -> Dict:
-        """Handle prediction-only mode without any training"""
-        # Load data
-        self.data = self._load_dataset()
-        X = self.data.drop(columns=[self.config['target_column']])
-
-        # Preprocess features (without training transformations)
-        X_processed = self._preprocess_data(X, is_training=False)
-        X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
-
-        # Make predictions
-        predictions = self.predict(X_tensor, batch_size=self.batch_size)
-
-        # Generate output
-        predictions_df = self._generate_detailed_predictions(X, predictions, None)
-
-        # Save results
-        dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
-        output_dir = os.path.join('data', dataset_name, 'Predictions')
-        os.makedirs(output_dir, exist_ok=True)
-        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-        predictions_df.to_csv(results_path, index=False)
-
-        return {
-            'results_path': results_path,
-            'predictions': predictions_df
         }
 
     def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
@@ -3474,41 +3416,8 @@ class DBNN(GPUDBNN):
 
         return None, None
 
+
     def predict(self, X: torch.Tensor, batch_size: int = 128):
-        """Make predictions using the best model weights without training"""
-        # Ensure model is loaded
-        if self.best_W is None:
-            self._load_best_weights()
-
-        if self.likelihood_params is None:
-            self._load_model_components()
-
-        # Use best weights for prediction
-        temp_W = self.current_W
-        self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
-
-        X = X.to(self.device)
-        predictions = []
-
-        try:
-            for i in range(0, len(X), batch_size):
-                batch_X = X[i:min(i + batch_size, len(X))]
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                else:
-                    raise ValueError(f"{self.model_type} is an invalid model type.")
-
-                batch_predictions = torch.argmax(posteriors, dim=1)
-                predictions.append(batch_predictions)
-
-        finally:
-            self.current_W = temp_W
-
-        return torch.cat(predictions).cpu()
-
-    def predict_old(self, X: torch.Tensor, batch_size: int = 128):
         """
         Make predictions in batches using the best model weights.
         This function ensures all batches are processed and predictions are concatenated correctly.
