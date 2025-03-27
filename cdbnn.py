@@ -6931,6 +6931,7 @@ def main():
                 device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
             )
 
+
             # Set the dataset (if required)
             if hasattr(predictor.model, 'set_dataset'):
                 # Create a dataset with the images in the input directory
