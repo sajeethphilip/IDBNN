@@ -6932,19 +6932,24 @@ def main():
             )
 
 
+
             # Set the dataset (if required)
             if hasattr(predictor.model, 'set_dataset'):
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
                 dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
+                dataset_name=str(args,data.split('/')[-1])
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
+            if args.output is None:
+                args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+                logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
                 data_path=args.data,
-                output_csv=args.output,
+                output_csv=ouput,
                 batch_size=args.batch_size
             )
             logger.info(f"Predictions saved to {args.output_csv}")
