@@ -6938,7 +6938,7 @@ def main():
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
                 dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
-                dataset_name=str(args,data.split('/')[-1])
+                dataset_name=str(args.data.split('/')[-1])
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
             if args.output is None:
