@@ -1375,6 +1375,23 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
+        self.config = self.data_config  # Use self.config consistently
+        # Store execution flags from config
+        self.train = self.config.get('execution_flags', {}).get('train', True)
+        self.train_only = self.config.get('execution_flags', {}).get('train_only', False)
+        self.predict = self.config.get('execution_flags', {}).get('predict', True)
+        # Handle predict-only mode first
+        if self.predict and not self.train:
+            # Minimal initialization for prediction
+            self.device = self.config.get('training_params', {}).get('compute_device', 'auto')
+            if self.device == 'auto':
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+            # Load required components
+            self._load_model_components()
+            self._load_best_weights()
+            self._load_categorical_encoders()
+            return  # Skip rest of initialization
 
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
@@ -1389,16 +1406,13 @@ class DBNN(GPUDBNN):
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
+
+
         # Store model configuration
         self.model_config = config
         self.training_log = pd.DataFrame()
         self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
-        # Add early exit for predict-only mode
-        if self.model_config.predict and not self.model_config.train:
-            self._load_model_components()
-            self._load_best_weights()
-            self._load_categorical_encoders()
-            return  # Skip rest of initialization for predict-only mode
+
         # Add new attributes to track the best round
         self.best_round = None  # Track the best round number
         self.best_round_initial_conditions = None  # Save initial conditions of the best round
@@ -1567,28 +1581,11 @@ class DBNN(GPUDBNN):
         self.dataset_name = dataset_name
 
         # Handle predict-only mode
-        if self.model_config.predict and not self.model_config.train:
-            # Load data without any training
-            self.data = self._load_dataset()
-            X = self.data.drop(columns=[self.data_config['target_column']])
-
-            # Preprocess features
-            X_processed = self._preprocess_data(X, is_training=False)
-            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
-
-            # Make predictions
-            predictions = self.predict(X_tensor, batch_size=self.batch_size)
-
-            # Generate detailed predictions
-            predictions_df = self._generate_detailed_predictions(X, predictions, None)
-
-            # Save results
-            results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-            predictions_df.to_csv(results_path, index=False)
-
+        if self.predict and not self.train:
+            results = self._predict_only()
             return {
-                'results_path': results_path,
-                'predictions': predictions_df
+                'results_path': results['results_path'],
+                'predictions': results['predictions']
             }
 
          # Load data using existing GPUDBNN method
@@ -1651,6 +1648,34 @@ class DBNN(GPUDBNN):
             'n_features': n_features,
             'n_excluded': n_excluded,
             'training_results': results
+        }
+
+    def _predict_only(self) -> Dict:
+        """Handle prediction-only mode without any training"""
+        # Load data
+        self.data = self._load_dataset()
+        X = self.data.drop(columns=[self.config['target_column']])
+
+        # Preprocess features (without training transformations)
+        X_processed = self._preprocess_data(X, is_training=False)
+        X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+
+        # Make predictions
+        predictions = self.predict(X_tensor, batch_size=self.batch_size)
+
+        # Generate output
+        predictions_df = self._generate_detailed_predictions(X, predictions, None)
+
+        # Save results
+        dataset_name = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        output_dir = os.path.join('data', dataset_name, 'Predictions')
+        os.makedirs(output_dir, exist_ok=True)
+        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
+        predictions_df.to_csv(results_path, index=False)
+
+        return {
+            'results_path': results_path,
+            'predictions': predictions_df
         }
 
     def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
