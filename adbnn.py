@@ -167,11 +167,23 @@ class DBNNPredictor:
             with open(encoder_path, 'rb') as f:
                 label_encoder = pickle.load(f)
             print("\033[K" +f"Label encoder loaded from {encoder_path}", end="\r", flush=True)
+            classes_ = label_encoder.classes_
+            self.label_encoder.classes_ = classes_
+            n_classes = len(classes_)
+            print(f"Found the following {n_classes} in label encoder: {classes_}")
             return label_encoder
         else:
             raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
 
+        encoders_file = os.path.join(self.model_dir, f'Best_{dataset_name}/label_encoder.pkl')
+        if os.path.exists(encoders_file):
+            with open(encoders_file, 'r') as f:
+                data = jpickle.load(f)
 
+            # Reconstruct label encoder classes
+            if 'label_encoder' in data:
+                self.label_encoder = LabelEncoder()
+                self.label_encoder.classes_ = np.array(data['label_encoder']['classes'])
 
     def _load_feature_pairs(self, dataset_name: str):
         """Load feature combinations from saved file"""
