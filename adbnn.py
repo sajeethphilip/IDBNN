@@ -170,7 +170,7 @@ class DBNNPredictor:
             classes_ = label_encoder.classes_
             self.label_encoder = label_encoder
             n_classes = len(classes_)
-            print(f"Found the following {n_classes} in label encoder: {classes_}")
+            print(f"Found the following {n_classes} in label encoder: {classes_}       ")
             return label_encoder
         else:
             raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
@@ -250,6 +250,7 @@ class DBNNPredictor:
     def preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
         """
         Preprocess input data using saved preprocessing parameters.
+        Enhanced to handle categorical columns and ensure numeric output.
 
         Args:
             df: Input DataFrame to preprocess
@@ -265,25 +266,41 @@ class DBNNPredictor:
 
         # Filter to only include expected features
         if self.feature_columns:
-            df_processed = df_processed[[col for col in self.feature_columns if col in df_processed.columns]]
+            # Ensure we only keep columns that exist in both the model and input data
+            available_cols = [col for col in self.feature_columns if col in df_processed.columns]
+            df_processed = df_processed[available_cols]
 
         # Handle categorical encoding
         if self.categorical_encoders:
             for column, mapping in self.categorical_encoders.items():
                 if column in df_processed.columns:
+                    # Convert column to string type for reliable mapping
+                    col_data = df_processed[column].astype(str)
+
                     # Handle missing values and new categories
-                    df_processed[column] = df_processed[column].fillna('MISSING').map(
-                        lambda x: mapping.get(x, -1)
-                    )
+                    encoded = col_data.map(lambda x: mapping.get(x, -1))
 
                     # Replace unmapped values with mean of mapped values
-                    unmapped = df_processed[df_processed[column] == -1].index
-                    if len(unmapped) > 0 and mapping:
+                    if mapping:  # Only if we have mappings
                         mean_value = np.mean(list(mapping.values()))
-                        df_processed.loc[unmapped, column] = mean_value
+                        encoded[encoded == -1] = mean_value
 
-        # Convert to numpy array
-        X_numpy = df_processed.to_numpy()
+                    df_processed[column] = encoded
+
+        # Ensure all remaining columns are numeric
+        for col in df_processed.columns:
+            if not pd.api.types.is_numeric_dtype(df_processed[col]):
+                try:
+                    df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
+                except:
+                    # If conversion fails, fill with global mean or 0
+                    df_processed[col] = 0
+
+        # Fill any remaining NA values
+        df_processed = df_processed.fillna(0)
+
+        # Convert to numpy array - ensuring float32 dtype
+        X_numpy = df_processed.to_numpy(dtype=np.float32)
 
         # Apply standardization using precomputed global stats
         if self.global_mean is not None and self.global_std is not None:
