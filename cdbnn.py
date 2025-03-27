@@ -1086,31 +1086,50 @@ class BaseAutoencoder(nn.Module):
         """Convert features dictionary to a pandas DataFrame with proper class names."""
         data_dict = {}
 
+        # Get base length from embeddings
+        base_length = len(features['embeddings']) if 'embeddings' in features else 0
+        if base_length == 0:
+            raise ValueError("No embeddings found in features")
+
         # Process embeddings
-        if 'embeddings' in features:
-            embeddings = features['embeddings'].cpu().numpy()
-            for i in range(embeddings.shape[1]):
-                data_dict[f'feature_{i}'] = embeddings[:, i]
-        else:
-            raise ValueError("Mandatory field 'embeddings' is missing in features")
+        embeddings = features['embeddings'].cpu().numpy()
+        for i in range(embeddings.shape[1]):
+            data_dict[f'feature_{i}'] = embeddings[:, i]
 
-        # Process labels - prioritize class_names over numerical labels
+        # Process labels - ensure same length as embeddings
         if 'class_names' in features:
-            data_dict['target'] = features['class_names']
+            if len(features['class_names']) == base_length:
+                data_dict['target'] = features['class_names']
+            else:
+                logger.warning(f"class_names length {len(features['class_names'])} doesn't match embeddings length {base_length}")
+                data_dict['target'] = [str(i) for i in range(base_length)]
         elif 'labels' in features:
-            data_dict['target'] = features['labels'].cpu().numpy()
+            if len(features['labels']) == base_length:
+                data_dict['target'] = features['labels'].cpu().numpy()
+            else:
+                logger.warning(f"labels length {len(features['labels'])} doesn't match embeddings length {base_length}")
+                data_dict['target'] = [str(i) for i in range(base_length)]
         else:
-            raise ValueError("Neither 'class_names' nor 'labels' found in features")
+            data_dict['target'] = [str(i) for i in range(base_length)]
 
-        # Include additional metadata if available
+        # Include additional metadata if available and length matches
         optional_fields = ['indices', 'filenames']
         for field in optional_fields:
             if field in features:
-                data_dict[field] = features[field]
+                if len(features[field]) == base_length:
+                    data_dict[field] = features[field]
+                else:
+                    logger.warning(f"{field} length {len(features[field])} doesn't match embeddings length {base_length}")
+                    data_dict[field] = [f"{field}_{i}" for i in range(base_length)]
 
         # Add enhancement features if available
         enhancement_dict = self._get_enhancement_columns(features)
-        data_dict.update(enhancement_dict)
+        for key, value in enhancement_dict.items():
+            if len(value) == base_length:
+                data_dict[key] = value
+            else:
+                logger.warning(f"Enhancement feature {key} length {len(value)} doesn't match embeddings length {base_length}")
+                data_dict[key] = [None] * base_length
 
         return pd.DataFrame(data_dict)
 
