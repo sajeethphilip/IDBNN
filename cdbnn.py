@@ -6905,11 +6905,11 @@ def main():
         # Setup logging and parse arguments
         logger = setup_logging()
         args = parse_arguments()
-
+        dataset_name=str(args.data.split('/')[-1])
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join(args.output, args.data, f"{args.data}.json")
+            config_path = os.path.join('data', dataset_name, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
             # Setup logging
@@ -6938,7 +6938,7 @@ def main():
                 # Create a dataset with the images in the input directory
                 transform = predictor._get_transforms()  # Get the image transforms
                 dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
-                dataset_name=str(args.data.split('/')[-1])
+
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
             if args.output == '':
