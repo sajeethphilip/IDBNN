@@ -1,4 +1,3 @@
-#Working Code Mar 27 2025
 import torch
 import copy
 import sys
@@ -80,7 +79,6 @@ logger = logging.getLogger(__name__)
 
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
-
     def __init__(self, config: Dict, device: str = None):
         """
         Initialize the PredictionManager.
@@ -89,10 +87,12 @@ class PredictionManager:
             config (Dict): Configuration dictionary.
             device (str, optional): Device to use (e.g., 'cuda' or 'cpu'). Defaults to None.
         """
+
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
+
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
@@ -166,11 +166,11 @@ class PredictionManager:
         return model
 
 
-    def predict_images(self, input_path: str, output_csv: str = None, batch_size: int = 128):
+    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with consistent clustering output"""
-        image_files, class_labels = self._get_image_files_with_labels(input_path)
+        image_files, class_labels = self._get_image_files_with_labels(data_path)
         if not image_files:
-            raise ValueError(f"No valid images found in {input_path}")
+            raise ValueError(f"No valid images found in {data_path}")
 
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
@@ -555,6 +555,46 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
         print(f"- Phase 1: {self.config['model']['autoencoder_config']['phase1_learning_rate']}")
         print(f"- Phase 2: {self.config['model']['autoencoder_config']['phase2_learning_rate']}")
 
+    def _generate_confusion_matrix(self, true_labels: torch.Tensor, pred_labels: torch.Tensor,
+                                 class_names: Optional[List[str]] = None) -> None:
+        """Generate and display a colored confusion matrix.
+
+        Args:
+            true_labels: Ground truth labels
+            pred_labels: Predicted labels
+            class_names: List of class names for display
+        """
+        if not hasattr(self, 'class_names') and class_names is None:
+            logger.warning("No class names available for confusion matrix")
+            return
+
+        class_names = class_names if class_names is not None else self.class_names
+
+        # Calculate confusion matrix
+        cm = confusion_matrix(true_labels.cpu().numpy(), pred_labels.cpu().numpy())
+
+        # Normalize by row (true labels)
+        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+        # Create figure
+        plt.figure(figsize=(12, 10))
+
+        # Create heatmap
+        sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
+                   xticklabels=class_names, yticklabels=class_names)
+
+        plt.title('Normalized Confusion Matrix')
+        plt.ylabel('True label')
+        plt.xlabel('Predicted label')
+        plt.xticks(rotation=45)
+        plt.yticks(rotation=0)
+
+        # Save to file
+        cm_path = os.path.join(self.log_dir, 'confusion_matrix.png')
+        plt.savefig(cm_path, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Confusion matrix saved to {cm_path}")
 
 class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
@@ -6872,6 +6912,18 @@ def main():
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
+        # Setup logging
+        os.makedirs('logs', exist_ok=True)
+        log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        logger.info(f"Logging setup complete. Log file: {log_file}")
 
             # Initialize the PredictionManager
             predictor = PredictionManager(
@@ -6890,8 +6942,9 @@ def main():
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                input_path=args.input_dir,
-                output_csv=args.output_csv
+                data_path=args.data,
+                output_csv=args.output,
+                batch_size=args.batch_size
             )
             logger.info(f"Predictions saved to {args.output_csv}")
 
