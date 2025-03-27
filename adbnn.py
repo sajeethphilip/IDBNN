@@ -103,12 +103,15 @@ class DBNNPredictor:
         self.model_dir = model_dir
         self.model_type = None  # Will be set during load
         self._is_initialized = False
-
+        self.n_bins_per_dim = 128  # Default value
+        # Initialize weight_updater as None but with type hint
+        self.weight_updater: Optional[BinWeightUpdater] = None
         # Initialize empty attributes
         self.label_encoder = None
         self.feature_pairs = None
         self.likelihood_params = None
         self.weight_updater = None
+        self.current_W = None
         self.scaler = None
         self.categorical_encoders = None
         self.feature_columns = None
@@ -194,34 +197,41 @@ class DBNNPredictor:
             # Load likelihood params
             if 'likelihood_params' in components:
                 self.likelihood_params = components['likelihood_params']
-                print("\033[K" + "Loaded likelihood_params from components file")
-            else:
-                # Fallback to direct component loading (backward compatibility)
-                if self.model_type == "Histogram":
-                    required = ['bin_probs', 'bin_edges', 'classes']
-                    if all(k in components for k in required):
-                        self.likelihood_params = {
-                            'bin_probs': components['bin_probs'],
-                            'bin_edges': components['bin_edges'],
-                            'classes': components['classes']
-                        }
-                elif self.model_type == "Gaussian":
-                    required = ['means', 'covs', 'classes']
-                    if all(k in components for k in required):
-                        self.likelihood_params = {
-                            'means': components['means'],
-                            'covs': components['covs'],
-                            'classes': components['classes']
-                        }
+            elif self.model_type == "Histogram":
+                required = ['bin_probs', 'bin_edges', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'bin_probs': components['bin_probs'],
+                        'bin_edges': components['bin_edges'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
+            elif self.model_type == "Gaussian":
+                required = ['means', 'covs', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'means': components['means'],
+                        'covs': components['covs'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
 
-            # Initialize weight updater after loading likelihood params
+            # Initialize weight updater
             if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
                 n_classes = len(self.likelihood_params['classes'])
-                n_pairs = len(self.feature_pairs) if hasattr(self, 'feature_pairs') else 0
+                feature_pairs = self.likelihood_params.get('feature_pairs', [])
+                if not feature_pairs and hasattr(self, 'feature_pairs'):
+                    feature_pairs = self.feature_pairs
+
+                # Get n_bins_per_dim from components or use default
+                n_bins = self.n_bins_per_dim
+                if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
+                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # Get from first bin_probs dim
+
                 self.weight_updater = BinWeightUpdater(
                     n_classes=n_classes,
-                    feature_pairs=self.feature_pairs,
-                    n_bins_per_dim=self.n_bins_per_dim if hasattr(self, 'n_bins_per_dim') else 128,
+                    feature_pairs=feature_pairs,
+                    n_bins_per_dim=n_bins,
                     batch_size=128
                 )
 
