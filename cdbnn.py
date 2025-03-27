@@ -272,48 +272,50 @@ class PredictionManager:
         return image_files, class_labels
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
-        """
-        Create a dataset from the list of image files.
+        """Create dataset with proper channel handling for torchvision datasets."""
+        if self.config.get('data_type') == 'torchvision':
+            # Special handling for torchvision datasets
+            dataset_class = getattr(torchvision.datasets, self.config['dataset']['name'].upper())
+            return dataset_class(
+                root='data',
+                train=False,
+                download=True,
+                transform=transform
+            )
+        else:
+            # Original folder-based dataset
+            class DummyDataset(Dataset):
+                def __init__(self, image_files, transform):
+                    self.image_files = image_files
+                    self.transform = transform
 
-        Args:
-            image_files (List[str]): List of paths to image files.
-            transform (transforms.Compose): Transformations to apply to the images.
+                def __len__(self):
+                    return len(self.image_files)
 
-        Returns:
-            Dataset: A PyTorch dataset containing the images.
-        """
-        class DummyDataset(Dataset):
-            def __init__(self, image_files, transform):
-                self.image_files = image_files
-                self.transform = transform
+                def __getitem__(self, idx):
+                    image = Image.open(self.image_files[idx])
+                    if self.transform:
+                        image = self.transform(image)
+                    return image, 0  # Dummy label
 
-            def __len__(self):
-                return len(self.image_files)
-
-            def __getitem__(self, idx):
-                image_path = self.image_files[idx]
-                image = Image.open(image_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                return image, 0  # Dummy label
-
-        return DummyDataset(image_files, transform)
+            return DummyDataset(image_files, transform)
 
     def _get_transforms(self) -> transforms.Compose:
-        """Get the image transforms based on the config, handling channel differences."""
+        """Get the image transforms with strict channel control."""
         transform_list = [
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
         ]
 
-        # Handle grayscale/RGB conversion
+        # Force proper channel handling
         in_channels = self.config['dataset']['in_channels']
         if in_channels == 1:
-            transform_list.append(transforms.Lambda(lambda x: x.repeat(3, 1, 1)))  # Convert to 3 channels
+            transform_list.append(transforms.Lambda(lambda x: x[:1]))  # Take only first channel
         elif in_channels == 3:
-            transform_list.append(transforms.Lambda(lambda x: x if x.shape[0] == 3 else x.repeat(3, 1, 1)))
+            transform_list.append(transforms.Lambda(
+                lambda x: x if x.shape[0] == 3 else x[:1].repeat(3, 1, 1)
+            ))
 
-        # Add normalization
         transform_list.append(transforms.Normalize(
             mean=self.config['dataset']['mean'],
             std=self.config['dataset']['std']
