@@ -5107,7 +5107,7 @@ class DBNN(GPUDBNN):
             'scaler': self.scaler,
             'label_encoder': {
                 'classes': self.label_encoder.classes_.tolist()
-            }
+            },
             'likelihood_params': self.likelihood_params,
             'model_type': self.model_type,
             'feature_pairs': self.feature_pairs,
