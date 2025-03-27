@@ -483,40 +483,49 @@ class DBNNPredictor:
         return results_df
 
     def _initialize_weight_updater(self):
-        """Initialize weight updater with proper parameters"""
-        if not hasattr(self, 'likelihood_params') or 'classes' not in self.likelihood_params:
-            raise RuntimeError("Cannot initialize weight updater - likelihood params not loaded")
+        """Initialize weight updater with verified dimensions"""
+        if not hasattr(self, 'likelihood_params'):
+            raise RuntimeError("Likelihood parameters not loaded")
 
-        n_classes = len(self.likelihood_params['classes'])
-        n_pairs = len(self.feature_pairs) if hasattr(self, 'feature_pairs') else 0
+        # Verify we have bin_probs to determine dimensions
+        if 'bin_probs' not in self.likelihood_params or len(self.likelihood_params['bin_probs']) == 0:
+            raise RuntimeError("Invalid likelihood parameters - missing bin_probs")
 
-        # Determine bin size from loaded params
-        n_bins = 128  # default
-        if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
-            n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # get from first dimension
+        # Get dimensions from the first bin_probs entry
+        first_bin_probs = self.likelihood_params['bin_probs'][0]
+        n_classes, n_bins_i, n_bins_j = first_bin_probs.shape
+
+        # Ensure all bin_probs have consistent dimensions
+        for bp in self.likelihood_params['bin_probs']:
+            if bp.shape != (n_classes, n_bins_i, n_bins_j):
+                raise RuntimeError(f"Inconsistent bin_probs dimensions. Expected {(n_classes, n_bins_i, n_bins_j)}, got {bp.shape}")
 
         self.weight_updater = BinWeightUpdater(
             n_classes=n_classes,
             feature_pairs=self.feature_pairs,
-            n_bins_per_dim=n_bins,
+            n_bins_per_dim=n_bins_i,  # Assuming square bins (n_bins_i == n_bins_j)
             batch_size=128
         )
 
+        # Initialize weights to match bin_probs dimensions
+        for class_id in range(n_classes):
+            for pair_idx in range(len(self.feature_pairs)):
+                self.weight_updater.histogram_weights[class_id][pair_idx] = torch.ones(
+                    (n_bins_i, n_bins_j),
+                    device=self.device
+                )
+
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Optimized batch posterior computation with defensive checks"""
+        """Dimension-aware posterior computation"""
         # Input validation
-        if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first")
-        if self.weight_updater is None:
-            raise RuntimeError("Weight updater not initialized")
-        if not hasattr(self, 'likelihood_params'):
-            raise RuntimeError("Likelihood parameters not loaded")
+        if not hasattr(self, 'likelihood_params') or 'bin_probs' not in self.likelihood_params:
+            raise RuntimeError("Likelihood parameters not properly initialized")
 
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-        # Process feature pairs with device management
+        # Process feature pairs
         feature_groups = torch.stack([
             features[:, pair].contiguous().to(self.device)
             for pair in self.feature_pairs
@@ -537,25 +546,30 @@ class DBNNPredictor:
             ])
             bin_indices_dict[group_idx] = indices
 
-        # Weight application with verification
+        # Weighted probability computation with dimension checks
         for group_idx in range(len(self.feature_pairs)):
-            bin_probs = self.likelihood_params['bin_probs'][group_idx]
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
             indices = bin_indices_dict[group_idx]
 
-            # Verify weight updater has the required weights
-            if not hasattr(self.weight_updater, 'get_histogram_weights'):
-                raise AttributeError("Weight updater missing required method get_histogram_weights")
-
+            # Get weights and verify dimensions
             weights = torch.stack([
                 self.weight_updater.get_histogram_weights(c, group_idx)
                 for c in range(n_classes)
             ]).to(self.device)
 
+            # Explicit dimension verification
+            if bin_probs.shape != weights.shape:
+                raise RuntimeError(
+                    f"Dimension mismatch: bin_probs {bin_probs.shape} vs weights {weights.shape} "
+                    f"for group {group_idx}. Check weight updater initialization."
+                )
+
+            # Apply weights and compute log likelihood
             weighted_probs = bin_probs * weights
-            probs = weighted_probs[:, indices[0], indices[1]]
+            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
             log_likelihoods += torch.log(probs.t() + epsilon)
 
-        # Final posterior calculation
+        # Normalize posteriors
         max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
         posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
