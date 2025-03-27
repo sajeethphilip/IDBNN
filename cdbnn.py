@@ -6941,7 +6941,7 @@ def main():
                 dataset_name=str(args.data.split('/')[-1])
                 predictor.model.set_dataset(dataset)  # Set the dataset in the model
                 logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
-            if args.output is '':
+            if args.output == '':
                 args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 print(f"Using default output path: {args.output}")
 
