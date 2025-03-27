@@ -124,7 +124,6 @@ class DBNNPredictor:
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Config file not found: {config_path}")
 
-
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
 
@@ -134,7 +133,10 @@ class DBNNPredictor:
             self._load_feature_pairs(dataset_name)
             self._load_likelihood_params(dataset_name)
             self._load_weights(dataset_name)
-            self._load_preprocessing_params(dataset_name)
+
+            # Make preprocessing params loading optional
+            if hasattr(self, '_load_preprocessing_params'):
+                self._load_preprocessing_params(dataset_name)
 
             # Validate all critical components are loaded
             required_attrs = [
@@ -223,6 +225,33 @@ class DBNNPredictor:
 
         except Exception as e:
             raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
+
+    def _load_preprocessing_params(self, dataset_name: str):
+        """Load preprocessing parameters (scalers, encoders, etc.)"""
+        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
+
+        if os.path.exists(components_file):
+            with open(components_file, 'rb') as f:
+                components = pickle.load(f)
+
+            # Load scaler if available
+            if 'scaler' in components:
+                self.scaler = components['scaler']
+
+            # Load categorical encoders if available
+            if 'categorical_encoders' in components:
+                self.categorical_encoders = components['categorical_encoders']
+
+            # Load global stats if available
+            if 'global_mean' in components and 'global_std' in components:
+                self.global_mean = components['global_mean']
+                self.global_std = components['global_std']
+
+            # Load feature columns if available
+            if 'feature_columns' in components:
+                self.feature_columns = components['feature_columns']
+
+            print("\033[K" + "Loaded preprocessing parameters", end="\r", flush=True)
 
     def _load_weights(self, dataset_name: str):
         """Load model weights"""
