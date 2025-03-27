@@ -232,7 +232,11 @@ class DBNNPredictor:
                 weights_data = json.load(f)
 
             n_classes = len(self.label_encoder.classes_)
-            n_pairs = len(self.feature_pairs) if self.feature_pairs else 0
+            # Check if feature_pairs is a tensor and get its first dimension length
+            if isinstance(self.feature_pairs, torch.Tensor):
+                n_pairs = self.feature_pairs.size(0)
+            else:
+                n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
 
             if weights_data.get('version', 1) == 2:
                 # New tensor format
