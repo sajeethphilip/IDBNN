@@ -93,179 +93,6 @@ class PredictionManager:
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
-    def predict_with_evaluation(self, input_path: str, output_csv: str = None,
-                              batch_size: int = 128, plot_dir: str = None):
-        """Predict with full evaluation including confusion matrix"""
-        # Get images and true labels from subfolders
-        image_files, class_labels = self._get_image_files_with_labels(input_path)
-
-        if not image_files:
-            raise ValueError(f"No valid images found in {input_path}")
-
-        # Get class names from subfolder structure
-        class_names = sorted(list(set(class_labels)))
-        if 'unknown' in class_names:
-            class_names.remove('unknown')
-
-        # Initialize data collection
-        all_features = []
-        all_preds = []
-        all_labels = []
-        all_confidences = []
-
-        transform = self._get_transforms()
-
-        # Process in batches
-        for i in tqdm(range(0, len(image_files), batch_size), desc="Evaluating predictions"):
-            batch_files = image_files[i:i + batch_size]
-            batch_labels = class_labels[i:i + batch_size]
-            batch_images = []
-
-            # Filter out unknown classes for evaluation
-            eval_indices = [idx for idx, label in enumerate(batch_labels)
-                          if label != 'unknown']
-
-            if not eval_indices:
-                continue
-
-            # Load images
-            for idx in eval_indices:
-                try:
-                    image = Image.open(batch_files[idx]).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append((image_tensor, batch_labels[idx]))
-                except Exception as e:
-                    logger.error(f"Error loading image {batch_files[idx]}: {str(e)}")
-                    continue
-
-            if not batch_images:
-                continue
-
-            # Stack images and get labels
-            batch_tensors = torch.cat([x[0] for x in batch_images], dim=0)
-            batch_true_labels = [x[1] for x in batch_images]
-
-            # Predict
-            with torch.no_grad():
-                output = self.model(batch_tensors)
-
-                if isinstance(output, dict):
-                    features = output['embedding']
-                    preds = output.get('class_predictions',
-                                     output['cluster_assignments'])
-                    confidences = output['class_probabilities'].max(dim=1)[0] if 'class_probabilities' in output \
-                                else output['cluster_probabilities'].max(dim=1)[0]
-                else:
-                    features, _ = output
-                    latent_info = self.model.organize_latent_space(features)
-                    preds = latent_info['cluster_assignments']
-                    confidences = latent_info['cluster_probabilities'].max(dim=1)[0]
-
-                all_features.extend(features.cpu().numpy())
-                all_preds.extend(preds.cpu().numpy())
-                all_confidences.extend(confidences.cpu().numpy())
-
-                # Convert string labels to indices
-                label_indices = [class_names.index(label) for label in batch_true_labels]
-                all_labels.extend(label_indices)
-
-        # Only proceed if we have ground truth labels
-        if not all_labels:
-            logger.warning("No ground truth labels available for evaluation")
-            return None
-
-        # Compute confusion matrix
-        cm = confusion_matrix(all_labels, all_preds)
-
-        # Compute metrics
-        metrics = {
-            'accuracy': accuracy_score(all_labels, all_preds),
-            'precision': precision_score(all_labels, all_preds, average='weighted'),
-            'recall': recall_score(all_labels, all_preds, average='weighted'),
-            'f1': f1_score(all_labels, all_preds, average='weighted')
-        }
-
-        logger.info(f"\nClassification Metrics:\n"
-                   f"Accuracy: {metrics['accuracy']:.4f}\n"
-                   f"Precision: {metrics['precision']:.4f}\n"
-                   f"Recall: {metrics['recall']:.4f}\n"
-                   f"F1 Score: {metrics['f1']:.4f}")
-
-        # Plot confusion matrix
-        if plot_dir:
-            os.makedirs(plot_dir, exist_ok=True)
-            cm_path = os.path.join(plot_dir, 'confusion_matrix.png')
-            self._plot_confusion_matrix(cm, class_names, cm_path)
-
-            # Save metrics
-            metrics_path = os.path.join(plot_dir, 'classification_metrics.json')
-            with open(metrics_path, 'w') as f:
-                json.dump(metrics, f, indent=2)
-
-        # Save predictions to CSV
-        if output_csv:
-            self._save_prediction_csv(
-                output_csv,
-                image_files,
-                class_labels,
-                all_features,
-                all_preds,
-                all_confidences,
-                class_names
-            )
-
-        return cm, metrics
-
-    def _plot_confusion_matrix(self, cm: np.ndarray, class_names: List[str], save_path: str):
-        """Plot and save confusion matrix"""
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                   xticklabels=class_names,
-                   yticklabels=class_names)
-        plt.title('Prediction Confusion Matrix')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        plt.xticks(rotation=45)
-        plt.yticks(rotation=0)
-        plt.savefig(save_path, bbox_inches='tight')
-        plt.close()
-        logger.info(f"Confusion matrix saved to {save_path}")
-
-    def _save_prediction_csv(self, output_csv: str, image_files: List[str],
-                           class_labels: List[str], features: List[np.ndarray],
-                           preds: List[int], confidences: List[float],
-                           class_names: List[str]):
-        """Save predictions with class information"""
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-
-        with open(output_csv, 'w', newline='') as f:
-            writer = csv.writer(f)
-
-            # Write header
-            header = [
-                'filename', 'true_class', 'predicted_class',
-                'confidence', 'is_correct'
-            ] + [f'feature_{i}' for i in range(len(features[0]))]
-            writer.writerow(header)
-
-            # Write rows
-            for i, filename in enumerate(image_files):
-                true_class = class_labels[i]
-                predicted_class = class_names[preds[i]] if i < len(preds) else 'unknown'
-                confidence = confidences[i] if i < len(confidences) else 0.0
-                is_correct = 1 if true_class == predicted_class else 0
-
-                row = [
-                    os.path.basename(filename),
-                    true_class,
-                    predicted_class,
-                    confidence,
-                    is_correct
-                ] + features[i].tolist()
-
-                writer.writerow(row)
-
-        logger.info(f"Predictions with evaluation saved to {output_csv}")
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
         if archive_path.endswith('.zip'):
@@ -2247,236 +2074,59 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
-               config: Dict, loss_manager: EnhancedLossManager,
-               val_loader: Optional[DataLoader] = None) -> Dict[str, List]:
-    """Enhanced training function with robust confusion matrix support"""
-    # Initialize training parameters
-    model.train()
-    optimizer = model._initialize_optimizer()
-    scheduler = model._initialize_scheduler()
-
-    # Create diagnostics directory
-    plot_dir = os.path.join(config['training']['checkpoint_dir'], 'diagnostics')
-    os.makedirs(plot_dir, exist_ok=True)
-
-    # Get class names (handle both folder-based and explicit class datasets)
-    try:
-        class_names = train_loader.dataset.classes
-    except AttributeError:
-        class_names = [str(i) for i in range(config['dataset'].get('num_classes', 10))]
-
-    # Early stopping setup
-    early_stopping = config['training'].get('early_stopping', {})
-    patience = early_stopping.get('patience', 5)
-    min_delta = early_stopping.get('min_delta', 0.001)
-    best_val_loss = float('inf')
-    patience_counter = 0
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
 
     history = defaultdict(list)
-    start_epoch = model.current_epoch if hasattr(model, 'current_epoch') else 0
 
-    for epoch in range(start_epoch, config['training']['epochs']):
-        model.current_epoch = epoch
-        model.train()
-        running_loss = 0.0
-        running_accuracy = 0.0
+    # Initialize starting epoch and phase
+    start_epoch = getattr(model, 'current_epoch', 0)
+    current_phase = getattr(model, 'training_phase', 1)
 
-        # Training loop
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{config["training"]["epochs"]}')
-        for batch_idx, (inputs, targets) in enumerate(pbar):
-            inputs, targets = inputs.to(model.device), targets.to(model.device)
+    # Phase 1: Pure reconstruction (if not already completed)
+    if current_phase == 1:
+        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
+        model.set_training_phase(1)
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
 
-            optimizer.zero_grad()
+        phase1_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch
+        )
+        history.update(phase1_history)
 
-            # Forward pass
-            outputs = model(inputs)
+        # Reset start_epoch for phase 2
+        start_epoch = 0
+    else:
+        logger.info("Phase 1 already completed, skipping")
 
-            # Handle different output formats
-            if isinstance(outputs, dict):
-                loss = loss_manager.calculate_loss(
-                    outputs['reconstruction'], inputs,
-                    outputs['embedding'],
-                    config['dataset'].get('image_type', 'general')
-                )['loss']
-                preds = outputs.get('class_predictions', outputs.get('cluster_assignments'))
-            else:
-                embeddings, reconstructions = outputs
-                loss = F.mse_loss(reconstructions, inputs)
-                if hasattr(model, 'classifier'):
-                    preds = model.classifier(embeddings).argmax(dim=1)
-                else:
-                    preds = model.organize_latent_space(embeddings)['cluster_assignments']
+    # Phase 2: Latent space organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        if current_phase < 2:
+            logger.info("Starting Phase 2: Latent space organization")
+            model.set_training_phase(2)
+        else:
+            logger.info("Resuming Phase 2: Latent space organization")
 
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+        # Lower learning rate for fine-tuning
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
 
-            # Update metrics
-            running_loss += loss.item()
-            running_accuracy += (preds == targets).float().mean().item()
-
-            pbar.set_postfix({
-                'loss': f'{running_loss/(batch_idx+1):.4f}',
-                'acc': f'{100*running_accuracy/(batch_idx+1):.2f}%'
-            })
-
-        # Update learning rate scheduler
-        if scheduler:
-            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(running_loss/len(train_loader))
-            else:
-                scheduler.step()
-
-        # Store training metrics
-        train_loss = running_loss / len(train_loader)
-        train_acc = running_accuracy / len(train_loader)
-        history['train_loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
-
-        # Validation phase
-        val_loss, val_acc = None, None
-        if val_loader:
-            model.eval()
-            val_running_loss = 0.0
-            val_running_accuracy = 0.0
-
-            with torch.no_grad():
-                for inputs, targets in val_loader:
-                    inputs, targets = inputs.to(model.device), targets.to(model.device)
-                    outputs = model(inputs)
-
-                    if isinstance(outputs, dict):
-                        loss = F.mse_loss(outputs['reconstruction'], inputs)
-                        preds = outputs.get('class_predictions', outputs.get('cluster_assignments'))
-                    else:
-                        _, reconstructions = outputs
-                        loss = F.mse_loss(reconstructions, inputs)
-                        if hasattr(model, 'classifier'):
-                            preds = model.classifier(embeddings).argmax(dim=1)
-                        else:
-                            preds = model.organize_latent_space(embeddings)['cluster_assignments']
-
-                    val_running_loss += loss.item()
-                    val_running_accuracy += (preds == targets).float().mean().item()
-
-            val_loss = val_running_loss / len(val_loader)
-            val_acc = val_running_accuracy / len(val_loader)
-            history['val_loss'].append(val_loss)
-            history['val_acc'].append(val_acc)
-
-            # Early stopping check
-            if val_loss < best_val_loss - min_delta:
-                best_val_loss = val_loss
-                patience_counter = 0
-                model.save_checkpoint(os.path.join(config['training']['checkpoint_dir'],
-                                                 f"{config['dataset']['name']}_best.pth"),
-                                    is_best=True)
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping triggered after {epoch+1} epochs")
-                    break
-
-        # Generate confusion matrices periodically
-        if epoch % 2 == 0 or epoch == config['training']['epochs'] - 1:
-            try:
-                # Training set evaluation
-                train_cm, train_metrics = compute_confusion_matrix(
-                    model, train_loader, class_names, "train", epoch, plot_dir
-                )
-
-                # Validation set evaluation
-                if val_loader:
-                    val_cm, val_metrics = compute_confusion_matrix(
-                        model, val_loader, class_names, "val", epoch, plot_dir
-                    )
-
-            except Exception as e:
-                logger.warning(f"Confusion matrix generation failed: {str(e)}")
-
-        # Save checkpoint
-        model.save_checkpoint(os.path.join(config['training']['checkpoint_dir'],
-                                         f"{config['dataset']['name']}_latest.pth"))
-
-    # Final evaluation
-    try:
-        logger.info("\nFinal Evaluation:")
-        final_train_cm, final_train_metrics = compute_confusion_matrix(
-            model, train_loader, class_names, "final_train", epoch, plot_dir
+        phase2_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch if current_phase == 2 else 0
         )
 
-        if val_loader:
-            final_val_cm, final_val_metrics = compute_confusion_matrix(
-                model, val_loader, class_names, "final_val", epoch, plot_dir
-            )
-    except Exception as e:
-        logger.error(f"Final evaluation failed: {str(e)}")
+        # Merge histories
+        for key, value in phase2_history.items():
+            history[f"phase2_{key}"] = value
 
     return history
 
-def compute_confusion_matrix(model: nn.Module, loader: DataLoader,
-                           class_names: List[str], phase: str,
-                           epoch: int, plot_dir: str) -> Tuple[np.ndarray, dict]:
-    """Robust confusion matrix computation with fallback to text output"""
-    model.eval()
-    all_preds = []
-    all_labels = []
-
-    with torch.no_grad():
-        for inputs, labels in tqdm(loader, desc=f"Computing {phase} confusion matrix"):
-            inputs = inputs.to(model.device)
-            labels = labels.to(model.device)
-
-            output = model(inputs)
-            if isinstance(output, dict):
-                preds = output.get('class_predictions', output.get('cluster_assignments'))
-            else:
-                _, features = output
-                if hasattr(model, 'classifier'):
-                    preds = model.classifier(features).argmax(dim=1)
-                else:
-                    preds = model.organize_latent_space(features)['cluster_assignments']
-
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    # Compute confusion matrix and metrics
-    cm = confusion_matrix(all_labels, all_preds)
-    metrics = {
-        'accuracy': accuracy_score(all_labels, all_preds),
-        'precision': precision_score(all_labels, all_preds, average='weighted', zero_division=0),
-        'recall': recall_score(all_labels, all_preds, average='weighted', zero_division=0),
-        'f1': f1_score(all_labels, all_preds, average='weighted', zero_division=0)
-    }
-
-    # Try to plot, fallback to text if needed
-    try:
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                   xticklabels=class_names,
-                   yticklabels=class_names)
-        plt.title(f'Confusion Matrix ({phase}) - Epoch {epoch+1}')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        plt.xticks(rotation=45)
-        plt.yticks(rotation=0)
-
-        cm_path = os.path.join(plot_dir, f'{phase}_cm_epoch_{epoch+1}.png')
-        plt.savefig(cm_path, bbox_inches='tight')
-        plt.close()
-        logger.info(f"Saved confusion matrix to {cm_path}")
-    except Exception as e:
-        logger.warning(f"Could not generate graphical confusion matrix: {str(e)}")
-        logger.info("\nText Confusion Matrix:")
-        logger.info("\n".join(["\t".join(map(str, row)) for row in cm]))
-        logger.info(f"Class names: {class_names}")
-
-    # Save metrics
-    metrics_path = os.path.join(plot_dir, f'{phase}_metrics_epoch_{epoch+1}.json')
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
-
-    return cm, metrics
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
