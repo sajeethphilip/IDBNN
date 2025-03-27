@@ -6912,18 +6912,18 @@ def main():
             config_path = os.path.join(args.output_dir, args.data, f"{args.data}.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
-        # Setup logging
-        os.makedirs('logs', exist_ok=True)
-        log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
-        )
-        logger.info(f"Logging setup complete. Log file: {log_file}")
+            # Setup logging
+            os.makedirs('logs', exist_ok=True)
+            log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(log_file),
+                    logging.StreamHandler()
+                ]
+            )
+            logger.info(f"Logging setup complete. Log file: {log_file}")
 
             # Initialize the PredictionManager
             predictor = PredictionManager(
