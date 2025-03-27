@@ -1,26 +1,20 @@
 # For the lazy guy
 ```
 git pull 
-To train/predcit using cdbnn2 (For Image Feature Extraction)
-  python cdbnn2.py [arguments]
+To train/predcit using cdbnn (For Image Feature Extraction)
+  python cdbnn.py [arguments]
     print("Welcome to Convolution DBNN")
 
-"--source", type=str, required=True,
-                      help="Path to source directory containing the data")
-"--dataset", type=str, required=True,
-                      help="Name for the dataset (will create data/<dataset>/)")
+"--data", type=str, required=True,
+                      help="Name for the dataset (will create data/<dataset>/)"
 "--mode", type=str, choices=["train", "predict", "train_and_predict"],
-                       default="train_and_predict", help="Execution mode")
-"--predict_dir", type=str,
-                       help="Directory to predict on (required for predict mode)")
-"--predict_output", type=str,
-                       help="Optional custom path for output CSV. Default: data/<datafolder>/<datafolder>.csv")
-"--merge_train_test", action="store_true",
-                       help="Force merge of train and test sets without prompt")
-"--force", action="store_true",
-                          help="Automatically overwrite existing files without prompt")
+                       default="train_and_predict", help="Execution mode"
+'--data_type', type=str, choices=['torchvision', 'custom'], default='custom'
+'--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn'
+'--config', type=str, help='path to configuration file'
+'--output', type=str, default='', help='output directory'
 
-To train/predcit using adbnn  (For Difference Boosting Neural Network)
+To train/predcit using adbnn  (For Difference Boosting Neural Network
 
   python adbnn.py [arguments]
 
