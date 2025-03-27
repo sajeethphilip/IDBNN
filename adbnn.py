@@ -120,9 +120,9 @@ class DBNNPredictor:
         self.global_std = None
 
     def load_model(self, dataset_name: str) -> bool:
-        """Load all model components with comprehensive validation"""
+        """Load all model components with strict initialization order"""
         try:
-            # Load config first
+            # 1. Load basic config first
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -130,21 +130,29 @@ class DBNNPredictor:
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
 
-            # Load core components in proper order
+            # 2. Set model type
             self.model_type = self.config.get('modelType', 'Histogram')
+
+            # 3. Load essential components in strict order
             self._load_label_encoder(dataset_name)
             self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)  # This now initializes weight_updater
+            self._load_likelihood_params(dataset_name)
+
+            # 4. Initialize weight updater after all params are loaded
+            self._initialize_weight_updater()
+
+            # 5. Load weights
             self._load_weights(dataset_name)
 
+            # 6. Load optional preprocessing params
             if hasattr(self, '_load_preprocessing_params'):
                 self._load_preprocessing_params(dataset_name)
 
-            # Validate all critical components are loaded
+            # Final validation
             required_attrs = [
                 'likelihood_params', 'feature_pairs',
                 'current_W', 'label_encoder',
-                'weight_updater'  # Now required
+                'weight_updater'  # Now explicitly required
             ]
             missing = [attr for attr in required_attrs if not hasattr(self, attr)]
             if missing:
@@ -474,25 +482,52 @@ class DBNNPredictor:
 
         return results_df
 
+    def _initialize_weight_updater(self):
+        """Initialize weight updater with proper parameters"""
+        if not hasattr(self, 'likelihood_params') or 'classes' not in self.likelihood_params:
+            raise RuntimeError("Cannot initialize weight updater - likelihood params not loaded")
+
+        n_classes = len(self.likelihood_params['classes'])
+        n_pairs = len(self.feature_pairs) if hasattr(self, 'feature_pairs') else 0
+
+        # Determine bin size from loaded params
+        n_bins = 128  # default
+        if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
+            n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # get from first dimension
+
+        self.weight_updater = BinWeightUpdater(
+            n_classes=n_classes,
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=n_bins,
+            batch_size=128
+        )
+
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Optimized batch posterior computation for Histogram model"""
+        """Optimized batch posterior computation with defensive checks"""
+        # Input validation
+        if not self._is_initialized:
+            raise RuntimeError("Predictor not initialized. Call load_model() first")
+        if self.weight_updater is None:
+            raise RuntimeError("Weight updater not initialized")
+        if not hasattr(self, 'likelihood_params'):
+            raise RuntimeError("Likelihood parameters not loaded")
+
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-        # Process all feature pairs at once
+        # Process feature pairs with device management
         feature_groups = torch.stack([
             features[:, pair].contiguous().to(self.device)
             for pair in self.feature_pairs
-        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+        ]).transpose(0, 1)
 
-        # Compute all bin indices at once
+        # Bin indices computation
         bin_indices_dict = {}
         for group_idx in range(len(self.feature_pairs)):
             bin_edges = self.likelihood_params['bin_edges'][group_idx]
             edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])
 
-            # Vectorized binning
             indices = torch.stack([
                 torch.bucketize(
                     feature_groups[:, group_idx, dim].contiguous(),
@@ -502,23 +537,25 @@ class DBNNPredictor:
             ])
             bin_indices_dict[group_idx] = indices
 
-        # Process all classes simultaneously
+        # Weight application with verification
         for group_idx in range(len(self.feature_pairs)):
             bin_probs = self.likelihood_params['bin_probs'][group_idx]
             indices = bin_indices_dict[group_idx]
 
-            # Get weights for all classes at once
+            # Verify weight updater has the required weights
+            if not hasattr(self.weight_updater, 'get_histogram_weights'):
+                raise AttributeError("Weight updater missing required method get_histogram_weights")
+
             weights = torch.stack([
                 self.weight_updater.get_histogram_weights(c, group_idx)
                 for c in range(n_classes)
-            ])
+            ]).to(self.device)
 
-            # Apply weights to probabilities and compute log likelihood
             weighted_probs = bin_probs * weights
-            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+            probs = weighted_probs[:, indices[0], indices[1]]
             log_likelihoods += torch.log(probs.t() + epsilon)
 
-        # Compute posteriors
+        # Final posterior calculation
         max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
         posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
