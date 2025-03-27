@@ -186,24 +186,50 @@ class DBNNPredictor:
                 self.feature_columns = components.get('feature_columns')
 
     def _load_likelihood_params(self, dataset_name: str):
-        """Load likelihood parameters based on model type"""
+        """Load likelihood parameters based on model type with proper validation"""
         components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-        if os.path.exists(components_file):
+
+        if not os.path.exists(components_file):
+            raise FileNotFoundError(
+                f"Model components file not found at {components_file}. "
+                "This file is required for making predictions."
+            )
+
+        try:
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
 
+            # Validate required components
+            required_components = {
+                "Histogram": ['bin_probs', 'bin_edges', 'classes'],
+                "Gaussian": ['means', 'covs', 'classes']
+            }.get(self.model_type, [])
+
+            missing = [comp for comp in required_components if comp not in components]
+            if missing:
+                raise ValueError(
+                    f"Model components file is missing required fields: {missing}"
+                )
+
             if self.model_type == "Histogram":
                 self.likelihood_params = {
-                    'bin_probs': components.get('bin_probs'),
-                    'bin_edges': components.get('bin_edges'),
-                    'classes': components.get('classes')
+                    'bin_probs': components['bin_probs'],
+                    'bin_edges': components['bin_edges'],
+                    'classes': components['classes']
                 }
             elif self.model_type == "Gaussian":
                 self.likelihood_params = {
-                    'means': components.get('means'),
-                    'covs': components.get('covs'),
-                    'classes': components.get('classes')
+                    'means': components['means'],
+                    'covs': components['covs'],
+                    'classes': components['classes']
                 }
+
+            print(f"Successfully loaded likelihood parameters from {components_file}")
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Error loading model components from {components_file}: {str(e)}"
+            ) from e
 
     def _load_weights(self, dataset_name: str):
         """Load model weights"""
