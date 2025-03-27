@@ -1383,6 +1383,7 @@ class DBNN(GPUDBNN):
         # Handle predict-only mode first
         if self.predict and not self.train:
             # Minimal initialization for prediction
+            print(f"Entering predict only mode for {dataset_name}")
             self.device = self.config.get('training_params', {}).get('compute_device', 'auto')
             if self.device == 'auto':
                 self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
