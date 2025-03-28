@@ -1652,6 +1652,7 @@ class GPUDBNN:
         if not fresh and use_previous_model:
             # Load previous model state
             self._load_model_components()
+            print("I am here")
             print(f"The target classes are {self.label_encoder.classes_}")
             self._load_best_weights()
             self._load_categorical_encoders()
