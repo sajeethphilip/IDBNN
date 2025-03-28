@@ -1677,7 +1677,7 @@ class GPUDBNN:
         self._load_best_weights()
         self._load_categorical_encoders()
 
-    def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[torch.Tensor]:
+    def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
         """
         Compute bin edges for all feature pairs once during initialization.
 
@@ -1686,48 +1686,79 @@ class GPUDBNN:
             bin_sizes: List of integers specifying bin sizes for each dimension
 
         Returns:
-            List of tensors containing bin edges for each feature pair
+            List of lists containing bin edge tensors for each feature pair and dimension
+            Structure: [pair_idx][dim_idx] = edge_tensor
         """
         DEBUG.log("Starting _compute_bin_edges")
-        print("\033[K" +f"Dataset shape: {dataset.shape}")
-        print("\033[K" +f"Bin sizes: {bin_sizes}")
+        print("\033[K" + f"Dataset shape: {dataset.shape}")
+        print("\033[K" + f"Bin sizes: {bin_sizes}")
+
+        # Validate inputs
+        if not isinstance(dataset, torch.Tensor):
+            raise TypeError(f"Dataset must be a torch.Tensor, got {type(dataset)}")
+        if not isinstance(bin_sizes, list) or not all(isinstance(x, int) for x in bin_sizes):
+            raise TypeError("bin_sizes must be a list of integers")
 
         bin_edges = []
-        for feature_group in self.feature_pairs:
-            feature_group = [int(x) for x in feature_group]
-            group_data = dataset[:, feature_group].contiguous()
-            n_dims = len(feature_group)
+        for pair_idx, feature_group in enumerate(self.feature_pairs):
+            try:
+                feature_group = [int(x) for x in feature_group]
+                group_data = dataset[:, feature_group].contiguous()
+                n_dims = len(feature_group)
 
-            # Get appropriate bin sizes for this group
-            group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
+                # Get appropriate bin sizes for this group
+                group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
 
-            # Compute bin edges for all dimensions
-            group_bin_edges = []
-            for dim in range(n_dims):
-                dim_data = group_data[:, dim].contiguous()
-                dim_min, dim_max = dim_data.min(), dim_data.max()
-                padding = (dim_max - dim_min) * 0.01
+                # Compute bin edges for all dimensions
+                group_bin_edges = []
+                for dim in range(n_dims):
+                    dim_data = group_data[:, dim].contiguous()
+                    dim_min, dim_max = dim_data.min(), dim_data.max()
 
-                # Ensure bin size is valid
-                if group_bin_sizes[dim] <= 1:
-                    raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
+                    # Calculate padding (1% of range or fixed minimum for zero-range features)
+                    padding = max((dim_max - dim_min) * 0.01, 1e-6)  # Ensure non-zero padding
 
-                # Compute bin edges
-                try:
-                    edges = torch.linspace(
-                        dim_min - padding,
-                        dim_max + padding,
-                        group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
-                        device=self.device
-                    ).contiguous()
+                    # Validate bin size
+                    if group_bin_sizes[dim] <= 1:
+                        raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
+
+                    # Compute edges with numerical stability checks
+                    if dim_min == dim_max:
+                        # Handle constant features by creating symmetric bins
+                        edges = torch.linspace(
+                            dim_min - padding,
+                            dim_max + padding,
+                            group_bin_sizes[dim] + 1,
+                            device=self.device
+                        ).contiguous()
+                    else:
+                        edges = torch.linspace(
+                            dim_min - padding,
+                            dim_max + padding,
+                            group_bin_sizes[dim] + 1,
+                            device=self.device
+                        ).contiguous()
+
+                    # Verify edges
+                    if not edges.is_contiguous():
+                        edges = edges.contiguous()
+                    if torch.any(torch.isnan(edges)):
+                        raise ValueError(f"NaN values detected in bin edges for pair {pair_idx}, dim {dim}")
+
                     group_bin_edges.append(edges)
-                    DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
-                except Exception as e:
-                    print("\033[K" +f"Error computing bin edges for dimension {dim}: {str(e)}")
-                    print("\033[K" +f"dim_min: {dim_min}, dim_max: {dim_max}, padding: {padding}, bin_size: {group_bin_sizes[dim]}")
-                    raise
+                    DEBUG.log(f"Pair {pair_idx}, Dim {dim}: edges range {edges[0].item():.3f} to {edges[-1].item():.3f}")
 
-            bin_edges.append(group_bin_edges)
+                bin_edges.append(group_bin_edges)
+
+            except Exception as e:
+                print(f"\033[KError processing feature pair {feature_group}: {str(e)}")
+                raise RuntimeError(f"Failed to compute bin edges for pair {pair_idx}") from e
+
+        # Final validation
+        if not bin_edges:
+            raise RuntimeError("No bin edges were computed - check feature pairs")
+        if len(bin_edges) != len(self.feature_pairs):
+            raise RuntimeError("Bin edges count doesn't match feature pairs count")
 
         return bin_edges
 #----------------------
