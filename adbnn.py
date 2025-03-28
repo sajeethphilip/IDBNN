@@ -5448,9 +5448,9 @@ class DBNN(GPUDBNN):
                 self.feature_pairs = components.get('feature_pairs')
 
                 # Only update label encoder if not already set
-                if current_encoder is None and 'label_encoder' in components:
-                    print("Here")
-                    self.label_encoder.classes_ = components['target_classes']
+
+                self.label_encoder.classes_ = components['target_classes']
+                print(f"The target classes are {self.label_encoder.classes_}")
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
                 self.likelihood_params = components['likelihood_params']
