@@ -872,8 +872,7 @@ class DatasetConfig:
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
             "inverse_learning_rate": 0.001,
-            "save_plots": True,
-            "classwise_loss": True  # New parameter for class-wise optimization
+            "save_plots": True
         }
         config["active_learning"]= {
             "tolerance": 1.0,
@@ -4300,9 +4299,6 @@ class DBNN(GPUDBNN):
         if not hasattr(self, 'best_combined_accuracy'):
             self.best_combined_accuracy = 0.0
 
-        # Get class-wise loss setting from config
-        classwise_loss = self.config.get('training_params', {}).get('classwise_loss', True)
-
         # Initialize best model weights if not already set
         if not hasattr(self, 'best_model_weights'):
             self.best_model_weights = None
@@ -4389,25 +4385,8 @@ class DBNN(GPUDBNN):
 
             batch_pbar.close()
 
-
-
-            # Calculate training error rate - modified for class-wise
-            if classwise_loss:
-                # Compute class-wise accuracy
-                class_accuracies = []
-                unique_classes = torch.unique(y_train)
-                for class_id in unique_classes:
-                    class_mask = (y_train == class_id)
-                    class_correct = (predictions[:current_batch_size][class_mask] == y_train[class_mask]).sum().item()
-                    class_total = class_mask.sum().item()
-                    if class_total > 0:
-                        class_accuracies.append(class_correct / class_total)
-
-                # Use minimum class accuracy as the metric to optimize
-                train_error_rate = 1 - min(class_accuracies) if class_accuracies else 1.0
-            else:
-                # Original overall accuracy computation
-                train_error_rate = n_errors / n_samples
+            # Calculate training error rate
+            train_error_rate = n_errors / n_samples
             error_rates.append(train_error_rate)
 
             # Calculate metrics using current weights
