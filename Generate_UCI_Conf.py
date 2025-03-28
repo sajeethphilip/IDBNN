@@ -91,8 +91,9 @@ def create_config_file(dataset_name, output_dir="data"):
         "column_names": dataset_info["columns"],
         "target_column": dataset_info["target"],  # Now a single value
         "separator": dataset_info["separator"],   # Determined from actual file
+	"modelType":"Histogram",        
         "has_header": dataset_info["has_header"],
-         "likelihood_config": {
+        "likelihood_config": {
         "feature_group_size": 2,
         "max_combinations": 1000,
         "bin_sizes": [20]
