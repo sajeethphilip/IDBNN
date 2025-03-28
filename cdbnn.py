@@ -970,99 +970,125 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """Extract features with proper metadata handling"""
+        """
+        Extract features from a DataLoader with improved label handling.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []
-        all_filenames = []
-        all_class_names = []
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
 
-        with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                inputs = inputs.to(self.device)
-                labels = labels.to(self.device)
+        try:
+            with torch.no_grad():
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
 
-                # Get metadata - handle all cases
-                if hasattr(loader.dataset, 'get_additional_info'):
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
 
-                    if hasattr(loader.dataset, 'reverse_encoder'):
-                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                    elif hasattr(loader.dataset, 'classes'):
-                        class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        # Improved class name handling
+                        if hasattr(loader.dataset, 'reverse_encoder'):
+                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                        elif hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [f"class_{label.item()}" for label in labels]
                     else:
-                        class_names = [str(label.item()) for label in labels]
-                else:
-                    # Fallback metadata generation
-                    indices = [f"{dataset_type}_{batch_idx}_{i}" for i in range(len(inputs))]
-                    filenames = [f"{dataset_type}_{batch_idx}_{i}.png" for i in range(len(inputs))]
-                    class_names = [str(label.item()) for label in labels]
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
 
-                # Extract embeddings
-                embeddings = self.encode(inputs)
-                if isinstance(embeddings, tuple):
-                    embeddings = embeddings[0]
+                        # Better fallback for class names
+                        if hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [str(label.item()) for label in labels]
 
-                # Collect all data
-                all_embeddings.append(embeddings)
-                all_labels.append(labels)
-                all_indices.extend(indices)
-                all_filenames.extend(filenames)
-                all_class_names.extend(class_names)
+                    # Extract embeddings
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
 
-        # Concatenate tensors, keep lists as-is
-        return {
-            'embeddings': torch.cat(all_embeddings),
-            'labels': torch.cat(all_labels),
-            'indices': all_indices,
-            'filenames': all_filenames,
-            'class_names': all_class_names
-        }
+                    # Append to lists
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
 
-    def save_features(self, train_features: Dict[str, torch.Tensor],
-                     test_features: Dict[str, torch.Tensor],
-                     output_path: str) -> None:
-        """Save features with proper metadata concatenation"""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        enable_adaptive = self.config['model'].get('enable_adaptive', True)
+                # Concatenate all results
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
 
-        if enable_adaptive:
-            # Verify all array lengths match before concatenation
-            train_len = len(train_features['embeddings'])
-            test_len = len(test_features['embeddings'])
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels,
+                    'indices': all_indices,
+                    'filenames': all_filenames,
+                    'class_names': all_class_names  # Now contains proper class names in all cases
+                }
 
-            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
-            merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
-                'labels': torch.cat([train_features['labels'], test_features['labels']]),
-                'indices': train_features['indices'] + test_features['indices'],
-                'filenames': train_features['filenames'] + test_features['filenames'],
-                'class_names': train_features['class_names'] + test_features['class_names']
-            }
+                return feature_dict
 
-            # Verify final lengths match
-            final_len = len(merged_features['embeddings'])
-            assert final_len == len(merged_features['labels']) == len(merged_features['indices']) \
-                   == len(merged_features['filenames']) == len(merged_features['class_names']), \
-                   "Length mismatch after concatenation"
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
 
-            df = self._features_to_dataframe(merged_features)
-            df.to_csv(output_path, index=False)
-            logger.info(f"Saved {final_len} samples to {output_path} (adaptive mode)")
-        else:
-            # Non-adaptive mode - save separate files
-            train_df = self._features_to_dataframe(train_features)
-            test_df = self._features_to_dataframe(test_features)
+    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
+        """
+        Save features for training and test sets based on the adaptive flag.
 
-            train_path = output_path.replace(".csv", "_train.csv")
-            test_path = output_path.replace(".csv", "_test.csv")
+        Args:
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            train_df.to_csv(train_path, index=False)
-            test_df.to_csv(test_path, index=False)
-            logger.info(f"Saved {len(train_features['embeddings'])} train samples to {train_path}")
-            logger.info(f"Saved {len(test_features['embeddings'])} test samples to {test_path}")
+            # Access enable_adaptive from training_params
+            try:
+                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+            except:
+                enable_adaptive = True
+                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+            if enable_adaptive:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features)
+                train_output_path = output_path
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features)
+                test_df = self._features_to_dataframe(test_features)
+
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
+
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
 
 
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -3516,99 +3542,125 @@ class BaseFeatureExtractor(nn.Module, ABC):
 
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """Extract features with proper metadata handling"""
+        """
+        Extract features from a DataLoader with improved label handling.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []
-        all_filenames = []
-        all_class_names = []
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
 
-        with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                inputs = inputs.to(self.device)
-                labels = labels.to(self.device)
+        try:
+            with torch.no_grad():
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
 
-                # Get metadata - handle all cases
-                if hasattr(loader.dataset, 'get_additional_info'):
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
 
-                    if hasattr(loader.dataset, 'reverse_encoder'):
-                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                    elif hasattr(loader.dataset, 'classes'):
-                        class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        # Improved class name handling
+                        if hasattr(loader.dataset, 'reverse_encoder'):
+                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                        elif hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [f"class_{label.item()}" for label in labels]
                     else:
-                        class_names = [str(label.item()) for label in labels]
-                else:
-                    # Fallback metadata generation
-                    indices = [f"{dataset_type}_{batch_idx}_{i}" for i in range(len(inputs))]
-                    filenames = [f"{dataset_type}_{batch_idx}_{i}.png" for i in range(len(inputs))]
-                    class_names = [str(label.item()) for label in labels]
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
 
-                # Extract embeddings
-                embeddings = self.encode(inputs)
-                if isinstance(embeddings, tuple):
-                    embeddings = embeddings[0]
+                        # Better fallback for class names
+                        if hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [str(label.item()) for label in labels]
 
-                # Collect all data
-                all_embeddings.append(embeddings)
-                all_labels.append(labels)
-                all_indices.extend(indices)
-                all_filenames.extend(filenames)
-                all_class_names.extend(class_names)
+                    # Extract embeddings
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
 
-        # Concatenate tensors, keep lists as-is
-        return {
-            'embeddings': torch.cat(all_embeddings),
-            'labels': torch.cat(all_labels),
-            'indices': all_indices,
-            'filenames': all_filenames,
-            'class_names': all_class_names
-        }
+                    # Append to lists
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
 
-    def save_features(self, train_features: Dict[str, torch.Tensor],
-                     test_features: Dict[str, torch.Tensor],
-                     output_path: str) -> None:
-        """Save features with proper metadata concatenation"""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        enable_adaptive = self.config['model'].get('enable_adaptive', True)
+                # Concatenate all results
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
 
-        if enable_adaptive:
-            # Verify all array lengths match before concatenation
-            train_len = len(train_features['embeddings'])
-            test_len = len(test_features['embeddings'])
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels,
+                    'indices': all_indices,
+                    'filenames': all_filenames,
+                    'class_names': all_class_names  # Now contains proper class names in all cases
+                }
 
-            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
-            merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
-                'labels': torch.cat([train_features['labels'], test_features['labels']]),
-                'indices': train_features['indices'] + test_features['indices'],
-                'filenames': train_features['filenames'] + test_features['filenames'],
-                'class_names': train_features['class_names'] + test_features['class_names']
-            }
+                return feature_dict
 
-            # Verify final lengths match
-            final_len = len(merged_features['embeddings'])
-            assert final_len == len(merged_features['labels']) == len(merged_features['indices']) \
-                   == len(merged_features['filenames']) == len(merged_features['class_names']), \
-                   "Length mismatch after concatenation"
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
 
-            df = self._features_to_dataframe(merged_features)
-            df.to_csv(output_path, index=False)
-            logger.info(f"Saved {final_len} samples to {output_path} (adaptive mode)")
-        else:
-            # Non-adaptive mode - save separate files
-            train_df = self._features_to_dataframe(train_features)
-            test_df = self._features_to_dataframe(test_features)
+    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
+        """
+        Save features for training and test sets based on the adaptive flag.
 
-            train_path = output_path.replace(".csv", "_train.csv")
-            test_path = output_path.replace(".csv", "_test.csv")
+        Args:
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            train_df.to_csv(train_path, index=False)
-            test_df.to_csv(test_path, index=False)
-            logger.info(f"Saved {len(train_features['embeddings'])} train samples to {train_path}")
-            logger.info(f"Saved {len(test_features['embeddings'])} test samples to {test_path}")
+            # Access enable_adaptive from training_params
+            try:
+                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+            except:
+                enable_adaptive = True
+                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+            if enable_adaptive:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features)
+                train_output_path = output_path
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features)
+                test_df = self._features_to_dataframe(test_features)
+
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
+
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
 
 
 
@@ -5008,99 +5060,125 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         return running_loss / len(val_loader), 100. * correct / total
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """Extract features with proper metadata handling"""
+        """
+        Extract features from a DataLoader with improved label handling.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []
-        all_filenames = []
-        all_class_names = []
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
 
-        with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                inputs = inputs.to(self.device)
-                labels = labels.to(self.device)
+        try:
+            with torch.no_grad():
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
 
-                # Get metadata - handle all cases
-                if hasattr(loader.dataset, 'get_additional_info'):
-                    indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                    filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
 
-                    if hasattr(loader.dataset, 'reverse_encoder'):
-                        class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                    elif hasattr(loader.dataset, 'classes'):
-                        class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        # Improved class name handling
+                        if hasattr(loader.dataset, 'reverse_encoder'):
+                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                        elif hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [f"class_{label.item()}" for label in labels]
                     else:
-                        class_names = [str(label.item()) for label in labels]
-                else:
-                    # Fallback metadata generation
-                    indices = [f"{dataset_type}_{batch_idx}_{i}" for i in range(len(inputs))]
-                    filenames = [f"{dataset_type}_{batch_idx}_{i}.png" for i in range(len(inputs))]
-                    class_names = [str(label.item()) for label in labels]
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
 
-                # Extract embeddings
-                embeddings = self.encode(inputs)
-                if isinstance(embeddings, tuple):
-                    embeddings = embeddings[0]
+                        # Better fallback for class names
+                        if hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [str(label.item()) for label in labels]
 
-                # Collect all data
-                all_embeddings.append(embeddings)
-                all_labels.append(labels)
-                all_indices.extend(indices)
-                all_filenames.extend(filenames)
-                all_class_names.extend(class_names)
+                    # Extract embeddings
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
 
-        # Concatenate tensors, keep lists as-is
-        return {
-            'embeddings': torch.cat(all_embeddings),
-            'labels': torch.cat(all_labels),
-            'indices': all_indices,
-            'filenames': all_filenames,
-            'class_names': all_class_names
-        }
+                    # Append to lists
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
 
-    def save_features(self, train_features: Dict[str, torch.Tensor],
-                     test_features: Dict[str, torch.Tensor],
-                     output_path: str) -> None:
-        """Save features with proper metadata concatenation"""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        enable_adaptive = self.config['model'].get('enable_adaptive', True)
+                # Concatenate all results
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
 
-        if enable_adaptive:
-            # Verify all array lengths match before concatenation
-            train_len = len(train_features['embeddings'])
-            test_len = len(test_features['embeddings'])
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels,
+                    'indices': all_indices,
+                    'filenames': all_filenames,
+                    'class_names': all_class_names  # Now contains proper class names in all cases
+                }
 
-            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
-            merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
-                'labels': torch.cat([train_features['labels'], test_features['labels']]),
-                'indices': train_features['indices'] + test_features['indices'],
-                'filenames': train_features['filenames'] + test_features['filenames'],
-                'class_names': train_features['class_names'] + test_features['class_names']
-            }
+                return feature_dict
 
-            # Verify final lengths match
-            final_len = len(merged_features['embeddings'])
-            assert final_len == len(merged_features['labels']) == len(merged_features['indices']) \
-                   == len(merged_features['filenames']) == len(merged_features['class_names']), \
-                   "Length mismatch after concatenation"
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
 
-            df = self._features_to_dataframe(merged_features)
-            df.to_csv(output_path, index=False)
-            logger.info(f"Saved {final_len} samples to {output_path} (adaptive mode)")
-        else:
-            # Non-adaptive mode - save separate files
-            train_df = self._features_to_dataframe(train_features)
-            test_df = self._features_to_dataframe(test_features)
+    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
+        """
+        Save features for training and test sets based on the adaptive flag.
 
-            train_path = output_path.replace(".csv", "_train.csv")
-            test_path = output_path.replace(".csv", "_test.csv")
+        Args:
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            train_df.to_csv(train_path, index=False)
-            test_df.to_csv(test_path, index=False)
-            logger.info(f"Saved {len(train_features['embeddings'])} train samples to {train_path}")
-            logger.info(f"Saved {len(test_features['embeddings'])} test samples to {test_path}")
+            # Access enable_adaptive from training_params
+            try:
+                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
+            except:
+                enable_adaptive = True
+                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+            if enable_adaptive:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features)
+                train_output_path = output_path
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features)
+                test_df = self._features_to_dataframe(test_features)
+
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
+
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
 
     def get_feature_shape(self) -> Tuple[int, ...]:
         """Get shape of extracted features"""
