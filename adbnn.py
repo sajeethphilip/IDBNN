@@ -5440,17 +5440,7 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                # Preserve existing label encoder if already loaded
-                current_encoder = getattr(self, 'label_encoder', None)
-
-                # Update other components
-                self.likelihood_params = components.get('likelihood_params')
-                self.feature_pairs = components.get('feature_pairs')
-
-                # Only update label encoder if not already set
-
                 self.label_encoder.classes_ = components['target_classes']
-                print(f"The target classes are {self.label_encoder.classes_}")
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
                 self.likelihood_params = components['likelihood_params']
@@ -5476,6 +5466,7 @@ class DBNN(GPUDBNN):
             # First try to load existing model and components
             weights_loaded = os.path.exists(self._get_weights_filename())
             components_loaded = self._load_model_components()
+            print(f"The target classes are {self.components_loaded.classes_}")
 
             if not (weights_loaded and components_loaded):
                 print("\033[K" +"Complete model not found. Training required.", end="\r", flush=True)
