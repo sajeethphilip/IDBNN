@@ -544,7 +544,7 @@ class DBNNPredictor:
                 )
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Dimension-aware posterior computation"""
+        """Dimension-aware posterior computation with NaN handling"""
         # Input validation
         if not hasattr(self, 'likelihood_params') or 'bin_probs' not in self.likelihood_params:
             raise RuntimeError("Likelihood parameters not properly initialized")
@@ -552,6 +552,7 @@ class DBNNPredictor:
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs per sample
 
         # Process feature pairs
         feature_groups = torch.stack([
@@ -559,25 +560,37 @@ class DBNNPredictor:
             for pair in self.feature_pairs
         ]).transpose(0, 1)
 
-        # Bin indices computation
+        # Bin indices computation with NaN handling
         bin_indices_dict = {}
         for group_idx in range(len(self.feature_pairs)):
             bin_edges = self.likelihood_params['bin_edges'][group_idx]
             edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])
 
+            # Skip if either feature is NaN (-99999)
+            valid_mask = (feature_groups[:, group_idx, 0] != -99999) & \
+                         (feature_groups[:, group_idx, 1] != -99999)
+
             indices = torch.stack([
-                torch.bucketize(
-                    feature_groups[:, group_idx, dim].contiguous(),
-                    edges[dim].contiguous()
-                ).sub_(1).clamp_(0, len(edges[dim]) - 2)
+                torch.where(
+                    valid_mask,
+                    torch.bucketize(
+                        feature_groups[:, group_idx, dim].contiguous(),
+                        edges[dim].contiguous()
+                    ).sub_(1).clamp_(0, len(edges[dim]) - 2),
+                    -1  # Invalid index for NaN values
+                )
                 for dim in range(2)
             ])
             bin_indices_dict[group_idx] = indices
 
-        # Weighted probability computation with dimension checks
+        # Weighted probability computation with NaN handling
         for group_idx in range(len(self.feature_pairs)):
             bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
             indices = bin_indices_dict[group_idx]
+
+            # Skip NaN pairs
+            valid_mask = (indices[0] != -1) & (indices[1] != -1)
+            valid_counts += valid_mask.float()
 
             # Get weights and verify dimensions
             weights = torch.stack([
@@ -585,19 +598,25 @@ class DBNNPredictor:
                 for c in range(n_classes)
             ]).to(self.device)
 
-            # Explicit dimension verification
-            if bin_probs.shape != weights.shape:
-                raise RuntimeError(
-                    f"Dimension mismatch: bin_probs {bin_probs.shape} vs weights {weights.shape} "
-                    f"for group {group_idx}. Check weight updater initialization."
-                )
-
-            # Apply weights and compute log likelihood
+            # Apply weights and compute log likelihood only for valid pairs
             weighted_probs = bin_probs * weights
-            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
-            log_likelihoods += torch.log(probs.t() + epsilon)
+            probs = torch.where(
+                valid_mask.unsqueeze(0),
+                weighted_probs[:, indices[0], indices[1]],
+                torch.ones_like(weighted_probs[:, 0, 0])  # Neutral value for invalid
+            )
 
-        # Normalize posteriors
+            log_likelihoods += torch.where(
+                valid_mask.unsqueeze(1),
+                torch.log(probs.t() + epsilon),
+                torch.zeros_like(log_likelihoods)
+            )
+
+        # Normalize posteriors by number of valid feature pairs
+        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
+        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
+
+        # Final softmax normalization
         max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
         posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
@@ -605,14 +624,19 @@ class DBNNPredictor:
         return posteriors, bin_indices_dict
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Optimized batch posterior computation for Gaussian model"""
+        """Gaussian posterior computation with NaN handling"""
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs
 
         # Process each feature group
         for pair_idx, pair in enumerate(self.feature_pairs):
             pair_data = features[:, pair]
+
+            # Skip if either feature is NaN (-99999)
+            valid_mask = (pair_data[:, 0] != -99999) & (pair_data[:, 1] != -99999)
+            valid_counts += valid_mask.float()
 
             # Process each class
             for class_idx in range(n_classes):
@@ -623,7 +647,7 @@ class DBNNPredictor:
                 # Center the data
                 centered = pair_data - mean.unsqueeze(0)
 
-                # Compute class likelihood
+                # Compute class likelihood only for valid pairs
                 try:
                     reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
                     prec = torch.inverse(reg_cov)
@@ -631,11 +655,19 @@ class DBNNPredictor:
                         torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
                         dim=1
                     )
-                    class_ll = -0.5 * quad + torch.log(weight + epsilon)
+                    class_ll = torch.where(
+                        valid_mask,
+                        -0.5 * quad + torch.log(weight + epsilon),
+                        torch.zeros(batch_size, device=self.device)
+                    )
                 except RuntimeError:
-                    class_ll = torch.full((batch_size,), -1e10, device=self.device)
+                    class_ll = torch.zeros(batch_size, device=self.device)
 
                 log_likelihoods[:, class_idx] += class_ll
+
+        # Normalize by number of valid feature pairs
+        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
+        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
 
         # Convert to probabilities using softmax
         max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
@@ -3363,14 +3395,16 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Input shape: {X.shape}")
             DEBUG.log(f"Input columns: {X.columns.tolist()}")
             DEBUG.log(f"Input dtypes:\n{X.dtypes}")
+
+            # Replace NA/NaN with -99999 and keep track of locations
+            X = X.copy()
+            self.nan_mask = X.isna()  # Store NaN locations
+            X = X.fillna(-99999)      # Replace with sentinel value
         else:
             DEBUG.log("Input is a tensor, skipping column-specific operations")
-
-        # Make a copy to avoid modifying original data
-        if isinstance(X, pd.DataFrame):
-            X = X.copy()
-        else:
             X = X.clone().detach()
+            self.nan_mask = torch.isnan(X)  # For tensor input
+            X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
 
         # Step 1: Compute global statistics only once during training
         if is_training and not self.global_stats_computed:
