@@ -5442,13 +5442,14 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                self.label_encoder = components['label_encoder']
-                if hasattr(self.label_encoder, 'classes_'):
-                    # If classes_ exists, we're good
-                    pass
-                elif 'target_classes' in components:
-                    # Handle case where classes need to be set
+                # Initialize a fresh LabelEncoder first
+                self.label_encoder = LabelEncoder()
+                # If we have saved classes, set them
+                if 'target_classes' in components:
                     self.label_encoder.classes_ = components['target_classes']
+                elif hasattr(components['label_encoder'], 'classes_'):
+                    # If the saved object has classes, use them
+                    self.label_encoder.classes_ = components['label_encoder'].classes_
                 self.scaler = components['scaler']
                 self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
