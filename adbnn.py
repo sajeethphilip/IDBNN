@@ -4204,6 +4204,31 @@ class DBNN(GPUDBNN):
             self.current_W = temp_W
 
     def _save_best_weights(self):
+        """Save the best weights and corresponding training data to file"""
+        if self.best_W is not None:
+            # Create directory for model components
+            model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
+            os.makedirs(model_dir, exist_ok=True)
+
+            # Save weights
+            weights_dict = {
+                'version': 2,
+                'weights': self.best_W.cpu().numpy().tolist(),
+                'shape': list(self.best_W.shape)
+            }
+            weights_file = os.path.join(model_dir, 'weights.json')
+            with open(weights_file, 'w') as f:
+                json.dump(weights_dict, f)
+
+            # Save training data if available
+            if hasattr(self, 'train_indices') and hasattr(self, 'data'):
+                train_data = self.data.iloc[self.train_indices]
+                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
+                train_data.to_csv(train_data_file, index=False)
+
+            print(f"\033[KSaved best weights and training data to {model_dir}")
+
+    def _save_best_weights_old(self):
         """Save the best weights to file"""
         if self.best_W is not None:
             # Convert tensor to numpy for saving
@@ -4219,6 +4244,45 @@ class DBNN(GPUDBNN):
                 json.dump(weights_dict, f)
 
     def _load_best_weights(self):
+        """Load the best weights and corresponding training data from file"""
+        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
+        weights_file = os.path.join(model_dir, 'weights.json')
+
+        if os.path.exists(weights_file):
+            try:
+                with open(weights_file, 'r') as f:
+                    weights_dict = json.load(f)
+
+                # Load weights
+                weights_array = np.array(weights_dict['weights'])
+                self.best_W = torch.tensor(
+                    weights_array,
+                    dtype=torch.float32,
+                    device=self.device
+                )
+
+                # Load training data if available
+                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
+                if os.path.exists(train_data_file):
+                    train_data = pd.read_csv(train_data_file)
+                    # Find matching indices in current data
+                    self.train_indices = []
+                    current_data = self.data.drop(columns=[self.target_column])
+
+                    for idx, row in train_data.drop(columns=[self.target_column]).iterrows():
+                        matches = (current_data == row).all(axis=1)
+                        if matches.any():
+                            self.train_indices.extend(matches[matches].index.tolist())
+
+                    print(f"\033[KLoaded {len(self.train_indices)} training samples from best model")
+
+                print(f"\033[KLoaded best weights from {weights_file}")
+            except Exception as e:
+                print(f"\033[KWarning: Could not load weights from {weights_file}: {str(e)}")
+                self.best_W = None
+
+
+    def _load_best_weights_old(self):
         """Load the best weights from file if they exist"""
         weights_file = self._get_weights_filename()
         if os.path.exists(weights_file):
