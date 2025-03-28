@@ -1652,8 +1652,6 @@ class GPUDBNN:
         if not fresh and use_previous_model:
             # Load previous model state
             self._load_model_components()
-            print("\n I am here")
-            print(f"The target classes  in if not fresh check is {self.label_encoder.classes_}")
             self._load_best_weights()
             self._load_categorical_encoders()
         elif fresh and use_previous_model:
@@ -5460,7 +5458,6 @@ class DBNN(GPUDBNN):
                 self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
                 self.bin_edges = components.get('bin_edges')  # Load bin_edges
                 self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
-                print(f"The target classes are as in _load_model_components :{self.label_encoder.classes_}")
                 print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
                 return True
         else:
@@ -5475,7 +5472,6 @@ class DBNN(GPUDBNN):
             # First try to load existing model and components
             weights_loaded = os.path.exists(self._get_weights_filename())
             components_loaded = self._load_model_components()
-            print(f"The target classes in predict and save are {self.label_encoder.classes_}")
 
             if not (weights_loaded and components_loaded):
                 print("\033[K" +"Complete model not found. Training required.", end="\r", flush=True)
