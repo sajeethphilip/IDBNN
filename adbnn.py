@@ -413,18 +413,32 @@ class DBNNPredictor:
         df_processed = df_processed.fillna(-99999)
 
         # Convert to numpy array - ensuring float32 dtype
-        X_numpy = df_processed.to_numpy(dtype=np.float32)
+        X_numpy = df_processed.to_numpy(dtype=np.float32)  # Convert to numpy array first
 
         # Apply standardization using precomputed global stats
         if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
             try:
-                X_scaled = (X_numpy - self.global_mean) / self.global_std
+                # Ensure global_mean and global_std are numpy arrays
+                global_mean = np.asarray(self.global_mean)
+                global_std = np.asarray(self.global_std)
+
+                # Check shapes match
+                if X_numpy.shape[1] != len(global_mean):
+                    raise ValueError(
+                        f"Feature dimension mismatch. "
+                        f"Data has {X_numpy.shape[1]} features, "
+                        f"but mean/std have {len(global_mean)} features"
+                    )
+
+                # Perform standardization on numpy array
+                X_scaled = (X_numpy - global_mean) / global_std
             except ValueError as e:
                 raise ValueError(
-                    f"Shape mismatch in standardization. "
+                    f"Standardization error. "
                     f"Data shape: {X_numpy.shape}, "
-                    f"Mean shape: {self.global_mean.shape}, "
-                    f"Std shape: {self.global_std.shape}"
+                    f"Mean shape: {global_mean.shape}, "
+                    f"Std shape: {global_std.shape}. "
+                    f"Error: {str(e)}"
                 ) from e
         else:
             X_scaled = X_numpy
