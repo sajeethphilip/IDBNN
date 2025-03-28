@@ -169,17 +169,33 @@ class DBNNPredictor:
             return False
 
     def _load_label_encoder(self, dataset_name: str):
-        """Load label encoder from saved file"""
+        """Load label encoder from saved file with proper type checking"""
         encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
         if os.path.exists(encoder_path):
-            with open(encoder_path, 'rb') as f:
-                label_encoder = pickle.load(f)
-            print("\033[K" +f"Label encoder loaded from {encoder_path}", end="\r", flush=True)
-            classes_ = label_encoder.classes_
-            self.label_encoder = label_encoder
-            n_classes = len(classes_)
-            print(f"Found the following {n_classes} in label encoder: {classes_}       ")
-            return label_encoder
+            try:
+                with open(encoder_path, 'rb') as f:
+                    label_encoder = pickle.load(f)
+
+                # Ensure we have a valid LabelEncoder
+                if not hasattr(label_encoder, 'classes_'):
+                    if isinstance(label_encoder, dict) and 'classes_' in label_encoder:
+                        # Handle case where encoder was saved as dict (backward compatibility)
+                        new_encoder = LabelEncoder()
+                        new_encoder.classes_ = np.array(label_encoder['classes_'])
+                        label_encoder = new_encoder
+                    else:
+                        raise ValueError("Invalid label encoder format")
+
+                print("\033[K" + f"Label encoder loaded from {encoder_path}")
+                classes_ = label_encoder.classes_
+                self.label_encoder = label_encoder
+                n_classes = len(classes_)
+                print(f"Found the following {n_classes} classes in label encoder: {classes_}")
+                return label_encoder
+
+            except Exception as e:
+                print(f"\033[KError loading label encoder: {str(e)}")
+                raise
         else:
             raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
 
