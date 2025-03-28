@@ -970,121 +970,96 @@ class BaseAutoencoder(nn.Module):
         plt.close()
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """
-        Extract features from a DataLoader with improved label handling and length validation.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata with guaranteed
-            consistent lengths across all components.
-        """
         self.eval()
         all_embeddings = []
         all_labels = []
         all_indices = []
         all_filenames = []
         all_class_names = []
-        processed_samples = 0
-        skipped_samples = 0
 
-        try:
-            with torch.no_grad():
-                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                    # Move data to device
-                    inputs = inputs.to(self.device)
-                    labels = labels.to(self.device)
-                    batch_size = inputs.size(0)
+        # Track dataset composition
+        train_size = len(loader.dataset) - 10000  # MNIST-specific
+        is_concat_dataset = hasattr(loader.dataset, 'datasets')  # Detect ConcatDataset
 
-                    # Initialize batch metadata
-                    batch_indices = []
-                    batch_filenames = []
-                    batch_class_names = []
+        with torch.no_grad():
+            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
+                batch_size = inputs.size(0)
+                global_offset = batch_idx * loader.batch_size
 
-                    # Get metadata - handle both custom and torchvision datasets
-                    if hasattr(loader.dataset, 'get_additional_info'):
-                        # Custom dataset with metadata
-                        for i in range(batch_size):
-                            try:
-                                global_idx = batch_idx * loader.batch_size + i
-                                idx_info, filename = loader.dataset.get_additional_info(global_idx)
-                                batch_indices.append(idx_info)
-                                batch_filenames.append(filename)
+                # Process each sample in batch individually
+                batch_indices = []
+                batch_filenames = []
+                batch_class_names = []
+                valid_samples = []
 
-                                # Handle class names
-                                if hasattr(loader.dataset, 'reverse_encoder'):
-                                    batch_class_names.append(loader.dataset.reverse_encoder[labels[i].item()])
-                                elif hasattr(loader.dataset, 'classes'):
-                                    batch_class_names.append(loader.dataset.classes[labels[i].item()])
-                                else:
-                                    batch_class_names.append(f"class_{labels[i].item()}")
-                            except Exception as e:
-                                logger.warning(f"Error getting metadata for sample {i} in batch {batch_idx}: {str(e)}")
-                                skipped_samples += 1
-                                continue
-                    else:
-                        # Standard torchvision dataset
-                        for i in range(batch_size):
-                            batch_indices.append(f"batch_{batch_idx}_sample_{i}")
-                            batch_filenames.append(f"sample_{batch_idx}_{i}.png")
+                for i in range(batch_size):
+                    current_global_idx = global_offset + i
 
-                            if hasattr(loader.dataset, 'classes'):
-                                batch_class_names.append(loader.dataset.classes[labels[i].item()])
-                            else:
-                                batch_class_names.append(str(labels[i].item()))
-
-                    # Extract embeddings
                     try:
-                        embeddings = self.encode(inputs)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
+                        # Handle metadata differently for train vs test
+                        if current_global_idx < train_size or not is_concat_dataset:
+                            if hasattr(loader.dataset, 'get_additional_info'):
+                                idx_info, filename = loader.dataset.get_additional_info(current_global_idx)
+                            else:
+                                idx_info = f"train_{current_global_idx}"
+                                filename = f"train_{current_global_idx}.png"
+                        else:
+                            # Test set samples
+                            test_idx = current_global_idx - train_size
+                            idx_info = f"test_{test_idx}"
+                            filename = f"test_{test_idx}.png"
 
-                        # Verify batch sizes match
-                        if embeddings.size(0) != batch_size:
-                            raise ValueError(f"Embedding batch size mismatch: {embeddings.size(0)} vs {batch_size}")
+                        # Get class name
+                        if hasattr(loader.dataset, 'classes'):
+                            class_name = loader.dataset.classes[labels[i].item()]
+                        else:
+                            class_name = str(labels[i].item())
 
-                        # Append successful samples
-                        all_embeddings.append(embeddings)
-                        all_labels.append(labels)
-                        all_indices.extend(batch_indices)
-                        all_filenames.extend(batch_filenames)
-                        all_class_names.extend(batch_class_names)
-                        processed_samples += batch_size
+                        batch_indices.append(idx_info)
+                        batch_filenames.append(filename)
+                        batch_class_names.append(class_name)
+                        valid_samples.append(i)
 
                     except Exception as e:
-                        logger.error(f"Error processing batch {batch_idx}: {str(e)}")
-                        skipped_samples += batch_size
+                        logger.warning(f"Skipping sample {current_global_idx}: {str(e)}")
                         continue
 
-            # Concatenate all results with validation
-            if not all_embeddings:
-                raise ValueError("No embeddings were successfully extracted")
+                # Only process valid samples
+                if valid_samples:
+                    valid_inputs = inputs[valid_samples]
+                    valid_labels = labels[valid_samples]
 
-            embeddings = torch.cat(all_embeddings)
-            labels = torch.cat(all_labels)
+                    embeddings = self.encode(valid_inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
 
-            # Final validation
-            if len(embeddings) != len(labels):
-                raise ValueError(f"Final size mismatch: embeddings={len(embeddings)}, labels={len(labels)}")
+                    all_embeddings.append(embeddings)
+                    all_labels.append(valid_labels)
+                    all_indices.extend(batch_indices)
+                    all_filenames.extend(batch_filenames)
+                    all_class_names.extend(batch_class_names)
 
-            # Log processing summary
-            logger.info(f"Feature extraction complete. Processed: {processed_samples}, Skipped: {skipped_samples}")
-            if skipped_samples > 0:
-                logger.warning(f"Skipped {skipped_samples} samples during processing")
+        # Final concatenation and validation
+        if not all_embeddings:
+            raise ValueError("No samples were successfully processed")
 
-            return {
-                'embeddings': embeddings,
-                'labels': labels,
-                'indices': all_indices,
-                'filenames': all_filenames,
-                'class_names': all_class_names
-            }
+        embeddings = torch.cat(all_embeddings)
+        labels = torch.cat(all_labels)
 
-        except Exception as e:
-            logger.error(f"Error during feature extraction: {str(e)}")
-            raise
+        # Verify lengths
+        assert len(embeddings) == len(labels) == len(all_indices) == len(all_filenames) == len(all_class_names), \
+            f"Length mismatch: emb={len(embeddings)}, labels={len(labels)}, indices={len(all_indices)}"
+
+        return {
+            'embeddings': embeddings,
+            'labels': labels,
+            'indices': all_indices,
+            'filenames': all_filenames,
+            'class_names': all_class_names
+        }
+
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -3563,82 +3538,95 @@ class BaseFeatureExtractor(nn.Module, ABC):
 
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """
-        Extract features from a DataLoader with improved label handling.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
-        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []  # Store file indices
-        all_filenames = []  # Store filenames
-        all_class_names = []  # Store actual class names
+        all_indices = []
+        all_filenames = []
+        all_class_names = []
 
-        try:
-            with torch.no_grad():
-                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                    inputs = inputs.to(self.device)
-                    labels = labels.to(self.device)
+        # Track dataset composition
+        train_size = len(loader.dataset) - 10000  # MNIST-specific
+        is_concat_dataset = hasattr(loader.dataset, 'datasets')  # Detect ConcatDataset
 
-                    # Get metadata if available, otherwise use placeholders
-                    if hasattr(loader.dataset, 'get_additional_info'):
-                        # Custom dataset with metadata
-                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+        with torch.no_grad():
+            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
+                batch_size = inputs.size(0)
+                global_offset = batch_idx * loader.batch_size
 
-                        # Improved class name handling
-                        if hasattr(loader.dataset, 'reverse_encoder'):
-                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                        elif hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                # Process each sample in batch individually
+                batch_indices = []
+                batch_filenames = []
+                batch_class_names = []
+                valid_samples = []
+
+                for i in range(batch_size):
+                    current_global_idx = global_offset + i
+
+                    try:
+                        # Handle metadata differently for train vs test
+                        if current_global_idx < train_size or not is_concat_dataset:
+                            if hasattr(loader.dataset, 'get_additional_info'):
+                                idx_info, filename = loader.dataset.get_additional_info(current_global_idx)
+                            else:
+                                idx_info = f"train_{current_global_idx}"
+                                filename = f"train_{current_global_idx}.png"
                         else:
-                            class_names = [f"class_{label.item()}" for label in labels]
-                    else:
-                        # Dataset without metadata (e.g., torchvision)
-                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
-                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                            # Test set samples
+                            test_idx = current_global_idx - train_size
+                            idx_info = f"test_{test_idx}"
+                            filename = f"test_{test_idx}.png"
 
-                        # Better fallback for class names
+                        # Get class name
                         if hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                            class_name = loader.dataset.classes[labels[i].item()]
                         else:
-                            class_names = [str(label.item()) for label in labels]
+                            class_name = str(labels[i].item())
 
-                    # Extract embeddings
-                    embeddings = self.encode(inputs)
+                        batch_indices.append(idx_info)
+                        batch_filenames.append(filename)
+                        batch_class_names.append(class_name)
+                        valid_samples.append(i)
+
+                    except Exception as e:
+                        logger.warning(f"Skipping sample {current_global_idx}: {str(e)}")
+                        continue
+
+                # Only process valid samples
+                if valid_samples:
+                    valid_inputs = inputs[valid_samples]
+                    valid_labels = labels[valid_samples]
+
+                    embeddings = self.encode(valid_inputs)
                     if isinstance(embeddings, tuple):
                         embeddings = embeddings[0]
 
-                    # Append to lists
                     all_embeddings.append(embeddings)
-                    all_labels.append(labels)
-                    all_indices.extend(indices)
-                    all_filenames.extend(filenames)
-                    all_class_names.extend(class_names)
+                    all_labels.append(valid_labels)
+                    all_indices.extend(batch_indices)
+                    all_filenames.extend(batch_filenames)
+                    all_class_names.extend(batch_class_names)
 
-                # Concatenate all results
-                embeddings = torch.cat(all_embeddings)
-                labels = torch.cat(all_labels)
+        # Final concatenation and validation
+        if not all_embeddings:
+            raise ValueError("No samples were successfully processed")
 
-                feature_dict = {
-                    'embeddings': embeddings,
-                    'labels': labels,
-                    'indices': all_indices,
-                    'filenames': all_filenames,
-                    'class_names': all_class_names  # Now contains proper class names in all cases
-                }
+        embeddings = torch.cat(all_embeddings)
+        labels = torch.cat(all_labels)
 
-                return feature_dict
+        # Verify lengths
+        assert len(embeddings) == len(labels) == len(all_indices) == len(all_filenames) == len(all_class_names), \
+            f"Length mismatch: emb={len(embeddings)}, labels={len(labels)}, indices={len(all_indices)}"
 
-        except Exception as e:
-            logger.error(f"Error during feature extraction: {str(e)}")
-            raise
+        return {
+            'embeddings': embeddings,
+            'labels': labels,
+            'indices': all_indices,
+            'filenames': all_filenames,
+            'class_names': all_class_names
+        }
 
 import torch
 import torch.nn as nn
@@ -5036,82 +5024,95 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         return running_loss / len(val_loader), 100. * correct / total
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
-        """
-        Extract features from a DataLoader with improved label handling.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
-        """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []  # Store file indices
-        all_filenames = []  # Store filenames
-        all_class_names = []  # Store actual class names
+        all_indices = []
+        all_filenames = []
+        all_class_names = []
 
-        try:
-            with torch.no_grad():
-                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
-                    inputs = inputs.to(self.device)
-                    labels = labels.to(self.device)
+        # Track dataset composition
+        train_size = len(loader.dataset) - 10000  # MNIST-specific
+        is_concat_dataset = hasattr(loader.dataset, 'datasets')  # Detect ConcatDataset
 
-                    # Get metadata if available, otherwise use placeholders
-                    if hasattr(loader.dataset, 'get_additional_info'):
-                        # Custom dataset with metadata
-                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+        with torch.no_grad():
+            for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
+                batch_size = inputs.size(0)
+                global_offset = batch_idx * loader.batch_size
 
-                        # Improved class name handling
-                        if hasattr(loader.dataset, 'reverse_encoder'):
-                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                        elif hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                # Process each sample in batch individually
+                batch_indices = []
+                batch_filenames = []
+                batch_class_names = []
+                valid_samples = []
+
+                for i in range(batch_size):
+                    current_global_idx = global_offset + i
+
+                    try:
+                        # Handle metadata differently for train vs test
+                        if current_global_idx < train_size or not is_concat_dataset:
+                            if hasattr(loader.dataset, 'get_additional_info'):
+                                idx_info, filename = loader.dataset.get_additional_info(current_global_idx)
+                            else:
+                                idx_info = f"train_{current_global_idx}"
+                                filename = f"train_{current_global_idx}.png"
                         else:
-                            class_names = [f"class_{label.item()}" for label in labels]
-                    else:
-                        # Dataset without metadata (e.g., torchvision)
-                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
-                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                            # Test set samples
+                            test_idx = current_global_idx - train_size
+                            idx_info = f"test_{test_idx}"
+                            filename = f"test_{test_idx}.png"
 
-                        # Better fallback for class names
+                        # Get class name
                         if hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                            class_name = loader.dataset.classes[labels[i].item()]
                         else:
-                            class_names = [str(label.item()) for label in labels]
+                            class_name = str(labels[i].item())
 
-                    # Extract embeddings
-                    embeddings = self.encode(inputs)
+                        batch_indices.append(idx_info)
+                        batch_filenames.append(filename)
+                        batch_class_names.append(class_name)
+                        valid_samples.append(i)
+
+                    except Exception as e:
+                        logger.warning(f"Skipping sample {current_global_idx}: {str(e)}")
+                        continue
+
+                # Only process valid samples
+                if valid_samples:
+                    valid_inputs = inputs[valid_samples]
+                    valid_labels = labels[valid_samples]
+
+                    embeddings = self.encode(valid_inputs)
                     if isinstance(embeddings, tuple):
                         embeddings = embeddings[0]
 
-                    # Append to lists
                     all_embeddings.append(embeddings)
-                    all_labels.append(labels)
-                    all_indices.extend(indices)
-                    all_filenames.extend(filenames)
-                    all_class_names.extend(class_names)
+                    all_labels.append(valid_labels)
+                    all_indices.extend(batch_indices)
+                    all_filenames.extend(batch_filenames)
+                    all_class_names.extend(batch_class_names)
 
-                # Concatenate all results
-                embeddings = torch.cat(all_embeddings)
-                labels = torch.cat(all_labels)
+        # Final concatenation and validation
+        if not all_embeddings:
+            raise ValueError("No samples were successfully processed")
 
-                feature_dict = {
-                    'embeddings': embeddings,
-                    'labels': labels,
-                    'indices': all_indices,
-                    'filenames': all_filenames,
-                    'class_names': all_class_names  # Now contains proper class names in all cases
-                }
+        embeddings = torch.cat(all_embeddings)
+        labels = torch.cat(all_labels)
 
-                return feature_dict
+        # Verify lengths
+        assert len(embeddings) == len(labels) == len(all_indices) == len(all_filenames) == len(all_class_names), \
+            f"Length mismatch: emb={len(embeddings)}, labels={len(labels)}, indices={len(all_indices)}"
 
-        except Exception as e:
-            logger.error(f"Error during feature extraction: {str(e)}")
-            raise
+        return {
+            'embeddings': embeddings,
+            'labels': labels,
+            'indices': all_indices,
+            'filenames': all_filenames,
+            'class_names': all_class_names
+        }
 
     def get_feature_shape(self) -> Tuple[int, ...]:
         """Get shape of extracted features"""
