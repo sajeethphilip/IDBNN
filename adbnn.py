@@ -1679,86 +1679,71 @@ class GPUDBNN:
 
     def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
         """
-        Compute bin edges for all feature pairs once during initialization.
+        Vectorized computation of bin edges with GPU memory management.
 
         Args:
             dataset: Input tensor of shape [n_samples, n_features]
-            bin_sizes: List of integers specifying bin sizes for each dimension
+            bin_sizes: List of integers specifying bin sizes
 
         Returns:
-            List of lists containing bin edge tensors for each feature pair and dimension
-            Structure: [pair_idx][dim_idx] = edge_tensor
+            List of lists containing bin edge tensors for each feature pair
         """
-        DEBUG.log("Starting _compute_bin_edges")
-        print("\033[K" + f"Dataset shape: {dataset.shape}")
-        print("\033[K" + f"Bin sizes: {bin_sizes}")
+        DEBUG.log("Starting vectorized _compute_bin_edges")
 
-        # Validate inputs
-        if not isinstance(dataset, torch.Tensor):
-            raise TypeError(f"Dataset must be a torch.Tensor, got {type(dataset)}")
-        if not isinstance(bin_sizes, list) or not all(isinstance(x, int) for x in bin_sizes):
-            raise TypeError("bin_sizes must be a list of integers")
+        # Memory management parameters
+        MAX_GPU_MEM = 0.8 * torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 1e10
+        SAFETY_FACTOR = 0.7  # Use only 70% of available memory
+
+        # Calculate memory requirements per feature pair
+        bytes_per_pair = 2 * 4 * len(bin_sizes)  # 2 edges, 4 bytes per float, per dimension
+        max_pairs_per_batch = int((MAX_GPU_MEM * SAFETY_FACTOR) / bytes_per_pair)
+        max_pairs_per_batch = max(1, min(max_pairs_per_batch, len(self.feature_pairs)))
 
         bin_edges = []
-        for pair_idx, feature_group in enumerate(self.feature_pairs):
-            try:
-                feature_group = [int(x) for x in feature_group]
-                group_data = dataset[:, feature_group].contiguous()
-                n_dims = len(feature_group)
 
-                # Get appropriate bin sizes for this group
-                group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
+        # Process in memory-managed batches
+        for batch_start in range(0, len(self.feature_pairs), max_pairs_per_batch):
+            batch_end = min(batch_start + max_pairs_per_batch, len(self.feature_pairs))
+            batch_pairs = self.feature_pairs[batch_start:batch_end]
 
-                # Compute bin edges for all dimensions
-                group_bin_edges = []
-                for dim in range(n_dims):
-                    dim_data = group_data[:, dim].contiguous()
-                    dim_min, dim_max = dim_data.min(), dim_data.max()
+            # Vectorized min/max computation for the batch
+            with torch.no_grad():
+                # Stack all features needed in this batch
+                feature_indices = torch.unique(torch.cat([torch.tensor(pair, device=self.device)
+                                                        for pair in batch_pairs]))
+                batch_data = dataset[:, feature_indices]
 
-                    # Calculate padding (1% of range or fixed minimum for zero-range features)
-                    padding = max((dim_max - dim_min) * 0.01, 1e-6)  # Ensure non-zero padding
+                # Compute min/max for all features in batch
+                mins = batch_data.min(dim=0)[0]
+                maxs = batch_data.max(dim=0)[0]
 
-                    # Validate bin size
-                    if group_bin_sizes[dim] <= 1:
-                        raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
+                # Create mapping from feature index to its position in batch_data
+                feat_to_idx = {int(f): i for i, f in enumerate(feature_indices)}
 
-                    # Compute edges with numerical stability checks
-                    if dim_min == dim_max:
-                        # Handle constant features by creating symmetric bins
+                # Process each pair in batch
+                for pair in batch_pairs:
+                    pair_edges = []
+                    for dim, feat in enumerate(pair):
+                        feat_idx = feat_to_idx[int(feat)]
+                        dim_min = mins[feat_idx]
+                        dim_max = maxs[feat_idx]
+                        padding = max((dim_max - dim_min) * 0.01, 1e-6)
+
+                        # Get bin size for this dimension
+                        bin_size = bin_sizes[0] if len(bin_sizes) == 1 else bin_sizes[dim]
+
+                        # Vectorized edge computation
                         edges = torch.linspace(
                             dim_min - padding,
                             dim_max + padding,
-                            group_bin_sizes[dim] + 1,
+                            bin_size + 1,
                             device=self.device
                         ).contiguous()
-                    else:
-                        edges = torch.linspace(
-                            dim_min - padding,
-                            dim_max + padding,
-                            group_bin_sizes[dim] + 1,
-                            device=self.device
-                        ).contiguous()
+                        pair_edges.append(edges)
 
-                    # Verify edges
-                    if not edges.is_contiguous():
-                        edges = edges.contiguous()
-                    if torch.any(torch.isnan(edges)):
-                        raise ValueError(f"NaN values detected in bin edges for pair {pair_idx}, dim {dim}")
+                    bin_edges.append(pair_edges)
 
-                    group_bin_edges.append(edges)
-                    DEBUG.log(f"Pair {pair_idx}, Dim {dim}: edges range {edges[0].item():.3f} to {edges[-1].item():.3f}")
-
-                bin_edges.append(group_bin_edges)
-
-            except Exception as e:
-                print(f"\033[KError processing feature pair {feature_group}: {str(e)}")
-                raise RuntimeError(f"Failed to compute bin edges for pair {pair_idx}") from e
-
-        # Final validation
-        if not bin_edges:
-            raise RuntimeError("No bin edges were computed - check feature pairs")
-        if len(bin_edges) != len(self.feature_pairs):
-            raise RuntimeError("Bin edges count doesn't match feature pairs count")
+            torch.cuda.empty_cache()  # Free memory between batches
 
         return bin_edges
 #----------------------
