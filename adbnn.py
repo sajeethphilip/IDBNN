@@ -5440,7 +5440,16 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                self.label_encoder.classes_ = components['target_classes']
+                # Preserve existing label encoder if already loaded
+                current_encoder = getattr(self, 'label_encoder', None)
+
+                # Update other components
+                self.likelihood_params = components.get('likelihood_params')
+                self.feature_pairs = components.get('feature_pairs')
+
+                # Only update label encoder if not already set
+                if current_encoder is None and 'label_encoder' in components:
+                    self.label_encoder.classes_ = components['target_classes']
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
                 self.likelihood_params = components['likelihood_params']
