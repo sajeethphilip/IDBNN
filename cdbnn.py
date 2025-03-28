@@ -179,45 +179,6 @@ class PredictionManager:
         return model
 
 
-    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output"""
-        try:
-            image_files, class_labels = self._get_image_files_with_labels(data_path)
-            if not image_files:
-                # Check if the path exists
-                if not os.path.exists(data_path):
-                    raise FileNotFoundError(f"Input path does not exist: {data_path}")
-                # Check if it's a directory but has no images
-                if os.path.isdir(data_path):
-                    raise ValueError(f"No valid images found in directory: {data_path}. "
-                                  f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
-                # If it's a file but not a supported image format
-                raise ValueError(f"Unsupported file format: {data_path}. "
-                              f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
-
-            if output_csv is None:
-                dataset_name = os.path.splitext(os.path.basename(data_path))[0] if os.path.isfile(data_path) else os.path.basename(data_path)
-                output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-
-            # Rest of the method remains the same...
-            transform = self._get_transforms()
-            logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
-
-            # Initialize CSV with cluster information
-            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-            with open(output_csv, 'w', newline='') as csvfile:
-                    csv_writer = csv.writer(csvfile)
-                    for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                        row = [
-                            os.path.basename(filename),
-                            true_class,
-                            cluster_assign[j],
-                            cluster_conf[j]
-                        ] + features[j].tolist()
-                        csv_writer.writerow(row)
-
-            logger.info(f"Predictions with clustering saved to {output_csv}")
-
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
         Get a list of image files and their corresponding class labels from the input path.
@@ -309,6 +270,7 @@ class PredictionManager:
 
         return image_files, class_labels
 
+
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """Create dataset with proper handling for all input types."""
         if self.config.get('data_type') == 'torchvision':
@@ -362,9 +324,10 @@ class PredictionManager:
 
             return VirtualDataset(image_files, class_labels, transform)
 
+
     def _save_features(self, train_features: Dict[str, torch.Tensor],
-                      test_features: Dict[str, torch.Tensor],
-                      output_path: str) -> None:
+                     test_features: Dict[str, torch.Tensor],
+                     output_path: str) -> None:
         """Save features with adaptive mode handling."""
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -392,6 +355,7 @@ class PredictionManager:
             test_output_path = output_path.replace(".csv", "_test.csv")
             test_df.to_csv(test_output_path, index=False)
             logger.info(f"Test features saved to {test_output_path}")
+
 
     def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
         """Convert features to DataFrame with adaptive mode handling."""
@@ -425,6 +389,7 @@ class PredictionManager:
                 data_dict[key] = value
 
         return pd.DataFrame(data_dict)
+
 
     def _create_dataset_old(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """Create dataset with proper channel handling for torchvision datasets."""
