@@ -169,35 +169,45 @@ class DBNNPredictor:
             return False
 
     def _load_label_encoder(self, dataset_name: str):
-        """Load label encoder from saved file with proper type checking"""
+        """Robust label encoder loading with validation"""
         encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
-        if os.path.exists(encoder_path):
-            try:
-                with open(encoder_path, 'rb') as f:
-                    label_encoder = pickle.load(f)
 
-                # Ensure we have a valid LabelEncoder
-                if not hasattr(label_encoder, 'classes_'):
-                    if isinstance(label_encoder, dict) and 'classes_' in label_encoder:
-                        # Handle case where encoder was saved as dict (backward compatibility)
-                        new_encoder = LabelEncoder()
-                        new_encoder.classes_ = np.array(label_encoder['classes_'])
-                        label_encoder = new_encoder
-                    else:
-                        raise ValueError("Invalid label encoder format")
-
-                print("\033[K" + f"Label encoder loaded from {encoder_path}")
-                classes_ = label_encoder.classes_
-                self.label_encoder = label_encoder
-                n_classes = len(classes_)
-                print(f"Found the following {n_classes} classes in label encoder: {classes_}")
-                return label_encoder
-
-            except Exception as e:
-                print(f"\033[KError loading label encoder: {str(e)}")
-                raise
-        else:
+        if not os.path.exists(encoder_path):
             raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
+
+        try:
+            with open(encoder_path, 'rb') as f:
+                encoder = pickle.load(f)
+
+            # Handle case where encoder was saved as dict
+            if isinstance(encoder, dict):
+                if 'classes_' in encoder:
+                    new_encoder = LabelEncoder()
+                    new_encoder.classes_ = np.array(encoder['classes_'])
+                    encoder = new_encoder
+                    # Resave it properly
+                    with open(encoder_path, 'wb') as f:
+                        pickle.dump(encoder, f)
+                else:
+                    raise ValueError("Saved encoder dict missing classes_")
+
+            # Validate the loaded encoder
+            if not hasattr(encoder, 'classes_') or not hasattr(encoder, 'transform'):
+                raise ValueError("Invalid label encoder format")
+
+            self.label_encoder = encoder
+            print(f"\033[KLoaded label encoder with classes: {encoder.classes_}")
+            return encoder
+
+        except Exception as e:
+            print(f"\033[KError loading label encoder: {str(e)}")
+            # Attempt to recreate from data
+            if hasattr(self, 'data'):
+                print("Attempting to recreate label encoder from data...")
+                self.label_encoder = LabelEncoder()
+                self.label_encoder.fit(self.data[self.target_column])
+                return self.label_encoder
+            raise
 
 
     def _load_feature_pairs(self, dataset_name: str):
