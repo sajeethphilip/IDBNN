@@ -392,13 +392,8 @@ class DBNNPredictor:
         # Filter to only include expected features
         if self.feature_columns:
             # Ensure we only keep columns that exist in both the model and input data
-            available_cols = [col for col in self.feature_columns if col in df_processed.columns and col != self.target_column]
+            available_cols = [col for col in self.feature_columns if col in df_processed.columns]
             df_processed = df_processed[available_cols]
-
-            # Ensure we have the same features as during training
-            if len(available_cols) != len([col for col in self.feature_columns if col != self.target_column]):
-                missing = set(self.feature_columns) - set(df_processed.columns) - {self.target_column}
-                raise ValueError(f"Missing features required by model: {missing}")
 
         # Handle categorical encoding
         if self.categorical_encoders:
@@ -434,20 +429,7 @@ class DBNNPredictor:
 
         # Apply standardization using precomputed global stats
         if self.global_mean is not None and self.global_std is not None:
-            # Ensure we only use the relevant features from global stats
-            feature_indices = [i for i, col in enumerate(self.feature_columns)
-                             if col in df_processed.columns and col != self.target_column]
-            if len(feature_indices) != X_numpy.shape[1]:
-                raise ValueError(
-                    f"Feature dimension mismatch. Expected {len(feature_indices)} features, "
-                    f"got {X_numpy.shape[1]}. Check input data columns."
-                )
-
-            # Select only the relevant portions of global stats
-            relevant_mean = self.global_mean[feature_indices]
-            relevant_std = self.global_std[feature_indices]
-
-            X_scaled = (X_numpy - relevant_mean) / relevant_std
+            X_scaled = (X_numpy - self.global_mean) / self.global_std
         else:
             X_scaled = X_numpy
 
