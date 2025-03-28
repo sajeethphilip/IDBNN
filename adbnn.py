@@ -3548,134 +3548,57 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized non-parametric likelihood computation with memory-efficient processing
+        """Memory-optimized pairwise likelihood computation with dynamic allocation"""
+        DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
+        print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
 
-        Key improvements while maintaining functionality:
-        1. Batched processing of feature pairs to reduce memory usage
-        2. Better GPU memory management
-        3. Preserved all existing debug/logging functionality
-        4. Same return structure and data types
-        """
-        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel (optimized)")
-        print("\033[K" + "Computing pairwise likelihoods...")
+        # Move inputs to CPU first to save GPU memory
+        dataset_cpu = dataset.cpu()
+        labels_cpu = labels.cpu()
 
-        # Input validation and preparation (unchanged)
-        dataset = torch.as_tensor(dataset, device=self.device).contiguous()
-        labels = torch.as_tensor(labels, device=self.device).contiguous()
-
-        # Initialize progress tracking (unchanged)
-        n_pairs = len(self.feature_pairs) if hasattr(self, 'feature_pairs') else 0
-        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
-
-        # Pre-compute unique classes once (unchanged)
-        unique_classes, class_counts = torch.unique(labels, return_counts=True)
+        # Pre-compute unique classes on CPU
+        unique_classes, class_counts = torch.unique(labels_cpu, return_counts=True)
         n_classes = len(unique_classes)
-        n_samples = len(dataset)
+        n_samples = len(dataset_cpu)
 
-        # Get bin sizes from configuration (unchanged)
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
-        if len(bin_sizes) == 1:
-            n_bins = bin_sizes[0]
-            self.n_bins_per_dim = n_bins
-            DEBUG.log(f" Using uniform {n_bins} bins per dimension")
-        else:
-            DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
+        # Get bin sizes from configuration
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [64])
+        n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
+        self.n_bins_per_dim = n_bins
 
-        # Initialize feature pairs and bin edges if not exists (unchanged)
-        if not hasattr(self, 'feature_pairs') or not hasattr(self, 'bin_edges'):
-            self.feature_pairs = self._generate_feature_combinations(
-                feature_dims,
-                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
-                self.config.get('likelihood_config', {}).get('max_combinations', None)
-            ).to(self.device)
-            self.bin_edges = self._compute_bin_edges(dataset, bin_sizes)
-
-        # Ensure bin_edges is not None (unchanged)
-        if self.bin_edges is None:
-            raise ValueError("bin_edges is not initialized")
-
-        # Initialize storage (unchanged)
+        # Initialize storage on CPU
         all_bin_counts = []
         all_bin_probs = []
 
-        # Calculate optimal batch size based on available memory
-        batch_size = self._calculate_likelihood_batch_size(
-            n_classes,
-            bin_sizes,
-            dataset.element_size() * dataset.nelement()
-        )
-        DEBUG.log(f" Using batch size of {batch_size} feature pairs")
+        # Process feature pairs in smaller batches
+        pair_batch_size = self._calculate_safe_batch_size(n_classes, n_bins)
+        total_pairs = len(self.feature_pairs)
 
-        # Process feature pairs in batches
-        for batch_start in range(0, len(self.feature_pairs), batch_size):
-            batch_end = min(batch_start + batch_size, len(self.feature_pairs))
-            batch_pairs = self.feature_pairs[batch_start:batch_end]
+        with tqdm(total=total_pairs, desc="Processing feature pairs") as pbar:
+            for batch_start in range(0, total_pairs, pair_batch_size):
+                batch_end = min(batch_start + pair_batch_size, total_pairs)
+                batch_pairs = self.feature_pairs[batch_start:batch_end]
 
-            # Process each feature group in current batch
-            for group_idx, feature_group in enumerate(batch_pairs, start=batch_start):
-                feature_group = [int(x) for x in feature_group]
-                DEBUG.log(f" Processing feature group: {feature_group}")
+                # Process this batch of pairs
+                batch_counts, batch_probs = self._process_pair_batch(
+                    dataset_cpu,
+                    labels_cpu,
+                    batch_pairs,
+                    unique_classes,
+                    bin_sizes
+                )
 
-                # Extract group data (unchanged)
-                group_data = dataset[:, feature_group].contiguous()
-                n_dims = len(feature_group)
+                all_bin_counts.extend(batch_counts)
+                all_bin_probs.extend(batch_probs)
+                pbar.update(len(batch_pairs))
 
-                # Get bin sizes for this group (unchanged)
-                group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
-
-                # Get precomputed bin edges (unchanged)
-                bin_edges = self.bin_edges[group_idx]
-
-                # Initialize bin counts (unchanged)
-                bin_shape = [n_classes] + [size for size in group_bin_sizes]
-                bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
-
-                # Process each class (unchanged)
-                for class_idx, class_label in enumerate(unique_classes):
-                    class_mask = labels == class_label
-                    if class_mask.any():
-                        class_data = group_data[class_mask].contiguous()
-
-                        # Compute bin indices (unchanged)
-                        bin_indices = torch.stack([
-                            torch.bucketize(
-                                class_data[:, dim].contiguous(),
-                                bin_edges[dim].contiguous()
-                            ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                            for dim in range(n_dims)
-                        ])
-
-                        # Use scatter_add_ for efficient counting (unchanged)
-                        counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
-                        flat_indices = torch.sum(
-                            bin_indices * torch.tensor(
-                                [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
-                                device=self.device
-                            ).unsqueeze(1),
-                            dim=0
-                        ).long()
-                        counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
-                        bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
-
-                # Apply Laplace smoothing (unchanged)
-                smoothed_counts = bin_counts + 1.0
-                bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
-
-                # Store results (unchanged)
-                all_bin_counts.append(smoothed_counts)
-                all_bin_probs.append(bin_probs)
-
-                DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
-                DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
-                pair_pbar.update(1)
-
-                # Clear intermediate variables to save memory
-                del bin_indices, counts, flat_indices
+                # Clear GPU cache after each batch
                 torch.cuda.empty_cache()
 
-        pair_pbar.close()
+        # Move final results to GPU
+        all_bin_counts = [t.to(self.device) for t in all_bin_counts]
+        all_bin_probs = [t.to(self.device) for t in all_bin_probs]
 
-        # Return same structure as original (unchanged)
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
@@ -3683,6 +3606,90 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs,
             'classes': unique_classes.to(self.device)
         }
+
+    def _process_pair_batch(self, dataset_cpu, labels_cpu, batch_pairs, unique_classes, bin_sizes):
+        """Process a batch of feature pairs on CPU"""
+        batch_counts = []
+        batch_probs = []
+
+        for feature_group in batch_pairs:
+            feature_group = [int(x) for x in feature_group]
+            group_data = dataset_cpu[:, feature_group]
+            n_dims = len(feature_group)
+
+            # Get bin sizes for this group
+            group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
+
+            # Initialize bin counts on CPU
+            bin_shape = [len(unique_classes)] + group_bin_sizes
+            bin_counts = torch.zeros(bin_shape, dtype=torch.float32)
+
+            for class_idx, class_label in enumerate(unique_classes):
+                class_mask = (labels_cpu == class_label)
+                if class_mask.any():
+                    class_data = group_data[class_mask]
+
+                    # Compute bin indices
+                    bin_indices = []
+                    for dim in range(n_dims):
+                        edges = self.bin_edges[dim] if n_dims == 1 else self.bin_edges[feature_group[dim]]
+                        indices = torch.bucketize(
+                            class_data[:, dim],
+                            edges.cpu()
+                        ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
+                        bin_indices.append(indices)
+
+                    # Update counts
+                    if n_dims == 1:
+                        bin_counts[class_idx] = torch.bincount(
+                            bin_indices[0],
+                            minlength=group_bin_sizes[0]
+                        ).float()
+                    else:
+                        # For multi-dimensional, use scatter_add
+                        flat_indices = torch.sum(
+                            torch.stack(bin_indices) * torch.tensor(
+                                [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)]
+                            ).unsqueeze(1),
+                            dim=0
+                        ).long()
+
+                        counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.float32)
+                        counts.scatter_add_(
+                            0,
+                            flat_indices,
+                            torch.ones_like(flat_indices, dtype=torch.float32)
+                        )
+                        bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
+
+            # Apply Laplace smoothing and compute probabilities
+            smoothed_counts = bin_counts + 1.0
+            bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
+
+            batch_counts.append(smoothed_counts)
+            batch_probs.append(bin_probs)
+
+        return batch_counts, batch_probs
+
+    def _calculate_safe_batch_size(self, n_classes, n_bins):
+        """Calculate safe batch size based on available memory"""
+        # Conservative estimate - start small
+        base_size = 10
+
+        if torch.cuda.is_available():
+            try:
+                # Estimate memory needed per pair
+                pair_mem = n_classes * (n_bins ** 2) * 4  # 4 bytes per float
+
+                # Get available memory
+                free_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
+
+                # Calculate how many pairs we can fit (leave 50% buffer)
+                safe_pairs = int((free_mem * 0.5) / pair_mem)
+                return max(1, min(safe_pairs, 100))  # Limit between 1 and 100
+            except:
+                return base_size
+        return base_size
 
     def _calculate_likelihood_batch_size(self, n_classes: int, bin_sizes: List[int], dataset_size: int) -> int:
         """Calculate optimal batch size based on available memory"""
