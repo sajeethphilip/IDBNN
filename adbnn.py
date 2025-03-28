@@ -25,6 +25,7 @@ from scipy import stats
 from scipy.stats import normaltest
 import numpy as np
 from itertools import combinations
+from math import comb
 import torch
 import os
 import pickle
@@ -3691,28 +3692,6 @@ class DBNN(GPUDBNN):
                 return base_size
         return base_size
 
-    def _calculate_likelihood_batch_size(self, n_classes: int, bin_sizes: List[int], dataset_size: int) -> int:
-        """Calculate optimal batch size based on available memory"""
-        if not torch.cuda.is_available():
-            return 32  # Default for CPU
-
-        try:
-            # Estimate memory requirements per pair
-            max_bins = max(bin_sizes) if len(bin_sizes) > 1 else bin_sizes[0]
-            pair_memory = n_classes * (max_bins ** 2) * 4  # 4 bytes per float
-
-            # Get available GPU memory
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            used_mem = torch.cuda.memory_allocated()
-            free_mem = total_mem - used_mem - dataset_size  # Leave room for dataset
-
-            # Calculate safe batch size (leave 20% buffer)
-            batch_size = int((free_mem * 0.8) / pair_memory)
-            return max(1, min(batch_size, 256))  # Limit between 1 and 256
-
-        except Exception as e:
-            DEBUG.log(f"Error calculating batch size: {str(e)}")
-            return 32  # Fallback value
 
     def _compute_gaussian_params(self, dataset: torch.Tensor, labels: torch.Tensor):
         """
