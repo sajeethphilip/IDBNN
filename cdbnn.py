@@ -1033,10 +1033,10 @@ class BaseAutoencoder(nn.Module):
             train_len = len(train_features['embeddings'])
             test_len = len(test_features['embeddings'])
 
-            # Concatenate ALL metadata arrays
+            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
             merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']),
-                'labels': torch.cat([train_features['labels'], test_features['labels']),
+                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
+                'labels': torch.cat([train_features['labels'], test_features['labels']]),
                 'indices': train_features['indices'] + test_features['indices'],
                 'filenames': train_features['filenames'] + test_features['filenames'],
                 'class_names': train_features['class_names'] + test_features['class_names']
@@ -1063,6 +1063,7 @@ class BaseAutoencoder(nn.Module):
             test_df.to_csv(test_path, index=False)
             logger.info(f"Saved {len(train_features['embeddings'])} train samples to {train_path}")
             logger.info(f"Saved {len(test_features['embeddings'])} test samples to {test_path}")
+
 
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -3578,10 +3579,10 @@ class BaseFeatureExtractor(nn.Module, ABC):
             train_len = len(train_features['embeddings'])
             test_len = len(test_features['embeddings'])
 
-            # Concatenate ALL metadata arrays
+            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
             merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']),
-                'labels': torch.cat([train_features['labels'], test_features['labels']),
+                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
+                'labels': torch.cat([train_features['labels'], test_features['labels']]),
                 'indices': train_features['indices'] + test_features['indices'],
                 'filenames': train_features['filenames'] + test_features['filenames'],
                 'class_names': train_features['class_names'] + test_features['class_names']
@@ -3608,6 +3609,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
             test_df.to_csv(test_path, index=False)
             logger.info(f"Saved {len(train_features['embeddings'])} train samples to {train_path}")
             logger.info(f"Saved {len(test_features['embeddings'])} test samples to {test_path}")
+
 
 
 import torch
@@ -5069,10 +5071,10 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
             train_len = len(train_features['embeddings'])
             test_len = len(test_features['embeddings'])
 
-            # Concatenate ALL metadata arrays
+            # Concatenate ALL metadata arrays - FIXED SYNTAX HERE
             merged_features = {
-                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']),
-                'labels': torch.cat([train_features['labels'], test_features['labels']),
+                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
+                'labels': torch.cat([train_features['labels'], test_features['labels']]),
                 'indices': train_features['indices'] + test_features['indices'],
                 'filenames': train_features['filenames'] + test_features['filenames'],
                 'class_names': train_features['class_names'] + test_features['class_names']
