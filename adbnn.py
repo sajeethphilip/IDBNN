@@ -1651,7 +1651,8 @@ class GPUDBNN:
         # Handle model state based on flags
         if not fresh and use_previous_model:
             # Load previous model state
-            self._load_model_components()
+            components_loaded=self._load_model_components()
+            print(f"The target classes are {components_loaded.classes_}")
             self._load_best_weights()
             self._load_categorical_encoders()
         elif fresh and use_previous_model:
@@ -5466,7 +5467,7 @@ class DBNN(GPUDBNN):
             # First try to load existing model and components
             weights_loaded = os.path.exists(self._get_weights_filename())
             components_loaded = self._load_model_components()
-            print(f"The target classes are {self.components_loaded.classes_}")
+            print(f"The target classes are {components_loaded.classes_}")
 
             if not (weights_loaded and components_loaded):
                 print("\033[K" +"Complete model not found. Training required.", end="\r", flush=True)
