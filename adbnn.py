@@ -3644,13 +3644,16 @@ class DBNN(GPUDBNN):
         batch_counts = []
         batch_probs = []
 
-        for feature_group in batch_pairs:
+        for pair_idx, feature_group in enumerate(batch_pairs):
             feature_group = [int(x) for x in feature_group]
             group_data = dataset_cpu[:, feature_group]
             n_dims = len(feature_group)
 
             # Get bin sizes for this group
             group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
+
+            # Get bin edges for this group (already on correct device)
+            group_bin_edges = self.bin_edges[pair_idx]
 
             # Initialize bin counts on CPU
             bin_shape = [len(unique_classes)] + group_bin_sizes
@@ -3664,10 +3667,11 @@ class DBNN(GPUDBNN):
                     # Compute bin indices
                     bin_indices = []
                     for dim in range(n_dims):
-                        edges = self.bin_edges[dim] if n_dims == 1 else self.bin_edges[feature_group[dim]]
+                        # Get edges for this dimension (already a tensor)
+                        edges = group_bin_edges[dim]
                         indices = torch.bucketize(
                             class_data[:, dim],
-                            edges.cpu()
+                            edges.cpu()  # Move edges to CPU to match data
                         ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
                         bin_indices.append(indices)
 
