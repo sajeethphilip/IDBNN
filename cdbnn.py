@@ -96,7 +96,7 @@ class PredictionManager:
 
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
-        """Extract a compressed archive to a directory."""
+        """Extract a compressed archive to a directory and return the data directory path."""
         if archive_path.endswith('.zip'):
             with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
@@ -108,7 +108,19 @@ class PredictionManager:
                 tar_ref.extractall(extract_dir)
         else:
             raise ValueError(f"Unsupported archive format: {archive_path}")
+
+        # Check if we have train/test folders or should use subfolders directly
+        contents = os.listdir(extract_dir)
+        if 'train' not in contents and 'test' not in contents:
+            # No train/test folders - look for subfolders to use as classes
+            subfolders = [f for f in contents if os.path.isdir(os.path.join(extract_dir, f))]
+            if subfolders:
+                # Use the parent folder name as dataset name
+                dataset_name = os.path.splitext(os.path.basename(archive_path))[0]
+                return extract_dir  # Return the root as data directory
+
         return extract_dir
+
 
     def _get_image_files(self, input_path: str) -> List[str]:
         """Get a list of image files from the input path."""
@@ -167,72 +179,33 @@ class PredictionManager:
         return model
 
 
-    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output"""
+def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
+    """Predict features with consistent clustering output"""
+    try:
         image_files, class_labels = self._get_image_files_with_labels(data_path)
         if not image_files:
-            raise ValueError(f"No valid images found in {data_path}")
+            # Check if the path exists
+            if not os.path.exists(data_path):
+                raise FileNotFoundError(f"Input path does not exist: {data_path}")
+            # Check if it's a directory but has no images
+            if os.path.isdir(data_path):
+                raise ValueError(f"No valid images found in directory: {data_path}. "
+                              f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
+            # If it's a file but not a supported image format
+            raise ValueError(f"Unsupported file format: {data_path}. "
+                          f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
 
         if output_csv is None:
-            dataset_name = self.config['dataset']['name']
+            dataset_name = os.path.splitext(os.path.basename(data_path))[0] if os.path.isfile(data_path) else os.path.basename(data_path)
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
+        # Rest of the method remains the same...
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
         # Initialize CSV with cluster information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
-            csv_writer = csv.writer(csvfile)
-            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(
-                ['filename', 'target', 'cluster_assignment', 'cluster_confidence'] +
-                feature_cols
-            )
-
-        # Process images in batches
-        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
-            batch_files = image_files[i:i + batch_size]
-            batch_labels = class_labels[i:i + batch_size]
-            batch_images = []
-
-            for filename in batch_files:
-                try:
-                    image = Image.open(filename).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append(image_tensor)
-                except Exception as e:
-                    logger.error(f"Error loading image {filename}: {str(e)}")
-                    continue
-
-            if not batch_images:
-                continue
-
-            batch_tensor = torch.cat(batch_images, dim=0)
-
-            # Get predictions with clustering
-            with torch.no_grad():
-                output = self.model(batch_tensor)
-
-                if isinstance(output, dict):
-                    embedding = output.get('embedding', output.get('features'))
-                    latent_info = output
-                else:
-                    embedding = output[0]
-                    latent_info = self.model.organize_latent_space(embedding)
-
-                features = embedding.cpu().numpy()
-
-                # Get cluster information
-                if 'cluster_assignments' in latent_info:
-                    cluster_assign = latent_info['cluster_assignments'].cpu().numpy()
-                    cluster_conf = latent_info['cluster_probabilities'].max(1)[0].cpu().numpy()
-                else:
-                    cluster_assign = ['NA'] * len(batch_files)
-                    cluster_conf = ['NA'] * len(batch_files)
-
-            # Write predictions to CSV
-            with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
                     row = [
@@ -248,7 +221,7 @@ class PredictionManager:
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
         Get a list of image files and their corresponding class labels from the input path.
-        Assumes images are organized in subfolders under train/test folders.
+        Handles cases where images are in subfolders without train/test structure.
         """
         image_files = []
         class_labels = []
@@ -257,16 +230,33 @@ class PredictionManager:
             # Single image file (no class label)
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                 image_files.append(input_path)
-                class_labels.append("unknown")  # No class label available
+                class_labels.append("unknown")
         elif os.path.isdir(input_path):
-            # Directory of images - recursively search for image files
-            for root, dirs, files in os.walk(input_path):
-                for file in files:
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                        image_files.append(os.path.join(root, file))
-                        # Extract class label from subfolder name
-                        class_label = os.path.basename(root)
-                        class_labels.append(class_label)
+            # Check if we have train/test folders
+            contents = os.listdir(input_path)
+            if 'train' in contents or 'test' in contents:
+                # Standard structure with train/test folders
+                train_dir = os.path.join(input_path, 'train') if 'train' in contents else None
+                test_dir = os.path.join(input_path, 'test') if 'test' in contents else None
+
+                for data_dir in [train_dir, test_dir]:
+                    if data_dir and os.path.isdir(data_dir):
+                        for root, dirs, files in os.walk(data_dir):
+                            for file in files:
+                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                                    image_files.append(os.path.join(root, file))
+                                    class_label = os.path.basename(root)
+                                    class_labels.append(class_label)
+            else:
+                # No train/test folders - treat subfolders as classes
+                for class_name in os.listdir(input_path):
+                    class_dir = os.path.join(input_path, class_name)
+                    if os.path.isdir(class_dir):
+                        for root, _, files in os.walk(class_dir):
+                            for file in files:
+                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                                    image_files.append(os.path.join(root, file))
+                                    class_labels.append(class_name)
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
