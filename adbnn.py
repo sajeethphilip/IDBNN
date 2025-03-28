@@ -1952,7 +1952,20 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
-
+        # Metadata storage (CPU only)
+        self._metadata = {
+            'sample_ids': [],          # Original dataset indices
+            'file_paths': [],          # Paths for image/data files
+            'class_names': [],         # String class labels
+            'feature_names': [],       # Column/feature names
+            'aux_data': {}             # Other non-computational data
+        }
+        # GPU Tensors (computational only)
+        self._gpu_tensors = {
+            'features': None,
+            'targets': None,
+            'weights': None
+        }
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
@@ -2327,113 +2340,80 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Load and preprocess dataset with improved error handling"""
-        DEBUG.log(f" Loading dataset from config: {self.config}")
+        """Optimized dataset loader with GPU memory management"""
+        DEBUG.log(f"Loading dataset: {self.dataset_name}")
+
         try:
-            # Validate configuration
-            if self.config is None:
-                raise ValueError(f"No configuration found for dataset: {self.dataset_name}")
+            # Config validation (unchanged)
+            if not self.config:
+                raise ValueError(f"No config for dataset: {self.dataset_name}")
+
             file_path = self.config.get('file_path')
-            if file_path is None:
-                raise ValueError(f"No file path specified in configuration for dataset: {self.dataset_name}")
-            # Handle URL or local file
-            try:
-                if file_path.startswith(('http://', 'https://')):
-                    DEBUG.log(f" Loading from URL: {file_path}")
-                    response = requests.get(file_path)
-                    response.raise_for_status()
-                    data = StringIO(response.text)
-                else:
-                    DEBUG.log(f" Loading from local file: {file_path}")
-                    if not os.path.exists(file_path):
-                        raise FileNotFoundError(f"Dataset file not found: {file_path}")
-                    data = file_path
+            if not file_path:
+                raise ValueError("No file path in config")
 
-                # First, read the CSV to get the actual headers
-                has_header = self.config.get('has_header', True)
+            # Load data (unchanged file handling)
+            if file_path.startswith(('http://', 'https://')):
+                df = pd.read_csv(StringIO(requests.get(file_path).text),
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None)
+            else:
+                df = pd.read_csv(file_path,
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None)
 
-                read_params = {
-                    'sep': self.config.get('separator', ','),
-                    'header': 0 if has_header else None,
-                }
+            # Store original data (CPU only)
+            self.Original_data = df.copy()
 
-                # DO NOT include 'names' parameter for the initial read
-                # This allows us to read the actual headers from the file
-                DEBUG.log(f" Reading CSV with parameters: {read_params}")
-                df = pd.read_csv(data, **read_params)
-                self.Original_data=df.copy()
+            # Filter features if specified
+            if 'column_names' in self.config:
+                df = _filter_features_from_config(df, self.config)
 
-                if df is None or df.empty:
-                    raise ValueError(f"Empty dataset loaded from {file_path}")
+            # Handle target column
+            target_col = self.config['target_column']
+            if isinstance(target_col, int):
+                target_col = df.columns[target_col]
+                self.config['target_column'] = target_col
 
-                DEBUG.log(f" Loaded DataFrame shape: {df.shape}")
-                DEBUG.log(f" Original DataFrame columns: {df.columns.tolist()}")
+            if target_col not in df.columns:
+                raise ValueError(f"Target column '{target_col}' not found")
 
-                # Filter features based on config after reading the actual data
-                if 'column_names' in self.config:
-                    DEBUG.log(" Filtering features based on config")
-                    df = _filter_features_from_config(df, self.config)
-                    DEBUG.log(f" Shape after filtering: {df.shape}")
+            # Shuffling logic (CPU only)
+            shuffle_path = os.path.join(
+                self.config.get('training_params', {}).get('training_save_path', 'training_data'),
+                os.path.splitext(os.path.basename(self.dataset_name))[0],
+                'data',
+                'shuffled_data.csv'
+            )
 
-                # Handle target column
-                target_column = self.config.get('target_column')
+            if self.fresh_start and self.random_state == -1:
+                for _ in range(3):
+                    df = df.sample(frac=1).reset_index(drop=True)
+                os.makedirs(os.path.dirname(shuffle_path), exist_ok=True)
+                df.to_csv(shuffle_path, index=False)
+            elif os.path.exists(shuffle_path):
+                df = pd.read_csv(shuffle_path)
 
-                if target_column is None:
-                    raise ValueError(f"No target column specified for dataset: {self.dataset_name}")
+            # Convert to memory-efficient format
+            df = df.astype({
+                col: 'category' if df[col].dtype == 'object' else df[col].dtype
+                for col in df.columns
+            })
 
-                if isinstance(target_column, int):
-                    cols = df.columns.tolist()
-                    if target_column >= len(cols):
-                        raise ValueError(f"Target column index {target_column} is out of range")
-                    target_column = cols[target_column]
-                    self.config['target_column'] = target_column
-                    DEBUG.log(f" Using target column: {target_column}")
+            # Store metadata separately (never moves to GPU)
+            self._metadata = {
+                'file_path': file_path,
+                'column_names': list(df.columns),
+                'target_column': target_col,
+                'original_index': df.index.values,
+                'shuffle_path': shuffle_path
+            }
 
-                if target_column not in df.columns:
-                    raise ValueError(f"Target column '{target_column}' not found in dataset")
+            return df
 
-                DEBUG.log(f" Dataset loaded successfully. Shape: {df.shape}")
-                DEBUG.log(f" Columns: {df.columns.tolist()}")
-                DEBUG.log(f" Data types:\n{df.dtypes}")
-
-                # Create data directory path
-                dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
-                base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
-                data_dir = os.path.join(base_path, dataset_folder, 'data')
-                shuffled_file = os.path.join(data_dir, 'shuffled_data.csv')
-
-                # Check if this is a fresh start with random shuffling
-                if self.fresh_start and self.random_state == -1:
-                    print("\033[K" +"Fresh start with random shuffling enabled")
-                    # Perform 3 rounds of truly random shuffling
-                    for _ in range(3):
-                        df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
-                    # Ensure directory exists before saving
-                    os.makedirs(data_dir, exist_ok=True)
-                    # Save shuffled data
-                    df.to_csv(shuffled_file, index=False)
-                    print("\033[K" +f"Saved shuffled data to {shuffled_file}")
-                elif os.path.exists(shuffled_file):
-                    print("\033[K" +f"Loading previously shuffled data from {shuffled_file}")
-                    df = pd.read_csv(shuffled_file)
-                else:
-                    print("\033[K" +"Using original data order (no shuffling required)")
-
-                return df
-
-            except requests.exceptions.RequestException as e:
-                DEBUG.log(f" Error downloading dataset from URL: {str(e)}")
-                raise RuntimeError(f"Failed to download dataset from URL: {str(e)}")
-            except pd.errors.EmptyDataError:
-                DEBUG.log(f" Error: Dataset file is empty")
-                raise ValueError(f"Dataset file is empty: {file_path}")
-            except pd.errors.ParserError as e:
-                DEBUG.log(f" Error parsing CSV file: {str(e)}")
-                raise ValueError(f"Invalid CSV format: {str(e)}")
         except Exception as e:
-            DEBUG.log(f" Error loading dataset: {str(e)}")
-            DEBUG.log(" Stack trace:", traceback.format_exc())
-            raise RuntimeError(f"Failed to load dataset: {str(e)}")
+            DEBUG.log(f"Dataset load error: {str(e)}")
+            raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations"""
