@@ -5434,6 +5434,7 @@ class DBNN(GPUDBNN):
     def _load_model_components(self):
         """Load all model components"""
         components_file = self._get_model_components_filename()
+        print(f"The model components are loaded from {components_file}")
         if os.path.exists(components_file):
             print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
