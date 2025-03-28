@@ -621,19 +621,29 @@ class DBNNPredictor:
                 for c in range(n_classes)
             ]).to(self.device)
 
-            # Apply weights and compute log likelihood only for valid pairs
-            weighted_probs = bin_probs * weights
-            probs = torch.where(
-                valid_mask.unsqueeze(0),
-                weighted_probs[:, indices[0], indices[1]],
-                torch.ones_like(weighted_probs[:, 0, 0])  # Neutral value for invalid
-            )
+            # Ensure weights and bin_probs have compatible shapes
+            if weights.shape != bin_probs.shape:
+                raise ValueError(f"Shape mismatch between weights {weights.shape} and bin_probs {bin_probs.shape}")
 
-            log_likelihoods += torch.where(
-                valid_mask.unsqueeze(1),
-                torch.log(probs.t() + epsilon),
-                torch.zeros_like(log_likelihoods)
-            )
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights
+
+            # Gather probabilities for all samples and classes
+            # Need to handle batch dimension properly
+            batch_probs = torch.zeros((n_classes, batch_size), device=self.device)
+
+            for class_idx in range(n_classes):
+                # Get probabilities for this class
+                class_probs = weighted_probs[class_idx]
+
+                # Gather probabilities using indices
+                batch_probs[class_idx] = torch.where(
+                    valid_mask,
+                    class_probs[indices[0], indices[1]],
+                    torch.ones_like(valid_mask, dtype=torch.float32)
+                )
+
+            log_likelihoods += torch.log(batch_probs.t() + epsilon)
 
         # Normalize posteriors by number of valid feature pairs
         valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
