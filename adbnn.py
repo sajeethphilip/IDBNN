@@ -2362,8 +2362,9 @@ class DBNN(GPUDBNN):
                                sep=self.config.get('separator', ','),
                                header=0 if self.config.get('has_header', True) else None)
 
-            # Store original data (CPU only)
-            self.Original_data = df.copy()
+             # Store original data (CPU only)
+            self.Original_data = df.copy()  # This is the line that was missing
+            self.X_Orig = df.drop(columns=[self.target_column]).copy()  # Add this line
 
             # Filter features if specified
             if 'column_names' in self.config:
@@ -5839,101 +5840,6 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
         print("\033[K" + "Example: 'dataset1.conf' and 'dataset1.csv'")
 
     return dataset_pairs
-
-def process_datasets():
-    """Main function to process all datasets"""
-    # Find all dataset pairs
-    dataset_pairs = find_dataset_pairs()
-
-    if not dataset_pairs:
-        print("\033[K" +"No matching .conf and .csv file pairs found in the current directory.")
-        return
-
-    print("\033[K" +f"Found {len(dataset_pairs)} dataset pair(s)")
-
-    # Process each dataset
-    for basename, conf_path, csv_path in dataset_pairs:
-        print("\033[K" +f"{'='*60}")
-        print("\033[K" +f"Dataset: {basename}")
-        print("\033[K" +f"Config file: {conf_path}")
-        print("\033[K" +f"Data file: {csv_path}")
-        print("\033[K" +'='*60)
-
-        # Validate dataset name
-        if not basename or not isinstance(basename, str):
-            print("\033[K" +f"Invalid dataset name: {basename}. Skipping...")
-            continue
-
-        # Print dataset information
-        print_dataset_info(conf_path, csv_path)
-
-        # Ask user if they want to process this dataset
-        response = input("\nProcess this dataset? (y/n): ").lower()
-        if response == 'n':
-            print("\033[K" +f"Skipping dataset: {basename}")
-            continue
-
-        # Process dataset
-        print("\033[K" +f"Processing dataset: {basename}")
-        try:
-            # Create DBNN instance with specific dataset name
-            model = DBNN(dataset_name=basename)
-
-            # Optionally create an invertible model
-            if model.config.get('enable_invertible', False):
-                invertible_model = model.create_invertible_model(
-                    reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
-                    feedback_strength=model.config.get('feedback_strength', 0.3)
-                )
-                print("\033[K" +"Created invertible DBNN model")
-
-            start_time = datetime.now()
-            results = model.process_dataset(conf_path)
-            end_time = datetime.now()
-
-            # Print results
-            print("\033[K" +"Processing complete!")
-            print("\033[K" +f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
-            print("\033[K" +f"Results saved to: {results['results_path']}")
-            print("\033[K" +f"Training log saved to: {results['log_path']}")
-            print("\033[K" +f"Processed {results['n_samples']} samples with {results['n_features']} features")
-            print("\033[K" +f"Excluded {results['n_excluded']} features")
-            # Save the label encoder after training
-            model = DBNN(dataset_name=basename)
-            save_label_encoder(model.label_encoder, basename)
-
-        except FileNotFoundError as e:
-            print("\033[K" +f"Dataset file not found: {e}")
-            print("\033[K" +"Searching UCI repository for the dataset...")
-            dataset_processor = DatasetProcessor()
-            datasets = dataset_processor.search_uci_repository(basename)
-            if datasets:
-                print("\033[K" +f"Found {len(datasets)} matching datasets in UCI repository:")
-                for i, dataset in enumerate(datasets):
-                    print("\033[K" +f"{i+1}. {dataset['name']} - {dataset['url']}")
-                choice = input("\nEnter the number of the dataset to download (or 'q' to quit): ")
-                if choice.lower() != 'q':
-                    try:
-                        selected_dataset = datasets[int(choice) - 1]
-                        print("\033[K" +f"Downloading dataset: {selected_dataset['name']}")
-                        dataset_path = dataset_processor.download_uci_dataset(selected_dataset['name'], selected_dataset['url'])
-                        print("\033[K" +f"Dataset downloaded to: {dataset_path}")
-                        # Process the downloaded dataset
-                        model = DBNN(dataset_name=selected_dataset['name'])
-                        results = model.process_dataset(dataset_path)
-                        print("\033[K" +"Processing complete!")
-                        print("\033[K" +f"Results saved to: {results['results_path']}")
-                    except Exception as e:
-                        print("\033[K" +f"Error downloading or processing dataset: {str(e)}")
-            else:
-                print("\033[K" +f"No matching datasets found in UCI repository for: {basename}")
-
-        except Exception as e:
-            print("\033[K" +f"Error processing dataset {basename}:")
-            print("\033[K" +f"Error details: {str(e)}")
-            traceback.print_exc()
-
-    print("\033[K" +"All datasets processed")
 
 
 def validate_config(config: dict) -> dict:
