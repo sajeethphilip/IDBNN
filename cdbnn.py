@@ -178,6 +178,85 @@ class PredictionManager:
         logger.info("Model loaded successfully with clustering parameters.")
         return model
 
+    def _copy_class_folders(self, src_dir: str, dest_dir: str):
+        """Copy class folders from source to destination directory.
+
+        Args:
+            src_dir: Source directory containing class folders
+            dest_dir: Destination directory (will create class folders here)
+        """
+        for class_name in os.listdir(src_dir):
+            class_src = os.path.join(src_dir, class_name)
+            class_dest = os.path.join(dest_dir, class_name)
+
+            if os.path.isdir(class_src):
+                # If destination exists, merge contents
+                if os.path.exists(class_dest):
+                    for f in os.listdir(class_src):
+                        src_file = os.path.join(class_src, f)
+                        if os.path.isfile(src_file):
+                            shutil.copy2(src_file, class_dest)
+                else:
+                    shutil.copytree(class_src, class_dest)
+
+    def _extract_and_organize_data(self, input_path: str) -> str:
+        """Extract and organize data into consistent train/class structure.
+
+        Args:
+            input_path: Path to input file or directory
+
+        Returns:
+            Path to the organized data directory
+        """
+        dataset_name = self.config['dataset']['name']
+        base_data_dir = os.path.join('data', dataset_name)
+        train_dir = os.path.join(base_data_dir, 'train')
+
+        # Create directory structure if it doesn't exist
+        os.makedirs(train_dir, exist_ok=True)
+
+        # If input is a compressed file, extract it first
+        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+            extract_dir = os.path.join(base_data_dir, 'extracted')
+            os.makedirs(extract_dir, exist_ok=True)
+            input_path = self._extract_archive(input_path, extract_dir)
+
+        # Handle different input structures
+        if os.path.isdir(input_path):
+            # Case 1: Already has train/test structure
+            if os.path.exists(os.path.join(input_path, 'train')) or os.path.exists(os.path.join(input_path, 'test')):
+                # Copy all train images
+                if os.path.exists(os.path.join(input_path, 'train')):
+                    self._copy_class_folders(os.path.join(input_path, 'train'), train_dir)
+
+                # Copy all test images (merge into train)
+                if os.path.exists(os.path.join(input_path, 'test')):
+                    self._copy_class_folders(os.path.join(input_path, 'test'), train_dir)
+
+            # Case 2: Has direct class subfolders
+            elif any(os.path.isdir(os.path.join(input_path, f)) for f in os.listdir(input_path)):
+                self._copy_class_folders(input_path, train_dir)
+
+            # Case 3: Flat directory of images (assign to single class)
+            else:
+                class_name = 'class_0'
+                class_dir = os.path.join(train_dir, class_name)
+                os.makedirs(class_dir, exist_ok=True)
+
+                for f in os.listdir(input_path):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        shutil.copy2(os.path.join(input_path, f), class_dir)
+
+        # Case 4: Single image file
+        elif os.path.isfile(input_path) and input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+            class_name = 'class_0'
+            class_dir = os.path.join(train_dir, class_name)
+            os.makedirs(class_dir, exist_ok=True)
+            shutil.copy2(input_path, os.path.join(class_dir, os.path.basename(input_path)))
+
+        return train_dir
+
+
     def _handle_torchvision_dataset(self) -> Tuple[List[str], List[str]]:
         """Special handling for torchvision datasets"""
         dataset_name = self.config['dataset']['name'].upper()
@@ -206,63 +285,19 @@ class PredictionManager:
                     class_labels.append(class_label)
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
-        """
-        Get a list of image files and their corresponding class labels from the input path.
-        Handles both traditional train/test structure and direct class subfolders.
-        """
+        """Get image files and labels from the organized train directory."""
+        train_dir = self._extract_and_organize_data(input_path)
+
         image_files = []
         class_labels = []
 
-        # Handle torchvision datasets
-        if self.config.get('data_type') == 'torchvision':
-            return self._handle_torchvision_dataset()
-
-        # Handle compressed files
-        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-            input_path = self._extract_archive(input_path)
-
-        # Handle directory structure
-        if os.path.isdir(input_path):
-            # First check if we have direct class subfolders (no train/test)
-            class_subfolders = [f for f in os.listdir(input_path)
-                              if os.path.isdir(os.path.join(input_path, f))]
-
-            # Check if these subfolders contain images (likely class folders)
-            if class_subfolders and any(
-                any(f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
-                    for f in os.listdir(os.path.join(input_path, subfolder)))
-                for subfolder in class_subfolders
-            ):
-                # Process as direct class folders
-                for class_name in class_subfolders:
-                    class_dir = os.path.join(input_path, class_name)
-                    for root, _, files in os.walk(class_dir):
-                        for file in files:
-                            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                                image_files.append(os.path.join(root, file))
-                                class_labels.append(class_name)
-            else:
-                # Check for traditional train/test structure
-                train_dir = os.path.join(input_path, 'train')
-                test_dir = os.path.join(input_path, 'test')
-
-                if os.path.exists(train_dir):
-                    self._process_folder(train_dir, image_files, class_labels)
-                if os.path.exists(test_dir) and not self.config.get('execution_flags', {}).get('enable_adaptive', True):
-                    self._process_folder(test_dir, image_files, class_labels)
-
-                if not image_files:
-                    raise ValueError(f"No valid image files found in {input_path}. "
-                                   f"Expected either:\n"
-                                   f"1. Class subfolders directly under the directory\n"
-                                   f"2. Standard train/test folder structure")
-        elif os.path.isfile(input_path):
-            # Single image file
-            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                image_files.append(input_path)
-                class_labels.append("unknown")
-        else:
-            raise ValueError(f"Invalid input path: {input_path}")
+        for class_name in os.listdir(train_dir):
+            class_dir = os.path.join(train_dir, class_name)
+            if os.path.isdir(class_dir):
+                for f in os.listdir(class_dir):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                        image_files.append(os.path.join(class_dir, f))
+                        class_labels.append(class_name)
 
         return image_files, class_labels
 
