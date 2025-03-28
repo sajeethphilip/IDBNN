@@ -5442,9 +5442,9 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                self.label_encoder.classes_ = components['target_classes']
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
+                self.label_encoder.classes_ = components['target_classes']
                 self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
                 self.feature_columns = components.get('feature_columns')
