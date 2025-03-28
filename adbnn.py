@@ -375,13 +375,7 @@ class DBNNPredictor:
     def preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
         """
         Preprocess input data using saved preprocessing parameters.
-        Enhanced to handle categorical columns and ensure numeric output.
-
-        Args:
-            df: Input DataFrame to preprocess
-
-        Returns:
-            torch.Tensor: Preprocessed tensor ready for prediction
+        Handles target column removal and feature ordering according to config.
         """
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
@@ -389,47 +383,49 @@ class DBNNPredictor:
         # Make a copy to avoid modifying original
         df_processed = df.copy()
 
-        # Filter to only include expected features
-        if self.feature_columns:
-            # Ensure we only keep columns that exist in both the model and input data
+        # Filter to only include expected features from config
+        if hasattr(self, 'feature_columns') and self.feature_columns:
+            # Ensure we only keep columns that exist in both model and input data
             available_cols = [col for col in self.feature_columns if col in df_processed.columns]
-            df_processed = df_processed[available_cols]
+
+            # Remove target column if present
+            if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
+                available_cols = [col for col in available_cols if col != self.target_column]
+
+            # Reorder columns exactly as specified in config
+            try:
+                df_processed = df_processed[available_cols]
+            except KeyError as e:
+                missing = set(self.feature_columns) - set(df_processed.columns)
+                raise ValueError(f"Missing required columns: {missing}") from e
 
         # Handle categorical encoding
-        if self.categorical_encoders:
+        if hasattr(self, 'categorical_encoders') and self.categorical_encoders:
             for column, mapping in self.categorical_encoders.items():
                 if column in df_processed.columns:
                     # Convert column to string type for reliable mapping
                     col_data = df_processed[column].astype(str)
-
-                    # Handle missing values and new categories
                     encoded = col_data.map(lambda x: mapping.get(x, -1))
-
-                    # Replace unmapped values with mean of mapped values
-                    if mapping:  # Only if we have mappings
-                        mean_value = np.mean(list(mapping.values()))
-                        encoded[encoded == -1] = mean_value
-
                     df_processed[column] = encoded
 
-        # Ensure all remaining columns are numeric
-        for col in df_processed.columns:
-            if not pd.api.types.is_numeric_dtype(df_processed[col]):
-                try:
-                    df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
-                except:
-                    # If conversion fails, fill with global mean or 0
-                    df_processed[col] = 0
-
-        # Fill any remaining NA values
-        df_processed = df_processed.fillna(0)
+        # Replace NA values with -99999 and store mask
+        self.nan_mask = df_processed.isna()
+        df_processed = df_processed.fillna(-99999)
 
         # Convert to numpy array - ensuring float32 dtype
         X_numpy = df_processed.to_numpy(dtype=np.float32)
 
         # Apply standardization using precomputed global stats
-        if self.global_mean is not None and self.global_std is not None:
-            X_scaled = (X_numpy - self.global_mean) / self.global_std
+        if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
+            try:
+                X_scaled = (X_numpy - self.global_mean) / self.global_std
+            except ValueError as e:
+                raise ValueError(
+                    f"Shape mismatch in standardization. "
+                    f"Data shape: {X_numpy.shape}, "
+                    f"Mean shape: {self.global_mean.shape}, "
+                    f"Std shape: {self.global_std.shape}"
+                ) from e
         else:
             X_scaled = X_numpy
 
@@ -438,22 +434,33 @@ class DBNNPredictor:
 
     def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
         """
-        Make predictions on input data.
-
-        Args:
-            X: Input data (DataFrame or tensor)
-            batch_size: Batch size for prediction
-
-        Returns:
-            pd.DataFrame: DataFrame with predictions and probabilities
+        Make predictions on input data with proper feature validation.
+        Handles feature selection and ordering according to config.
         """
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
 
-        # Handle input type
+        # Handle input type and feature selection
         if isinstance(X, pd.DataFrame):
-            X_tensor = self.preprocess_data(X)
-            original_df = X.copy()
+            # Filter and order columns according to config
+            if hasattr(self, 'feature_columns'):
+                # Get columns that exist in both model and input
+                available_cols = [col for col in self.feature_columns if col in X.columns]
+                if not available_cols:
+                    raise ValueError("No matching features found between model and input data")
+
+                # Ensure we maintain the order from feature_columns
+                X_filtered = X[available_cols].copy()
+
+                # Check if we need to drop target column (if present)
+                if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
+                    X_filtered = X_filtered.drop(columns=[self.target_column])
+
+                # Store original for results
+                original_df = X.copy()
+                X_tensor = self.preprocess_data(X_filtered)
+            else:
+                raise RuntimeError("Model not properly initialized - missing feature columns")
         else:
             X_tensor = X.to(self.device) if not X.is_cuda else X
             original_df = None
@@ -471,12 +478,15 @@ class DBNNPredictor:
             batch_X = X_tensor[i:batch_end]
 
             # Compute posteriors
-            if self.model_type == "Histogram":
-                posteriors, _ = self._compute_batch_posterior(batch_X)
-            elif self.model_type == "Gaussian":
-                posteriors, _ = self._compute_batch_posterior_std(batch_X)
-            else:
-                raise ValueError(f"Unknown model type: {self.model_type}")
+            try:
+                if self.model_type == "Histogram":
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                elif self.model_type == "Gaussian":
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                else:
+                    raise ValueError(f"Unknown model type: {self.model_type}")
+            except Exception as e:
+                raise RuntimeError(f"Error computing posteriors: {str(e)}")
 
             # Get predictions
             batch_pred = torch.argmax(posteriors, dim=1)
@@ -484,7 +494,6 @@ class DBNNPredictor:
             # Store results
             all_predictions.append(batch_pred.cpu())
             all_probabilities.append(posteriors.cpu())
-
             batch_pbar.update(1)
 
         batch_pbar.close()
