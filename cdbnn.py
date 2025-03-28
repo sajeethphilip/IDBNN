@@ -179,44 +179,44 @@ class PredictionManager:
         return model
 
 
-def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-    """Predict features with consistent clustering output"""
-    try:
-        image_files, class_labels = self._get_image_files_with_labels(data_path)
-        if not image_files:
-            # Check if the path exists
-            if not os.path.exists(data_path):
-                raise FileNotFoundError(f"Input path does not exist: {data_path}")
-            # Check if it's a directory but has no images
-            if os.path.isdir(data_path):
-                raise ValueError(f"No valid images found in directory: {data_path}. "
+    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
+        """Predict features with consistent clustering output"""
+        try:
+            image_files, class_labels = self._get_image_files_with_labels(data_path)
+            if not image_files:
+                # Check if the path exists
+                if not os.path.exists(data_path):
+                    raise FileNotFoundError(f"Input path does not exist: {data_path}")
+                # Check if it's a directory but has no images
+                if os.path.isdir(data_path):
+                    raise ValueError(f"No valid images found in directory: {data_path}. "
+                                  f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
+                # If it's a file but not a supported image format
+                raise ValueError(f"Unsupported file format: {data_path}. "
                               f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
-            # If it's a file but not a supported image format
-            raise ValueError(f"Unsupported file format: {data_path}. "
-                          f"Supported formats: .png, .jpg, .jpeg, .bmp, .tiff")
 
-        if output_csv is None:
-            dataset_name = os.path.splitext(os.path.basename(data_path))[0] if os.path.isfile(data_path) else os.path.basename(data_path)
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+            if output_csv is None:
+                dataset_name = os.path.splitext(os.path.basename(data_path))[0] if os.path.isfile(data_path) else os.path.basename(data_path)
+                output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
-        # Rest of the method remains the same...
-        transform = self._get_transforms()
-        logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
+            # Rest of the method remains the same...
+            transform = self._get_transforms()
+            logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with cluster information
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        with open(output_csv, 'w', newline='') as csvfile:
-                csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
-                    row = [
-                        os.path.basename(filename),
-                        true_class,
-                        cluster_assign[j],
-                        cluster_conf[j]
-                    ] + features[j].tolist()
-                    csv_writer.writerow(row)
+            # Initialize CSV with cluster information
+            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+            with open(output_csv, 'w', newline='') as csvfile:
+                    csv_writer = csv.writer(csvfile)
+                    for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                        row = [
+                            os.path.basename(filename),
+                            true_class,
+                            cluster_assign[j],
+                            cluster_conf[j]
+                        ] + features[j].tolist()
+                        csv_writer.writerow(row)
 
-        logger.info(f"Predictions with clustering saved to {output_csv}")
+            logger.info(f"Predictions with clustering saved to {output_csv}")
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
