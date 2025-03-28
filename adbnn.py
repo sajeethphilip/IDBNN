@@ -376,6 +376,12 @@ class DBNNPredictor:
         """
         Preprocess input data using saved preprocessing parameters.
         Enhanced to handle categorical columns and ensure numeric output.
+
+        Args:
+            df: Input DataFrame to preprocess
+
+        Returns:
+            torch.Tensor: Preprocessed tensor ready for prediction
         """
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
@@ -383,15 +389,11 @@ class DBNNPredictor:
         # Make a copy to avoid modifying original
         df_processed = df.copy()
 
-        # Filter to only include expected features (excluding target column if present)
+        # Filter to only include expected features
         if self.feature_columns:
             # Ensure we only keep columns that exist in both the model and input data
-            available_cols = [col for col in self.feature_columns
-                             if col in df_processed.columns and col != self.target_column]
+            available_cols = [col for col in self.feature_columns if col in df_processed.columns]
             df_processed = df_processed[available_cols]
-        elif self.target_column in df_processed.columns:
-            # If no feature columns specified but target column is present, drop it
-            df_processed = df_processed.drop(columns=[self.target_column])
 
         # Handle categorical encoding
         if self.categorical_encoders:
@@ -406,10 +408,6 @@ class DBNNPredictor:
                     # Replace unmapped values with mean of mapped values
                     if mapping:  # Only if we have mappings
                         mean_value = np.mean(list(mapping.values()))
-                        # Explicitly cast to original dtype to avoid warnings
-                        original_dtype = df_processed[column].dtype
-                        if pd.api.types.is_numeric_dtype(original_dtype):
-                            mean_value = original_dtype.type(mean_value)
                         encoded[encoded == -1] = mean_value
 
                     df_processed[column] = encoded
@@ -420,7 +418,7 @@ class DBNNPredictor:
                 try:
                     df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce')
                 except:
-                    # If conversion fails, fill with 0
+                    # If conversion fails, fill with global mean or 0
                     df_processed[col] = 0
 
         # Fill any remaining NA values
@@ -431,15 +429,7 @@ class DBNNPredictor:
 
         # Apply standardization using precomputed global stats
         if self.global_mean is not None and self.global_std is not None:
-            # Ensure dimensions match
-            if X_numpy.shape[1] == len(self.global_mean):
-                X_scaled = (X_numpy - self.global_mean) / self.global_std
-            else:
-                raise ValueError(
-                    f"Feature dimension mismatch. Input has {X_numpy.shape[1]} features, "
-                    f"but model expects {len(self.global_mean)}. "
-                    "Please check if target column was included."
-                )
+            X_scaled = (X_numpy - self.global_mean) / self.global_std
         else:
             X_scaled = X_numpy
 
