@@ -5449,6 +5449,7 @@ class DBNN(GPUDBNN):
 
                 # Only update label encoder if not already set
                 if current_encoder is None and 'label_encoder' in components:
+                    print("Here")
                     self.label_encoder.classes_ = components['target_classes']
                 self.scaler = components['scaler']
                 self.label_encoder = components['label_encoder']
