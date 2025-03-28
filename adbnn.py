@@ -4121,49 +4121,54 @@ class DBNN(GPUDBNN):
         return None, None
 
 
-    def predict(self, X: torch.Tensor, batch_size: int = 128):
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
         """
-        Make predictions in batches using the best model weights.
-        This function ensures all batches are processed and predictions are concatenated correctly.
+        Make predictions in batches with consistent NaN handling.
+        Handles both DataFrame and Tensor inputs.
         """
         # Store current weights temporarily
-        #print("\033[K" +"Making predictions...")
         temp_W = self.current_W
-        n_batches = (len(X) + batch_size - 1) // batch_size
-        pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
-
-        # Use best weights for prediction
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
 
-        X = X.to(self.device)
-        predictions = []
-
         try:
-            for i in range(0, len(X), batch_size):
-                batch_X = X[i:min(i + batch_size, len(X))]
-                if self.model_type == "Histogram":
-                    # Get posteriors only, ignore bin indices
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    # Get posteriors only, ignore component responsibilities
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                else:
-                    raise ValueError(f"{self.model_type} is an invalid model type. Please edit the configuration file.")
+            # Convert DataFrame to tensor if needed
+            if isinstance(X, pd.DataFrame):
+                # Preprocess with same NaN handling as training
+                X_processed = self._preprocess_data(X, is_training=False)
+                X_tensor = X_processed.to(self.device)
+            else:
+                # For tensor input, ensure proper NaN handling
+                X_tensor = X.to(self.device)
+                self.nan_mask = torch.isnan(X_tensor)
+                X_tensor = torch.where(self.nan_mask,
+                                     torch.tensor(-99999, device=X_tensor.device),
+                                     X_tensor)
 
-                # Get predictions for the current batch
-                batch_predictions = torch.argmax(posteriors, dim=1)
-                predictions.append(batch_predictions)
-                pred_pbar.update(1)
+            n_batches = (len(X_tensor) + batch_size - 1) // batch_size
+            predictions = []
+
+            with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
+                for i in range(0, len(X_tensor), batch_size):
+                    batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
+
+                    # Get posteriors (NaN handling happens inside these methods)
+                    if self.model_type == "Histogram":
+                        posteriors, _ = self._compute_batch_posterior(batch_X)
+                    elif self.model_type == "Gaussian":
+                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                    else:
+                        raise ValueError(f"Invalid model type: {self.model_type}")
+
+                    # Get predictions
+                    batch_predictions = torch.argmax(posteriors, dim=1)
+                    predictions.append(batch_predictions)
+                    pred_pbar.update(1)
+
+            return torch.cat(predictions).cpu()
 
         finally:
-            # Restore current weights
+            # Restore original weights
             self.current_W = temp_W
-
-        pred_pbar.close()
-
-        # Concatenate predictions from all batches
-        return torch.cat(predictions).cpu()
-
 
     def _save_best_weights(self):
         """Save the best weights to file"""
