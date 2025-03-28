@@ -221,27 +221,69 @@ def predict_images(self, data_path: str, output_csv: str = None, batch_size: int
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
         Get a list of image files and their corresponding class labels from the input path.
-        Handles cases where images are in subfolders without train/test structure.
+        Handles all input types (folders, compressed files, torchvision datasets) and
+        supports adaptive DBNN mode with virtual merging.
         """
         image_files = []
         class_labels = []
+        is_adaptive = self.config.get('execution_flags', {}).get('enable_adaptive', True)
 
-        if os.path.isfile(input_path):
-            # Single image file (no class label)
-            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                image_files.append(input_path)
-                class_labels.append("unknown")
-        elif os.path.isdir(input_path):
-            # Check if we have train/test folders
+        # Handle torchvision datasets
+        if self.config.get('data_type') == 'torchvision':
+            dataset_name = self.config['dataset']['name'].upper()
+            try:
+                dataset_class = getattr(torchvision.datasets, dataset_name)
+                # For torchvision datasets, we'll create paths in memory
+                dataset = dataset_class(root='data', train=False, download=True)
+                if hasattr(dataset, 'classes'):
+                    class_names = dataset.classes
+                else:
+                    class_names = [str(i) for i in range(len(set(dataset.targets)))]
+
+                for idx, (img, target) in enumerate(dataset):
+                    # Create virtual path for torchvision data
+                    virtual_path = f"torchvision_{dataset_name}_{idx}.png"
+                    image_files.append(virtual_path)
+                    class_labels.append(class_names[target])
+                return image_files, class_labels
+            except Exception as e:
+                raise ValueError(f"Could not load torchvision dataset {dataset_name}: {str(e)}")
+
+        # Handle compressed files
+        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+            extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            input_path = self._extract_archive(input_path, extract_dir)
+
+        # Handle directory structure
+        if os.path.isdir(input_path):
             contents = os.listdir(input_path)
-            if 'train' in contents or 'test' in contents:
-                # Standard structure with train/test folders
-                train_dir = os.path.join(input_path, 'train') if 'train' in contents else None
-                test_dir = os.path.join(input_path, 'test') if 'test' in contents else None
 
-                for data_dir in [train_dir, test_dir]:
-                    if data_dir and os.path.isdir(data_dir):
+            # Check for standard train/test structure
+            has_train = 'train' in contents
+            has_test = 'test' in contents
+
+            if has_train or has_test:
+                # In adaptive mode, we merge train and test virtually
+                if is_adaptive:
+                    dirs_to_process = []
+                    if has_train:
+                        dirs_to_process.append(os.path.join(input_path, 'train'))
+                    if has_test:
+                        dirs_to_process.append(os.path.join(input_path, 'test'))
+
+                    for data_dir in dirs_to_process:
                         for root, dirs, files in os.walk(data_dir):
+                            for file in files:
+                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                                    image_files.append(os.path.join(root, file))
+                                    class_label = os.path.basename(root)
+                                    class_labels.append(class_label)
+                else:
+                    # Non-adaptive mode - process train and test separately
+                    if has_train:
+                        train_dir = os.path.join(input_path, 'train')
+                        for root, dirs, files in os.walk(train_dir):
                             for file in files:
                                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                                     image_files.append(os.path.join(root, file))
@@ -257,12 +299,134 @@ def predict_images(self, data_path: str, output_csv: str = None, batch_size: int
                                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                                     image_files.append(os.path.join(root, file))
                                     class_labels.append(class_name)
+        elif os.path.isfile(input_path):
+            # Single image file
+            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                image_files.append(input_path)
+                class_labels.append("unknown")
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
         return image_files, class_labels
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
+        """Create dataset with proper handling for all input types."""
+        if self.config.get('data_type') == 'torchvision':
+            # Special handling for torchvision datasets
+            dataset_name = self.config['dataset']['name'].upper()
+            dataset_class = getattr(torchvision.datasets, dataset_name)
+            return dataset_class(
+                root='data',
+                train=False,
+                download=True,
+                transform=transform
+            )
+        else:
+            # Custom dataset from image files
+            class VirtualDataset(Dataset):
+                def __init__(self, image_files, class_labels, transform):
+                    self.image_files = image_files
+                    self.class_labels = class_labels
+                    self.transform = transform
+                    self.class_to_idx = {cls: idx for idx, cls in enumerate(sorted(set(class_labels)))}
+                    self.idx_to_class = {idx: cls for cls, idx in self.class_to_idx.items()}
+
+                def __len__(self):
+                    return len(self.image_files)
+
+                def __getitem__(self, idx):
+                    img_path = self.image_files[idx]
+
+                    # Handle torchvision virtual paths
+                    if img_path.startswith('torchvision_'):
+                        # Get the actual image from torchvision dataset
+                        parts = img_path.split('_')
+                        dataset_name = parts[1]
+                        idx = int(parts[2].split('.')[0])
+                        dataset_class = getattr(torchvision.datasets, dataset_name)
+                        dataset = dataset_class(root='data', train=False, download=True)
+                        img, target = dataset[idx]
+                        if self.transform:
+                            img = self.transform(img)
+                        return img, target
+                    else:
+                        # Regular image file
+                        img = Image.open(img_path).convert('RGB')
+                        if self.transform:
+                            img = self.transform(img)
+                        label = self.class_to_idx[self.class_labels[idx]]
+                        return img, label
+
+                def get_class_names(self):
+                    return self.idx_to_class
+
+            return VirtualDataset(image_files, class_labels, transform)
+
+    def _save_features(self, train_features: Dict[str, torch.Tensor],
+                      test_features: Dict[str, torch.Tensor],
+                      output_path: str) -> None:
+        """Save features with adaptive mode handling."""
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # In adaptive mode, merge train and test features
+        if self.config.get('execution_flags', {}).get('enable_adaptive', True):
+            merged_features = {
+                'embeddings': torch.cat([train_features['embeddings'], test_features['embeddings']]),
+                'labels': torch.cat([train_features['labels'], test_features['labels']]),
+                'indices': train_features['indices'] + test_features['indices'],
+                'filenames': train_features['filenames'] + test_features['filenames'],
+                'class_names': train_features['class_names'] + test_features['class_names']
+            }
+
+            df = self._features_to_dataframe(merged_features)
+            df.to_csv(output_path, index=False)
+            logger.info(f"Merged features saved to {output_path} (adaptive mode)")
+        else:
+            # Non-adaptive mode - save separately
+            train_df = self._features_to_dataframe(train_features)
+            train_output_path = output_path.replace(".csv", "_train.csv")
+            train_df.to_csv(train_output_path, index=False)
+            logger.info(f"Training features saved to {train_output_path}")
+
+            test_df = self._features_to_dataframe(test_features)
+            test_output_path = output_path.replace(".csv", "_test.csv")
+            test_df.to_csv(test_output_path, index=False)
+            logger.info(f"Test features saved to {test_output_path}")
+
+    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
+        """Convert features to DataFrame with adaptive mode handling."""
+        data_dict = {}
+        base_length = len(features['embeddings']) if 'embeddings' in features else 0
+
+        # Handle embeddings
+        if 'embeddings' in features:
+            embeddings = features['embeddings'].cpu().numpy()
+            for i in range(embeddings.shape[1]):
+                data_dict[f'feature_{i}'] = embeddings[:, i]
+
+        # Handle labels/class names
+        if 'class_names' in features and len(features['class_names']) == base_length:
+            data_dict['target'] = features['class_names']
+        elif 'labels' in features and len(features['labels']) == base_length:
+            data_dict['target'] = features['labels'].cpu().numpy()
+        else:
+            data_dict['target'] = [str(i) for i in range(base_length)]
+
+        # Add metadata if available
+        optional_fields = ['indices', 'filenames']
+        for field in optional_fields:
+            if field in features and len(features[field]) == base_length:
+                data_dict[field] = features[field]
+
+        # Add enhancement features if available
+        enhancement_dict = self._get_enhancement_columns(features)
+        for key, value in enhancement_dict.items():
+            if len(value) == base_length:
+                data_dict[key] = value
+
+        return pd.DataFrame(data_dict)
+
+    def _create_dataset_old(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """Create dataset with proper channel handling for torchvision datasets."""
         if self.config.get('data_type') == 'torchvision':
             # Special handling for torchvision datasets
@@ -1089,7 +1253,7 @@ class BaseAutoencoder(nn.Module):
         return {}
 
 
-    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
+    def _features_to_dataframe_old(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
         """Convert features dictionary to a pandas DataFrame with proper class names."""
         data_dict = {}
 
