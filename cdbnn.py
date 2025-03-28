@@ -5485,7 +5485,7 @@ class DatasetProcessor:
                  output_dir: str = "data", config: Optional[Dict] = None):
         self.datafile = datafile
         self.datatype = datatype.lower()
-        self.output_dir = output_dir
+
         self.config = config if config is not None else {}  # Initialize config
 
         if self.datatype == 'torchvision':
@@ -5495,7 +5495,8 @@ class DatasetProcessor:
 
         self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
-
+        self.output_dir = os.path.join(output_dir, self.dataset_name)
+        os.makedirs(self.output_dir, exist_ok=True)
         self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
         self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
