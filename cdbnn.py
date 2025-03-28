@@ -178,88 +178,84 @@ class PredictionManager:
         logger.info("Model loaded successfully with clustering parameters.")
         return model
 
+    def _handle_torchvision_dataset(self) -> Tuple[List[str], List[str]]:
+        """Special handling for torchvision datasets"""
+        dataset_name = self.config['dataset']['name'].upper()
+        try:
+            dataset_class = getattr(torchvision.datasets, dataset_name)
+            dataset = dataset_class(root='data', train=False, download=True)
+            class_names = dataset.classes if hasattr(dataset, 'classes') else [str(i) for i in range(len(set(dataset.targets)))]
+
+            return [
+                f"torchvision_{dataset_name}_{idx}.png"
+                for idx in range(len(dataset))
+            ], [
+                class_names[target]
+                for target in dataset.targets
+            ]
+        except Exception as e:
+            raise ValueError(f"Could not load torchvision dataset {dataset_name}: {str(e)}")
+
+    def _process_folder(self, folder_path: str, image_files: List[str], class_labels: List[str]):
+        """Process a folder (either train or test) and populate image_files and class_labels"""
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                    image_files.append(os.path.join(root, file))
+                    class_label = os.path.basename(root)
+                    class_labels.append(class_label)
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
         """
         Get a list of image files and their corresponding class labels from the input path.
-        Handles all input types (folders, compressed files, torchvision datasets) and
-        supports adaptive DBNN mode with virtual merging.
+        Handles both traditional train/test structure and direct class subfolders.
         """
         image_files = []
         class_labels = []
-        is_adaptive = self.config.get('execution_flags', {}).get('enable_adaptive', True)
 
         # Handle torchvision datasets
         if self.config.get('data_type') == 'torchvision':
-            dataset_name = self.config['dataset']['name'].upper()
-            try:
-                dataset_class = getattr(torchvision.datasets, dataset_name)
-                # For torchvision datasets, we'll create paths in memory
-                dataset = dataset_class(root='data', train=False, download=True)
-                if hasattr(dataset, 'classes'):
-                    class_names = dataset.classes
-                else:
-                    class_names = [str(i) for i in range(len(set(dataset.targets)))]
-
-                for idx, (img, target) in enumerate(dataset):
-                    # Create virtual path for torchvision data
-                    virtual_path = f"torchvision_{dataset_name}_{idx}.png"
-                    image_files.append(virtual_path)
-                    class_labels.append(class_names[target])
-                return image_files, class_labels
-            except Exception as e:
-                raise ValueError(f"Could not load torchvision dataset {dataset_name}: {str(e)}")
+            return self._handle_torchvision_dataset()
 
         # Handle compressed files
         if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-            extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            input_path = self._extract_archive(input_path, extract_dir)
+            input_path = self._extract_archive(input_path)
 
         # Handle directory structure
         if os.path.isdir(input_path):
-            contents = os.listdir(input_path)
+            # First check if we have direct class subfolders (no train/test)
+            class_subfolders = [f for f in os.listdir(input_path)
+                              if os.path.isdir(os.path.join(input_path, f))]
 
-            # Check for standard train/test structure
-            has_train = 'train' in contents
-            has_test = 'test' in contents
-
-            if has_train or has_test:
-                # In adaptive mode, we merge train and test virtually
-                if is_adaptive:
-                    dirs_to_process = []
-                    if has_train:
-                        dirs_to_process.append(os.path.join(input_path, 'train'))
-                    if has_test:
-                        dirs_to_process.append(os.path.join(input_path, 'test'))
-
-                    for data_dir in dirs_to_process:
-                        for root, dirs, files in os.walk(data_dir):
-                            for file in files:
-                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                                    image_files.append(os.path.join(root, file))
-                                    class_label = os.path.basename(root)
-                                    class_labels.append(class_label)
-                else:
-                    # Non-adaptive mode - process train and test separately
-                    if has_train:
-                        train_dir = os.path.join(input_path, 'train')
-                        for root, dirs, files in os.walk(train_dir):
-                            for file in files:
-                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                                    image_files.append(os.path.join(root, file))
-                                    class_label = os.path.basename(root)
-                                    class_labels.append(class_label)
-            else:
-                # No train/test folders - treat subfolders as classes
-                for class_name in os.listdir(input_path):
+            # Check if these subfolders contain images (likely class folders)
+            if class_subfolders and any(
+                any(f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+                    for f in os.listdir(os.path.join(input_path, subfolder)))
+                for subfolder in class_subfolders
+            ):
+                # Process as direct class folders
+                for class_name in class_subfolders:
                     class_dir = os.path.join(input_path, class_name)
-                    if os.path.isdir(class_dir):
-                        for root, _, files in os.walk(class_dir):
-                            for file in files:
-                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                                    image_files.append(os.path.join(root, file))
-                                    class_labels.append(class_name)
+                    for root, _, files in os.walk(class_dir):
+                        for file in files:
+                            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                                image_files.append(os.path.join(root, file))
+                                class_labels.append(class_name)
+            else:
+                # Check for traditional train/test structure
+                train_dir = os.path.join(input_path, 'train')
+                test_dir = os.path.join(input_path, 'test')
+
+                if os.path.exists(train_dir):
+                    self._process_folder(train_dir, image_files, class_labels)
+                if os.path.exists(test_dir) and not self.config.get('execution_flags', {}).get('enable_adaptive', True):
+                    self._process_folder(test_dir, image_files, class_labels)
+
+                if not image_files:
+                    raise ValueError(f"No valid image files found in {input_path}. "
+                                   f"Expected either:\n"
+                                   f"1. Class subfolders directly under the directory\n"
+                                   f"2. Standard train/test folder structure")
         elif os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
