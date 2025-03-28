@@ -4029,19 +4029,19 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=True)
+        train_data.to_csv(f'data/{dataset_name}/Last_training.csv',header=True, index=True)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=True)
-        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to {dataset_name}_Last_testing.csv{Colors.ENDC}")
-        print("\033[K" +f"{Colors.GREEN}Last training data is saved to {dataset_name}_Last_training.csv{Colors.ENDC}")
+        test_data.to_csv(f'data/{dataset_name}/Last_testing.csv', header=True, index=True)
+        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to data/{dataset_name}/Last_testing.csv{Colors.ENDC}")
+        print("\033[K" +f"{Colors.GREEN}Last training data is saved to data/{dataset_name}/Last_training.csv{Colors.ENDC}")
 
     def load_last_known_split(self):
         """Load the last known good training/testing split with proper column alignment"""
         dataset_name = self.dataset_name
-        train_file = f'{dataset_name}_Last_training.csv'
-        test_file = f'{dataset_name}_Last_testing.csv'
+        train_file = f'data/{dataset_name}/Last_training.csv'
+        test_file = f'data/{dataset_name}/Last_testing.csv'
 
         if os.path.exists(train_file) and os.path.exists(test_file):
             try:
