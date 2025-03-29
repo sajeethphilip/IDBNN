@@ -598,11 +598,6 @@ def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: boo
     try:
         dataset_info = get_dataset_info(dataset_name)
 
-        # For datasets with splits, ask about merging
-        if dataset_info['has_train_test_split'] and not merge_train_test:
-            response = input(f"Dataset {dataset_name} has train/test split. Merge them to train? (y/n, default y): ").lower()
-            merge_train_test = response != 'n'
-
         # Download and organize dataset
         final_path, class_names = download_dataset(
             dataset_name=dataset_name,
@@ -617,10 +612,26 @@ def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: boo
             class_names=class_names
         )
 
+        # Create copy in Data folder in root directory
+        src_path = os.path.join(root, dataset_name.lower(), "train")
+        dest_path = os.path.join("Data", dataset_name.lower(), "train")
+
+        # Ensure destination directory exists
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+        # Remove existing directory if it exists
+        if os.path.exists(dest_path):
+            shutil.rmtree(dest_path)
+
+        print(f"Copying dataset to {dest_path}...")
+        shutil.copytree(src_path, dest_path)
+        print("Copy completed successfully")
+
         print(f"\nSuccessfully processed dataset:")
         print(f"- Files saved to: {final_path}")
         print(f"- Found {len(class_names)} classes")
         print(f"- Configuration file created: {os.path.join(root, dataset_name.lower(), f'{dataset_name.lower()}.json')}")
+        print(f"- Dataset copied to: {dest_path}")
 
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
