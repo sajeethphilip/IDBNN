@@ -39,11 +39,17 @@ def extract_tar_file(tar_path: str, extract_to: str) -> None:
 def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     """
     Move all image class subfolders to the train directory.
+    Cleans the target directory first if it exists.
     Handles cases where:
     - There are train/test folders (move their contents to train)
     - Only raw class folders exist (move them to train)
     - There's a containing folder like 256_ObjectCategories (move its contents to train)
     """
+    # Clean the train directory if it exists
+    if os.path.exists(train_path):
+        shutil.rmtree(train_path)
+    os.makedirs(train_path, exist_ok=True)
+
     class_names = []
 
     # First check for train/test folders
@@ -56,10 +62,22 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
                 if os.path.isdir(class_path):
                     dest_path = os.path.join(train_path, class_name)
 
-                    # If class already exists in train, merge the contents
+                    # If class already exists in train (from previous split), merge the contents
                     if os.path.exists(dest_path):
                         for item in os.listdir(class_path):
-                            shutil.move(os.path.join(class_path, item), dest_path)
+                            src_item = os.path.join(class_path, item)
+                            if os.path.isdir(src_item):
+                                # For nested directories, merge recursively
+                                dest_item = os.path.join(dest_path, item)
+                                if os.path.exists(dest_item):
+                                    shutil.rmtree(dest_item)
+                                shutil.move(src_item, dest_path)
+                            else:
+                                # For files, overwrite if they exist
+                                dest_file = os.path.join(dest_path, item)
+                                if os.path.exists(dest_file):
+                                    os.remove(dest_file)
+                                shutil.move(src_item, dest_path)
                     else:
                         shutil.move(class_path, dest_path)
 
@@ -85,6 +103,8 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
                     class_path = os.path.join(item_path, class_name)
                     if os.path.isdir(class_path):
                         dest_path = os.path.join(train_path, class_name)
+                        if os.path.exists(dest_path):
+                            shutil.rmtree(dest_path)
                         shutil.move(class_path, dest_path)
                         class_names.append(class_name)
                 # Remove the now-empty containing directory
@@ -92,6 +112,8 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
             else:
                 # It's a class folder itself, move it to train
                 dest_path = os.path.join(train_path, item)
+                if os.path.exists(dest_path):
+                    shutil.rmtree(dest_path)
                 shutil.move(item_path, dest_path)
                 class_names.append(item)
 
