@@ -1,3 +1,41 @@
+import os
+import shutil
+import tarfile
+from torchvision import datasets
+import torchvision
+from typing import List, Dict, Tuple
+import argparse
+
+def list_available_datasets() -> List[str]:
+    """List all available datasets in torchvision.datasets"""
+    dataset_classes = []
+    for name in dir(torchvision.datasets):
+        if name[0].isupper() and name not in ['VisionDataset', 'DatasetFolder', 'ImageFolder']:
+            dataset_classes.append(name)
+    return sorted(dataset_classes)
+
+def get_dataset_info(dataset_name: str) -> Dict:
+    """Get information about a specific dataset"""
+    try:
+        dataset_class = getattr(torchvision.datasets, dataset_name)
+        return {
+            'name': dataset_name,
+            'has_train_test_split': hasattr(dataset_class, 'train') and hasattr(dataset_class, 'test'),
+            'default_root': os.path.join('data', dataset_name.lower())
+        }
+    except AttributeError:
+        raise ValueError(f"Dataset {dataset_name} not found in torchvision.datasets")
+
+def ensure_directory_exists(path: str) -> None:
+    """Ensure a directory exists, create if it doesn't"""
+    os.makedirs(path, exist_ok=True)
+
+def extract_tar_file(tar_path: str, extract_to: str) -> None:
+    """Extract a tar file to the specified directory"""
+    ensure_directory_exists(extract_to)
+    with tarfile.open(tar_path, 'r') as tar:
+        tar.extractall(path=extract_to)
+
 def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     """
     Move all image class subfolders to the train directory.
@@ -92,3 +130,78 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
         raise
+
+def interactive_mode():
+    """Interactive mode for dataset selection and downloading"""
+    available_datasets = list_available_datasets()
+
+    print("Available datasets:")
+    for i, dataset in enumerate(available_datasets, 1):
+        print(f"{i}. {dataset}")
+
+    dataset_name = input("\nEnter dataset name (press Enter to process all datasets): ").strip()
+
+    if not dataset_name:
+        # Process all datasets
+        for dataset in available_datasets:
+            process_dataset(dataset)
+    else:
+        # Process single dataset
+        process_dataset(dataset_name)
+
+def process_dataset(dataset_name: str) -> None:
+    """Process a single dataset"""
+    if dataset_name not in list_available_datasets():
+        print(f"Dataset '{dataset_name}' not found.")
+        return
+
+    print(f"\nProcessing dataset: {dataset_name}")
+    try:
+        dataset_info = get_dataset_info(dataset_name)
+
+        # For datasets with splits, ask about merging (though we'll merge everything to train)
+        merge = True
+        if dataset_info['has_train_test_split']:
+            response = input(f"Dataset {dataset_name} has train/test split. Merge them to train? (y/n, default y): ").lower()
+            merge = response != 'n'
+
+        final_path, class_names = download_dataset(
+            dataset_name=dataset_name,
+            root='data',
+            merge_train_test=merge
+        )
+
+        print(f"Successfully processed dataset. Files saved to: {final_path}")
+        print(f"Found {len(class_names)} classes: {', '.join(class_names[:5])}{'...' if len(class_names) > 5 else ''}")
+
+    except Exception as e:
+        print(f"Error processing dataset {dataset_name}: {str(e)}")
+
+if __name__ == "__main__":
+    if len(os.sys.argv) > 1:
+        # Command line mode
+        parser = argparse.ArgumentParser(description='Download and organize torchvision image datasets')
+        parser.add_argument('--dataset', type=str, default='', help='Name of dataset to download')
+        parser.add_argument('--root', type=str, default='data', help='Root directory for downloaded datasets')
+        parser.add_argument('--merge', action='store_true', help='Merge train and test sets (if available)')
+        parser.add_argument('--all', action='store_true', help='Download all available datasets')
+        args = parser.parse_args()
+
+        if args.dataset or args.all:
+            available_datasets = list_available_datasets()
+
+            if args.all:
+                datasets_to_process = available_datasets
+            else:
+                if args.dataset not in available_datasets:
+                    print(f"Dataset '{args.dataset}' not found.")
+                    exit()
+                datasets_to_process = [args.dataset]
+
+            for dataset_name in datasets_to_process:
+                process_dataset(dataset_name)
+        else:
+            interactive_mode()
+    else:
+        # Interactive mode
+        interactive_mode()
