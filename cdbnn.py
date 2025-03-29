@@ -2493,7 +2493,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         model.current_epoch = epoch
 
         # Training phase
-        train_loss, train_acc = model._train_epoch(model, train_loader, config)
+        train_loss, train_acc = model._train_epoch(model, train_loader)
 
         # Validation phase
         val_loss, val_acc = None, None
