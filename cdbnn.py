@@ -3336,7 +3336,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         training = config.setdefault('training', {})
         training.update({
             'batch_size': 128,
-            'epochs': 20,
+            'epochs': 200,
             'num_workers': min(4, os.cpu_count() or 1),
             'checkpoint_dir': os.path.join('Model', 'checkpoints'),
             'trials': 100,
@@ -5852,7 +5852,7 @@ class DatasetProcessor:
             },
             "training": {
                 "batch_size": 128,
-                "epochs": 20,
+                "epochs": 200,
                 "num_workers": min(4, os.cpu_count() or 1),
                 "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
                 "validation_split": 0.2,
@@ -6695,7 +6695,7 @@ def print_usage():
     print("  --encoder_type  Type of encoder ('cnn' or 'autoenc')")
     print("  --config        Path to configuration file (overrides other options)")
     print("  --batch_size    Batch size for training (default: 128)")
-    print("  --epochs        Number of training epochs (default: 20)")
+    print("  --epochs        Number of training epochs (default: 200)")
     print("  --workers       Number of data loading workers (default: 4)")
     print("  --learning_rate Learning rate (default: 0.001)")
     print("  --output-dir    Output directory (default: data)")
@@ -6722,7 +6722,7 @@ def parse_arguments():
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
     parser.add_argument('--output', type=str, default='', help='output directory')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
+    parser.add_argument('--epochs', type=int, default=200, help='number of epochs')
     parser.add_argument('--workers', type=int, default=4, help='number of workers')
     parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
     parser.add_argument('--cpu', action='store_true', help='force CPU usage')
@@ -6822,7 +6822,7 @@ def get_interactive_args():
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
     if args.mode == 'train':
-        default = last_args.get('epochs', 20) if last_args else 20
+        default = last_args.get('epochs', 200) if last_args else 200
         args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
 
     default = last_args.get('output', 'data') if last_args else 'data'
