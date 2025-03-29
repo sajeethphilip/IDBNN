@@ -523,9 +523,8 @@ def process_dataset(dataset_name: str) -> None:
 
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
-
-if __name__ == "__main__":
-    if len(os.sys.argv) > 1:
+def main():
+    if len(sys.argv) > 1:
         # Command line mode
         parser = argparse.ArgumentParser(description='Download and organize torchvision image datasets')
         parser.add_argument('--dataset', type=str, default='', help='Name of dataset to download')
@@ -546,9 +545,66 @@ if __name__ == "__main__":
                 datasets_to_process = [args.dataset]
 
             for dataset_name in datasets_to_process:
-                process_dataset(dataset_name)
+                process_dataset(dataset_name, args.root, args.merge)
         else:
             interactive_mode()
     else:
         # Interactive mode
         interactive_mode()
+
+def interactive_mode():
+    """Interactive mode for dataset selection and downloading"""
+    available_datasets = list_available_datasets()
+
+    print("Available datasets:")
+    for i, dataset in enumerate(available_datasets, 1):
+        print(f"{i}. {dataset}")
+
+    dataset_name = input("\nEnter dataset name (press Enter to process all datasets): ").strip()
+
+    if not dataset_name:
+        # Process all datasets
+        for dataset in available_datasets:
+            process_dataset(dataset)
+    else:
+        # Process single dataset
+        process_dataset(dataset_name)
+
+def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: bool = True) -> None:
+    """Process a single dataset including download and config creation"""
+    if dataset_name not in list_available_datasets():
+        print(f"Dataset '{dataset_name}' not found.")
+        return
+
+    print(f"\nProcessing dataset: {dataset_name}")
+    try:
+        dataset_info = get_dataset_info(dataset_name)
+
+        # For datasets with splits, ask about merging
+        if dataset_info['has_train_test_split'] and not merge_train_test:
+            response = input(f"Dataset {dataset_name} has train/test split. Merge them to train? (y/n, default y): ").lower()
+            merge_train_test = response != 'n'
+
+        # Download and organize dataset
+        final_path, class_names = download_dataset(
+            dataset_name=dataset_name,
+            root=root,
+            merge_train_test=merge_train_test
+        )
+
+        # Create configuration file with actual image properties
+        create_config_file(
+            dataset_name=dataset_name,
+            dataset_path=os.path.join(root, dataset_name.lower()),
+            class_names=class_names
+        )
+
+        print(f"\nSuccessfully processed dataset:")
+        print(f"- Files saved to: {final_path}")
+        print(f"- Found {len(class_names)} classes")
+        print(f"- Configuration file created: {os.path.join(root, dataset_name.lower(), f'{dataset_name.lower()}.json')}")
+
+    except Exception as e:
+        print(f"Error processing dataset {dataset_name}: {str(e)}")
+if __name__ == "__main__":
+    main()
