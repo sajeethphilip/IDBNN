@@ -2913,7 +2913,8 @@ class ReconstructionManager:
         elif image_type == 'agricultural':
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, self.config)
         else:
-            model = BaseAutoencoder(input_shape, feature_dims, self.config)
+            #model = BaseAutoencoder(input_shape, feature_dims, self.config)
+            model = AutoEncoderFeatureExtractor(config)
 
         return model.to(self.device)
 
