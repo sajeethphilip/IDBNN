@@ -822,9 +822,10 @@ class BaseAutoencoder(nn.Module):
                                    torch.randn(num_clusters, self.feature_dims))
 
             if not hasattr(self, 'clustering_temperature'):
+                # Convert to tensor and register as buffer
+                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([config['model']['autoencoder_config']
-                                               ['enhancements']['clustering_temperature']]))
+                                   torch.tensor([temp_value], dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -1324,7 +1325,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature.item()
+            temperature = self.clustering_temperature
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -2141,7 +2142,7 @@ class UnifiedCheckpoint:
             'phase': phase,
             'loss': loss,
             'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
-            'clustering_temperature': getattr(model, 'clustering_temperature', 1.0),
+            'clustering_temperature': model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0]),
             'timestamp': datetime.now().isoformat(),
             'config': {
                 'kl_divergence': model.use_kl_divergence,
