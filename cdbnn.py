@@ -2020,6 +2020,15 @@ class AgriculturalPatternLoss(nn.Module):
 
         return stats
 
+def safe_get_scalar(value):
+    """Safely convert any numeric value to Python float"""
+    if isinstance(value, torch.Tensor):
+        return value.item()
+    elif isinstance(value, (float, int)):
+        return float(value)
+    else:
+        raise ValueError(f"Cannot convert {type(value)} to scalar")
+
 class EnhancedLossManager:
     """Manager for handling specialized loss functions"""
 
@@ -2049,25 +2058,26 @@ class EnhancedLossManager:
         return self.loss_functions.get(image_type)
 
     def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor, image_type: str) -> Dict[str, torch.Tensor]:
-        """Calculate loss with appropriate enhancements"""
-        loss_fn = self.get_loss_function(image_type)
-        if loss_fn is None:
-            return {'loss': F.mse_loss(reconstruction, target)}
-
-        result = loss_fn(reconstruction, target)
-
-        # Ensure we always return a dictionary with tensor loss
-        if isinstance(result, dict):
-            if 'loss' in result and isinstance(result['loss'], torch.Tensor):
-                return result
-            elif 'loss' in result:
-                return {'loss': torch.tensor(result['loss'], device=reconstruction.device)}
-            else:
+            """Calculate loss with appropriate enhancements"""
+            loss_fn = self.get_loss_function(image_type)
+            if loss_fn is None:
                 return {'loss': F.mse_loss(reconstruction, target)}
-        elif isinstance(result, torch.Tensor):
-            return {'loss': result}
-        else:  # float or other numeric type
-            return {'loss': torch.tensor(float(result), device=reconstruction.device)}
+
+            result = loss_fn(reconstruction, target)
+
+            # Ensure we always return a dictionary with tensor loss
+            if isinstance(result, dict):
+                if 'loss' in result:
+                    if isinstance(result['loss'], torch.Tensor):
+                        return result
+                    else:
+                        return {'loss': torch.tensor(float(result['loss']), device=reconstruction.device)}
+                else:
+                    return {'loss': F.mse_loss(reconstruction, target)}
+            elif isinstance(result, torch.Tensor):
+                return {'loss': result}
+            else:
+                return {'loss': torch.tensor(float(result), device=reconstruction.device)}
 
 
 class UnifiedCheckpoint:
@@ -2399,138 +2409,136 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
     return metrics
 
 def _train_phase(model: nn.Module, train_loader: DataLoader,
-                    optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
-                    epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-        """Training logic for each phase with enhanced checkpoint handling"""
-        history = defaultdict(list)
-        device = next(model.parameters()).device
+                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for each phase with enhanced checkpoint handling"""
+    history = defaultdict(list)
+    device = next(model.parameters()).device
 
-        # Initialize unified checkpoint
-        checkpoint_manager = UnifiedCheckpoint(config)
+    # Initialize unified checkpoint
+    checkpoint_manager = UnifiedCheckpoint(config)
 
-        # Load best loss from checkpoint
-        best_loss = checkpoint_manager.get_best_loss(phase, model)
-        patience_counter = 0
+    # Load best loss from checkpoint
+    best_loss = safe_get_scalar(checkpoint_manager.get_best_loss(phase, model))
+    patience_counter = 0
 
-        try:
-            for epoch in range(start_epoch, epochs):
-                model.train()
-                running_loss = 0.0
-                num_batches = len(train_loader)
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            running_loss = 0.0
+            num_batches = len(train_loader)
 
-                # Training loop
-                pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-                for batch_idx, (data, labels) in enumerate(pbar):
-                    try:
-                        data = data.to(device)
-                        labels = labels.to(device)
+            # Training loop
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            for batch_idx, (data, labels) in enumerate(pbar):
+                try:
+                    data = data.to(device)
+                    labels = labels.to(device)
 
-                        # Zero gradients
-                        optimizer.zero_grad()
+                    # Zero gradients
+                    optimizer.zero_grad()
 
-                        # Forward pass
-                        if phase == 1:
-                            # Phase 1: Only reconstruction
-                            embeddings = model.encode(data)
-                            if isinstance(embeddings, tuple):
-                                embeddings = embeddings[0]
-                            reconstruction = model.decode(embeddings)
-                            loss = F.mse_loss(reconstruction, data)
+                    # Forward pass
+                    if phase == 1:
+                        # Phase 1: Only reconstruction
+                        embeddings = model.encode(data)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+                        reconstruction = model.decode(embeddings)
+                        loss = F.mse_loss(reconstruction, data)
+                    else:
+                        # Phase 2: Include clustering and classification
+                        output = model(data)
+                        if isinstance(output, dict):
+                            reconstruction = output['reconstruction']
+                            embedding = output['embedding']
                         else:
-                            # Phase 2: Include clustering and classification
-                            output = model(data)
-                            if isinstance(output, dict):
-                                reconstruction = output['reconstruction']
-                                embedding = output['embedding']
-                            else:
-                                embedding, reconstruction = output
+                            embedding, reconstruction = output
 
-                            # Calculate base loss - ensure we always get a tensor
-                            loss_result = loss_manager.calculate_loss(
-                                reconstruction, data,
-                                config['dataset'].get('image_type', 'general')
-                            )
-                            loss = loss_result['loss'] if isinstance(loss_result, dict) else loss_result
+                        # Calculate base loss
+                        loss_result = loss_manager.calculate_loss(reconstruction, data,
+                                                               config['dataset'].get('image_type', 'general'))
+                        loss = loss_result['loss']
 
-                            # Convert to tensor if it's a float
-                            if isinstance(loss, float):
-                                loss = torch.tensor(loss, device=device)
+                        # Add KL divergence loss if enabled
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(embedding, labels)
+                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
+                                kl_loss = F.kl_div(
+                                    latent_info['cluster_probabilities'].log(),
+                                    latent_info['target_distribution'],
+                                    reduction='batchmean'
+                                )
+                                loss += kl_weight * kl_loss
 
-                            # Add KL divergence loss if enabled
-                            if model.use_kl_divergence:
-                                latent_info = model.organize_latent_space(embedding, labels)
-                                kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
-                                if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
-                                    kl_loss = F.kl_div(
-                                        latent_info['cluster_probabilities'].log(),
-                                        latent_info['target_distribution'],
-                                        reduction='batchmean'
-                                    )
-                                    loss += kl_weight * kl_loss
+                        # Add classification loss if enabled
+                        if model.use_class_encoding and hasattr(model, 'classifier'):
+                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+                            class_logits = model.classifier(embedding)
+                            class_loss = F.cross_entropy(class_logits, labels)
+                            loss += class_weight * class_loss
 
-                            # Add classification loss if enabled
-                            if model.use_class_encoding and hasattr(model, 'classifier'):
-                                class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
-                                class_logits = model.classifier(embedding)
-                                class_loss = F.cross_entropy(class_logits, labels)
-                                loss += class_weight * class_loss
+                    # Backward pass and optimization
+                    loss.backward()
+                    optimizer.step()
 
-                        # Backward pass and optimization
-                        loss.backward()
-                        optimizer.step()
+                    # Get loss value safely
+                    loss_value = safe_get_scalar(loss)
+                    running_loss += loss_value
 
-                        # Get loss value safely without .item()
-                        loss_value = float(loss.detach().cpu().numpy())
-                        running_loss += loss_value
+                    # Update progress bar
+                    current_avg_loss = running_loss / (batch_idx + 1)
+                    pbar.set_postfix({
+                        'loss': f'{current_avg_loss:.4f}',
+                        'best': f'{best_loss:.4f}'
+                    })
 
-                        # Update progress bar
-                        current_avg_loss = running_loss / (batch_idx + 1)
-                        pbar.set_postfix({
-                            'loss': f'{current_avg_loss:.4f}',
-                            'best': f'{best_loss:.4f}'
-                        })
+                    # Memory cleanup
+                    del data, loss
+                    if phase == 2:
+                        del output
+                    torch.cuda.empty_cache()
 
-                        # Memory cleanup
-                        del data, loss
-                        if phase == 2:
-                            del output
-                        torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    continue
 
-                    except Exception as e:
-                        logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                        continue
+            # Calculate epoch average loss
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
+            history[f'phase{phase}_loss'].append(avg_loss)
 
-                # Calculate epoch average loss
-                avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
-                history[f'phase{phase}_loss'].append(avg_loss)
+            # Checkpoint and early stopping
+            is_best = avg_loss < best_loss
+            if is_best:
+                best_loss = avg_loss
+                patience_counter = 0
+                checkpoint_manager.save_model_state(
+                    model=model,
+                    optimizer=optimizer,
+                    phase=phase,
+                    epoch=epoch,
+                    loss=avg_loss,
+                    is_best=True
+                )
+            else:
+                patience_counter += 1
 
-                # Checkpoint and early stopping
-                is_best = avg_loss < best_loss
-                if is_best:
-                    best_loss = avg_loss
-                    patience_counter = 0
-                    checkpoint_manager.save_model_state(
-                        model=model,
-                        optimizer=optimizer,
-                        phase=phase,
-                        epoch=epoch,
-                        loss=avg_loss,
-                        is_best=True
-                    )
-                else:
-                    patience_counter += 1
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
+                break
 
-                if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
-                    logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
-                    break
+            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
-                logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+    except Exception as e:
+        logger.error(f"Error in training phase {phase}: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
-        except Exception as e:
-            logger.error(f"Error in training phase {phase}: {str(e)}")
-            raise
-
-        return history
+    return history
 
 def _train_phase_old(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
