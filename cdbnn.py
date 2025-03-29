@@ -1,5 +1,5 @@
-#Working, fully functional with predcition 27/March/2025
-#Revisions on Mar29 2025 4:15 pm
+#Working, fully functional with predcition 30/March/2025
+#Revisions on Mar30 2025 4:15 pm
 import torch
 import copy
 import sys
@@ -3114,6 +3114,9 @@ class BaseFeatureExtractor(nn.Module, ABC):
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
+        # Add label encoder attributes
+        self.label_encoder = None  # Will be a dictionary mapping class names to indices
+        self.reverse_label_encoder = None  # Will be a dictionary mapping indices to class names
 
 
         # Set device
