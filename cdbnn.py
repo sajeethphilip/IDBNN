@@ -2443,7 +2443,8 @@ class ModelFactory:
         elif image_type == 'agricultural':
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
         else:
-            model = BaseAutoencoder(input_shape, feature_dims, config)
+            #model = BaseAutoencoder(input_shape, feature_dims, config)
+            model = AutoEncoderFeatureExtractor(config)
 
         # Verify channel compatibility
         if hasattr(model, 'in_channels'):
