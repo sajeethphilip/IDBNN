@@ -7204,7 +7204,7 @@ def parse_arguments():
                        default='predict', help='Operation mode')
     parser.add_argument('--data_name', dest='data_name', default='mnist',
                        help='Name of the dataset')
-   parser.add_argument('--data_type', dest='data_type', default='custom',
+    parser.add_argument('--data_type', dest='data_type', default='custom',
                        help='custom or torchvision dataset')
 
     parser.add_argument('--input_path', required=True,
