@@ -5419,11 +5419,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-if __name__ == '__main__':
-    main()
 
-    else:
-        print("\033[K" +"No datasets found in data folder")
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
     print("\033[K" +"=" * 40)
