@@ -1424,7 +1424,7 @@ class DBNN(GPUDBNN):
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
         # Store model configuration
-        self.model_config = config
+        self.model_config = self.config
         self.training_log = pd.DataFrame()
         self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
 
