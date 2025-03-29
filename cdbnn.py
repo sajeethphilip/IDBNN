@@ -998,7 +998,63 @@ class BaseAutoencoder(nn.Module):
         self.current_epoch = 0
         self.history = defaultdict(list)
 #--------------------------
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch with reconstruction visualization"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        reconstruction_accuracy = 0.0
 
+        # Create output directory for training reconstructions
+        output_dir = os.path.join('data', self.config['dataset']['name'],
+                                'training_decoder_output', f'epoch_{self.current_epoch}')
+        os.makedirs(output_dir, exist_ok=True)
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        for batch_idx, (inputs, _) in enumerate(pbar):
+            try:
+                inputs = inputs.to(self.device)
+
+                # Log input shape and channels
+                logger.debug(f"Input tensor shape: {inputs.shape}, channels: {inputs.size(1)}")
+
+                self.optimizer.zero_grad()
+                embedding, reconstruction = self.feature_extractor(inputs)
+
+                # Verify reconstruction shape matches input
+                if reconstruction.shape != inputs.shape:
+                    raise ValueError(f"Reconstruction shape {reconstruction.shape} "
+                                  f"doesn't match input shape {inputs.shape}")
+
+                # Calculate loss
+                loss = self._calculate_loss(inputs, reconstruction, embedding)
+                loss.backward()
+                self.optimizer.step()
+
+                # Update metrics
+                running_loss += loss.item()
+                reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
+
+                # Save reconstructions periodically
+                if batch_idx % 50 == 0:
+                    self._save_training_batch(inputs, reconstruction, batch_idx, output_dir)
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = (reconstruction_accuracy / (batch_idx + 1)) * 100
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'recon_acc': f'{batch_acc:.2f}%'
+                })
+
+            except Exception as e:
+                logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                raise
+
+        pbar.close()
+        return (running_loss / len(train_loader),
+                (reconstruction_accuracy / len(train_loader)) * 100)
 
 #--------------------------
     def set_dataset(self, dataset: Dataset):
