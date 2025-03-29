@@ -216,7 +216,16 @@ class DatasetConfig:
         }
     }
 
-
+    @staticmethod
+    def load_config_from_path(config_path: str) -> Dict:
+        """Load configuration from explicit file path"""
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            return config
+        except Exception as e:
+            print(f"Error loading config from {config_path}: {str(e)}")
+            return None
     @staticmethod
     def is_url(path: str) -> bool:
         """Check if the given path is a URL"""
@@ -1361,17 +1370,14 @@ class DBNNConfig:
 
 class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
-
+    """
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
                  dataset_name: Optional[str] = None):
-
-        """
-        Initialize DBNN with configuration
 
         Args:
             config: DBNNConfig object or dictionary of parameters
             dataset_name: Name of the dataset (optional)
-        """
+
         # Initialize configuration
         if config is None:
             config = DBNNConfig()
@@ -1392,6 +1398,29 @@ class DBNN(GPUDBNN):
             use_previous_model=config.use_previous_model,
             model_type=config.model_type  # Pass model type from config
         )
+        """
+    def __init__(self, dataset_name: str, config_path: str = None, **kwargs):
+        # Load configuration first
+        if config_path:
+            self.config = DatasetConfig.load_config_from_path(config_path)
+        else:
+            self.config = DatasetConfig.load_config(dataset_name)
+
+        if self.config is None:
+            raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
+
+        # Now initialize with the loaded config
+        super().__init__(
+            dataset_name=dataset_name,
+            learning_rate=self.config.get('learning_rate', LearningRate),
+            max_epochs=self.config.get('epochs', Epochs),
+            test_size=self.config.get('test_fraction', TestFraction),
+            random_state=self.config.get('random_seed', TrainingRandomSeed),
+            model_type=self.config.get('modelType', "Histogram")
+            fresh=self.config.get('fresh_start',False)
+        )
+
+        self.target_column = self.config['target_column']
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
         # Store model configuration
@@ -5421,12 +5450,13 @@ def main_old():
         sys.exit(1)
 def main():
     parser = argparse.ArgumentParser(description='Deep Bayesian Neural Network (DBNN)')
-    parser.add_argument('--dataset', type=str,
+    parser.add_argument('--dataset', type=str, required=True,
                        help='Name of the dataset (should match config file name)')
-    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'train_predict', 'invert'],
-                       help='Operation mode: train, predict, train_predict, or invert')
+    parser.add_argument('--mode', type=str, required=True,
+                       choices=['train', 'predict', 'train_predict', 'invert'],
+                       help='Operation mode')
     parser.add_argument('--config', type=str,
-                       help='Path to custom config file')
+                       help='Path to custom config file (default: data/<dataset>/<dataset>.conf)')
     parser.add_argument('--output_dir', type=str, default='results',
                        help='Directory to save output files')
     parser.add_argument('--batch_size', type=int, default=128,
@@ -5434,30 +5464,18 @@ def main():
 
     args = parser.parse_args()
 
-    # Interactive mode if no arguments provided
-    if not any(vars(args).values()):
-        interactive_mode()
-        return
-
-    # Validate arguments
-    if not args.dataset:
-        print("Error: Dataset name is required")
-        parser.print_help()
-        return
-
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-
     try:
-        # Initialize DBNN configuration
-        config = {
-            'dataset_name': args.dataset,
-            'config_path': args.config,
-            'batch_size': args.batch_size
-        }
+        # Load configuration
+        if args.config:
+            config_path = args.config
+        else:
+            config_path = os.path.join('data', args.dataset, f"{args.dataset}.conf")
 
-        # Initialize DBNN
-        dbnn = DBNN(config=config)
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found at {config_path}")
+
+        # Initialize DBNN with explicit config path
+        dbnn = DBNN(dataset_name=args.dataset, config_path=config_path)
 
         if args.mode in ['train', 'train_predict']:
             # Training or train+predict mode
