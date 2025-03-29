@@ -426,7 +426,7 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
 
     return sorted(class_names)
 
-    def download_dataset(dataset_name: str, root: str = '.', merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
+def download_dataset(dataset_name: str, root: str = '.', merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
         """
         Download and organize a torchvision dataset.
         Creates <dataset_name>/train/<class_folders> structure in the specified root directory.
