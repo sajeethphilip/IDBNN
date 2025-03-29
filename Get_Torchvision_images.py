@@ -20,7 +20,7 @@ def get_dataset_info(dataset_name: str) -> Dict:
         return {
             'name': dataset_name,
             'has_train_test_split': hasattr(dataset_class, 'train') and hasattr(dataset_class, 'test'),
-            'default_root': os.path.join('data', dataset_name.lower())
+            'default_root': os.path.join('Data', dataset_name.lower())
         }
     except AttributeError:
         raise ValueError(f"Dataset {dataset_name} not found in torchvision.datasets")
@@ -136,7 +136,7 @@ def interactive_mode():
 
                 final_path, class_names = download_dataset(
                     dataset_name=dataset,
-                    root='data',
+                    root='Data',
                     merge_train_test=merge
                 )
 
@@ -162,7 +162,7 @@ def interactive_mode():
 
             final_path, class_names = download_dataset(
                 dataset_name=dataset_name,
-                root='data',
+                root='Data',
                 merge_train_test=merge
             )
 
@@ -178,7 +178,7 @@ if __name__ == "__main__":
         # Command line mode
         parser = argparse.ArgumentParser(description='Download and organize torchvision image datasets')
         parser.add_argument('--dataset', type=str, default='', help='Name of dataset to download')
-        parser.add_argument('--root', type=str, default='data', help='Root directory for downloaded datasets')
+        parser.add_argument('--root', type=str, default='Data', help='Root directory for downloaded datasets')
         parser.add_argument('--merge', action='store_true', help='Merge train and test sets (if available)')
         parser.add_argument('--all', action='store_true', help='Download all available datasets')
         args = parser.parse_args()
