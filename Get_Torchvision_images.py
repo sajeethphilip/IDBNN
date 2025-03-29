@@ -470,6 +470,15 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
     """
     Download and organize a torchvision dataset.
     Always creates data/<dataset>/train/<class_folders> structure.
+
+    Args:
+        dataset_name: Name of the dataset to download
+        root: Root directory for downloaded datasets
+        merge_train_test: Whether to merge train and test sets
+        **kwargs: Additional arguments to pass to dataset constructor
+
+    Returns:
+        Tuple of (path to train directory, list of class names)
     """
     dataset_class = getattr(torchvision.datasets, dataset_name)
     dataset_path = os.path.join(root, dataset_name.lower())
@@ -487,9 +496,17 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
             from torchvision.datasets import MNIST
             import torch
 
-            # Create directories for train and test
+            # Clean up any existing directories first
             train_img_path = os.path.join(dataset_path, 'train')
             test_img_path = os.path.join(dataset_path, 'test')
+
+            # Remove existing directories if they exist
+            if os.path.exists(train_img_path):
+                shutil.rmtree(train_img_path)
+            if os.path.exists(test_img_path):
+                shutil.rmtree(test_img_path)
+
+            # Create fresh directories
             os.makedirs(train_img_path, exist_ok=True)
             os.makedirs(test_img_path, exist_ok=True)
 
