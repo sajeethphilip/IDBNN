@@ -93,7 +93,17 @@ import os
 from pathlib import Path
 
 
+
+# Set sharing strategy at the start
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
 
 
 
@@ -3348,16 +3358,6 @@ class MorphologyLoss(nn.Module):
     def _vertical_symmetry(self, x):
         return F.mse_loss(x, torch.flip(x, [-2]))
 
-
-# Set sharing strategy at the start
-torch.multiprocessing.set_sharing_strategy('file_system')
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 class BaseFeatureExtractor(nn.Module, ABC):
     """Abstract base class for feature extraction models."""
