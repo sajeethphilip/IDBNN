@@ -3849,7 +3849,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
                 self.current_epoch = epoch
 
                 # Training
-                train_loss, train_acc = self._train_epoch(train_loader,device=self.device)
+                train_loss, train_acc = self._train_epoch(train_loader)
 
                 # Create summary for this epoch
                 epoch_dir = os.path.join('data', self.config['dataset']['name'],
