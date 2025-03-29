@@ -381,7 +381,7 @@ class PredictionManager:
 
         Args:
             data_path: Path to input (can be directory, compressed file, or single image)
-            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
+            output_csv: Path to output CSV file (default: data_name.csv in dataset folder)
             batch_size: Batch size for prediction
         """
         # Get image files with labels and original filenames
@@ -391,8 +391,8 @@ class PredictionManager:
 
         # Set default output path if not provided
         if output_csv is None:
-            dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            data_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', data_name, f"{data_name}_predictions.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
@@ -923,9 +923,9 @@ class BaseAutoencoder(nn.Module):
 
         # Initialize checkpoint paths
         self.checkpoint_dir = config['training']['checkpoint_dir']
-        self.dataset_name = config['dataset']['name']
+        self.data_name = config['dataset']['name']
         self.checkpoint_path = os.path.join(self.checkpoint_dir,
-                                          f"{self.dataset_name}_unified.pth")
+                                          f"{self.data_name}_unified.pth")
 
         # Create network layers
         self.encoder_layers = self._create_encoder_layers()
@@ -2224,8 +2224,8 @@ class UnifiedCheckpoint:
     def __init__(self, config: Dict):
         self.config = config
         self.checkpoint_dir = config['training']['checkpoint_dir']
-        self.dataset_name = config['dataset']['name']
-        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
+        self.data_name = config['dataset']['name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.data_name}_unified.pth")
         self.current_state = None
 
         # Create checkpoint directory if it doesn't exist
@@ -2338,7 +2338,7 @@ class UnifiedCheckpoint:
         """Print summary of checkpoint contents"""
         print("\nUnified Checkpoint Summary:")
         print("-" * 50)
-        print(f"Dataset: {self.dataset_name}")
+        print(f"Dataset: {self.data_name}")
         print(f"Last Updated: {self.current_state['metadata']['last_updated']}")
         print("\nModel States:")
 
@@ -2545,7 +2545,7 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
 
     # Get unique identifier for this configuration
     identifier = _get_checkpoint_identifier(model, phase, config)
-    dataset_name = config['dataset']['name']
+    data_name = config['dataset']['name']
 
     checkpoint = {
         'state_dict': model.state_dict(),
@@ -2566,12 +2566,12 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
     }
 
     # Always save latest checkpoint
-    latest_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_latest.pth")
+    latest_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_latest.pth")
     torch.save(checkpoint, latest_path)
 
     # Save phase-specific best model if applicable
     if is_best:
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_best.pth")
         torch.save(checkpoint, best_path)
         logger.info(f"Saved best model for {identifier} with loss: {loss:.4f}")
 
@@ -2583,8 +2583,8 @@ def load_best_checkpoint(model: nn.Module, phase: int, config: Dict) -> Optional
     """
     checkpoint_dir = config['training']['checkpoint_dir']
     identifier = _get_checkpoint_identifier(model, phase, config)
-    dataset_name = config['dataset']['name']
-    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
+    data_name = config['dataset']['name']
+    best_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_best.pth")
 
     if os.path.exists(best_path):
         logger.info(f"Loading best checkpoint for {identifier}")
@@ -2859,13 +2859,13 @@ class ReconstructionManager:
 
         # Determine input CSV path
         if csv_path is None:
-            dataset_name = self.config['dataset']['name']
-            base_dir = os.path.join('data', dataset_name)
+            data_name = self.config['dataset']['name']
+            base_dir = os.path.join('data', data_name)
 
             if self.config.get('execution_flags', {}).get('invert_DBNN', False):
                 csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
             else:
-                csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
+                csv_path = os.path.join(base_dir, f"{data_name}.csv")
 
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
@@ -4395,15 +4395,15 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         if not os.path.exists(checkpoint_dir):
             return None
 
-        dataset_name = self.config['dataset']['name']
+        data_name = self.config['dataset']['name']
 
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{data_name}_best.pth")
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{data_name}_checkpoint.pth")
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -4425,8 +4425,8 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         }
 
         # Save latest checkpoint
-        dataset_name = self.config['dataset']['name']
-        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        data_name = self.config['dataset']['name']
+        filename = f"{data_name}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -4616,14 +4616,14 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
     def generate_reconstructions(self):
         """Generate reconstructed images based on config mode"""
         invert_dbnn = self.config.get('execution_flags', {}).get('invert_DBNN', False)
-        dataset_name = self.config['dataset']['name']
-        base_dir = os.path.join('data', dataset_name)
+        data_name = self.config['dataset']['name']
+        base_dir = os.path.join('data', data_name)
 
         # Determine input file
         if invert_dbnn:
             input_file = os.path.join(base_dir, 'reconstructed_input.csv')
         else:
-            input_file = os.path.join(base_dir, f"{dataset_name}.csv")
+            input_file = os.path.join(base_dir, f"{data_name}.csv")
 
         if not os.path.exists(input_file):
             raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -5250,19 +5250,19 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
             self.optimizer = self._initialize_optimizer()
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
-        dataset_name = self.config['dataset']['name']
-        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+        data_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', data_name, 'checkpoints')
 
         if not os.path.exists(checkpoint_dir):
             return None
 
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{data_name}_best.pth")
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{data_name}_checkpoint.pth")
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -5284,8 +5284,8 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         }
 
         # Save latest checkpoint
-        dataset_name = self.config['dataset']['name']
-        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        data_name = self.config['dataset']['name']
+        filename = f"{data_name}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -5838,15 +5838,15 @@ class DatasetProcessor:
         self.config = config if config is not None else {}  # Initialize config
 
         if self.datatype == 'torchvision':
-            self.dataset_name = self.datafile.lower()
+            self.data_name = self.datafile.lower()
         else:
-            self.dataset_name = Path(self.datafile).stem.lower()
+            self.data_name = Path(self.datafile).stem.lower()
 
-        self.dataset_dir = os.path.join("data", self.dataset_name)
+        self.dataset_dir = os.path.join("data", self.data_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
+        self.config_path = os.path.join(self.dataset_dir, f"{self.data_name}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.data_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
 
     def _extract_archive(self, archive_path: str) -> str:
@@ -6044,7 +6044,7 @@ class DatasetProcessor:
 
         return {
             "dataset": {
-                "name": self.dataset_name,
+                "name": self.data_name,
                 "type": self.datatype,
                 "in_channels": in_channels,
                 "num_classes": num_classes,
@@ -6244,7 +6244,7 @@ class DatasetProcessor:
                 "fresh_start": False
             },
             "output": {
-                "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+                "features_file": os.path.join(self.dataset_dir, f"{self.data_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
                 "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
             }
@@ -6253,7 +6253,7 @@ class DatasetProcessor:
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
         """Generate dataset-specific configuration"""
         return {
-            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+            "file_path": os.path.join(self.dataset_dir, f"{self.data_name}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
@@ -6339,7 +6339,7 @@ class DatasetProcessor:
     def generate_default_config(self, train_dir: str) -> Dict:
         """Generate and manage all configuration files"""
         os.makedirs(self.dataset_dir, exist_ok=True)
-        logger.info(f"Starting configuration generation for dataset: {self.dataset_name}")
+        logger.info(f"Starting configuration generation for dataset: {self.data_name}")
 
         # 1. Generate and handle main configuration (json)
         logger.info("Generating main configuration...")
@@ -6424,7 +6424,7 @@ class DatasetProcessor:
     def _detect_image_properties(self, folder_path: str) -> Tuple[Tuple[int, int], int]:
         """Detect actual image properties but use config values if specified"""
         # Load existing config if available
-        config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        config_path = os.path.join(self.dataset_dir, f"{self.data_name}.json")
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -6473,9 +6473,9 @@ class DatasetProcessor:
 
     def _process_torchvision(self) -> Tuple[str, str]:
         """Process torchvision dataset"""
-        dataset_name = self.datafile.upper()
-        if not hasattr(datasets, dataset_name):
-            raise ValueError(f"Torchvision dataset {dataset_name} not found")
+        data_name = self.datafile.upper()
+        if not hasattr(datasets, data_name):
+            raise ValueError(f"Torchvision dataset {data_name} not found")
 
         # Setup paths in dataset-specific directory
         train_dir = os.path.join(self.dataset_dir, "train")
@@ -6486,14 +6486,14 @@ class DatasetProcessor:
         # Download and process datasets
         transform = transforms.ToTensor()
 
-        train_dataset = getattr(datasets, dataset_name)(
+        train_dataset = getattr(datasets, data_name)(
             root=self.output_dir,
             train=True,
             download=True,
             transform=transform
         )
 
-        test_dataset = getattr(datasets, dataset_name)(
+        test_dataset = getattr(datasets, data_name)(
             root=self.output_dir,
             train=False,
             download=True,
@@ -7105,22 +7105,22 @@ def get_interactive_args():
     # Get data path/name
     default = last_args.get('data', '') if last_args else ''
     prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
-    dataset_name = input(prompt).strip() or default
+    data_name = input(prompt).strip() or default
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
+        default_model = (f"data/{data_name}/checkpoints/{data_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
         # Set default input directory
-        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
+        default_input = f"Data/{data_name}.zip" if data_name else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
         args.input_path= input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+        default_csv = os.path.join('data', data_name, f"{data_name}_predictions.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
@@ -7168,9 +7168,9 @@ def get_interactive_args():
     save_last_args(args)
     return args
 
-def check_existing_model(dataset_dir, dataset_name):
+def check_existing_model(dataset_dir, data_name):
     """Check existing model type from checkpoint"""
-    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
+    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{data_name}_best.pth")
     if os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -7365,12 +7365,12 @@ def main():
         if args is None or getattr(args, 'interactive', False):
             args = interactive_input()
 
-        dataset_name = str(getattr(args, 'data_name', 'mnist'))
+        data_name = str(getattr(args, 'data_name', 'mnist'))
 
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
+            config_path = os.path.join('data', data_name, f"{data_name}.json")
             if not os.path.exists(config_path):
                 logger.error(f"Config file not found at {config_path}")
                 config_path = input("Enter path to config file: ").strip()
@@ -7406,7 +7406,7 @@ def main():
 
             # Handle output path
             if not hasattr(args, 'output') or not args.output:
-                args.output = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+                args.output = os.path.join('data', data_name, f"{data_name}_predictions.csv")
                 logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
@@ -7513,7 +7513,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     try:
         # Setup paths
         #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name =args.dataset_name
+        data_name =args.data_name
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
@@ -7569,7 +7569,7 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
     try:
         # Setup paths
         #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name=args.dataset_name
+        data_name=args.data_name
         data_dir = os.path.join('data', data_name)
 
         # Load configuration
