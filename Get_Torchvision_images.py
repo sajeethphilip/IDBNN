@@ -361,12 +361,8 @@ def extract_tar_file(tar_path: str, extract_to: str) -> None:
 
 def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     """
-    Move all image class subfolders to the train directory.
-    Cleans the target directory first if it exists.
-    Handles cases where:
-    - There are train/test folders (move their contents to train)
-    - Only raw class folders exist (move them to train)
-    - There's a containing folder like 256_ObjectCategories (move its contents to train)
+    Move all image class subfolders to the train directory while keeping a copy in the original location.
+    Returns sorted list of class names.
     """
     # Clean the train directory if it exists
     if os.path.exists(train_path):
@@ -379,7 +375,7 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     for split in ['train', 'test']:
         split_path = os.path.join(dataset_root, split)
         if os.path.exists(split_path):
-            # Move all class folders from this split to train
+            # Copy (not move) all class folders from this split to train
             for class_name in os.listdir(split_path):
                 class_path = os.path.join(split_path, class_name)
                 if os.path.isdir(class_path):
@@ -390,25 +386,19 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
                         for item in os.listdir(class_path):
                             src_item = os.path.join(class_path, item)
                             if os.path.isdir(src_item):
-                                # For nested directories, merge recursively
+                                # For nested directories, copy recursively
                                 dest_item = os.path.join(dest_path, item)
-                                if os.path.exists(dest_item):
-                                    shutil.rmtree(dest_item)
-                                shutil.move(src_item, dest_path)
+                                shutil.copytree(src_item, dest_item, dirs_exist_ok=True)
                             else:
-                                # For files, overwrite if they exist
+                                # For files, copy (don't overwrite)
                                 dest_file = os.path.join(dest_path, item)
-                                if os.path.exists(dest_file):
-                                    os.remove(dest_file)
-                                shutil.move(src_item, dest_path)
+                                if not os.path.exists(dest_file):
+                                    shutil.copy2(src_item, dest_path)
                     else:
-                        shutil.move(class_path, dest_path)
+                        shutil.copytree(class_path, dest_path)
 
                     if class_name not in class_names:
                         class_names.append(class_name)
-
-            # Remove the now-empty split directory
-            shutil.rmtree(split_path)
 
     # If no train/test folders found, look for direct class folders or containing folders
     if not class_names:
@@ -421,60 +411,58 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
 
             # If this is a directory that contains class folders (like 256_ObjectCategories)
             if any(os.path.isdir(os.path.join(item_path, subitem)) for subitem in os.listdir(item_path)):
-                # Move all its subdirectories to train
+                # Copy all its subdirectories to train
                 for class_name in os.listdir(item_path):
                     class_path = os.path.join(item_path, class_name)
                     if os.path.isdir(class_path):
                         dest_path = os.path.join(train_path, class_name)
-                        if os.path.exists(dest_path):
-                            shutil.rmtree(dest_path)
-                        shutil.move(class_path, dest_path)
+                        shutil.copytree(class_path, dest_path)
                         class_names.append(class_name)
-                # Remove the now-empty containing directory
-                shutil.rmtree(item_path)
             else:
-                # It's a class folder itself, move it to train
+                # It's a class folder itself, copy it to train
                 dest_path = os.path.join(train_path, item)
-                if os.path.exists(dest_path):
-                    shutil.rmtree(dest_path)
-                shutil.move(item_path, dest_path)
+                shutil.copytree(item_path, dest_path)
                 class_names.append(item)
 
     return sorted(class_names)
 
-def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
-    """
-    Download and organize a torchvision dataset.
-    Always creates data/<dataset>/train/<class_folders> structure.
-    """
-    dataset_class = getattr(torchvision.datasets, dataset_name)
-    dataset_path = os.path.join(root, dataset_name.lower())
-    train_path = os.path.join(dataset_path, 'train')
+    def download_dataset(dataset_name: str, root: str = '.', merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
+        """
+        Download and organize a torchvision dataset.
+        Creates <dataset_name>/train/<class_folders> structure in the specified root directory.
+        If root is '.', creates in current working directory.
+        """
+        # Remove 'data/' from the path if it exists in root
+        if root.startswith('data/'):
+            root = root.replace('data/', '', 1)
 
-    ensure_directory_exists(train_path)
+        dataset_path = os.path.join(root, dataset_name.lower())
+        train_path = os.path.join(dataset_path, 'train')
 
-    try:
-        # Download the dataset (this may download a tar file)
-        dataset = dataset_class(root=root, download=True, **kwargs)
+        ensure_directory_exists(train_path)
 
-        # Special handling for Caltech256 which comes as a tar file
-        if dataset_name.lower() == 'caltech256':
-            tar_path = os.path.join(root, '256_ObjectCategories.tar')
-            if os.path.exists(tar_path):
-                extract_tar_file(tar_path, dataset_path)
-                os.remove(tar_path)
+        try:
+            # Download the dataset (this may download a tar file)
+            dataset = dataset_class(root=root, download=True, **kwargs)
 
-        # Handle all datasets (standard and special cases)
-        class_names = move_all_to_train(dataset_path, train_path)
+            # Special handling for Caltech256 which comes as a tar file
+            if dataset_name.lower() == 'caltech256':
+                tar_path = os.path.join(root, '256_ObjectCategories.tar')
+                if os.path.exists(tar_path):
+                    extract_tar_file(tar_path, dataset_path)
+                    os.remove(tar_path)
 
-        # Get class names from dataset if available
-        if hasattr(dataset, 'classes') and dataset.classes:
-            return train_path, dataset.classes
-        return train_path, class_names
+            # Handle all datasets (standard and special cases)
+            class_names = move_all_to_train(dataset_path, train_path)
 
-    except Exception as e:
-        print(f"Error processing dataset {dataset_name}: {str(e)}")
-        raise
+            # Get class names from dataset if available
+            if hasattr(dataset, 'classes') and dataset.classes:
+                return train_path, dataset.classes
+            return train_path, class_names
+
+        except Exception as e:
+            print(f"Error processing dataset {dataset_name}: {str(e)}")
+            raise
 
 def interactive_mode():
     """Interactive mode for dataset selection and downloading"""
