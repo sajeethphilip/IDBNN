@@ -2135,7 +2135,7 @@ class UnifiedCheckpoint:
             'config': {
                 'kl_divergence': model.use_kl_divergence,
                 'class_encoding': model.use_class_encoding,
-                'image_type': self.config['dataset'].get('image_type', 'general')
+                'image_type': self.config['dataset'].get('image_type', 'general'),
                 'clustering_params': {
                     'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
                     'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') else 1.0
