@@ -6787,7 +6787,9 @@ def parse_arguments():
 
     parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
     parser.add_argument('--mode', choices=['train', 'reconstruct','predict'], default='train')
-    parser.add_argument('--data', type=str, help='dataset name/path')
+    parser.add_argument('--data_name', type=str, help='dataset name/path')
+    parser.add_argument('--input_path', type=str, required=True,
+                   help='Path to input (can be directory or compressed file)')
     parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
     parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
     parser.add_argument('--config', type=str, help='path to configuration file')
@@ -7094,7 +7096,7 @@ def main():
         # Setup logging and parse arguments
         logger = setup_logging()
         args = parse_arguments()
-        dataset_name=str(args.data.split('/')[-1])
+        dataset_name=str(args.data_name)
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
@@ -7137,7 +7139,7 @@ def main():
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                data_path=args.data,
+                data_path=args.input_path,
                 output_csv=args.output,
                 batch_size=args.batch_size
             )
@@ -7230,11 +7232,12 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
         # Determine input CSV
         if args.invert_dbnn:
             input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, 'reconstructed_input.csv')
+            if not os.path.exists(input_csv):
+                raise FileNotFoundError(f"Input CSV not found: {input_csv}")
         else:
-            input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, f"{data_name}.csv")
+            output_csv = args.input_csv if args.input_csv else os.path.join(data_dir, f"{data_name}.csv")
 
-        if not os.path.exists(input_csv):
-            raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
 
         # Setup output directory
         output_dir = os.path.join(data_dir, 'predictions', datetime.now().strftime('%Y%m%d_%H%M%S'))
