@@ -875,7 +875,56 @@ class BaseAutoencoder(nn.Module):
         self.current_epoch = 0
         self.history = defaultdict(list)
 #--------------------------
+    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
+        """Convert features dictionary to a pandas DataFrame with proper class names."""
+        data_dict = {}
 
+        # Get base length from embeddings
+        base_length = len(features['embeddings']) if 'embeddings' in features else 0
+        if base_length == 0:
+            raise ValueError("No embeddings found in features")
+
+        # Process embeddings
+        embeddings = features['embeddings'].cpu().numpy()
+        for i in range(embeddings.shape[1]):
+            data_dict[f'feature_{i}'] = embeddings[:, i]
+
+        # Process labels - ensure same length as embeddings
+        if 'class_names' in features:
+            if len(features['class_names']) == base_length:
+                data_dict['target'] = features['class_names']
+            else:
+                logger.warning(f"class_names length {len(features['class_names'])} doesn't match embeddings length {base_length}")
+                data_dict['target'] = [str(i) for i in range(base_length)]
+        elif 'labels' in features:
+            if len(features['labels']) == base_length:
+                data_dict['target'] = features['labels'].cpu().numpy()
+            else:
+                logger.warning(f"labels length {len(features['labels'])} doesn't match embeddings length {base_length}")
+                data_dict['target'] = [str(i) for i in range(base_length)]
+        else:
+            data_dict['target'] = [str(i) for i in range(base_length)]
+
+        # Include additional metadata if available and length matches
+        optional_fields = ['indices', 'filenames']
+        for field in optional_fields:
+            if field in features:
+                if len(features[field]) == base_length:
+                    data_dict[field] = features[field]
+                else:
+                    logger.warning(f"{field} length {len(features[field])} doesn't match embeddings length {base_length}")
+                    data_dict[field] = [f"{field}_{i}" for i in range(base_length)]
+
+        # Add enhancement features if available
+        enhancement_dict = self._get_enhancement_columns(features)
+        for key, value in enhancement_dict.items():
+            if len(value) == base_length:
+                data_dict[key] = value
+            else:
+                logger.warning(f"Enhancement feature {key} length {len(value)} doesn't match embeddings length {base_length}")
+                data_dict[key] = [None] * base_length
+
+        return pd.DataFrame(data_dict)
 
 #--------------------------
     def set_dataset(self, dataset: Dataset):
