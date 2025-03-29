@@ -75,6 +75,14 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Dict, List, Optional
 from torchvision.transforms.functional import resize
+from types import SimpleNamespace
+import os
+import json
+import logging
+import traceback
+import argparse
+from datetime import datetime
+import torch
 
 logger = logging.getLogger(__name__)
 class Colors:
@@ -7077,6 +7085,9 @@ def main():
         # First try to parse command line arguments
         try:
             args = parse_arguments()
+        except SystemExit:
+            # argparse exits when -h/--help is used
+            return 0
         except:
             args = None
 
@@ -7084,7 +7095,7 @@ def main():
         if args is None or getattr(args, 'interactive', False):
             args = interactive_input()
 
-        dataset_name = str(args.data_name)
+        dataset_name = str(getattr(args, 'data_name', 'mnist'))
 
         # Process based on mode
         if args.mode == 'predict':
@@ -7092,7 +7103,9 @@ def main():
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
             if not os.path.exists(config_path):
                 logger.error(f"Config file not found at {config_path}")
-                config_path = input("Enter path to config file: ")
+                config_path = input("Enter path to config file: ").strip()
+                if not os.path.exists(config_path):
+                    raise FileNotFoundError(f"Config file not found at {config_path}")
 
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -7117,21 +7130,21 @@ def main():
             # Set the dataset (if required)
             if hasattr(predictor.model, 'set_dataset'):
                 transform = predictor._get_transforms()
-                dataset = predictor._create_dataset(args.input_path, transform)
+                dataset = predictor._create_dataset(getattr(args, 'input_path'), transform)
                 predictor.model.set_dataset(dataset)
                 logger.info(f"Dataset created with {len(dataset)} images")
 
             # Handle output path
-            if not hasattr(args, 'output') or args.output == '':
+            if not hasattr(args, 'output') or not args.output:
                 args.output = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
                 logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                data_path=args.input_path,
-                output_csv=args.output,
-                batch_size=args.batch_size
+                data_path=getattr(args, 'input_path'),
+                output_csv=getattr(args, 'output'),
+                batch_size=getattr(args, 'batch_size', 128)
             )
             logger.info(f"Predictions saved to {args.output}")
 
@@ -7215,6 +7228,15 @@ def parse_arguments():
                        help='Enable debug mode with verbose output')
 
     return parser.parse_args()
+
+
+def setup_logging():
+    """Setup basic logging configuration"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    return logging.getLogger(__name__)
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
