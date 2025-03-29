@@ -5310,7 +5310,7 @@ def print_dataset_info(conf_path: str, csv_path: str):
         print("\033[K" +f"Traceback: {traceback.format_exc()}")
 
 
-def main():
+def main_old():
     parser = argparse.ArgumentParser(description='Process ML datasets with DBNN')
     parser.add_argument('--dataset', type=str, required=True,
                        help='Name of the dataset (should match config file name)')
@@ -5419,7 +5419,191 @@ def main():
         print(f"Error: {str(e)}")
         traceback.print_exc()
         sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(description='Deep Bayesian Neural Network (DBNN)')
+    parser.add_argument('--dataset', type=str,
+                       help='Name of the dataset (should match config file name)')
+    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'train_predict', 'invert'],
+                       help='Operation mode: train, predict, train_predict, or invert')
+    parser.add_argument('--config', type=str,
+                       help='Path to custom config file')
+    parser.add_argument('--output_dir', type=str, default='results',
+                       help='Directory to save output files')
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help='Batch size for processing')
 
+    args = parser.parse_args()
+
+    # Interactive mode if no arguments provided
+    if not any(vars(args).values()):
+        interactive_mode()
+        return
+
+    # Validate arguments
+    if not args.dataset:
+        print("Error: Dataset name is required")
+        parser.print_help()
+        return
+
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    try:
+        # Initialize DBNN configuration
+        config = {
+            'dataset_name': args.dataset,
+            'config_path': args.config,
+            'batch_size': args.batch_size
+        }
+
+        # Initialize DBNN
+        dbnn = DBNN(config=config)
+
+        if args.mode in ['train', 'train_predict']:
+            # Training or train+predict mode
+            print(f"\n{Colors.BLUE}Starting {'training' if args.mode == 'train' else 'training + prediction'} for dataset: {args.dataset}{Colors.ENDC}")
+            results = dbnn.fit_predict(batch_size=args.batch_size)
+
+            # Save results
+            output_path = os.path.join(args.output_dir, args.dataset)
+            os.makedirs(output_path, exist_ok=True)
+
+            # Save predictions
+            if 'test_predictions' in results:
+                results['test_predictions'].to_csv(
+                    os.path.join(output_path, 'test_predictions.csv'), index=False)
+
+            if 'train_predictions' in results:
+                results['train_predictions'].to_csv(
+                    os.path.join(output_path, 'train_predictions.csv'), index=False)
+
+            # Save classification report
+            with open(os.path.join(output_path, 'classification_report.txt'), 'w') as f:
+                f.write(results['classification_report'])
+
+            # Save confusion matrix plot
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(results['confusion_matrix'], annot=True, fmt='d')
+            plt.title('Confusion Matrix')
+            plt.savefig(os.path.join(output_path, 'confusion_matrix.png'))
+            plt.close()
+
+            print(f"\n{Colors.GREEN}Results saved to {output_path}{Colors.ENDC}")
+
+        elif args.mode == 'predict':
+            # Prediction-only mode
+            print(f"\n{Colors.BLUE}Starting prediction for dataset: {args.dataset}{Colors.ENDC}")
+            if not hasattr(dbnn, 'X_tensor'):
+                # Load data if not already loaded
+                X = dbnn.data.drop(columns=[dbnn.target_column])
+                X_processed = dbnn._preprocess_data(X, is_training=False)
+                dbnn.X_tensor = X_processed.clone().detach().to(dbnn.device)
+
+            predictions = dbnn.predict(dbnn.X_tensor, batch_size=args.batch_size)
+
+            # Save predictions with probabilities
+            output_path = os.path.join(args.output_dir, args.dataset)
+            os.makedirs(output_path, exist_ok=True)
+
+            pred_df = dbnn.save_predictions(
+                dbnn.data.drop(columns=[dbnn.target_column]),
+                predictions,
+                os.path.join(output_path, 'predictions.csv'),
+                dbnn.data[dbnn.target_column] if hasattr(dbnn, 'target_column') else None
+            )
+
+            print(f"\n{Colors.GREEN}Predictions saved to {os.path.join(output_path, 'predictions.csv')}{Colors.ENDC}")
+
+        elif args.mode == 'invert':
+            # Inversion mode - reconstruct features from predictions
+            print(f"\n{Colors.BLUE}Starting feature inversion for dataset: {args.dataset}{Colors.ENDC}")
+            if not hasattr(dbnn, 'invertible_model'):
+                dbnn.create_invertible_model()
+
+            # Get some test samples
+            if hasattr(dbnn, 'X_test'):
+                samples = dbnn.X_test[:10]
+            else:
+                samples = dbnn.X_tensor[:10]
+
+            # Get predictions
+            posteriors, _ = dbnn._compute_batch_posterior(samples)
+
+            # Reconstruct features
+            reconstructed = dbnn.invertible_model.reconstruct_features(posteriors)
+
+            # Save reconstruction results
+            output_path = os.path.join(args.output_dir, args.dataset)
+            os.makedirs(output_path, exist_ok=True)
+
+            recon_df = pd.DataFrame({
+                'original': samples.cpu().numpy().tolist(),
+                'reconstructed': reconstructed.cpu().numpy().tolist()
+            })
+            recon_df.to_csv(os.path.join(output_path, 'reconstructions.csv'), index=False)
+
+            print(f"\n{Colors.GREEN}Reconstructions saved to {os.path.join(output_path, 'reconstructions.csv')}{Colors.ENDC}")
+
+    except Exception as e:
+        print(f"\n{Colors.RED}Error: {str(e)}{Colors.ENDC}")
+        traceback.print_exc()
+        sys.exit(1)
+
+def interactive_mode():
+    """Interactive command line interface when no arguments are provided"""
+    print(f"\n{Colors.BLUE}DBNN Interactive Mode{Colors.ENDC}")
+    print(f"{Colors.YELLOW}---------------------{Colors.ENDC}")
+
+    # Get available datasets
+    available_datasets = DatasetConfig.get_available_datasets()
+    if not available_datasets:
+        print(f"{Colors.RED}No datasets found. Please add dataset files to the data directory.{Colors.ENDC}")
+        return
+
+    # Select dataset
+    print("\nAvailable datasets:")
+    for i, dataset in enumerate(available_datasets, 1):
+        print(f"{i}. {dataset}")
+
+    try:
+        selection = int(input("\nSelect dataset (number): "))
+        dataset_name = available_datasets[selection-1]
+    except (ValueError, IndexError):
+        print(f"{Colors.RED}Invalid selection{Colors.ENDC}")
+        return
+
+    # Select mode
+    print("\nAvailable modes:")
+    modes = ['train', 'predict', 'train_predict', 'invert']
+    for i, mode in enumerate(modes, 1):
+        print(f"{i}. {mode}")
+
+    try:
+        selection = int(input("\nSelect mode (number): "))
+        mode = modes[selection-1]
+    except (ValueError, IndexError):
+        print(f"{Colors.RED}Invalid selection{Colors.ENDC}")
+        return
+
+    # Get batch size
+    try:
+        batch_size = int(input("\nBatch size (press Enter for default 128): ") or 128)
+    except ValueError:
+        print(f"{Colors.RED}Invalid batch size, using default 128{Colors.ENDC}")
+        batch_size = 128
+
+    # Create synthetic args object
+    class Args:
+        pass
+    args = Args()
+    args.dataset = dataset_name
+    args.mode = mode
+    args.output_dir = 'results'
+    args.batch_size = batch_size
+
+    # Call main with the synthetic args
+    print(f"\n{Colors.BLUE}Starting {mode} for dataset: {dataset_name}{Colors.ENDC}")
+    main(args)
 
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
