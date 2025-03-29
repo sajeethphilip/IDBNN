@@ -83,171 +83,8 @@ import traceback
 import argparse
 from datetime import datetime
 import torch
-import pickle
-import os
-from sklearn.preprocessing import LabelEncoder
-from collections import defaultdict
-from torch.utils.data import Dataset
-from PIL import Image
-import os
-from pathlib import Path
 
-
-
-# Set sharing strategy at the start
-torch.multiprocessing.set_sharing_strategy('file_system')
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-
-
-
-
-class CustomDataset(Dataset):
-    """Custom dataset that handles label encoding and image loading"""
-
-    def __init__(self, root_dir, transform=None, label_encoder=None,
-                 class_to_idx=None, extensions=('.png', '.jpg', '.jpeg')):
-        """
-        Args:
-            root_dir (string): Directory with all the images
-            transform (callable, optional): Optional transform to be applied
-            label_encoder (LabelEncoderManager): Label encoder instance
-            class_to_idx (dict, optional): Predefined class to index mapping
-            extensions (tuple): Valid image file extensions
-        """
-        self.root_dir = Path(root_dir)
-        self.transform = transform
-        self.label_encoder = label_encoder
-        self.extensions = extensions
-        self.samples = []
-        self.classes = []
-        self.class_to_idx = {}
-
-        # Build the dataset
-        self._build_dataset()
-
-        # Initialize label encoder if provided
-        if label_encoder is not None:
-            self._init_label_encoder()
-        elif class_to_idx is not None:
-            self.class_to_idx = class_to_idx
-            self.classes = list(class_to_idx.keys())
-
-    def _build_dataset(self):
-        """Build the dataset by scanning directories"""
-        self.classes = [d.name for d in sorted(self.root_dir.iterdir()) if d.is_dir()]
-        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-
-        for class_name in self.classes:
-            class_dir = self.root_dir / class_name
-            for img_path in class_dir.iterdir():
-                if img_path.suffix.lower() in self.extensions:
-                    self.samples.append((str(img_path), self.class_to_idx[class_name]))
-
-    def _init_label_encoder(self):
-        """Initialize the label encoder with dataset classes"""
-        if self.label_encoder is not None:
-            # Get all unique labels
-            all_labels = [self.classes[idx] for _, idx in self.samples]
-            self.label_encoder.fit(all_labels)
-            # Update mappings to use encoder
-            self.class_to_idx = dict(self.label_encoder.label_to_idx)
-            self.classes = self.label_encoder.classes_
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        img_path, label_idx = self.samples[idx]
-
-        try:
-            image = Image.open(img_path).convert('RGB')
-
-            if self.transform:
-                image = self.transform(image)
-
-            # Convert label index if encoder is available
-            if self.label_encoder is not None:
-                label_name = self.classes[label_idx]
-                label_idx = self.label_encoder.transform([label_name])[0]
-
-            return image, label_idx
-
-        except Exception as e:
-            print(f"Error loading image {img_path}: {str(e)}")
-            return None, None
-
-    def get_class_names(self):
-        """Get list of class names"""
-        return self.classes
-
-    def get_class_mapping(self):
-        """Get class to index mapping"""
-        return self.class_to_idx
-
-    def get_additional_info(self, idx):
-        """Get additional information about sample (for feature extraction)"""
-        img_path, label_idx = self.samples[idx]
-        return idx, img_path, self.classes[label_idx]
-
-class LabelEncoderManager:
-    """Handles label encoding consistently across training and prediction"""
-    def __init__(self):
-        self.encoder = LabelEncoder()
-        self.classes_ = None
-        self.label_to_idx = defaultdict(lambda: -1)  # Default for unknown labels
-        self.idx_to_label = defaultdict(str)  # Default for unknown indices
-
-    def fit(self, labels):
-        """Fit the encoder and create mappings"""
-        self.encoder.fit(labels)
-        self.classes_ = self.encoder.classes_
-        self._create_mappings()
-
-    def _create_mappings(self):
-        """Create bidirectional mappings"""
-        self.label_to_idx = defaultdict(
-            lambda: -1,
-            {label: idx for idx, label in enumerate(self.classes_)}
-        )
-        self.idx_to_label = defaultdict(
-            lambda: "unknown",
-            {idx: label for idx, label in enumerate(self.classes_)}
-        )
-
-    def transform(self, labels):
-        """Transform labels to indices"""
-        return [self.label_to_idx[label] for label in labels]
-
-    def inverse_transform(self, indices):
-        """Transform indices back to labels"""
-        return [self.idx_to_label[idx] for idx in indices]
-
-    def save(self, path):
-        """Save encoder state to file"""
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'classes': self.classes_,
-                'label_to_idx': dict(self.label_to_idx),
-                'idx_to_label': dict(self.idx_to_label)
-            }, f)
-
-    def load(self, path):
-        """Load encoder state from file"""
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-        self.classes_ = data['classes']
-        self.label_to_idx = defaultdict(lambda: -1, data['label_to_idx'])
-        self.idx_to_label = defaultdict(lambda: "unknown", data['idx_to_label'])
-        # Recreate sklearn encoder for compatibility
-        self.encoder = LabelEncoder()
-        self.encoder.classes_ = self.classes_
-
 class Colors:
     """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
@@ -308,7 +145,6 @@ class PredictionManager:
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
-        self.label_encoder = None
 
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
@@ -370,9 +206,6 @@ class PredictionManager:
                 checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
             else:
                 raise e
-        # Load label encoder if available
-        if 'label_encoder' in checkpoint:
-            self.label_encoder = checkpoint['label_encoder']
 
         # Load the best model state for phase 2 with KL divergence
         state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
@@ -387,11 +220,11 @@ class PredictionManager:
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output and label encoding
+        """Predict features with consistent clustering output
 
         Args:
             data_path: Path to input (can be directory, compressed file, or single image)
-            output_csv: Path to output CSV file (default: data_name.csv in dataset folder)
+            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
             batch_size: Batch size for prediction
         """
         # Get image files with labels and original filenames
@@ -401,8 +234,8 @@ class PredictionManager:
 
         # Set default output path if not provided
         if output_csv is None:
-            data_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', data_name, f"{data_name}_predictions.csv")
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
@@ -412,19 +245,13 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-
-            # Enhanced header with both encoded and decoded labels
-            header = [
-                'original_filename',    # Original filename without path
-                'filepath',            # Full path to the image
-                'target_label',        # Original class label (string)
-                'target_encoded',      # Encoded class index (if encoder available)
+            csv_writer.writerow([
+                'original_filename',  # Original filename without path
+                'filepath',          # Full path to the image
+                'target',            # Class label if available
                 'cluster_assignment',
-                'cluster_confidence',
-                'cluster_label'       # Cluster label if encoder available
-            ] + feature_cols
-
-            csv_writer.writerow(header)
+                'cluster_confidence'
+            ] + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -467,43 +294,23 @@ class PredictionManager:
                 if 'cluster_assignments' in latent_info:
                     cluster_assign = latent_info['cluster_assignments'].cpu().numpy()
                     cluster_conf = latent_info['cluster_probabilities'].max(1)[0].cpu().numpy()
-
-                    # Convert cluster assignments to labels if encoder available
-                    if hasattr(self, 'label_encoder'):
-                        cluster_labels = self.label_encoder.inverse_transform(cluster_assign)
-                    else:
-                        cluster_labels = ['NA'] * len(cluster_assign)
                 else:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
-                    cluster_labels = ['NA'] * len(batch_files)
 
-                # Convert class labels to encoded values if encoder available
-                if hasattr(self, 'label_encoder'):
-                    try:
-                        encoded_labels = self.label_encoder.transform(batch_labels)
-                    except ValueError:
-                        # Handle unknown labels
-                        encoded_labels = [-1] * len(batch_labels)
-                else:
-                    encoded_labels = ['NA'] * len(batch_labels)
-
-            # Write predictions to CSV with enhanced information
+            # Write predictions to CSV with original filenames
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
                     row = [
-                        orig_name,               # Original filename
-                        filename,                # Full filepath
-                        true_class,              # Original class label (string)
-                        encoded_labels[j],       # Encoded class index
-                        cluster_assign[j],       # Cluster index
-                        cluster_conf[j],         # Cluster confidence
-                        cluster_labels[j]        # Cluster label (string)
-                    ] + features[j].tolist()     # Feature vector
-
+                        orig_name,       # Original filename
+                        filename,        # Full filepath
+                        true_class,      # Class label
+                        cluster_assign[j],
+                        cluster_conf[j]
+                    ] + features[j].tolist()
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
@@ -933,9 +740,9 @@ class BaseAutoencoder(nn.Module):
 
         # Initialize checkpoint paths
         self.checkpoint_dir = config['training']['checkpoint_dir']
-        self.data_name = config['dataset']['name']
+        self.dataset_name = config['dataset']['name']
         self.checkpoint_path = os.path.join(self.checkpoint_dir,
-                                          f"{self.data_name}_unified.pth")
+                                          f"{self.dataset_name}_unified.pth")
 
         # Create network layers
         self.encoder_layers = self._create_encoder_layers()
@@ -998,63 +805,7 @@ class BaseAutoencoder(nn.Module):
         self.current_epoch = 0
         self.history = defaultdict(list)
 #--------------------------
-    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
-        """Train one epoch with reconstruction visualization"""
-        self.feature_extractor.train()
-        running_loss = 0.0
-        reconstruction_accuracy = 0.0
 
-        # Create output directory for training reconstructions
-        output_dir = os.path.join('data', self.config['dataset']['name'],
-                                'training_decoder_output', f'epoch_{self.current_epoch}')
-        os.makedirs(output_dir, exist_ok=True)
-
-        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
-                   unit='batch', leave=False)
-
-        for batch_idx, (inputs, _) in enumerate(pbar):
-            try:
-                inputs = inputs.to(self.device)
-
-                # Log input shape and channels
-                logger.debug(f"Input tensor shape: {inputs.shape}, channels: {inputs.size(1)}")
-
-                self.optimizer.zero_grad()
-                embedding, reconstruction = self.feature_extractor(inputs)
-
-                # Verify reconstruction shape matches input
-                if reconstruction.shape != inputs.shape:
-                    raise ValueError(f"Reconstruction shape {reconstruction.shape} "
-                                  f"doesn't match input shape {inputs.shape}")
-
-                # Calculate loss
-                loss = self._calculate_loss(inputs, reconstruction, embedding)
-                loss.backward()
-                self.optimizer.step()
-
-                # Update metrics
-                running_loss += loss.item()
-                reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
-
-                # Save reconstructions periodically
-                if batch_idx % 50 == 0:
-                    self._save_training_batch(inputs, reconstruction, batch_idx, output_dir)
-
-                # Update progress bar
-                batch_loss = running_loss / (batch_idx + 1)
-                batch_acc = (reconstruction_accuracy / (batch_idx + 1)) * 100
-                pbar.set_postfix({
-                    'loss': f'{batch_loss:.4f}',
-                    'recon_acc': f'{batch_acc:.2f}%'
-                })
-
-            except Exception as e:
-                logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                raise
-
-        pbar.close()
-        return (running_loss / len(train_loader),
-                (reconstruction_accuracy / len(train_loader)) * 100)
 
 #--------------------------
     def set_dataset(self, dataset: Dataset):
@@ -2290,8 +2041,8 @@ class UnifiedCheckpoint:
     def __init__(self, config: Dict):
         self.config = config
         self.checkpoint_dir = config['training']['checkpoint_dir']
-        self.data_name = config['dataset']['name']
-        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.data_name}_unified.pth")
+        self.dataset_name = config['dataset']['name']
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
         self.current_state = None
 
         # Create checkpoint directory if it doesn't exist
@@ -2404,7 +2155,7 @@ class UnifiedCheckpoint:
         """Print summary of checkpoint contents"""
         print("\nUnified Checkpoint Summary:")
         print("-" * 50)
-        print(f"Dataset: {self.data_name}")
+        print(f"Dataset: {self.dataset_name}")
         print(f"Last Updated: {self.current_state['metadata']['last_updated']}")
         print("\nModel States:")
 
@@ -2443,8 +2194,7 @@ class ModelFactory:
         elif image_type == 'agricultural':
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
         else:
-            #model = BaseAutoencoder(input_shape, feature_dims, config)
-            model = AutoEncoderFeatureExtractor(config)
+            model = BaseAutoencoder(input_shape, feature_dims, config)
 
         # Verify channel compatibility
         if hasattr(model, 'in_channels'):
@@ -2456,70 +2206,6 @@ class ModelFactory:
 
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
-                config: Dict, val_loader: DataLoader = None) -> Dict[str, List]:
-    """Enhanced training function with built-in label handling"""
-
-    # Initialize label encoder if not already present
-    if not hasattr(model, 'label_encoder'):
-        model.label_encoder = LabelEncoderManager()
-
-    # Extract labels from dataset if possible
-    if hasattr(train_loader.dataset, 'classes'):
-        all_labels = train_loader.dataset.classes
-    else:
-        # Fallback: collect all labels from the loader
-        all_labels = []
-        for _, labels in train_loader:
-            if isinstance(labels, torch.Tensor):
-                labels = labels.tolist()
-            all_labels.extend(labels)
-        all_labels = list(set(all_labels))  # Get unique labels
-
-    # Fit the label encoder
-    model.label_encoder.fit(all_labels)
-
-    # Update dataset with encoder if possible
-    if hasattr(train_loader.dataset, 'label_encoder'):
-        train_loader.dataset.label_encoder = model.label_encoder
-
-    # Original training logic with enhanced label handling
-    early_stopping = config['training'].get('early_stopping', {})
-    patience = early_stopping.get('patience', 5)
-    min_delta = early_stopping.get('min_delta', 0.001)
-
-    best_val_metric = float('inf')
-    patience_counter = 0
-
-    for epoch in range(model.current_epoch, config['training']['epochs']):
-        model.current_epoch = epoch
-
-        # Training phase
-        train_loss, train_acc = model._train_epoch(train_loader)
-
-        # Validation phase
-        val_loss, val_acc = None, None
-        if val_loader:
-            val_loss, val_acc = model._validate(model, val_loader, config)
-            current_metric = val_loss
-        else:
-            current_metric = train_loss
-
-        # Checkpoint saving (now includes label encoder)
-        if current_metric < best_val_metric - min_delta:
-            best_val_metric = current_metric
-            patience_counter = 0
-            _save_checkpoint(model, is_best=True, config=config)
-        else:
-            patience_counter += 1
-
-        # Early stopping check
-        if patience_counter >= patience:
-            logger.info(f"Early stopping triggered after {epoch + 1} epochs")
-            break
-
-    return model.history
-
-def train_model_old(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
@@ -2611,7 +2297,7 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
 
     # Get unique identifier for this configuration
     identifier = _get_checkpoint_identifier(model, phase, config)
-    data_name = config['dataset']['name']
+    dataset_name = config['dataset']['name']
 
     checkpoint = {
         'state_dict': model.state_dict(),
@@ -2622,8 +2308,6 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
         'loss': loss,
         'identifier': identifier,
         'config': config,
-        'label_encoder': model.label_encoder,  # Now includes encoder
-        'class_mapping': model.label_encoder.classes_,  # For easy reference
         'active_enhancements': {
             'kl_divergence': model.use_kl_divergence,
             'class_encoding': model.use_class_encoding,
@@ -2632,12 +2316,12 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
     }
 
     # Always save latest checkpoint
-    latest_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_latest.pth")
+    latest_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_latest.pth")
     torch.save(checkpoint, latest_path)
 
     # Save phase-specific best model if applicable
     if is_best:
-        best_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
         torch.save(checkpoint, best_path)
         logger.info(f"Saved best model for {identifier} with loss: {loss:.4f}")
 
@@ -2649,8 +2333,8 @@ def load_best_checkpoint(model: nn.Module, phase: int, config: Dict) -> Optional
     """
     checkpoint_dir = config['training']['checkpoint_dir']
     identifier = _get_checkpoint_identifier(model, phase, config)
-    data_name = config['dataset']['name']
-    best_path = os.path.join(checkpoint_dir, f"{data_name}_{identifier}_best.pth")
+    dataset_name = config['dataset']['name']
+    best_path = os.path.join(checkpoint_dir, f"{dataset_name}_{identifier}_best.pth")
 
     if os.path.exists(best_path):
         logger.info(f"Loading best checkpoint for {identifier}")
@@ -2913,8 +2597,7 @@ class ReconstructionManager:
         elif image_type == 'agricultural':
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, self.config)
         else:
-            #model = BaseAutoencoder(input_shape, feature_dims, self.config)
-            model = AutoEncoderFeatureExtractor(config)
+            model = BaseAutoencoder(input_shape, feature_dims, self.config)
 
         return model.to(self.device)
 
@@ -2926,13 +2609,13 @@ class ReconstructionManager:
 
         # Determine input CSV path
         if csv_path is None:
-            data_name = self.config['dataset']['name']
-            base_dir = os.path.join('data', data_name)
+            dataset_name = self.config['dataset']['name']
+            base_dir = os.path.join('data', dataset_name)
 
             if self.config.get('execution_flags', {}).get('invert_DBNN', False):
                 csv_path = os.path.join(base_dir, 'reconstructed_input.csv')
             else:
-                csv_path = os.path.join(base_dir, f"{data_name}.csv")
+                csv_path = os.path.join(base_dir, f"{dataset_name}.csv")
 
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
@@ -3416,12 +3099,22 @@ class MorphologyLoss(nn.Module):
         return F.mse_loss(x, torch.flip(x, [-2]))
 
 
+# Set sharing strategy at the start
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 class BaseFeatureExtractor(nn.Module, ABC):
     """Abstract base class for feature extraction models."""
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
-        self.label_encoder = LabelEncoderManager()
+
 
         # Set device
         if device is None:
@@ -3462,27 +3155,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         if not self.config['execution_flags'].get('fresh_start', False):
             self._load_from_checkpoint()
 
-    def save_checkpoint(self, path: str, is_best: bool = False):
-        """Save model checkpoint with label encoder"""
-        checkpoint = {
-            'state_dict': self.feature_extractor.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'epoch': self.current_epoch,
-            'best_accuracy': self.best_accuracy,
-            'best_loss': self.best_loss,
-            'history': dict(self.history),
-            'config': self.config,
-            'label_encoder': self.label_encoder  # Add encoder to checkpoint
-        }
-        torch.save(checkpoint, path)
 
-    def _load_from_checkpoint(self):
-        """Load model checkpoint with label encoder"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.feature_extractor.load_state_dict(checkpoint['state_dict'])
-        # Load label encoder if available
-        if 'label_encoder' in checkpoint:
-            self.label_encoder = checkpoint['label_encoder']
 
     @abstractmethod
     def _create_model(self) -> nn.Module:
@@ -4452,15 +4125,15 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         if not os.path.exists(checkpoint_dir):
             return None
 
-        data_name = self.config['dataset']['name']
+        dataset_name = self.config['dataset']['name']
 
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{data_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{data_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -4482,8 +4155,8 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
         }
 
         # Save latest checkpoint
-        data_name = self.config['dataset']['name']
-        filename = f"{data_name}_{'best' if is_best else 'checkpoint'}.pth"
+        dataset_name = self.config['dataset']['name']
+        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -4673,14 +4346,14 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
     def generate_reconstructions(self):
         """Generate reconstructed images based on config mode"""
         invert_dbnn = self.config.get('execution_flags', {}).get('invert_DBNN', False)
-        data_name = self.config['dataset']['name']
-        base_dir = os.path.join('data', data_name)
+        dataset_name = self.config['dataset']['name']
+        base_dir = os.path.join('data', dataset_name)
 
         # Determine input file
         if invert_dbnn:
             input_file = os.path.join(base_dir, 'reconstructed_input.csv')
         else:
-            input_file = os.path.join(base_dir, f"{data_name}.csv")
+            input_file = os.path.join(base_dir, f"{dataset_name}.csv")
 
         if not os.path.exists(input_file):
             raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -5307,19 +4980,19 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
             self.optimizer = self._initialize_optimizer()
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
-        data_name = self.config['dataset']['name']
-        checkpoint_dir = os.path.join('data', data_name, 'checkpoints')
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
 
         if not os.path.exists(checkpoint_dir):
             return None
 
         # Check for best model first
-        best_path = os.path.join(checkpoint_dir, f"{data_name}_best.pth")
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
         if os.path.exists(best_path):
             return best_path
 
         # Check for latest checkpoint
-        checkpoint_path = os.path.join(checkpoint_dir, f"{data_name}_checkpoint.pth")
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
         if os.path.exists(checkpoint_path):
             return checkpoint_path
 
@@ -5341,8 +5014,8 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         }
 
         # Save latest checkpoint
-        data_name = self.config['dataset']['name']
-        filename = f"{data_name}_{'best' if is_best else 'checkpoint'}.pth"
+        dataset_name = self.config['dataset']['name']
+        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, filename)
 
         torch.save(checkpoint, checkpoint_path)
@@ -5895,15 +5568,15 @@ class DatasetProcessor:
         self.config = config if config is not None else {}  # Initialize config
 
         if self.datatype == 'torchvision':
-            self.data_name = self.datafile.lower()
+            self.dataset_name = self.datafile.lower()
         else:
-            self.data_name = Path(self.datafile).stem.lower()
+            self.dataset_name = Path(self.datafile).stem.lower()
 
-        self.dataset_dir = os.path.join("data", self.data_name)
+        self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        self.config_path = os.path.join(self.dataset_dir, f"{self.data_name}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.data_name}.conf")
+        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
 
     def _extract_archive(self, archive_path: str) -> str:
@@ -6101,7 +5774,7 @@ class DatasetProcessor:
 
         return {
             "dataset": {
-                "name": self.data_name,
+                "name": self.dataset_name,
                 "type": self.datatype,
                 "in_channels": in_channels,
                 "num_classes": num_classes,
@@ -6301,7 +5974,7 @@ class DatasetProcessor:
                 "fresh_start": False
             },
             "output": {
-                "features_file": os.path.join(self.dataset_dir, f"{self.data_name}.csv"),
+                "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
                 "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
             }
@@ -6310,7 +5983,7 @@ class DatasetProcessor:
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
         """Generate dataset-specific configuration"""
         return {
-            "file_path": os.path.join(self.dataset_dir, f"{self.data_name}.csv"),
+            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
@@ -6396,7 +6069,7 @@ class DatasetProcessor:
     def generate_default_config(self, train_dir: str) -> Dict:
         """Generate and manage all configuration files"""
         os.makedirs(self.dataset_dir, exist_ok=True)
-        logger.info(f"Starting configuration generation for dataset: {self.data_name}")
+        logger.info(f"Starting configuration generation for dataset: {self.dataset_name}")
 
         # 1. Generate and handle main configuration (json)
         logger.info("Generating main configuration...")
@@ -6481,7 +6154,7 @@ class DatasetProcessor:
     def _detect_image_properties(self, folder_path: str) -> Tuple[Tuple[int, int], int]:
         """Detect actual image properties but use config values if specified"""
         # Load existing config if available
-        config_path = os.path.join(self.dataset_dir, f"{self.data_name}.json")
+        config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -6530,9 +6203,9 @@ class DatasetProcessor:
 
     def _process_torchvision(self) -> Tuple[str, str]:
         """Process torchvision dataset"""
-        data_name = self.datafile.upper()
-        if not hasattr(datasets, data_name):
-            raise ValueError(f"Torchvision dataset {data_name} not found")
+        dataset_name = self.datafile.upper()
+        if not hasattr(datasets, dataset_name):
+            raise ValueError(f"Torchvision dataset {dataset_name} not found")
 
         # Setup paths in dataset-specific directory
         train_dir = os.path.join(self.dataset_dir, "train")
@@ -6543,14 +6216,14 @@ class DatasetProcessor:
         # Download and process datasets
         transform = transforms.ToTensor()
 
-        train_dataset = getattr(datasets, data_name)(
+        train_dataset = getattr(datasets, dataset_name)(
             root=self.output_dir,
             train=True,
             download=True,
             transform=transform
         )
 
-        test_dataset = getattr(datasets, data_name)(
+        test_dataset = getattr(datasets, dataset_name)(
             root=self.output_dir,
             train=False,
             download=True,
@@ -7162,22 +6835,22 @@ def get_interactive_args():
     # Get data path/name
     default = last_args.get('data', '') if last_args else ''
     prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
-    data_name = input(prompt).strip() or default
+    dataset_name = input(prompt).strip() or default
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        default_model = (f"data/{data_name}/checkpoints/{data_name}_unified.pth")
+        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
         # Set default input directory
-        default_input = f"Data/{data_name}.zip" if data_name else ''
+        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
         args.input_path= input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', data_name, f"{data_name}_predictions.csv")
+        default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
@@ -7225,9 +6898,9 @@ def get_interactive_args():
     save_last_args(args)
     return args
 
-def check_existing_model(dataset_dir, data_name):
+def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
-    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{data_name}_best.pth")
+    checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
     if os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -7422,12 +7095,12 @@ def main():
         if args is None or getattr(args, 'interactive', False):
             args = interactive_input()
 
-        data_name = str(getattr(args, 'data_name', 'mnist'))
+        dataset_name = str(getattr(args, 'data_name', 'mnist'))
 
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join('data', data_name, f"{data_name}.json")
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
             if not os.path.exists(config_path):
                 logger.error(f"Config file not found at {config_path}")
                 config_path = input("Enter path to config file: ").strip()
@@ -7463,7 +7136,7 @@ def main():
 
             # Handle output path
             if not hasattr(args, 'output') or not args.output:
-                args.output = os.path.join('data', data_name, f"{data_name}_predictions.csv")
+                args.output = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
                 logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
@@ -7529,20 +7202,17 @@ def parse_arguments():
     # Main arguments
     parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
                        default='predict', help='Operation mode')
-    parser.add_argument('--data_name', dest='data_name', default='mnist',
+    parser.add_argument('--data-name', dest='data_name', default='mnist',
                        help='Name of the dataset')
-    parser.add_argument('--data_type', dest='data_type', default='custom',
-                       help='custom or torchvision data')
-
-    parser.add_argument('--input_path', required=True,
+    parser.add_argument('--input-path', required=True,
                        help='Path to input data (directory or zip file)')
     parser.add_argument('--interactive', action='store_true',
                        help='Force interactive mode even with command line args')
 
     # Prediction-specific
-    parser.add_argument('--model_path', help='Path to trained model')
+    parser.add_argument('--model-path', help='Path to trained model')
     parser.add_argument('--output', help='Output path for predictions')
-    parser.add_argument('--batch_size', type=int, default=128,
+    parser.add_argument('--batch-size', type=int, default=128,
                        help='Batch size for processing')
     parser.add_argument('--cpu', action='store_true',
                        help='Force CPU even if GPU available')
@@ -7572,13 +7242,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     """Handle training mode operations"""
     try:
         # Setup paths
-        #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name =args.data_name
+        data_name = os.path.splitext(os.path.basename(args.data))[0]
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'))
+        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output', 'data'))
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
@@ -7628,8 +7297,7 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
     """Handle prediction mode operations"""
     try:
         # Setup paths
-        #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name=args.data_name
+        data_name = os.path.splitext(os.path.basename(args.data))[0]
         data_dir = os.path.join('data', data_name)
 
         # Load configuration
