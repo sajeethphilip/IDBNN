@@ -130,7 +130,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                 "factor": 0.1,
                 "patience": 10,
                 "min_lr": 1e-06,
-                "verbose": true
+                "verbose": True
             },
             "autoencoder_config": {
                 "reconstruction_weight": 1.0,
@@ -139,9 +139,9 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                 "min_epochs": 10,
                 "patience": 5,
                 "enhancements": {
-                    "enabled": true,
-                    "use_kl_divergence": true,
-                    "use_class_encoding": false,
+                    "enabled": True,
+                    "use_kl_divergence": True,
+                    "use_class_encoding": False,
                     "kl_divergence_weight": 0.5,
                     "classification_weight": 0.5,
                     "clustering_temperature": 1.0,
@@ -150,7 +150,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
             },
             "loss_functions": {
                 "structural": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 1.0,
                     "params": {
                         "edge_weight": 1.0,
@@ -158,7 +158,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "color_enhancement": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 0.8,
                     "params": {
                         "channel_weight": 0.5,
@@ -166,7 +166,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "morphology": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 0.6,
                     "params": {
                         "shape_weight": 0.7,
@@ -174,7 +174,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "detail_preserving": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 0.8,
                     "params": {
                         "detail_weight": 1.0,
@@ -183,42 +183,42 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "astronomical_structure": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 1.0,
                     "components": {
-                        "edge_preservation": true,
-                        "peak_preservation": true,
-                        "detail_preservation": true
+                        "edge_preservation": True,
+                        "peak_preservation": True,
+                        "detail_preservation": True
                     }
                 },
                 "medical_structure": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 1.0,
                     "components": {
-                        "boundary_preservation": true,
-                        "tissue_contrast": true,
-                        "local_structure": true
+                        "boundary_preservation": True,
+                        "tissue_contrast": True,
+                        "local_structure": True
                     }
                 },
                 "agricultural_pattern": {
-                    "enabled": true,
+                    "enabled": True,
                     "weight": 1.0,
                     "components": {
-                        "texture_preservation": true,
-                        "damage_pattern": true,
-                        "color_consistency": true
+                        "texture_preservation": True,
+                        "damage_pattern": True,
+                        "color_consistency": True
                     }
                 }
             },
             "enhancement_modules": {
                 "astronomical": {
-                    "enabled": true,
+                    "enabled": True,
                     "components": {
-                        "structure_preservation": true,
-                        "detail_preservation": true,
-                        "star_detection": true,
-                        "galaxy_features": true,
-                        "kl_divergence": true
+                        "structure_preservation": True,
+                        "detail_preservation": True,
+                        "star_detection": True,
+                        "galaxy_features": True,
+                        "kl_divergence": True
                     },
                     "weights": {
                         "detail_weight": 1.0,
@@ -227,12 +227,12 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "medical": {
-                    "enabled": true,
+                    "enabled": True,
                     "components": {
-                        "tissue_boundary": true,
-                        "lesion_detection": true,
-                        "contrast_enhancement": true,
-                        "subtle_feature_preservation": true
+                        "tissue_boundary": True,
+                        "lesion_detection": True,
+                        "contrast_enhancement": True,
+                        "subtle_feature_preservation": True
                     },
                     "weights": {
                         "boundary_weight": 1.0,
@@ -241,13 +241,13 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                     }
                 },
                 "agricultural": {
-                    "enabled": true,
+                    "enabled": True,
                     "components": {
-                        "texture_analysis": true,
-                        "damage_detection": true,
-                        "color_anomaly": true,
-                        "pattern_enhancement": true,
-                        "morphological_features": true
+                        "texture_analysis": True,
+                        "damage_detection": True,
+                        "color_anomaly": True,
+                        "pattern_enhancement": True,
+                        "morphological_features": True
                     },
                     "weights": {
                         "texture_weight": 1.0,
@@ -263,7 +263,7 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
             "num_workers": 4,
             "checkpoint_dir": "data/mnist/checkpoints",
             "validation_split": 0.2,
-            "invert_DBNN": true,
+            "invert_DBNN": True,
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
             "inverse_learning_rate": 0.1,
@@ -273,31 +273,31 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
             }
         },
         "augmentation": {
-            "enabled": true,
+            "enabled": True,
             "random_crop": {
-                "enabled": true,
+                "enabled": True,
                 "padding": 4
             },
             "random_rotation": {
-                "enabled": true,
+                "enabled": True,
                 "degrees": 10
             },
             "horizontal_flip": {
-                "enabled": true,
+                "enabled": True,
                 "probability": 0.5
             },
             "vertical_flip": {
-                "enabled": false
+                "enabled": False
             },
             "color_jitter": {
-                "enabled": true,
+                "enabled": True,
                 "brightness": 0.2,
                 "contrast": 0.2,
                 "saturation": 0.2,
                 "hue": 0.1
             },
             "normalize": {
-                "enabled": true,
+                "enabled": True,
                 "mean": [
                     0.5
                 ],
@@ -308,12 +308,12 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
         },
         "execution_flags": {
             "mode": "train_and_predict",
-            "use_gpu": false,
-            "mixed_precision": true,
-            "distributed_training": false,
-            "debug_mode": false,
-            "use_previous_model": true,
-            "fresh_start": false
+            "use_gpu": False,
+            "mixed_precision": True,
+            "distributed_training": False,
+            "debug_mode": False,
+            "use_previous_model": True,
+            "fresh_start": False
         },
         "output": {
             "features_file": "data/mnist/mnist.csv",
