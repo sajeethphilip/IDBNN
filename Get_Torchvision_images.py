@@ -518,6 +518,22 @@ def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: boo
             class_names=class_names
         )
 
+        # Create a copy of the train directory in root folder
+        dataset_folder = dataset_name.lower()
+        src_train_path = os.path.join(root, dataset_folder, "train")
+        dest_train_path = os.path.join(dataset_folder, "train")
+
+        # Remove existing directory if it exists
+        if os.path.exists(dest_train_path):
+            shutil.rmtree(dest_train_path)
+
+        # Create parent directories if they don't exist
+        os.makedirs(os.path.dirname(dest_train_path), exist_ok=True)
+
+        # Copy the entire train directory
+        shutil.copytree(src_train_path, dest_train_path)
+        print(f"- Copied train directory to: {dest_train_path}")
+
         print(f"\nSuccessfully processed dataset:")
         print(f"- Files saved to: {final_path}")
         print(f"- Found {len(class_names)} classes")
