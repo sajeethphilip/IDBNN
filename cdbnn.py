@@ -2557,7 +2557,7 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
         'identifier': identifier,
         'config': config,
         'label_encoder': model.label_encoder,  # Now includes encoder
-        'class_mapping': model.label_encoder.classes_  # For easy reference
+        'class_mapping': model.label_encoder.classes_,  # For easy reference
         'active_enhancements': {
             'kl_divergence': model.use_kl_divergence,
             'class_encoding': model.use_class_encoding,
