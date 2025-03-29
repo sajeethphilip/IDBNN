@@ -426,43 +426,39 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
 
     return sorted(class_names)
 
-def download_dataset(dataset_name: str, root: str = '.', merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
-        """
-        Download and organize a torchvision dataset.
-        Creates <dataset_name>/train/<class_folders> structure in the specified root directory.
-        If root is '.', creates in current working directory.
-        """
-        # Remove 'data/' from the path if it exists in root
-        if root.startswith('data/'):
-            root = root.replace('data/', '', 1)
+def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True, **kwargs) -> Tuple[str, List[str]]:
+    """
+    Download and organize a torchvision dataset.
+    Always creates data/<dataset>/train/<class_folders> structure.
+    """
+    dataset_class = getattr(torchvision.datasets, dataset_name)
+    dataset_path = os.path.join(root, dataset_name.lower())
+    train_path = os.path.join(dataset_path, 'train')
 
-        dataset_path = os.path.join(root, dataset_name.lower())
-        train_path = os.path.join(dataset_path, 'train')
+    ensure_directory_exists(train_path)
 
-        ensure_directory_exists(train_path)
+    try:
+        # Download the dataset (this may download a tar file)
+        dataset = dataset_class(root=root, download=True, **kwargs)
 
-        try:
-            # Download the dataset (this may download a tar file)
-            dataset = dataset_class(root=root, download=True, **kwargs)
+        # Special handling for Caltech256 which comes as a tar file
+        if dataset_name.lower() == 'caltech256':
+            tar_path = os.path.join(root, '256_ObjectCategories.tar')
+            if os.path.exists(tar_path):
+                extract_tar_file(tar_path, dataset_path)
+                os.remove(tar_path)
 
-            # Special handling for Caltech256 which comes as a tar file
-            if dataset_name.lower() == 'caltech256':
-                tar_path = os.path.join(root, '256_ObjectCategories.tar')
-                if os.path.exists(tar_path):
-                    extract_tar_file(tar_path, dataset_path)
-                    os.remove(tar_path)
+        # Handle all datasets (standard and special cases)
+        class_names = move_all_to_train(dataset_path, train_path)
 
-            # Handle all datasets (standard and special cases)
-            class_names = move_all_to_train(dataset_path, train_path)
+        # Get class names from dataset if available
+        if hasattr(dataset, 'classes') and dataset.classes:
+            return train_path, dataset.classes
+        return train_path, class_names
 
-            # Get class names from dataset if available
-            if hasattr(dataset, 'classes') and dataset.classes:
-                return train_path, dataset.classes
-            return train_path, class_names
-
-        except Exception as e:
-            print(f"Error processing dataset {dataset_name}: {str(e)}")
-            raise
+    except Exception as e:
+        print(f"Error processing dataset {dataset_name}: {str(e)}")
+        raise
 
 def interactive_mode():
     """Interactive mode for dataset selection and downloading"""
