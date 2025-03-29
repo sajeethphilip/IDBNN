@@ -2398,28 +2398,6 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-def _train_epoch(model, train_loader, optimizer, device):
-    """Train one epoch"""
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    for inputs, labels in train_loader:
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = model.criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-
-    return running_loss / len(train_loader), 100. * correct / total
 
 def _validate(model, val_loader, device):
     """Validate model"""
@@ -2479,12 +2457,12 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         model.current_epoch = epoch
 
         # Training phase
-        train_loss, train_acc = _train_epoch(model, train_loader, config)
+        train_loss, train_acc = model._train_epoch(model, train_loader, config,device=self.device)
 
         # Validation phase
         val_loss, val_acc = None, None
         if val_loader:
-            val_loss, val_acc = _validate(model, val_loader, config)
+            val_loss, val_acc = model._validate(model, val_loader, config)
             current_metric = val_loss
         else:
             current_metric = train_loss
@@ -3835,7 +3813,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
                 self.current_epoch = epoch
 
                 # Training
-                train_loss, train_acc = self._train_epoch(train_loader)
+                train_loss, train_acc = self._train_epoch(train_loader,device=self.device)
 
                 # Create summary for this epoch
                 epoch_dir = os.path.join('data', self.config['dataset']['name'],
