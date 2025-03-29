@@ -484,69 +484,73 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
     dataset_path = os.path.join(root, dataset_name.lower())
     train_path = os.path.join(dataset_path, 'train')
 
+    # Clean up existing directory structure completely before processing
+    if os.path.exists(dataset_path):
+        shutil.rmtree(dataset_path)
     ensure_directory_exists(train_path)
 
     try:
         # Download the dataset (this may download a tar file)
         dataset = dataset_class(root=root, download=True, **kwargs)
 
-        # Special handling for MNIST
-        if dataset_name.lower() == 'mnist':
-            # MNIST has different structure, we need to convert it to image files
-            from torchvision.datasets import MNIST
-            import torch
-
-            # Clean up any existing directories first
+        # Special handling for MNIST/FashionMNIST/KMNIST/EMNIST datasets
+        if dataset_name.lower() in ['mnist', 'fashionmnist', 'kmnist', 'emnist']:
+            # These datasets have different structure, we need to convert to image files
             train_img_path = os.path.join(dataset_path, 'train')
             test_img_path = os.path.join(dataset_path, 'test')
-
-            # Remove existing directories if they exist
-            if os.path.exists(train_img_path):
-                shutil.rmtree(train_img_path)
-            if os.path.exists(test_img_path):
-                shutil.rmtree(test_img_path)
 
             # Create fresh directories
             os.makedirs(train_img_path, exist_ok=True)
             os.makedirs(test_img_path, exist_ok=True)
 
             # Process training set
-            train_set = MNIST(root=root, train=True, download=True)
+            train_set = dataset_class(root=root, train=True, download=True)
             for i in range(len(train_set)):
                 img, label = train_set[i]
                 class_dir = os.path.join(train_img_path, str(label))
                 os.makedirs(class_dir, exist_ok=True)
-                img.save(os.path.join(class_dir, f"{i}.png"))
+                img_path = os.path.join(class_dir, f"{i}.png")
+                if not os.path.exists(img_path):  # Only save if file doesn't exist
+                    img.save(img_path)
 
             # Process test set
-            test_set = MNIST(root=root, train=False, download=True)
+            test_set = dataset_class(root=root, train=False, download=True)
             for i in range(len(test_set)):
                 img, label = test_set[i]
                 class_dir = os.path.join(test_img_path, str(label))
                 os.makedirs(class_dir, exist_ok=True)
-                img.save(os.path.join(class_dir, f"{i}.png"))
+                img_path = os.path.join(class_dir, f"{i}.png")
+                if not os.path.exists(img_path):  # Only save if file doesn't exist
+                    img.save(img_path)
 
             # Get class names
-            class_names = [str(i) for i in range(10)]
+            if hasattr(dataset, 'classes') and dataset.classes:
+                class_names = dataset.classes
+            else:
+                class_names = [str(i) for i in range(10)]  # Default for digit datasets
 
             # Clean up raw files
-            raw_dir = os.path.join(root, 'MNIST', 'raw')
+            raw_dir = os.path.join(root, dataset_name.upper(), 'raw')
             if os.path.exists(raw_dir):
                 shutil.rmtree(raw_dir)
 
             # Move test to train if merge_train_test is True
             if merge_train_test:
                 for class_name in class_names:
-                    src = os.path.join(test_img_path, class_name)
-                    dst = os.path.join(train_img_path, class_name)
+                    src = os.path.join(test_img_path, str(class_name))
+                    dst = os.path.join(train_img_path, str(class_name))
                     if os.path.exists(src):
                         if os.path.exists(dst):
+                            # Merge contents without overwriting
                             for file in os.listdir(src):
-                                shutil.move(os.path.join(src, file), dst)
-                            shutil.rmtree(src)
+                                src_file = os.path.join(src, file)
+                                dst_file = os.path.join(dst, file)
+                                if not os.path.exists(dst_file):
+                                    shutil.move(src_file, dst)
                         else:
                             shutil.move(src, dst)
-                shutil.rmtree(test_img_path)
+                if os.path.exists(test_img_path):
+                    shutil.rmtree(test_img_path)
 
             return train_img_path, class_names
 
@@ -557,7 +561,7 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
                 extract_tar_file(tar_path, dataset_path)
                 os.remove(tar_path)
 
-        # Handle all datasets (standard and special cases)
+        # Handle all other standard datasets
         class_names = move_all_to_train(dataset_path, train_path)
 
         # Get class names from dataset if available
