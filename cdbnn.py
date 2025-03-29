@@ -37,7 +37,7 @@ import glob
 from tqdm import tqdm
 import random
 import pandas as pd
-from typing import Dict, List, Tuple, Optional, Union, Any,SimpleNamespace
+from typing import Dict, List, Tuple, Optional, Union, Any
 from collections import defaultdict
 from pathlib import Path
 import torch.multiprocessing
