@@ -2766,7 +2766,9 @@ class DBNN(GPUDBNN):
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
         """Preprocess data with improved error handling and column consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
-
+        """Preprocess data and return tensor on correct device"""
+        if isinstance(X, torch.Tensor):
+            return X.to(self.device)
         # Check if X is a DataFrame or a tensor
         if isinstance(X, pd.DataFrame):
             DEBUG.log(f"Input shape: {X.shape}")
@@ -4170,8 +4172,34 @@ class DBNN(GPUDBNN):
 
         DEBUG.log(f" Detected categorical columns: {categorical_columns}")
         return categorical_columns
-
     def _get_train_test_split(self, X_tensor, y_tensor):
+        """Get or create consistent train-test split while maintaining tensor format"""
+        dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
+        split_path = os.path.join(base_path, dataset_folder, 'train_test_split.pkl')
+
+        if os.path.exists(split_path):
+            with open(split_path, 'rb') as f:
+                split_indices = pickle.load(f)
+                train_idx, test_idx = split_indices['train'], split_indices['test']
+                return (X_tensor[train_idx], X_tensor[test_idx],
+                        y_tensor[train_idx], y_tensor[test_idx])
+
+        # Perform split directly on tensors
+        num_samples = len(X_tensor)
+        indices = torch.randperm(num_samples) if self.shuffle_state != -1 else torch.arange(num_samples)
+        split = int(num_samples * (1 - self.test_size))
+
+        train_idx = indices[:split]
+        test_idx = indices[split:]
+
+        # Save split indices
+        os.makedirs(os.path.dirname(split_path), exist_ok=True)
+        with open(split_path, 'wb') as f:
+            pickle.dump({'train': train_idx, 'test': test_idx}, f)
+
+        return X_tensor[train_idx], X_tensor[test_idx], y_tensor[train_idx], y_tensor[test_idx]
+    def _get_train_test_split_old(self, X_tensor, y_tensor):
         """Get or create consistent train-test split using smaller chunks to avoid memory issues."""
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
@@ -4295,8 +4323,50 @@ class DBNN(GPUDBNN):
 
         return {c_id: posteriors[idx].item() for idx, c_id in enumerate(classes)}
 
+    def fit_predict(self, batch_size: int = 128):
+        """Full training and prediction pipeline with proper tensor handling"""
+        try:
+            # Preprocess data if not already done
+            if not hasattr(self, 'X_tensor'):
+                X = self.data.drop(columns=[self.target_column])
+                self.X_tensor = self._preprocess_data(X, is_training=True)
+                y_encoded = self.label_encoder.transform(self.data[self.target_column])
+                self.y_tensor = torch.tensor(y_encoded, dtype=torch.long).to(self.device)
 
-    def fit_predict(self, batch_size: int = 128, save_path: str = None):
+            # Get train-test split (returns tensors)
+            X_train, X_test, y_train, y_test = self._get_train_test_split(
+                self.X_tensor, self.y_tensor)
+
+            # Train model
+            final_W, error_rates = self.train(X_train, y_train, X_test, y_test, batch_size=batch_size)
+
+            # Make predictions
+            train_predictions = self.predict(X_train, batch_size=batch_size)
+            test_predictions = self.predict(X_test, batch_size=batch_size)
+
+            # Calculate metrics
+            train_acc = accuracy_score(y_train.cpu().numpy(), train_predictions.numpy())
+            test_acc = accuracy_score(y_test.cpu().numpy(), test_predictions.numpy())
+
+            # Generate classification report and confusion matrix
+            y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+            y_test_pred_labels = self.label_encoder.inverse_transform(test_predictions.numpy())
+
+            return {
+                'train_predictions': train_predictions,
+                'test_predictions': test_predictions,
+                'train_accuracy': train_acc,
+                'test_accuracy': test_acc,
+                'classification_report': classification_report(y_test_labels, y_test_pred_labels),
+                'confusion_matrix': confusion_matrix(y_test_labels, y_test_pred_labels),
+                'error_rates': error_rates
+            }
+
+        except Exception as e:
+            print(f"Error in fit_predict: {str(e)}")
+            raise
+
+    def fit_predict_old(self, batch_size: int = 128, save_path: str = None):
         """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
         try:
             # Set a flag to indicate we're printing metrics
