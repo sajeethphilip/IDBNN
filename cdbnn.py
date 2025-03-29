@@ -2454,26 +2454,6 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
-
-def _validate(model, val_loader, device):
-    """Validate model"""
-    model.eval()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for inputs, labels in val_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = model.criterion(outputs, labels)
-
-            running_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
-
-    return running_loss / len(val_loader), 100. * correct / total
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, val_loader: DataLoader = None) -> Dict[str, List]:
     """Enhanced training function with built-in label handling"""
@@ -2513,7 +2493,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         model.current_epoch = epoch
 
         # Training phase
-        train_loss, train_acc = model._train_epoch(model, train_loader, config,device=self.device)
+        train_loss, train_acc = model._train_epoch(model, train_loader, config)
 
         # Validation phase
         val_loss, val_acc = None, None
