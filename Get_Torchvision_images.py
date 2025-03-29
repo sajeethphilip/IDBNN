@@ -1,47 +1,10 @@
-import os
-import shutil
-import tarfile
-from torchvision import datasets
-import torchvision
-from typing import List, Dict, Tuple
-import argparse
-
-def list_available_datasets() -> List[str]:
-    """List all available datasets in torchvision.datasets"""
-    dataset_classes = []
-    for name in dir(torchvision.datasets):
-        if name[0].isupper() and name not in ['VisionDataset', 'DatasetFolder', 'ImageFolder']:
-            dataset_classes.append(name)
-    return sorted(dataset_classes)
-
-def get_dataset_info(dataset_name: str) -> Dict:
-    """Get information about a specific dataset"""
-    try:
-        dataset_class = getattr(torchvision.datasets, dataset_name)
-        return {
-            'name': dataset_name,
-            'has_train_test_split': hasattr(dataset_class, 'train') and hasattr(dataset_class, 'test'),
-            'default_root': os.path.join('data', dataset_name.lower())
-        }
-    except AttributeError:
-        raise ValueError(f"Dataset {dataset_name} not found in torchvision.datasets")
-
-def ensure_directory_exists(path: str) -> None:
-    """Ensure a directory exists, create if it doesn't"""
-    os.makedirs(path, exist_ok=True)
-
-def extract_tar_file(tar_path: str, extract_to: str) -> None:
-    """Extract a tar file to the specified directory"""
-    ensure_directory_exists(extract_to)
-    with tarfile.open(tar_path, 'r') as tar:
-        tar.extractall(path=extract_to)
-
 def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     """
-    Move all image subfolders to the train directory.
+    Move all image class subfolders to the train directory.
     Handles cases where:
-    - There are train/test folders (move both to train)
+    - There are train/test folders (move their contents to train)
     - Only raw class folders exist (move them to train)
+    - There's a containing folder like 256_ObjectCategories (move its contents to train)
     """
     class_names = []
 
@@ -68,11 +31,28 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
             # Remove the now-empty split directory
             shutil.rmtree(split_path)
 
-    # If no train/test folders found, look for direct class folders
+    # If no train/test folders found, look for direct class folders or containing folders
     if not class_names:
         for item in os.listdir(dataset_root):
             item_path = os.path.join(dataset_root, item)
-            if os.path.isdir(item_path) and not item.startswith('.'):
+
+            # Skip hidden files and non-directories
+            if not os.path.isdir(item_path) or item.startswith('.'):
+                continue
+
+            # If this is a directory that contains class folders (like 256_ObjectCategories)
+            if any(os.path.isdir(os.path.join(item_path, subitem)) for subitem in os.listdir(item_path)):
+                # Move all its subdirectories to train
+                for class_name in os.listdir(item_path):
+                    class_path = os.path.join(item_path, class_name)
+                    if os.path.isdir(class_path):
+                        dest_path = os.path.join(train_path, class_name)
+                        shutil.move(class_path, dest_path)
+                        class_names.append(class_name)
+                # Remove the now-empty containing directory
+                shutil.rmtree(item_path)
+            else:
+                # It's a class folder itself, move it to train
                 dest_path = os.path.join(train_path, item)
                 shutil.move(item_path, dest_path)
                 class_names.append(item)
@@ -99,14 +79,6 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
             tar_path = os.path.join(root, '256_ObjectCategories.tar')
             if os.path.exists(tar_path):
                 extract_tar_file(tar_path, dataset_path)
-                extracted_dir = os.path.join(dataset_path, '256_ObjectCategories')
-                if os.path.exists(extracted_dir):
-                    # Move all class folders to train directory
-                    for class_name in os.listdir(extracted_dir):
-                        class_path = os.path.join(extracted_dir, class_name)
-                        if os.path.isdir(class_path):
-                            shutil.move(class_path, train_path)
-                    shutil.rmtree(extracted_dir)
                 os.remove(tar_path)
 
         # Handle all datasets (standard and special cases)
@@ -120,78 +92,3 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
         raise
-
-def interactive_mode():
-    """Interactive mode for dataset selection and downloading"""
-    available_datasets = list_available_datasets()
-
-    print("Available datasets:")
-    for i, dataset in enumerate(available_datasets, 1):
-        print(f"{i}. {dataset}")
-
-    dataset_name = input("\nEnter dataset name (press Enter to process all datasets): ").strip()
-
-    if not dataset_name:
-        # Process all datasets
-        for dataset in available_datasets:
-            process_dataset(dataset)
-    else:
-        # Process single dataset
-        process_dataset(dataset_name)
-
-def process_dataset(dataset_name: str) -> None:
-    """Process a single dataset"""
-    if dataset_name not in list_available_datasets():
-        print(f"Dataset '{dataset_name}' not found.")
-        return
-
-    print(f"\nProcessing dataset: {dataset_name}")
-    try:
-        dataset_info = get_dataset_info(dataset_name)
-
-        # For datasets with splits, ask about merging (though we'll merge everything to train)
-        merge = True
-        if dataset_info['has_train_test_split']:
-            response = input(f"Dataset {dataset_name} has train/test split. Merge them to train? (y/n, default y): ").lower()
-            merge = response != 'n'
-
-        final_path, class_names = download_dataset(
-            dataset_name=dataset_name,
-            root='data',
-            merge_train_test=merge
-        )
-
-        print(f"Successfully processed dataset. Files saved to: {final_path}")
-        print(f"Found {len(class_names)} classes: {', '.join(class_names[:5])}{'...' if len(class_names) > 5 else ''}")
-
-    except Exception as e:
-        print(f"Error processing dataset {dataset_name}: {str(e)}")
-
-if __name__ == "__main__":
-    if len(os.sys.argv) > 1:
-        # Command line mode
-        parser = argparse.ArgumentParser(description='Download and organize torchvision image datasets')
-        parser.add_argument('--dataset', type=str, default='', help='Name of dataset to download')
-        parser.add_argument('--root', type=str, default='data', help='Root directory for downloaded datasets')
-        parser.add_argument('--merge', action='store_true', help='Merge train and test sets (if available)')
-        parser.add_argument('--all', action='store_true', help='Download all available datasets')
-        args = parser.parse_args()
-
-        if args.dataset or args.all:
-            available_datasets = list_available_datasets()
-
-            if args.all:
-                datasets_to_process = available_datasets
-            else:
-                if args.dataset not in available_datasets:
-                    print(f"Dataset '{args.dataset}' not found.")
-                    exit()
-                datasets_to_process = [args.dataset]
-
-            for dataset_name in datasets_to_process:
-                process_dataset(dataset_name)
-        else:
-            interactive_mode()
-    else:
-        # Interactive mode
-        interactive_mode()
