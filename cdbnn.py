@@ -2048,8 +2048,7 @@ class EnhancedLossManager:
         """Get appropriate loss function for image type"""
         return self.loss_functions.get(image_type)
 
-    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor,
-                      image_type: str) -> Dict[str, torch.Tensor]:
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor, image_type: str) -> Union[Dict[str, torch.Tensor], torch.Tensor]:
         """Calculate loss with appropriate enhancements"""
         loss_fn = self.get_loss_function(image_type)
         if loss_fn is None:
@@ -2057,20 +2056,13 @@ class EnhancedLossManager:
 
         loss = loss_fn(reconstruction, target)
 
-        # Get additional statistics if available
-        stats = {}
-        if isinstance(loss_fn, AgriculturalPatternLoss):
-            texture_stats = loss_fn._analyze_texture_statistics(reconstruction)
-            pattern_stats = loss_fn._analyze_pattern_distribution(reconstruction)
-            stats.update({
-                'texture_stats': texture_stats,
-                'pattern_stats': pattern_stats
-            })
-
-        return {
-            'loss': loss,
-            'stats': stats
-        }
+        # Ensure we return a tensor if the loss is a float
+        if isinstance(loss, float):
+            return {'loss': torch.tensor(loss, device=reconstruction.device)}
+        elif isinstance(loss, dict):
+            return loss
+        else:
+            return {'loss': loss}
 
 
 class UnifiedCheckpoint:
@@ -2190,9 +2182,9 @@ class UnifiedCheckpoint:
         if state_key in self.current_state['model_states']:
             best_state = self.current_state['model_states'][state_key]['best']
             if best_state is not None:
-                return best_state['loss']
+                loss = best_state['loss']
+                return loss.item() if hasattr(loss, 'item') else float(loss)
         return float('inf')
-
     def print_checkpoint_summary(self):
         """Print summary of checkpoint contents"""
         print("\nUnified Checkpoint Summary:")
@@ -2453,7 +2445,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                             reconstruction, data,
                             config['dataset'].get('image_type', 'general')
                         )
-                        loss = loss_dict['loss']
+                        loss = loss_dict['loss'] if isinstance(loss_dict, dict) else loss_dict
 
                         # Add KL divergence loss if enabled
                         if model.use_kl_divergence:
@@ -2465,27 +2457,25 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                                     latent_info['target_distribution'],
                                     reduction='batchmean'
                                 )
-                                loss += kl_weight * kl_loss
+                                loss += kl_weight * kl_loss.item() if hasattr(kl_loss, 'item') else kl_weight * kl_loss
 
                         # Add classification loss if enabled
                         if model.use_class_encoding and hasattr(model, 'classifier'):
                             class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
                             class_logits = model.classifier(embedding)
                             class_loss = F.cross_entropy(class_logits, labels)
-                            loss += class_weight * class_loss
+                            loss += class_weight * class_loss.item() if hasattr(class_loss, 'item') else class_weight * class_loss
 
                     # Backward pass and optimization
                     loss.backward()
                     optimizer.step()
 
-                    # Update running loss - ensure we have a scalar float
-                    current_loss = loss.item() if hasattr(loss, 'item') else float(loss)
-                    running_loss += current_loss
-
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)
+                    # Safely get loss value
+                    loss_value = loss.item() if hasattr(loss, 'item') else float(loss)
+                    running_loss += loss_value
 
                     # Update progress bar
+                    current_avg_loss = running_loss / (batch_idx + 1)
                     pbar.set_postfix({
                         'loss': f'{current_avg_loss:.4f}',
                         'best': f'{best_loss:.4f}'
@@ -2501,17 +2491,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
                     continue
 
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
-            else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
-
-            # Record history
+            # Calculate epoch average loss
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
-            # Save checkpoint and check for best model
+            # Checkpoint and early stopping
             is_best = avg_loss < best_loss
             if is_best:
                 best_loss = avg_loss
@@ -2528,19 +2512,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 is_best=is_best
             )
 
-            # Early stopping check
-            patience = config['training'].get('early_stopping', {}).get('patience', 5)
-            if patience_counter >= patience:
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
             logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
-
-            # Clean up at end of epoch
-            pbar.close()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
