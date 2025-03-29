@@ -207,9 +207,23 @@ class PredictionManager:
             else:
                 raise e
 
+        # Verify clustering parameters exist if needed
+        if model.use_kl_divergence:
+            if 'cluster_centers' not in checkpoint['model_states']['phase2_kld']['best']['state_dict']:
+                raise ValueError("Checkpoint missing cluster centers for KL divergence mode")
+            if 'clustering_temperature' not in checkpoint['model_states']['phase2_kld']['best']['state_dict']:
+                raise ValueError("Checkpoint missing clustering temperature for KL divergence mode")
+
+
         # Load the best model state for phase 2 with KL divergence
         state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
         model.load_state_dict(state_dict, strict=False)
+        # Verify clustering parameters were loaded correctly
+        if model.use_kl_divergence:
+            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
+                raise RuntimeError("Cluster centers failed to load")
+            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
+                raise RuntimeError("Clustering temperature failed to load")
 
         # Force phase 2 for prediction to use clustering
         model.set_training_phase(2)
@@ -772,18 +786,6 @@ class BaseAutoencoder(nn.Module):
             )
             self.shape_registry['classifier_output'] = (num_classes,)
 
-        # Initialize clustering if KL divergence is enabled
-        if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(
-                torch.randn(num_clusters, feature_dims)
-            )
-            self.clustering_temperature = (config['model']
-                                         .get('autoencoder_config', {})
-                                         .get('enhancements', {})
-                                         .get('clustering_temperature', 1.0))
-            self.shape_registry['cluster_centers'] = (num_clusters, feature_dims)
-
         # Training phase tracking
         self.training_phase = 1  # Start with phase 1
 
@@ -804,9 +806,40 @@ class BaseAutoencoder(nn.Module):
         self.best_accuracy = 0.0
         self.current_epoch = 0
         self.history = defaultdict(list)
+        # Initialize clustering parameters
+        self._initialize_clustering(config)
+
 #--------------------------
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+        if self.use_kl_divergence:
+            num_clusters = config['dataset'].get('num_classes', 10)
+            self.register_buffer('cluster_centers',
+                               torch.randn(num_clusters, self.feature_dims))
+            self.register_buffer('clustering_temperature',
+                               torch.tensor([config['model']['autoencoder_config']
+                                           ['enhancements']['clustering_temperature']]))
+        else:
+            self.cluster_centers = None
+            self.clustering_temperature = None
 
+    def state_dict(self, *args, **kwargs):
+        """Extend state dict to include clustering parameters"""
+        state = super().state_dict(*args, **kwargs)
+        # Cluster centers and temperature are already included because they're registered buffers
+        return state
 
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load state dict including clustering parameters"""
+        # These will be loaded automatically since they're registered buffers
+        super().load_state_dict(state_dict, strict)
+
+        # Ensure clustering parameters are on the right device
+        if hasattr(self, 'cluster_centers') and self.cluster_centers is not None:
+            self.cluster_centers = self.cluster_centers.to(self.device)
+        if hasattr(self, 'clustering_temperature') and self.clustering_temperature is not None:
+            self.clustering_temperature = self.clustering_temperature.to(self.device)
 #--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
@@ -1287,6 +1320,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
+            temperature = self.clustering_temperature.item()
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -2102,6 +2136,10 @@ class UnifiedCheckpoint:
                 'kl_divergence': model.use_kl_divergence,
                 'class_encoding': model.use_class_encoding,
                 'image_type': self.config['dataset'].get('image_type', 'general')
+                'clustering_params': {
+                    'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
+                    'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') else 1.0
+                 }
             }
         }
 
@@ -3158,26 +3196,51 @@ class BaseFeatureExtractor(nn.Module, ABC):
         if not self.config['execution_flags'].get('fresh_start', False):
             self._load_from_checkpoint()
 
+        # Initialize clustering parameters
+        self._initialize_clustering(config)
 
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+        if self.use_kl_divergence:
+            num_clusters = config['dataset'].get('num_classes', 10)
+            self.register_buffer('cluster_centers',
+                               torch.randn(num_clusters, self.feature_dims))
+            self.register_buffer('clustering_temperature',
+                               torch.tensor([config['model']['autoencoder_config']
+                                           ['enhancements']['clustering_temperature']]))
+        else:
+            self.cluster_centers = None
+            self.clustering_temperature = None
 
+    def set_label_encoder(self, label_encoder: Dict):
+        """Set label encoder dictionary (class names to indices)"""
+        self.label_encoder = label_encoder
+        self.reverse_label_encoder = {v: k for k, v in label_encoder.items()}
+
+    def get_label_encoder(self) -> Optional[Dict]:
+        """Get label encoder dictionary"""
+        return self.label_encoder
+
+    def get_reverse_label_encoder(self) -> Optional[Dict]:
+        """Get reverse label encoder dictionary"""
+        return self.reverse_label_encoder
     @abstractmethod
     def _create_model(self) -> nn.Module:
         """Create and return the feature extraction model"""
         pass
 
     def state_dict(self, *args, **kwargs):
-        """Extend state dict to include clustering parameters"""
+        """Extend state dict to include label encoder"""
         state = super().state_dict(*args, **kwargs)
-        if hasattr(self, 'cluster_centers'):
-            state['cluster_centers'] = self.cluster_centers.data
-            state['clustering_temperature'] = torch.tensor([self.clustering_temperature])
+        state['label_encoder'] = self.label_encoder
+        state['reverse_label_encoder'] = self.reverse_label_encoder
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including clustering parameters"""
-        cluster_centers = state_dict.pop('cluster_centers', None)
-        clustering_temp = state_dict.pop('clustering_temperature', None)
-
+        """Load state dict including label encoder"""
+        self.label_encoder = state_dict.pop('label_encoder', None)
+        self.reverse_label_encoder = state_dict.pop('reverse_label_encoder', None)
         super().load_state_dict(state_dict, strict)
 
         if cluster_centers is not None:
@@ -4091,6 +4154,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             try:
                 logger.info(f"Loading checkpoint from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.load_state_dict(checkpoint['state_dict'])  # This will load label encoders
 
                 # Load model state
                 self.feature_extractor.load_state_dict(checkpoint['state_dict'])
