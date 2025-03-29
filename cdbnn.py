@@ -6781,29 +6781,8 @@ def print_usage():
     print("  2. Process custom dataset using Autoencoder:")
     print("     python cdbnn.py --data_type custom --data path/to/images --encoder_type autoenc")
 
-def parse_arguments():
-    if len(sys.argv) == 1:
-        return get_interactive_args()
+import argparse
 
-    parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
-    parser.add_argument('--mode', choices=['train', 'reconstruct','predict'], default='train')
-    parser.add_argument('--data_name', type=str, help='dataset name/path')
-    parser.add_argument('--input_path', type=str, required=True,
-                   help='Path to input (can be directory or compressed file)')
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
-    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
-    parser.add_argument('--config', type=str, help='path to configuration file')
-    parser.add_argument('--debug', action='store_true', help='enable debug mode')
-    parser.add_argument('--output', type=str, default='', help='output directory')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--epochs', type=int, default=200, help='number of epochs')
-    parser.add_argument('--workers', type=int, default=4, help='number of workers')
-    parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--cpu', action='store_true', help='force CPU usage')
-    parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
-    parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
-
-    return parser.parse_args()
 
 
 def save_last_args(args):
@@ -7092,17 +7071,33 @@ def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
     try:
-        # Setup logging and parse arguments
+        # Setup logging
         logger = setup_logging()
-        args = parse_arguments()
-        dataset_name=str(args.data_name)
+
+        # First try to parse command line arguments
+        try:
+            args = parse_arguments()
+        except:
+            args = None
+
+        # If no command line args or --interactive flag, use interactive input
+        if args is None or getattr(args, 'interactive', False):
+            args = interactive_input()
+
+        dataset_name = str(args.data_name)
+
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join('data', dataset_name, f"{args.data}.json")
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
+            if not os.path.exists(config_path):
+                logger.error(f"Config file not found at {config_path}")
+                config_path = input("Enter path to config file: ")
+
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            # Setup logging
+
+            # Setup prediction logging
             os.makedirs('logs', exist_ok=True)
             log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
             logging.basicConfig(
@@ -7116,24 +7111,20 @@ def main():
             logger.info(f"Logging setup complete. Log file: {log_file}")
 
             # Initialize the PredictionManager
-            predictor = PredictionManager(
-                config=config,
-                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
-            )
-
-
+            device = 'cuda' if torch.cuda.is_available() and not getattr(args, 'cpu', False) else 'cpu'
+            predictor = PredictionManager(config=config, device=device)
 
             # Set the dataset (if required)
             if hasattr(predictor.model, 'set_dataset'):
-                # Create a dataset with the images in the input directory
-                transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
+                transform = predictor._get_transforms()
+                dataset = predictor._create_dataset(args.input_path, transform)
+                predictor.model.set_dataset(dataset)
+                logger.info(f"Dataset created with {len(dataset)} images")
 
-                predictor.model.set_dataset(dataset)  # Set the dataset in the model
-                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
-            if args.output == '':
-                args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                print(f"Using default output path: {args.output}")
+            # Handle output path
+            if not hasattr(args, 'output') or args.output == '':
+                args.output = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+                logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
             logger.info("Starting prediction process...")
@@ -7154,9 +7145,76 @@ def main():
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
-        if args and args.debug:
+        if args and getattr(args, 'debug', False):
             traceback.print_exc()
         return 1
+
+
+def interactive_input():
+    """Collect inputs interactively if no command line args provided"""
+    print("\nInteractive Mode - Please enter the following information:")
+
+    mode = input("Enter mode (train/reconstruct/predict) [predict]: ").strip().lower() or 'predict'
+    data_name = input("Enter dataset name [mnist]: ").strip() or 'mnist'
+    input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [data/{data_name}]: ").strip() or f"data/{data_name}"
+
+    args = SimpleNamespace(
+        mode=mode,
+        data_name=data_name,
+        input_path=input_path,
+        interactive=True
+    )
+
+    # Mode-specific inputs
+    if mode == 'predict':
+        args.model_path = input(f"Enter path to trained model [data/{data_name}/checkpoints/{data_name}_unified.pth]: ").strip() or f"data/{data_name}/checkpoints/{data_name}_unified.pth"
+        args.output = input(f"Enter output CSV path [data/{data_name}/{data_name}_predictions.csv]: ").strip() or f"data/{data_name}/{data_name}_predictions.csv"
+        args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
+        args.cpu = input("Force CPU even if GPU available? (y/n) [n]: ").strip().lower() == 'y'
+
+    elif mode == 'train':
+        args.epochs = int(input("Enter number of epochs [100]: ").strip() or 100)
+        args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
+        args.learning_rate = float(input("Enter learning rate [0.001]: ").strip() or 0.001)
+
+    args.debug = input("Enable debug mode? (y/n) [n]: ").strip().lower() == 'y'
+
+    return args
+
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='CDBNN Training and Prediction')
+
+    # Main arguments
+    parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
+                       default='predict', help='Operation mode')
+    parser.add_argument('--data-name', dest='data_name', default='mnist',
+                       help='Name of the dataset')
+    parser.add_argument('--input-path', required=True,
+                       help='Path to input data (directory or zip file)')
+    parser.add_argument('--interactive', action='store_true',
+                       help='Force interactive mode even with command line args')
+
+    # Prediction-specific
+    parser.add_argument('--model-path', help='Path to trained model')
+    parser.add_argument('--output', help='Output path for predictions')
+    parser.add_argument('--batch-size', type=int, default=128,
+                       help='Batch size for processing')
+    parser.add_argument('--cpu', action='store_true',
+                       help='Force CPU even if GPU available')
+
+    # Training-specific
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Number of training epochs')
+    parser.add_argument('--learning-rate', type=float, default=0.001,
+                       help='Learning rate for training')
+
+    # Debugging
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug mode with verbose output')
+
+    return parser.parse_args()
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
