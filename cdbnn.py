@@ -2398,7 +2398,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-    def _train_phase(model: nn.Module, train_loader: DataLoader,
+def _train_phase(model: nn.Module, train_loader: DataLoader,
                     optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                     epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
         """Training logic for each phase with enhanced checkpoint handling"""
