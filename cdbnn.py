@@ -7169,7 +7169,7 @@ def interactive_input():
 
     mode = input("Enter mode (train/reconstruct/predict) [predict]: ").strip().lower() or 'predict'
     data_name = input("Enter dataset name [mnist]: ").strip() or 'mnist'
-    input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [data/{data_name}]: ").strip() or f"data/{data_name}"
+    input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [Data/{data_name}.zip]: ").strip() or f"Data/{data_name}.zip"
 
     args = SimpleNamespace(
         mode=mode,
@@ -7202,9 +7202,9 @@ def parse_arguments():
     # Main arguments
     parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
                        default='predict', help='Operation mode')
-    parser.add_argument('--data-name', dest='data_name', default='mnist',
+    parser.add_argument('--data_name', dest='data_name', default='mnist',
                        help='Name of the dataset')
-    parser.add_argument('--input-path', required=True,
+    parser.add_argument('--input_path', required=True,
                        help='Path to input data (directory or zip file)')
     parser.add_argument('--interactive', action='store_true',
                        help='Force interactive mode even with command line args')
@@ -7242,12 +7242,13 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     """Handle training mode operations"""
     try:
         # Setup paths
-        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        #data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_name=args.data_name
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output', 'data'))
+        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'))
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
@@ -7297,7 +7298,8 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
     """Handle prediction mode operations"""
     try:
         # Setup paths
-        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        #data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_name=args.data_name
         data_dir = os.path.join('data', data_name)
 
         # Load configuration
