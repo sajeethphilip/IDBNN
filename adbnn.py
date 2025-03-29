@@ -3620,6 +3620,212 @@ class DBNN(GPUDBNN):
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
         """Training loop with proper weight handling and enhanced progress tracking"""
+        print("\033[K" + "Starting training...", end="\r", flush=True)
+
+        # Initialize weights if not already set
+        if self.current_W is None:
+            n_classes = len(self.label_encoder.classes_)
+            n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
+            if n_pairs == 0:
+                raise ValueError("Feature pairs not initialized")
+
+            # Initialize weights with small random values
+            self.current_W = torch.randn(
+                (n_classes, n_pairs),
+                device=self.device,
+                dtype=torch.float32
+            ) * 0.1  # Small initial weights
+
+            if self.best_W is None:
+                self.best_W = self.current_W.clone()
+
+            self.best_error = float('inf')
+
+        # Initialize best combined accuracy if not already set
+        if not hasattr(self, 'best_combined_accuracy'):
+            self.best_combined_accuracy = 0.0
+
+        # Initialize best model weights if not already set
+        if not hasattr(self, 'best_model_weights'):
+            self.best_model_weights = None
+
+        # Store initial conditions at the start of training
+        if self.best_round_initial_conditions is None:
+            self.best_round_initial_conditions = {
+                'weights': self.current_W.clone(),
+                'likelihood_params': self.likelihood_params,
+                'feature_pairs': self.feature_pairs,
+                'bin_edges': self.bin_edges,
+                'gaussian_params': self.gaussian_params
+            }
+
+        # Initialize progress bar for epochs
+        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs")
+
+        # Store current weights for prediction during training
+        train_weights = self.current_W.clone()
+
+        # Pre-allocate tensors for batch processing
+        n_samples = len(X_train)
+        predictions = torch.empty(batch_size, dtype=torch.long, device=self.device)
+        batch_mask = torch.empty(batch_size, dtype=torch.bool, device=self.device)
+
+        # Initialize tracking variables
+        error_rates = []
+        train_losses = []
+        test_losses = []
+        train_accuracies = []
+        test_accuracies = []
+        prev_train_error = float('inf')
+        prev_train_accuracy = 0.0
+        prev_test_accuracy = 0.0
+        patience_counter = 0
+        best_train_accuracy = 0.0
+        best_test_accuracy = 0.0
+
+        if self.in_adaptive_fit:
+            patience = 5
+        else:
+            patience = Trials
+
+        for epoch in range(self.max_epochs):
+            # Save epoch data
+            self.save_epoch_data(epoch, self.train_indices, self.test_indices)
+
+            Trstart_time = time.time()
+            failed_cases = []
+            n_errors = 0
+
+            # Process training data in batches
+            n_batches = (len(X_train) + batch_size - 1) // batch_size
+            batch_pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1} batches", leave=False)
+
+            for i in range(0, n_samples, batch_size):
+                batch_end = min(i + batch_size, n_samples)
+                current_batch_size = batch_end - i
+
+                batch_X = X_train[i:batch_end]
+                batch_y = y_train[i:batch_end]
+
+                # Compute posteriors for batch
+                if self.model_type == "Histogram":
+                    posteriors, bin_indices = self._compute_batch_posterior(batch_X)
+                elif self.model_type == "Gaussian":
+                    posteriors, comp_resp = self._compute_batch_posterior_std(batch_X)
+
+                predictions[:current_batch_size] = torch.argmax(posteriors, dim=1)
+                batch_mask[:current_batch_size] = (predictions[:current_batch_size] != batch_y)
+
+                n_errors += batch_mask[:current_batch_size].sum().item()
+
+                if batch_mask[:current_batch_size].any():
+                    failed_indices = torch.where(batch_mask[:current_batch_size])[0]
+                    for idx in failed_indices:
+                        failed_cases.append((
+                            batch_X[idx],
+                            batch_y[idx].item(),
+                            posteriors[idx].cpu().numpy()
+                        ))
+                batch_pbar.update(1)
+
+            batch_pbar.close()
+
+            # Calculate training error rate
+            train_error_rate = n_errors / n_samples
+            error_rates.append(train_error_rate)
+
+            # Calculate metrics using current weights
+            with torch.no_grad():
+                # Temporarily set current_W for training metrics
+                orig_weights = self.current_W
+                self.current_W = train_weights
+
+                # Training metrics
+                print("\033[K" + f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
+                train_predictions = self.predict(X_train, batch_size=batch_size)
+                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
+                train_loss = n_errors / n_samples
+
+                # Restore original weights
+                self.current_W = orig_weights
+
+            # Update best accuracies
+            best_train_accuracy = max(best_train_accuracy, train_accuracy)
+
+            # Store metrics
+            train_losses.append(train_loss)
+            train_accuracies.append(train_accuracy)
+
+            # Calculate training time
+            Trend_time = time.time()
+            training_time = Trend_time - Trstart_time
+
+            # Update progress display
+            epoch_pbar.update(1)
+            epoch_pbar.set_postfix({
+                'train_err': f"{train_error_rate:.4f} (best: {1-best_train_accuracy:.4f})",
+                'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
+            })
+
+            # Update previous values for next iteration
+            prev_train_error = train_error_rate
+            prev_train_accuracy = train_accuracy
+
+            # Check if this is the best round so far
+            if train_accuracy > best_train_accuracy:
+                best_train_accuracy = train_accuracy
+                self.best_round = epoch
+                self.best_round_initial_conditions = {
+                    'weights': self.current_W.clone(),
+                    'likelihood_params': self.likelihood_params,
+                    'feature_pairs': self.feature_pairs,
+                    'bin_edges': self.bin_edges,
+                    'gaussian_params': self.gaussian_params
+                }
+
+            # Update best model if improved
+            if train_error_rate <= self.best_error:
+                improvement = self.best_error - train_error_rate
+                self.best_error = train_error_rate
+                self.best_W = self.current_W.clone()  # Save current weights as best
+
+                if improvement <= 0.001:
+                    patience_counter += 1
+                else:
+                    patience_counter = 0
+                    self.learning_rate = LearningRate
+            else:
+                patience_counter += 1
+
+            # Early stopping check
+            if patience_counter >= patience or train_accuracy == 1.00:
+                print("\033[K" + f"{Colors.YELLOW} Early stopping.{Colors.ENDC}")
+                break
+
+            # Update weights if there were failures
+            if failed_cases:
+                self._update_priors_parallel(failed_cases, batch_size)
+
+            # Save reconstruction plots if enabled
+            if self.save_plots:
+                # Reconstruct features from predictions
+                reconstructed_features = self.reconstruct_features(posteriors)
+                save_path = f"data/{self.dataset_name}/plots/epoch_{epoch+1}"
+                os.makedirs(save_path, exist_ok=True)
+                self._save_reconstruction_plots(
+                    original_features=X_train.cpu().numpy(),
+                    reconstructed_features=reconstructed_features.cpu().numpy(),
+                    true_labels=y_train.cpu().numpy(),
+                    save_path=save_path
+                )
+
+        # Training complete
+        epoch_pbar.close()
+        return self.current_W.cpu(), error_rates
+
+
+    def train_old(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
+        """Training loop with proper weight handling and enhanced progress tracking"""
         print("\033[K" +"Starting training..." , end="\r", flush=True)
         # Initialize best combined accuracy if not already set
         if not hasattr(self, 'best_combined_accuracy'):
