@@ -5,6 +5,331 @@ from torchvision import datasets
 import torchvision
 from typing import List, Dict, Tuple
 import argparse
+import json
+from typing import Dict, Any
+import numpy as np
+from PIL import Image
+from typing import Tuple, List, Dict, Any
+
+def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[float], List[float]]:
+    """
+    Analyze images in the dataset to determine:
+    - Number of channels (1 for grayscale, 3 for RGB)
+    - Image size (width, height)
+    - Mean pixel values per channel
+    - Standard deviation per channel
+
+    Args:
+        dataset_path: Path to the dataset's train directory
+
+    Returns:
+        Tuple of (channels, (width, height), mean_values, std_values)
+    """
+    # Find first image in the dataset
+    for root, _, files in os.walk(dataset_path):
+        if files:
+            first_image = os.path.join(root, files[0])
+            break
+    else:
+        raise ValueError("No images found in dataset directory")
+
+    # Open the image and convert to numpy array
+    img = Image.open(first_image)
+    img_array = np.array(img)
+
+    # Determine image properties
+    if len(img_array.shape) == 2:  # Grayscale
+        channels = 1
+        height, width = img_array.shape
+    else:  # Color
+        height, width, channels = img_array.shape
+
+    # Calculate mean and std from a sample of images (max 100 for efficiency)
+    means = []
+    stds = []
+    sample_count = 0
+    max_samples = 100
+
+    for root, _, files in os.walk(dataset_path):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img = Image.open(os.path.join(root, file))
+                img_array = np.array(img)
+
+                if channels == 1:
+                    if len(img_array.shape) == 3:  # Convert color to grayscale
+                        img_array = np.mean(img_array, axis=2)
+                    means.append(np.mean(img_array))
+                    stds.append(np.std(img_array))
+                else:
+                    if len(img_array.shape) == 2:  # Convert grayscale to RGB
+                        img_array = np.stack([img_array]*3, axis=-1)
+                    means.append(np.mean(img_array, axis=(0,1)))
+                    stds.append(np.std(img_array, axis=(0,1)))
+
+                sample_count += 1
+                if sample_count >= max_samples:
+                    break
+        if sample_count >= max_samples:
+            break
+
+    # Calculate overall mean and std
+    if channels == 1:
+        mean_val = [float(np.mean(means))]
+        std_val = [float(np.mean(stds))]
+    else:
+        mean_val = [float(x) for x in np.mean(means, axis=0)]
+        std_val = [float(x) for x in np.mean(stds, axis=0)]
+
+    return channels, (width, height), mean_val, std_val
+def create_config_file(dataset_name: str, dataset_path: str, class_names: List[str],
+                      input_size: Tuple[int, int] = (32, 32), in_channels: int = 3) -> None:
+    """
+    Create a JSON configuration file for the dataset based on the template.
+
+    Args:
+        dataset_name: Name of the dataset
+        dataset_path: Path where the dataset is stored
+        class_names: List of class names in the dataset
+        input_size: Default input size (width, height)
+        in_channels: Number of input channels (1 for grayscale, 3 for RGB)
+    """
+    config_path = os.path.join(dataset_path, f"{dataset_name.lower()}.json")
+
+    # Basic dataset information
+    config: Dict[str, Any] = {
+        "dataset": {
+            "name": dataset_name.lower(),
+            "type": "torchvision",
+            "in_channels": in_channels,
+            "num_classes": len(class_names),
+            "input_size": list(input_size),
+            "mean": [0.5] * in_channels,
+            "std": [0.5] * in_channels,
+            "resize_images": False,
+            "train_dir": os.path.join(dataset_path, "train"),
+            "test_dir": os.path.join(dataset_path, "test") if os.path.exists(os.path.join(dataset_path, "test")) else ""
+        },
+        # Rest of the configuration can be copied from template
+        "model": {
+            "encoder_type": "autoenc",
+            "enable_adaptive": True,
+            "feature_dims": 128,
+            "learning_rate": 0.001,
+            "optimizer": {
+                "type": "Adam",
+                "weight_decay": 0.0001,
+                "momentum": 0.9,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "epsilon": 1e-08
+            },
+           "scheduler": {
+                "type": "ReduceLROnPlateau",
+                "factor": 0.1,
+                "patience": 10,
+                "min_lr": 1e-06,
+                "verbose": true
+            },
+            "autoencoder_config": {
+                "reconstruction_weight": 1.0,
+                "feature_weight": 0.1,
+                "convergence_threshold": 0.001,
+                "min_epochs": 10,
+                "patience": 5,
+                "enhancements": {
+                    "enabled": true,
+                    "use_kl_divergence": true,
+                    "use_class_encoding": false,
+                    "kl_divergence_weight": 0.5,
+                    "classification_weight": 0.5,
+                    "clustering_temperature": 1.0,
+                    "min_cluster_confidence": 0.7
+                }
+            },
+            "loss_functions": {
+                "structural": {
+                    "enabled": true,
+                    "weight": 1.0,
+                    "params": {
+                        "edge_weight": 1.0,
+                        "smoothness_weight": 0.5
+                    }
+                },
+                "color_enhancement": {
+                    "enabled": true,
+                    "weight": 0.8,
+                    "params": {
+                        "channel_weight": 0.5,
+                        "contrast_weight": 0.3
+                    }
+                },
+                "morphology": {
+                    "enabled": true,
+                    "weight": 0.6,
+                    "params": {
+                        "shape_weight": 0.7,
+                        "symmetry_weight": 0.3
+                    }
+                },
+                "detail_preserving": {
+                    "enabled": true,
+                    "weight": 0.8,
+                    "params": {
+                        "detail_weight": 1.0,
+                        "texture_weight": 0.8,
+                        "frequency_weight": 0.6
+                    }
+                },
+                "astronomical_structure": {
+                    "enabled": true,
+                    "weight": 1.0,
+                    "components": {
+                        "edge_preservation": true,
+                        "peak_preservation": true,
+                        "detail_preservation": true
+                    }
+                },
+                "medical_structure": {
+                    "enabled": true,
+                    "weight": 1.0,
+                    "components": {
+                        "boundary_preservation": true,
+                        "tissue_contrast": true,
+                        "local_structure": true
+                    }
+                },
+                "agricultural_pattern": {
+                    "enabled": true,
+                    "weight": 1.0,
+                    "components": {
+                        "texture_preservation": true,
+                        "damage_pattern": true,
+                        "color_consistency": true
+                    }
+                }
+            },
+            "enhancement_modules": {
+                "astronomical": {
+                    "enabled": true,
+                    "components": {
+                        "structure_preservation": true,
+                        "detail_preservation": true,
+                        "star_detection": true,
+                        "galaxy_features": true,
+                        "kl_divergence": true
+                    },
+                    "weights": {
+                        "detail_weight": 1.0,
+                        "structure_weight": 0.8,
+                        "edge_weight": 0.7
+                    }
+                },
+                "medical": {
+                    "enabled": true,
+                    "components": {
+                        "tissue_boundary": true,
+                        "lesion_detection": true,
+                        "contrast_enhancement": true,
+                        "subtle_feature_preservation": true
+                    },
+                    "weights": {
+                        "boundary_weight": 1.0,
+                        "lesion_weight": 0.8,
+                        "contrast_weight": 0.6
+                    }
+                },
+                "agricultural": {
+                    "enabled": true,
+                    "components": {
+                        "texture_analysis": true,
+                        "damage_detection": true,
+                        "color_anomaly": true,
+                        "pattern_enhancement": true,
+                        "morphological_features": true
+                    },
+                    "weights": {
+                        "texture_weight": 1.0,
+                        "damage_weight": 0.8,
+                        "pattern_weight": 0.7
+                    }
+                }
+            }
+        },
+        "training": {
+            "batch_size": 128,
+            "epochs": 20,
+            "num_workers": 4,
+            "checkpoint_dir": "data/mnist/checkpoints",
+            "validation_split": 0.2,
+            "invert_DBNN": true,
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.1,
+            "early_stopping": {
+                "patience": 5,
+                "min_delta": 0.001
+            }
+        },
+        "augmentation": {
+            "enabled": true,
+            "random_crop": {
+                "enabled": true,
+                "padding": 4
+            },
+            "random_rotation": {
+                "enabled": true,
+                "degrees": 10
+            },
+            "horizontal_flip": {
+                "enabled": true,
+                "probability": 0.5
+            },
+            "vertical_flip": {
+                "enabled": false
+            },
+            "color_jitter": {
+                "enabled": true,
+                "brightness": 0.2,
+                "contrast": 0.2,
+                "saturation": 0.2,
+                "hue": 0.1
+            },
+            "normalize": {
+                "enabled": true,
+                "mean": [
+                    0.5
+                ],
+                "std": [
+                    0.5
+                ]
+            }
+        },
+        "execution_flags": {
+            "mode": "train_and_predict",
+            "use_gpu": false,
+            "mixed_precision": true,
+            "distributed_training": false,
+            "debug_mode": false,
+            "use_previous_model": true,
+            "fresh_start": false
+        },
+        "output": {
+            "features_file": "data/mnist/mnist.csv",
+            "model_dir": "data/mnist/models",
+            "visualization_dir": "data/mnist/visualizations"
+        }
+    }
+
+    # Automatically disable color jitter for grayscale images
+    if channels == 1:
+        config["augmentation"]["color_jitter"]["enabled"] = False
+
+    # Save the configuration file
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"Created configuration file: {config_path}")
+
 
 def list_available_datasets() -> List[str]:
     """List all available datasets in torchvision.datasets"""
