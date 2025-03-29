@@ -59,11 +59,14 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
     else:
         raise ValueError(f"No images found in directory: {dataset_path}")
 
-    # Rest of the function remains the same...
     img = Image.open(first_image)
     img_array = np.array(img)
 
-    if len(img_array.shape) == 2:  # Grayscale
+    # Special handling for MNIST which might be saved as L mode (8-bit pixels, black and white)
+    if img.mode == 'L':
+        channels = 1
+        height, width = img_array.shape
+    elif len(img_array.shape) == 2:  # Grayscale
         channels = 1
         height, width = img_array.shape
     else:  # Color
@@ -477,6 +480,58 @@ def download_dataset(dataset_name: str, root: str, merge_train_test: bool = True
     try:
         # Download the dataset (this may download a tar file)
         dataset = dataset_class(root=root, download=True, **kwargs)
+
+        # Special handling for MNIST
+        if dataset_name.lower() == 'mnist':
+            # MNIST has different structure, we need to convert it to image files
+            from torchvision.datasets import MNIST
+            import torch
+
+            # Create directories for train and test
+            train_img_path = os.path.join(dataset_path, 'train')
+            test_img_path = os.path.join(dataset_path, 'test')
+            os.makedirs(train_img_path, exist_ok=True)
+            os.makedirs(test_img_path, exist_ok=True)
+
+            # Process training set
+            train_set = MNIST(root=root, train=True, download=True)
+            for i in range(len(train_set)):
+                img, label = train_set[i]
+                class_dir = os.path.join(train_img_path, str(label))
+                os.makedirs(class_dir, exist_ok=True)
+                img.save(os.path.join(class_dir, f"{i}.png"))
+
+            # Process test set
+            test_set = MNIST(root=root, train=False, download=True)
+            for i in range(len(test_set)):
+                img, label = test_set[i]
+                class_dir = os.path.join(test_img_path, str(label))
+                os.makedirs(class_dir, exist_ok=True)
+                img.save(os.path.join(class_dir, f"{i}.png"))
+
+            # Get class names
+            class_names = [str(i) for i in range(10)]
+
+            # Clean up raw files
+            raw_dir = os.path.join(root, 'MNIST', 'raw')
+            if os.path.exists(raw_dir):
+                shutil.rmtree(raw_dir)
+
+            # Move test to train if merge_train_test is True
+            if merge_train_test:
+                for class_name in class_names:
+                    src = os.path.join(test_img_path, class_name)
+                    dst = os.path.join(train_img_path, class_name)
+                    if os.path.exists(src):
+                        if os.path.exists(dst):
+                            for file in os.listdir(src):
+                                shutil.move(os.path.join(src, file), dst)
+                            shutil.rmtree(src)
+                        else:
+                            shutil.move(src, dst)
+                shutil.rmtree(test_img_path)
+
+            return train_img_path, class_names
 
         # Special handling for Caltech256 which comes as a tar file
         if dataset_name.lower() == 'caltech256':
