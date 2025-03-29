@@ -1416,7 +1416,7 @@ class DBNN(GPUDBNN):
             max_epochs=self.config.get('epochs', Epochs),
             test_size=self.config.get('test_fraction', TestFraction),
             random_state=self.config.get('random_seed', TrainingRandomSeed),
-            model_type=self.config.get('modelType', "Histogram")
+            model_type=self.config.get('modelType', "Histogram"),
             fresh=self.config.get('fresh_start',False)
         )
 
