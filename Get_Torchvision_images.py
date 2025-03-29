@@ -600,52 +600,6 @@ def interactive_mode():
         # Process single dataset
         process_dataset(dataset_name)
 
-def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: bool = True) -> None:
-    """Process a single dataset including download and config creation"""
-    if dataset_name not in list_available_datasets():
-        print(f"Dataset '{dataset_name}' not found.")
-        return
 
-    print(f"\nProcessing dataset: {dataset_name}")
-    try:
-        dataset_info = get_dataset_info(dataset_name)
-
-        # Download and organize dataset
-        final_path, class_names = download_dataset(
-            dataset_name=dataset_name,
-            root=root,
-            merge_train_test=merge_train_test
-        )
-
-        # Create configuration file with actual image properties
-        create_config_file(
-            dataset_name=dataset_name,
-            dataset_path=os.path.join(root, dataset_name.lower()),
-            class_names=class_names
-        )
-
-        # Create copy in Data folder in root directory
-        src_path = os.path.join(root, dataset_name.lower(), "train")
-        dest_path = os.path.join("Data", dataset_name.lower(), "train")
-
-        # Ensure destination directory exists
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-        # Remove existing directory if it exists
-        if os.path.exists(dest_path):
-            shutil.rmtree(dest_path)
-
-        print(f"Copying dataset to {dest_path}...")
-        shutil.copytree(src_path, dest_path)
-        print("Copy completed successfully")
-
-        print(f"\nSuccessfully processed dataset:")
-        print(f"- Files saved to: {final_path}")
-        print(f"- Found {len(class_names)} classes")
-        print(f"- Configuration file created: {os.path.join(root, dataset_name.lower(), f'{dataset_name.lower()}.json')}")
-        print(f"- Dataset copied to: {dest_path}")
-
-    except Exception as e:
-        print(f"Error processing dataset {dataset_name}: {str(e)}")
 if __name__ == "__main__":
     main()
