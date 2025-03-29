@@ -21,19 +21,25 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
     - Standard deviation per channel
 
     Args:
-        dataset_path: Path to the dataset's train directory
+        dataset_path: Path to the dataset directory (should contain train folder)
 
     Returns:
         Tuple of (channels, (width, height), mean_values, std_values)
     """
-    # Find first image in the dataset
-    for root, _, files in os.walk(dataset_path):
+    # Look specifically in the train directory
+    train_path = os.path.join(dataset_path, "train")
+    if not os.path.exists(train_path):
+        raise ValueError(f"No train directory found at {train_path}")
+
+    # Find first image in the train directory
+    for root, _, files in os.walk(train_path):
         if files:
             first_image = os.path.join(root, files[0])
             break
     else:
-        raise ValueError("No images found in dataset directory")
+        raise ValueError("No images found in dataset train directory")
 
+    # Rest of the function remains the same...
     # Open the image and convert to numpy array
     img = Image.open(first_image)
     img_array = np.array(img)
@@ -51,7 +57,7 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
     sample_count = 0
     max_samples = 100
 
-    for root, _, files in os.walk(dataset_path):
+    for root, _, files in os.walk(train_path):  # Changed to walk train_path
         for file in files:
             if file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 img = Image.open(os.path.join(root, file))
@@ -83,6 +89,7 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
         std_val = [float(x) for x in np.mean(stds, axis=0)]
 
     return channels, (width, height), mean_val, std_val
+
 def create_config_file(dataset_name: str, dataset_path: str, class_names: List[str],
                       input_size: Tuple[int, int] = (32, 32), in_channels: int = 3) -> None:
     """
@@ -104,9 +111,9 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
             "type": "torchvision",
             "in_channels": channels,
             "num_classes": len(class_names),
-            "input_size": list(width, height),
-            "mean": [mean_val] * channels,
-            "std": [mean_val] * channels,
+            "input_size": [width, height],
+            "mean": [mean_val],
+            "std": [mean_val],
             "resize_images": True,
             "train_dir": os.path.join(dataset_path, "train"),
             "test_dir": os.path.join(dataset_path, "test") if os.path.exists(os.path.join(dataset_path, "test")) else ""
