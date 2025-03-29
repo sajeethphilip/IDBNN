@@ -709,9 +709,81 @@ class DBNNPredictor:
 
         return posteriors, None
 
+    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None,header=None):
+        # Decode numeric labels back to original alphanumeric labels
+        y_true_labels = self.label_encoder.inverse_transform(y_true)
+        y_pred_labels = self.label_encoder.inverse_transform(y_pred)
+
+        # Get unique classes from both true and predicted labels
+        unique_true = np.unique(y_true_labels)
+        unique_pred = np.unique(y_pred_labels)
+
+        # Use provided class labels or get from label encoder
+        if class_labels is None:
+            class_labels = self.label_encoder.classes_
+
+        # Ensure all classes are represented in confusion matrix
+        all_classes = np.unique(np.concatenate([unique_true, unique_pred, class_labels]))
+        n_classes = len(all_classes)
+
+        # Create class index mapping
+        class_to_idx = {cls: idx for idx, cls in enumerate(all_classes)}
+
+        # Initialize confusion matrix with zeros
+        cm = np.zeros((n_classes, n_classes), dtype=int)
+
+        # Fill confusion matrix
+        for t, p in zip(y_true_labels, y_pred_labels):
+            if t in class_to_idx and p in class_to_idx:
+                cm[class_to_idx[t], class_to_idx[p]] += 1
+
+        # Print confusion matrix with colors
+        print("\033[K" +f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
+        print("\033[K" +f"{'Actual/Predicted':<15}", end='')
+        for label in all_classes:
+            print("\033[K" +f"{str(label):<8}", end='')
+        print("\033[K" +"Accuracy")
+        print("\033[K" +"-" * (15 + 8 * n_classes + 10))
+
+        # Print matrix with colors
+        for i in range(n_classes):
+            # Print actual class label
+            print("\033[K" +f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
+
+            # Print confusion matrix row
+            for j in range(n_classes):
+                if i == j:
+                    # Correct predictions in green
+                    color = Colors.GREEN
+                else:
+                    # Incorrect predictions in red
+                    color = Colors.RED
+                print("\033[K" +f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
+
+            # Print class accuracy with color based on performance
+            acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
+            if acc >= 0.9:
+                color = Colors.GREEN
+            elif acc >= 0.7:
+                color = Colors.YELLOW
+            else:
+                color = Colors.BLUE
+            print("\033[K" +f"{color}{acc:>7.2%}{Colors.ENDC}")
+
+        # Print overall accuracy
+        total_correct = np.diag(cm).sum()
+        total_samples = cm.sum()
+        if total_samples > 0:
+            overall_acc = total_correct / total_samples
+            print("\033[K" +"-" * (15 + 8 * n_classes + 10))
+            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
+            print("\033[K" +f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
+            print("\033[K" +f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+
+
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """
-        Make predictions directly from a CSV file.
+        Make predictions directly from a CSV file and display confusion matrix if target column exists in config.
 
         Args:
             csv_path: Path to input CSV file
@@ -723,8 +795,35 @@ class DBNNPredictor:
         # Load data
         df = pd.read_csv(csv_path)
 
+        # Get target column from config file
+        target_column = self.config.get('target_column') if hasattr(self, 'config') else None
+
+        # Check if target column exists in input data
+        target_in_data = target_column is not None and target_column in df.columns
+
         # Make predictions
         results = self.predict(df)
+
+        # If target column exists in config and data, compute and display confusion matrix
+        if target_in_data:
+            try:
+                # Get true and predicted labels
+                y_true = df[target_column]
+                y_pred = results['predicted_class']
+
+                # Convert to encoded values if needed
+                if not np.issubdtype(y_true.dtype, np.number):
+                    y_true = self.label_encoder.transform(y_true)
+
+                if not np.issubdtype(y_pred.dtype, np.number):
+                    y_pred = self.label_encoder.transform(y_pred)
+
+                # Display colored confusion matrix
+                self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
+
+            except Exception as e:
+                print(f"\033[KError generating confusion matrix: {str(e)}")
+                traceback.print_exc()
 
         # Save if output path specified
         if output_path:
