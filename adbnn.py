@@ -1,4 +1,3 @@
-#Working, fully functional with predcition 28/March/2025
 import torch
 import time
 import argparse
@@ -25,7 +24,6 @@ from scipy import stats
 from scipy.stats import normaltest
 import numpy as np
 from itertools import combinations
-from math import comb
 import torch
 import os
 import pickle
@@ -41,8 +39,6 @@ cardinality_tolerance=4 #Use when the features are likely to be extremly diverse
 LearningRate =0.1
 TrainingRandomSeed=42  #None # 42
 Epochs=1000
-bin_sizes =128
-n_bins_per_dim =128
 TestFraction=0.2
 Train=True #True #False #
 Train_only=False #True #
@@ -81,658 +77,7 @@ import json
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from tqdm import tqdm
-import torch
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
-import json
-import os
-from typing import Union, List, Dict, Optional
-from collections import defaultdict
 
-class DBNNPredictor:
-    """Optimized standalone predictor for DBNN models"""
-
-    def __init__(self, model_dir: str = 'Model', device: str = None):
-        """
-        Initialize predictor with model components.
-
-        Args:
-            model_dir: Directory containing saved model components
-            device: Device to run predictions on ('cuda' or 'cpu')
-        """
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model_dir = model_dir
-        self.model_type = None  # Will be set during load
-        self._is_initialized = False
-        self.n_bins_per_dim = 128  # Default value
-        # Initialize weight_updater as None but with type hint
-        self.weight_updater: Optional[BinWeightUpdater] = None
-        # Initialize empty attributes
-        self.label_encoder = None
-        self.feature_pairs = None
-        self.likelihood_params = None
-        self.weight_updater = None
-        self.current_W = None
-        self.scaler = None
-        self.categorical_encoders = None
-        self.feature_columns = None
-        self.target_column = None
-        self.global_mean = None
-        self.global_std = None
-
-    def load_model(self, dataset_name: str) -> bool:
-        """Load all model components with strict initialization order"""
-        try:
-            # 1. Load basic config first
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found: {config_path}")
-
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
-
-            # 2. Set model type
-            self.model_type = self.config.get('modelType', 'Histogram')
-
-            # 3. Load essential components in strict order
-            self._load_label_encoder(dataset_name)
-            self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
-
-            # 4. Initialize weight updater after all params are loaded
-            self._initialize_weight_updater()
-
-            # 5. Load weights
-            self._load_weights(dataset_name)
-
-            # 6. Load optional preprocessing params
-            if hasattr(self, '_load_preprocessing_params'):
-                self._load_preprocessing_params(dataset_name)
-
-            # Final validation
-            required_attrs = [
-                'likelihood_params', 'feature_pairs',
-                'current_W', 'label_encoder',
-                'weight_updater'  # Now explicitly required
-            ]
-            missing = [attr for attr in required_attrs if not hasattr(self, attr)]
-            if missing:
-                raise RuntimeError(f"Missing required model components: {missing}")
-
-            self._is_initialized = True
-            return True
-
-        except Exception as e:
-            print(f"\033[KError loading model: {str(e)}")
-            traceback.print_exc()
-            return False
-
-    def _load_label_encoder(self, dataset_name: str):
-        """Robust label encoder loading with validation"""
-        encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
-
-        if not os.path.exists(encoder_path):
-            raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
-
-        try:
-            with open(encoder_path, 'rb') as f:
-                encoder = pickle.load(f)
-
-            # Handle case where encoder was saved as dict
-            if isinstance(encoder, dict):
-                if 'classes_' in encoder:
-                    new_encoder = LabelEncoder()
-                    new_encoder.classes_ = np.array(encoder['classes_'])
-                    encoder = new_encoder
-                    # Resave it properly
-                    with open(encoder_path, 'wb') as f:
-                        pickle.dump(encoder, f)
-                else:
-                    raise ValueError("Saved encoder dict missing classes_")
-
-            # Validate the loaded encoder
-            if not hasattr(encoder, 'classes_') or not hasattr(encoder, 'transform'):
-                raise ValueError("Invalid label encoder format")
-
-            self.label_encoder = encoder
-            print(f"\033[KLoaded label encoder with classes: {encoder.classes_}")
-            return encoder
-
-        except Exception as e:
-            print(f"\033[KError loading label encoder: {str(e)}")
-            # Attempt to recreate from data
-            if hasattr(self, 'data'):
-                print("Attempting to recreate label encoder from data...")
-                self.label_encoder = LabelEncoder()
-                self.label_encoder.fit(self.data[self.target_column])
-                return self.label_encoder
-            raise
-
-
-    def _load_feature_pairs(self, dataset_name: str):
-        """Load feature combinations from saved file"""
-        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-        if os.path.exists(components_file):
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-                self.feature_pairs = components.get('feature_pairs')
-                self.feature_columns = components.get('feature_columns')
-
-    def _load_likelihood_params(self, dataset_name: str):
-        """Load likelihood parameters and initialize weight updater"""
-        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-
-        if not os.path.exists(components_file):
-            raise FileNotFoundError(f"Model components file not found at {components_file}")
-
-        try:
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-
-            # Load likelihood params
-            if 'likelihood_params' in components:
-                self.likelihood_params = components['likelihood_params']
-            elif self.model_type == "Histogram":
-                required = ['bin_probs', 'bin_edges', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'bin_probs': components['bin_probs'],
-                        'bin_edges': components['bin_edges'],
-                        'classes': components['classes'],
-                        'feature_pairs': components.get('feature_pairs', [])
-                    }
-            elif self.model_type == "Gaussian":
-                required = ['means', 'covs', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'means': components['means'],
-                        'covs': components['covs'],
-                        'classes': components['classes'],
-                        'feature_pairs': components.get('feature_pairs', [])
-                    }
-
-            # Initialize weight updater
-            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
-                n_classes = len(self.likelihood_params['classes'])
-                feature_pairs = self.likelihood_params.get('feature_pairs', [])
-                if not feature_pairs and hasattr(self, 'feature_pairs'):
-                    feature_pairs = self.feature_pairs
-
-                # Get n_bins_per_dim from components or use default
-                n_bins = self.n_bins_per_dim
-                if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
-                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # Get from first bin_probs dim
-
-                self.weight_updater = BinWeightUpdater(
-                    n_classes=n_classes,
-                    feature_pairs=feature_pairs,
-                    n_bins_per_dim=n_bins,
-                    batch_size=128
-                )
-
-        except Exception as e:
-            raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
-
-    def _load_preprocessing_params(self, dataset_name: str):
-        """Load preprocessing parameters (scalers, encoders, etc.)"""
-        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-
-        if os.path.exists(components_file):
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-
-            # Load scaler if available
-            if 'scaler' in components:
-                self.scaler = components['scaler']
-
-            # Load categorical encoders if available
-            if 'categorical_encoders' in components:
-                self.categorical_encoders = components['categorical_encoders']
-
-            # Load global stats if available
-            if 'global_mean' in components and 'global_std' in components:
-                self.global_mean = components['global_mean']
-                self.global_std = components['global_std']
-
-            # Load feature columns if available
-            if 'feature_columns' in components:
-                self.feature_columns = components['feature_columns']
-
-            print("\033[K" + "Loaded preprocessing parameters", end="\r", flush=True)
-
-    def _load_weights(self, dataset_name: str):
-        """Load model weights"""
-        weights_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_weights.json')
-        if os.path.exists(weights_file):
-            with open(weights_file, 'r') as f:
-                weights_data = json.load(f)
-
-            n_classes = len(self.label_encoder.classes_)
-            # Check if feature_pairs is a tensor and get its first dimension length
-            if isinstance(self.feature_pairs, torch.Tensor):
-                n_pairs = self.feature_pairs.size(0)
-            else:
-                n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
-
-            if weights_data.get('version', 1) == 2:
-                # New tensor format
-                weights_array = np.array(weights_data['weights'])
-                self.current_W = torch.tensor(weights_array, device=self.device)
-            else:
-                # Old dictionary format
-                weights_array = np.zeros((n_classes, n_pairs))
-                for class_id, class_weights in weights_data.items():
-                    for pair_idx, weight in enumerate(class_weights.values()):
-                        weights_array[int(class_id), pair_idx] = weight
-                self.current_W = torch.tensor(weights_array, device=self.device)
-
-    def _load_likelihood_params(self, dataset_name: str):
-        """Load likelihood parameters from the comprehensive components file"""
-        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-
-        if not os.path.exists(components_file):
-            raise FileNotFoundError(f"Model components file not found at {components_file}")
-
-        try:
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-
-            # First try loading from the structured likelihood_params
-            if 'likelihood_params' in components:
-                self.likelihood_params = components['likelihood_params']
-                print("\033[K" +f"Loaded likelihood_params from components file")
-                return
-
-            # Fallback to direct component loading (backward compatibility)
-            if self.model_type == "Histogram":
-                required = ['bin_probs', 'bin_edges', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'bin_probs': components['bin_probs'],
-                        'bin_edges': components['bin_edges'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required histogram components")
-
-            elif self.model_type == "Gaussian":
-                required = ['means', 'covs', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'means': components['means'],
-                        'covs': components['covs'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required Gaussian components")
-
-            print("\033[K" +f"Loaded {self.model_type} likelihood parameters from {components_file}")
-
-        except Exception as e:
-            raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
-
-    def preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
-        """
-        Preprocess input data using saved preprocessing parameters.
-        Handles target column removal and feature ordering according to config.
-        """
-        if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first.")
-
-        # Make a copy to avoid modifying original
-        df_processed = df.copy()
-
-        # Filter to only include expected features from config
-        if hasattr(self, 'feature_columns') and self.feature_columns:
-            # Ensure we only keep columns that exist in both model and input data
-            available_cols = [col for col in self.feature_columns if col in df_processed.columns]
-
-            # Remove target column if present
-            if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
-                available_cols = [col for col in available_cols if col != self.target_column]
-
-            # Reorder columns exactly as specified in config
-            try:
-                df_processed = df_processed[available_cols]
-            except KeyError as e:
-                missing = set(self.feature_columns) - set(df_processed.columns)
-                raise ValueError(f"Missing required columns: {missing}") from e
-
-        # Handle categorical encoding
-        if hasattr(self, 'categorical_encoders') and self.categorical_encoders:
-            for column, mapping in self.categorical_encoders.items():
-                if column in df_processed.columns:
-                    # Convert column to string type for reliable mapping
-                    col_data = df_processed[column].astype(str)
-                    encoded = col_data.map(lambda x: mapping.get(x, -1))
-                    df_processed[column] = encoded
-
-        # Replace NA values with -99999 and store mask
-        self.nan_mask = df_processed.isna()
-        df_processed = df_processed.fillna(-99999)
-
-        # Convert to numpy array - ensuring float32 dtype
-        X_numpy = df_processed.to_numpy(dtype=np.float32)  # Convert to numpy array first
-
-        # Apply standardization using precomputed global stats
-        if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
-            try:
-                # Ensure global_mean and global_std are numpy arrays
-                global_mean = np.asarray(self.global_mean)
-                global_std = np.asarray(self.global_std)
-
-                # Check shapes match
-                if X_numpy.shape[1] != len(global_mean):
-                    raise ValueError(
-                        f"Feature dimension mismatch. "
-                        f"Data has {X_numpy.shape[1]} features, "
-                        f"but mean/std have {len(global_mean)} features"
-                    )
-
-                # Perform standardization on numpy array
-                X_scaled = (X_numpy - global_mean) / global_std
-            except ValueError as e:
-                raise ValueError(
-                    f"Standardization error. "
-                    f"Data shape: {X_numpy.shape}, "
-                    f"Mean shape: {global_mean.shape}, "
-                    f"Std shape: {global_std.shape}. "
-                    f"Error: {str(e)}"
-                ) from e
-        else:
-            X_scaled = X_numpy
-
-        # Convert to tensor
-        return torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
-
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
-        """
-        Make predictions on input data with proper feature validation.
-        Handles feature selection and ordering according to config.
-        """
-        if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first.")
-
-        # Handle input type and feature selection
-        if isinstance(X, pd.DataFrame):
-            # Filter and order columns according to config
-            if hasattr(self, 'feature_columns'):
-                # Get columns that exist in both model and input
-                available_cols = [col for col in self.feature_columns if col in X.columns]
-                if not available_cols:
-                    raise ValueError("No matching features found between model and input data")
-
-                # Ensure we maintain the order from feature_columns
-                X_filtered = X[available_cols].copy()
-
-                # Check if we need to drop target column (if present)
-                if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
-                    X_filtered = X_filtered.drop(columns=[self.target_column])
-
-                # Store original for results
-                original_df = X.copy()
-                X_tensor = self.preprocess_data(X_filtered)
-            else:
-                raise RuntimeError("Model not properly initialized - missing feature columns")
-        else:
-            X_tensor = X.to(self.device) if not X.is_cuda else X
-            original_df = None
-
-        # Initialize storage for results
-        all_predictions = []
-        all_probabilities = []
-
-        # Process in batches
-        n_batches = (len(X_tensor) + batch_size - 1) // batch_size
-        batch_pbar = tqdm(total=n_batches, desc="Prediction batches")
-
-        for i in range(0, len(X_tensor), batch_size):
-            batch_end = min(i + batch_size, len(X_tensor))
-            batch_X = X_tensor[i:batch_end]
-
-            # Compute posteriors
-            try:
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                else:
-                    raise ValueError(f"Unknown model type: {self.model_type}")
-            except Exception as e:
-                raise RuntimeError(f"Error computing posteriors: {str(e)}")
-
-            # Get predictions
-            batch_pred = torch.argmax(posteriors, dim=1)
-
-            # Store results
-            all_predictions.append(batch_pred.cpu())
-            all_probabilities.append(posteriors.cpu())
-            batch_pbar.update(1)
-
-        batch_pbar.close()
-
-        # Combine results
-        predictions = torch.cat(all_predictions).numpy()
-        probabilities = torch.cat(all_probabilities).numpy()
-
-        # Create results DataFrame
-        if original_df is not None:
-            results_df = original_df.copy()
-        else:
-            results_df = pd.DataFrame(index=range(len(X_tensor)))
-
-        # Add predictions and probabilities
-        pred_labels = self.label_encoder.inverse_transform(predictions)
-        results_df['predicted_class'] = pred_labels
-
-        for i, class_name in enumerate(self.label_encoder.classes_):
-            results_df[f'prob_{class_name}'] = probabilities[:, i]
-
-        results_df['max_probability'] = probabilities.max(axis=1)
-
-        return results_df
-
-    def _initialize_weight_updater(self):
-        """Initialize weight updater with verified dimensions"""
-        if not hasattr(self, 'likelihood_params'):
-            raise RuntimeError("Likelihood parameters not loaded")
-
-        # Verify we have bin_probs to determine dimensions
-        if 'bin_probs' not in self.likelihood_params or len(self.likelihood_params['bin_probs']) == 0:
-            raise RuntimeError("Invalid likelihood parameters - missing bin_probs")
-
-        # Get dimensions from the first bin_probs entry
-        first_bin_probs = self.likelihood_params['bin_probs'][0]
-        n_classes, n_bins_i, n_bins_j = first_bin_probs.shape
-
-        # Ensure all bin_probs have consistent dimensions
-        for bp in self.likelihood_params['bin_probs']:
-            if bp.shape != (n_classes, n_bins_i, n_bins_j):
-                raise RuntimeError(f"Inconsistent bin_probs dimensions. Expected {(n_classes, n_bins_i, n_bins_j)}, got {bp.shape}")
-
-        self.weight_updater = BinWeightUpdater(
-            n_classes=n_classes,
-            feature_pairs=self.feature_pairs,
-            n_bins_per_dim=n_bins_i,  # Assuming square bins (n_bins_i == n_bins_j)
-            batch_size=128
-        )
-
-        # Initialize weights to match bin_probs dimensions
-        for class_id in range(n_classes):
-            for pair_idx in range(len(self.feature_pairs)):
-                self.weight_updater.histogram_weights[class_id][pair_idx] = torch.ones(
-                    (n_bins_i, n_bins_j),
-                    device=self.device
-                )
-
-    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Dimension-aware posterior computation with NaN handling"""
-        # Input validation
-        if not hasattr(self, 'likelihood_params') or 'bin_probs' not in self.likelihood_params:
-            raise RuntimeError("Likelihood parameters not properly initialized")
-
-        batch_size = features.shape[0]
-        n_classes = len(self.likelihood_params['classes'])
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
-        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs per sample
-
-        # Process feature pairs
-        feature_groups = torch.stack([
-            features[:, pair].contiguous().to(self.device)
-            for pair in self.feature_pairs
-        ]).transpose(0, 1)
-
-        # Bin indices computation with NaN handling
-        bin_indices_dict = {}
-        for group_idx in range(len(self.feature_pairs)):
-            bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])
-
-            # Skip if either feature is NaN (-99999)
-            valid_mask = (feature_groups[:, group_idx, 0] != -99999) & \
-                         (feature_groups[:, group_idx, 1] != -99999)
-
-            indices = torch.stack([
-                torch.where(
-                    valid_mask,
-                    torch.bucketize(
-                        feature_groups[:, group_idx, dim].contiguous(),
-                        edges[dim].contiguous()
-                    ).sub_(1).clamp_(0, len(edges[dim]) - 2),
-                    -1  # Invalid index for NaN values
-                )
-                for dim in range(2)
-            ])
-            bin_indices_dict[group_idx] = indices
-
-        # Weighted probability computation with NaN handling
-        for group_idx in range(len(self.feature_pairs)):
-            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
-            indices = bin_indices_dict[group_idx]
-
-            # Skip NaN pairs
-            valid_mask = (indices[0] != -1) & (indices[1] != -1)
-            valid_counts += valid_mask.float()
-
-            # Get weights and verify dimensions
-            weights = torch.stack([
-                self.weight_updater.get_histogram_weights(c, group_idx)
-                for c in range(n_classes)
-            ]).to(self.device)
-
-            # Ensure weights and bin_probs have compatible shapes
-            if weights.shape != bin_probs.shape:
-                raise ValueError(f"Shape mismatch between weights {weights.shape} and bin_probs {bin_probs.shape}")
-
-            # Apply weights to probabilities
-            weighted_probs = bin_probs * weights
-
-            # Gather probabilities for all samples and classes
-            # Need to handle batch dimension properly
-            batch_probs = torch.zeros((n_classes, batch_size), device=self.device)
-
-            for class_idx in range(n_classes):
-                # Get probabilities for this class
-                class_probs = weighted_probs[class_idx]
-
-                # Gather probabilities using indices
-                batch_probs[class_idx] = torch.where(
-                    valid_mask,
-                    class_probs[indices[0], indices[1]],
-                    torch.ones_like(valid_mask, dtype=torch.float32)
-                )
-
-            log_likelihoods += torch.log(batch_probs.t() + epsilon)
-
-        # Normalize posteriors by number of valid feature pairs
-        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
-        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
-
-        # Final softmax normalization
-        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
-        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
-        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
-
-        return posteriors, bin_indices_dict
-
-    def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
-        """Gaussian posterior computation with NaN handling"""
-        batch_size = features.shape[0]
-        n_classes = len(self.likelihood_params['classes'])
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
-        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs
-
-        # Process each feature group
-        for pair_idx, pair in enumerate(self.feature_pairs):
-            pair_data = features[:, pair]
-
-            # Skip if either feature is NaN (-99999)
-            valid_mask = (pair_data[:, 0] != -99999) & (pair_data[:, 1] != -99999)
-            valid_counts += valid_mask.float()
-
-            # Process each class
-            for class_idx in range(n_classes):
-                mean = self.likelihood_params['means'][class_idx, pair_idx]
-                cov = self.likelihood_params['covs'][class_idx, pair_idx]
-                weight = self.weight_updater.get_gaussian_weights(class_idx, pair_idx)
-
-                # Center the data
-                centered = pair_data - mean.unsqueeze(0)
-
-                # Compute class likelihood only for valid pairs
-                try:
-                    reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-                    prec = torch.inverse(reg_cov)
-                    quad = torch.sum(
-                        torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
-                        dim=1
-                    )
-                    class_ll = torch.where(
-                        valid_mask,
-                        -0.5 * quad + torch.log(weight + epsilon),
-                        torch.zeros(batch_size, device=self.device)
-                    )
-                except RuntimeError:
-                    class_ll = torch.zeros(batch_size, device=self.device)
-
-                log_likelihoods[:, class_idx] += class_ll
-
-        # Normalize by number of valid feature pairs
-        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
-        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
-
-        # Convert to probabilities using softmax
-        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
-        exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + epsilon)
-
-        return posteriors, None
-
-    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """
-        Make predictions directly from a CSV file.
-
-        Args:
-            csv_path: Path to input CSV file
-            output_path: Optional path to save predictions
-
-        Returns:
-            pd.DataFrame: DataFrame with predictions and probabilities
-        """
-        # Load data
-        df = pd.read_csv(csv_path)
-
-        # Make predictions
-        results = self.predict(df)
-
-        # Save if output path specified
-        if output_path:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            results.to_csv(output_path, index=False)
-
-        return results
-#-------------------------------------------DBNN Predictor Ends ------------------------------------
 class DatasetProcessor:
     """A class to handle dataset-related operations such as downloading, processing, and formatting."""
 
@@ -953,7 +298,14 @@ class DatasetConfig:
             "fresh_start": false,
             "use_previous_model": true
         }
-
+        # Save the configuration
+        config_path = f"data/{dataset_name}/{dataset_name}.conf"
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+            print("\033[K" +f"Created default configuration file: {config_path}")
+        except Exception as e:
+            print("\033[K" +f"Warning: Could not save configuration file: {str(e)}")
 
         return config
 
@@ -1768,73 +1120,57 @@ class GPUDBNN:
         self._load_best_weights()
         self._load_categorical_encoders()
 
-    def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
+    def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[torch.Tensor]:
         """
-        Vectorized computation of bin edges with GPU memory management.
+        Compute bin edges for all feature pairs once during initialization.
 
         Args:
             dataset: Input tensor of shape [n_samples, n_features]
-            bin_sizes: List of integers specifying bin sizes
+            bin_sizes: List of integers specifying bin sizes for each dimension
 
         Returns:
-            List of lists containing bin edge tensors for each feature pair
+            List of tensors containing bin edges for each feature pair
         """
-        DEBUG.log("Starting vectorized _compute_bin_edges")
-
-        # Memory management parameters
-        MAX_GPU_MEM = 0.8 * torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 1e10
-        SAFETY_FACTOR = 0.7  # Use only 70% of available memory
-
-        # Calculate memory requirements per feature pair
-        bytes_per_pair = 2 * 4 * len(bin_sizes)  # 2 edges, 4 bytes per float, per dimension
-        max_pairs_per_batch = int((MAX_GPU_MEM * SAFETY_FACTOR) / bytes_per_pair)
-        max_pairs_per_batch = max(1, min(max_pairs_per_batch, len(self.feature_pairs)))
+        DEBUG.log("Starting _compute_bin_edges")
+        print("\033[K" +f"Dataset shape: {dataset.shape}")
+        print("\033[K" +f"Bin sizes: {bin_sizes}")
 
         bin_edges = []
+        for feature_group in self.feature_pairs:
+            feature_group = [int(x) for x in feature_group]
+            group_data = dataset[:, feature_group].contiguous()
+            n_dims = len(feature_group)
 
-        # Process in memory-managed batches
-        for batch_start in range(0, len(self.feature_pairs), max_pairs_per_batch):
-            batch_end = min(batch_start + max_pairs_per_batch, len(self.feature_pairs))
-            batch_pairs = self.feature_pairs[batch_start:batch_end]
+            # Get appropriate bin sizes for this group
+            group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
 
-            # Vectorized min/max computation for the batch
-            with torch.no_grad():
-                # Stack all features needed in this batch
-                feature_indices = torch.unique(torch.cat([torch.tensor(pair, device=self.device)
-                                                        for pair in batch_pairs]))
-                batch_data = dataset[:, feature_indices]
+            # Compute bin edges for all dimensions
+            group_bin_edges = []
+            for dim in range(n_dims):
+                dim_data = group_data[:, dim].contiguous()
+                dim_min, dim_max = dim_data.min(), dim_data.max()
+                padding = (dim_max - dim_min) * 0.01
 
-                # Compute min/max for all features in batch
-                mins = batch_data.min(dim=0)[0]
-                maxs = batch_data.max(dim=0)[0]
+                # Ensure bin size is valid
+                if group_bin_sizes[dim] <= 1:
+                    raise ValueError(f"Bin size must be > 1, got {group_bin_sizes[dim]}")
 
-                # Create mapping from feature index to its position in batch_data
-                feat_to_idx = {int(f): i for i, f in enumerate(feature_indices)}
+                # Compute bin edges
+                try:
+                    edges = torch.linspace(
+                        dim_min - padding,
+                        dim_max + padding,
+                        group_bin_sizes[dim] + 1,  # Use configured bin size for this dimension
+                        device=self.device
+                    ).contiguous()
+                    group_bin_edges.append(edges)
+                    DEBUG.log(f" Dimension {dim} edges range: {edges[0].item():.3f} to {edges[-1].item():.3f}")
+                except Exception as e:
+                    print("\033[K" +f"Error computing bin edges for dimension {dim}: {str(e)}")
+                    print("\033[K" +f"dim_min: {dim_min}, dim_max: {dim_max}, padding: {padding}, bin_size: {group_bin_sizes[dim]}")
+                    raise
 
-                # Process each pair in batch
-                for pair in batch_pairs:
-                    pair_edges = []
-                    for dim, feat in enumerate(pair):
-                        feat_idx = feat_to_idx[int(feat)]
-                        dim_min = mins[feat_idx]
-                        dim_max = maxs[feat_idx]
-                        padding = max((dim_max - dim_min) * 0.01, 1e-6)
-
-                        # Get bin size for this dimension
-                        bin_size = bin_sizes[0] if len(bin_sizes) == 1 else bin_sizes[dim]
-
-                        # Vectorized edge computation
-                        edges = torch.linspace(
-                            dim_min - padding,
-                            dim_max + padding,
-                            bin_size + 1,
-                            device=self.device
-                        ).contiguous()
-                        pair_edges.append(edges)
-
-                    bin_edges.append(pair_edges)
-
-            torch.cuda.empty_cache()  # Free memory between batches
+            bin_edges.append(group_bin_edges)
 
         return bin_edges
 #----------------------
@@ -2016,7 +1352,7 @@ class DBNNConfig:
             config_data = json.load(f)
         return cls(**config_data)
 
-    def save_old(self, config_path: str):
+    def save(self, config_path: str):
         """Save configuration to JSON file"""
         config_dict = {k: v for k, v in self.__dict__.items()}
         with open(config_path, 'w') as f:
@@ -2043,20 +1379,7 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
-        # Metadata storage (CPU only)
-        self._metadata = {
-            'sample_ids': [],          # Original dataset indices
-            'file_paths': [],          # Paths for image/data files
-            'class_names': [],         # String class labels
-            'feature_names': [],       # Column/feature names
-            'aux_data': {}             # Other non-computational data
-        }
-        # GPU Tensors (computational only)
-        self._gpu_tensors = {
-            'features': None,
-            'targets': None,
-            'weights': None
-        }
+
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
@@ -2201,15 +1524,13 @@ class DBNN(GPUDBNN):
         # Load or create the configuration file and update global variables
         config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
         # Update global variables based on the configuration file
-        global Train_device,bin_sizes,n_bins_per_dim, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+        global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
         Train_device = config.get("compute_device", Train_device)
         print(''f"The train device is set as {Train_device}")
         self.device=Train_device
         Trials = config.get("trials", Trials)
         cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
         cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
-        bin_sizes = config.get("bin_sizes", 128)
-        n_bins_per_dim = config.get("n_bins_per_dim", 128)
         LearningRate = config.get("learning_rate", LearningRate)
         TrainingRandomSeed = config.get("random_seed", TrainingRandomSeed)
         Epochs = config.get("epochs", Epochs)
@@ -2244,7 +1565,7 @@ class DBNN(GPUDBNN):
          # Load data using existing GPUDBNN method
         self.data =self._load_dataset()
         self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
-        self.batch_size=self._calculate_optimal_batch_size(len(self.data))
+        self.batch_size=self._calculate_optimal_batch_size(self.data)
         # Add row tracking
         self.data['original_index'] = range(len(self.data))
 
@@ -2431,81 +1752,113 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Optimized dataset loader with GPU memory management"""
-        DEBUG.log(f"Loading dataset: {self.dataset_name}")
-
+        """Load and preprocess dataset with improved error handling"""
+        DEBUG.log(f" Loading dataset from config: {self.config}")
         try:
-            # Config validation (unchanged)
-            if not self.config:
-                raise ValueError(f"No config for dataset: {self.dataset_name}")
-
+            # Validate configuration
+            if self.config is None:
+                raise ValueError(f"No configuration found for dataset: {self.dataset_name}")
             file_path = self.config.get('file_path')
-            if not file_path:
-                raise ValueError("No file path in config")
+            if file_path is None:
+                raise ValueError(f"No file path specified in configuration for dataset: {self.dataset_name}")
+            # Handle URL or local file
+            try:
+                if file_path.startswith(('http://', 'https://')):
+                    DEBUG.log(f" Loading from URL: {file_path}")
+                    response = requests.get(file_path)
+                    response.raise_for_status()
+                    data = StringIO(response.text)
+                else:
+                    DEBUG.log(f" Loading from local file: {file_path}")
+                    if not os.path.exists(file_path):
+                        raise FileNotFoundError(f"Dataset file not found: {file_path}")
+                    data = file_path
 
-            # Load data (unchanged file handling)
-            if file_path.startswith(('http://', 'https://')):
-                df = pd.read_csv(StringIO(requests.get(file_path).text),
-                               sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None)
-            else:
-                df = pd.read_csv(file_path,
-                               sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None)
+                # First, read the CSV to get the actual headers
+                has_header = self.config.get('has_header', True)
 
-             # Store original data (CPU only)
-            self.Original_data = df.copy()  # This is the line that was missing
-            self.X_Orig = df.drop(columns=[self.target_column]).copy()  # Add this line
+                read_params = {
+                    'sep': self.config.get('separator', ','),
+                    'header': 0 if has_header else None,
+                }
 
-            # Filter features if specified
-            if 'column_names' in self.config:
-                df = _filter_features_from_config(df, self.config)
+                # DO NOT include 'names' parameter for the initial read
+                # This allows us to read the actual headers from the file
+                DEBUG.log(f" Reading CSV with parameters: {read_params}")
+                df = pd.read_csv(data, **read_params)
+                self.Original_data=df.copy()
 
-            # Handle target column
-            target_col = self.config['target_column']
-            if isinstance(target_col, int):
-                target_col = df.columns[target_col]
-                self.config['target_column'] = target_col
+                if df is None or df.empty:
+                    raise ValueError(f"Empty dataset loaded from {file_path}")
 
-            if target_col not in df.columns:
-                raise ValueError(f"Target column '{target_col}' not found")
+                DEBUG.log(f" Loaded DataFrame shape: {df.shape}")
+                DEBUG.log(f" Original DataFrame columns: {df.columns.tolist()}")
 
-            # Shuffling logic (CPU only)
-            shuffle_path = os.path.join(
-                self.config.get('training_params', {}).get('training_save_path', 'training_data'),
-                os.path.splitext(os.path.basename(self.dataset_name))[0],
-                'data',
-                'shuffled_data.csv'
-            )
+                # Filter features based on config after reading the actual data
+                if 'column_names' in self.config:
+                    DEBUG.log(" Filtering features based on config")
+                    df = _filter_features_from_config(df, self.config)
+                    DEBUG.log(f" Shape after filtering: {df.shape}")
 
-            if self.fresh_start and self.random_state == -1:
-                for _ in range(3):
-                    df = df.sample(frac=1).reset_index(drop=True)
-                os.makedirs(os.path.dirname(shuffle_path), exist_ok=True)
-                df.to_csv(shuffle_path, index=False)
-            elif os.path.exists(shuffle_path):
-                df = pd.read_csv(shuffle_path)
+                # Handle target column
+                target_column = self.config.get('target_column')
 
-            # Convert to memory-efficient format
-            df = df.astype({
-                col: 'category' if df[col].dtype == 'object' else df[col].dtype
-                for col in df.columns
-            })
+                if target_column is None:
+                    raise ValueError(f"No target column specified for dataset: {self.dataset_name}")
 
-            # Store metadata separately (never moves to GPU)
-            self._metadata = {
-                'file_path': file_path,
-                'column_names': list(df.columns),
-                'target_column': target_col,
-                'original_index': df.index.values,
-                'shuffle_path': shuffle_path
-            }
+                if isinstance(target_column, int):
+                    cols = df.columns.tolist()
+                    if target_column >= len(cols):
+                        raise ValueError(f"Target column index {target_column} is out of range")
+                    target_column = cols[target_column]
+                    self.config['target_column'] = target_column
+                    DEBUG.log(f" Using target column: {target_column}")
 
-            return df
+                if target_column not in df.columns:
+                    raise ValueError(f"Target column '{target_column}' not found in dataset")
 
+                DEBUG.log(f" Dataset loaded successfully. Shape: {df.shape}")
+                DEBUG.log(f" Columns: {df.columns.tolist()}")
+                DEBUG.log(f" Data types:\n{df.dtypes}")
+
+                # Create data directory path
+                dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+                base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
+                data_dir = os.path.join(base_path, dataset_folder, 'data')
+                shuffled_file = os.path.join(data_dir, 'shuffled_data.csv')
+
+                # Check if this is a fresh start with random shuffling
+                if self.fresh_start and self.random_state == -1:
+                    print("\033[K" +"Fresh start with random shuffling enabled")
+                    # Perform 3 rounds of truly random shuffling
+                    for _ in range(3):
+                        df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+                    # Ensure directory exists before saving
+                    os.makedirs(data_dir, exist_ok=True)
+                    # Save shuffled data
+                    df.to_csv(shuffled_file, index=False)
+                    print("\033[K" +f"Saved shuffled data to {shuffled_file}")
+                elif os.path.exists(shuffled_file):
+                    print("\033[K" +f"Loading previously shuffled data from {shuffled_file}")
+                    df = pd.read_csv(shuffled_file)
+                else:
+                    print("\033[K" +"Using original data order (no shuffling required)")
+
+                return df
+
+            except requests.exceptions.RequestException as e:
+                DEBUG.log(f" Error downloading dataset from URL: {str(e)}")
+                raise RuntimeError(f"Failed to download dataset from URL: {str(e)}")
+            except pd.errors.EmptyDataError:
+                DEBUG.log(f" Error: Dataset file is empty")
+                raise ValueError(f"Dataset file is empty: {file_path}")
+            except pd.errors.ParserError as e:
+                DEBUG.log(f" Error parsing CSV file: {str(e)}")
+                raise ValueError(f"Invalid CSV format: {str(e)}")
         except Exception as e:
-            DEBUG.log(f"Dataset load error: {str(e)}")
-            raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
+            DEBUG.log(f" Error loading dataset: {str(e)}")
+            DEBUG.log(" Stack trace:", traceback.format_exc())
+            raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations"""
@@ -2769,36 +2122,39 @@ class DBNN(GPUDBNN):
             optimal_batch_size: int
         """
         if not torch.cuda.is_available():
-            print(f"{Colors.RED} The GPU cuda library is unavailable. setting batch size to 128{Colors.ENDC}")
             return 128  # Default for CPU
 
-        # Get total and reserved GPU memory
-        total_memory = torch.cuda.get_device_properties(0).total_memory
-        reserved_memory = torch.cuda.memory_reserved(0)
-        allocated_memory = torch.cuda.memory_allocated(0)
+        try:
+            # Get total and reserved GPU memory
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            reserved_memory = torch.cuda.memory_reserved(0)
+            allocated_memory = torch.cuda.memory_allocated(0)
 
-        # Calculate available memory (leaving 20% as buffer)
-        available_memory = (total_memory - reserved_memory - allocated_memory) * 0.8
+            # Calculate available memory (leaving 20% as buffer)
+            available_memory = (total_memory - reserved_memory - allocated_memory) * 0.8
 
-        # Calculate memory needed per sample (with buffer for intermediate computations)
-        memory_per_sample = sample_tensor_size * 4  # Factor of 4 for intermediate computations
+            # Calculate memory needed per sample (with buffer for intermediate computations)
+            memory_per_sample = sample_tensor_size * 4  # Factor of 4 for intermediate computations
 
-        # Calculate optimal batch size
-        optimal_batch_size = int(available_memory / memory_per_sample)
+            # Calculate optimal batch size
+            optimal_batch_size = int(available_memory / memory_per_sample)
 
-        # Enforce minimum and maximum bounds
-        optimal_batch_size = max(32, min(optimal_batch_size, 4096))
+            # Enforce minimum and maximum bounds
+            optimal_batch_size = max(32, min(optimal_batch_size, 2048))
 
-        DEBUG.log(f" Memory Analysis:")
-        DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Reserved Memory: {reserved_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-        print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
+            DEBUG.log(f" Memory Analysis:")
+            DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
+            DEBUG.log(f" - Reserved Memory: {reserved_memory / 1e9:.2f} GB")
+            DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
+            DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
+            DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
+            print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
 
-        return optimal_batch_size
+            return optimal_batch_size
 
+        except Exception as e:
+            DEBUG.log(f" Error calculating batch size: {str(e)}")
+            return 128  # Default fallback
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """
@@ -2983,45 +2339,6 @@ class DBNN(GPUDBNN):
         plt.savefig(f"{save_path}_reconstruction_plots.png")
         plt.close()
 
-    def reset_to_initial_state(self):
-        """Reset the model's weights and parameters to their initial state."""
-        DEBUG.log("Resetting model to initial state for fresh training...")
-
-        # Reset weights to uniform priors
-        n_classes = len(self.label_encoder.classes_)
-        n_pairs = len(self.feature_pairs) if self.feature_pairs is not None else 0
-
-        if n_pairs > 0:
-            self.current_W = torch.full(
-                (n_classes, n_pairs),
-                0.1,  # Default uniform prior
-                device=self.device,
-                dtype=torch.float32
-            )
-            self.best_W = self.current_W.clone()
-            self.best_error = float('inf')
-
-        # Reset likelihood parameters (if applicable)
-        if self.model_type == "Histogram":
-            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-            )
-        elif self.model_type == "Gaussian":
-            self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-            )
-
-        # Reset weight updater
-        if self.weight_updater is not None:
-            self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
-                feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim,
-                batch_size=self.batch_size
-            )
-
-
-        DEBUG.log("Model reset to initial state.")
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.001,
@@ -3180,9 +2497,6 @@ class DBNN(GPUDBNN):
                 print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                 print("\033[K" +f"Training set size: {len(train_indices)}")
                 print("\033[K" +f"Test set size: {len(test_indices)}")
-
-                # Reset model to initial state for fresh training
-                self.reset_to_initial_state()
 
                 # Save indices for this epoch
                 self.save_epoch_data(round_num, train_indices, test_indices)
@@ -3428,16 +2742,14 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Input shape: {X.shape}")
             DEBUG.log(f"Input columns: {X.columns.tolist()}")
             DEBUG.log(f"Input dtypes:\n{X.dtypes}")
-
-            # Replace NA/NaN with -99999 and keep track of locations
-            X = X.copy()
-            self.nan_mask = X.isna()  # Store NaN locations
-            X = X.fillna(-99999)      # Replace with sentinel value
         else:
             DEBUG.log("Input is a tensor, skipping column-specific operations")
+
+        # Make a copy to avoid modifying original data
+        if isinstance(X, pd.DataFrame):
+            X = X.copy()
+        else:
             X = X.clone().detach()
-            self.nan_mask = torch.isnan(X)  # For tensor input
-            X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
 
         # Step 1: Compute global statistics only once during training
         if is_training and not self.global_stats_computed:
@@ -3541,251 +2853,166 @@ class DBNN(GPUDBNN):
         return X_tensor
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
-        """Generate and save/load consistent feature combinations with memory-efficient handling.
-
-        Enhanced version that:
-        1. Maintains all existing functionality
-        2. Adds memory optimization for large feature spaces
-        3. Preserves the same interface and behavior
-        4. Adds better progress tracking
-        """
-        # Ensure feature_indices is a list (maintaining existing behavior)
+        """Generate and save/load consistent feature combinations, treating groups as unique sets."""
+        # Ensure feature_indices is a list
         if isinstance(feature_indices, int):
-            feature_indices = list(range(feature_indices))
+            feature_indices = list(range(feature_indices))  # Convert integer to list of indices
 
-        # Get parameters with fallbacks (maintaining existing config access pattern)
-        config = self.config
-        group_size = group_size or config.get('feature_group_size', 2)
-        max_combinations = max_combinations or config.get('max_combinations', None)
-        bin_sizes = config.get('bin_sizes', [128])
+        # Get parameters directly from the root of the config file
+        group_size = self.config.get('feature_group_size', 2)
+        max_combinations = max_combinations or self.config.get('max_combinations', None)
+        bin_sizes = self.config.get('bin_sizes', [128])
 
-        # Debug output (preserving existing format)
-        debug_msg = [
-            f"[DEBUG] Generating feature combinations after filtering:",
-            f"- n_features: {len(feature_indices)}",
-            f"- group_size: {group_size}",
-            f"- max_combinations: {max_combinations}",
-            f"- bin_sizes: {bin_sizes}"
-        ]
-        print("\033[K" + "\n\033[K".join(debug_msg))
+        # Debug: Print parameters
+        print("\033[K" +f"[DEBUG] Generating feature combinations after filtering out features with high cardinality set by the conf file:")
+        print("\033[K" +f"- n_features: {len(feature_indices)}")
+        print("\033[K" +f"- group_size: {group_size}")
+        print("\033[K" +f"- max_combinations: {max_combinations}")
+        print("\033[K" +f"- bin_sizes: {bin_sizes}")
 
-        # Create path for storing feature combinations (same as original)
+        # Create path for storing feature combinations
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
-        base_path = config.get('training_params', {}).get('training_save_path', 'training_data')
+        base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
         combinations_path = os.path.join(base_path, dataset_folder, 'feature_combinations.pkl')
 
-        # Check for cached combinations (same behavior)
+        # Check if combinations already exist
         if os.path.exists(combinations_path):
-            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
-            print("\033[K" + f"[DEBUG] Loading cached feature combinations from {combinations_path}")
-            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
+            print("\033[K" +"---------------------BEWARE!! Remove if you get Error on retraining------------------------")
+            print("\033[K" +f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            print("\033[K" +"---------------------BEWARE!! Remove if you get Error on retraining------------------------")
             with open(combinations_path, 'rb') as f:
                 combinations_tensor = pickle.load(f)
-            print("\033[K" + f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
+            print("\033[K" +f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
             return combinations_tensor.to(self.device)
 
-        # New memory-efficient generation logic
-        print("\033[K" + f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
+        # Generate new combinations if none exist
+        print("\033[K" +f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
+        from itertools import combinations
+        all_combinations = list(combinations(feature_indices, group_size))
+        unique_combinations = list(set([tuple(sorted(comb)) for comb in all_combinations]))
+        unique_combinations = sorted(unique_combinations)[:max_combinations]
+        combinations_tensor = torch.tensor(unique_combinations, device=self.device)
 
-        # Calculate total possible combinations
-        total_possible = comb(len(feature_indices), group_size)
-        print("\033[K" + f"[DEBUG] Total possible combinations: {total_possible:,}")
-
-        # Case 1: Fewer combinations than max - generate all
-        if max_combinations is None or total_possible <= max_combinations:
-            print("\033[K" + "[DEBUG] Generating all possible combinations")
-            all_combinations = list(combinations(feature_indices, group_size))
-        # Case 2: Too many combinations - use random sampling
-        else:
-            print("\033[K" + f"[DEBUG] Sampling {max_combinations} random combinations")
-            all_combinations = self._sample_combinations(feature_indices, group_size, max_combinations)
-
-        # Remove duplicates and sort (maintaining original behavior)
-        unique_combinations = list({tuple(sorted(comb)) for comb in all_combinations})
-        unique_combinations = sorted(unique_combinations)
-
-        # Convert to tensor (on CPU first to save GPU memory)
-        combinations_tensor = torch.tensor(unique_combinations, device='cpu')
-        print("\033[K" + f"[DEBUG] Generated {len(unique_combinations)} unique feature combinations")
-
-        # Save the new combinations (same as original)
+        # Save the new combinations
         os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
         with open(combinations_path, 'wb') as f:
             pickle.dump(combinations_tensor.cpu(), f)
-        print("\033[K" + f"[DEBUG] Saved combinations to {combinations_path}")
+        print("\033[K" +f"[DEBUG] Saved {len(unique_combinations)} unique feature combinations to {combinations_path}")
 
-        return combinations_tensor.to(self.device)
-
-    def _sample_combinations(self, features: List[int], group_size: int, max_samples: int) -> List[Tuple[int]]:
-        """Memory-efficient combination sampling for large feature spaces."""
-        # Use reservoir sampling for large feature spaces
-        samples = set()
-
-        # First add all possible combinations if they're few enough
-        if comb(len(features), group_size) < 1e6:  # Threshold for full generation
-            return list(combinations(features, group_size))
-
-        # For very large spaces, use iterative sampling
-        while len(samples) < max_samples:
-            # Generate random combinations without replacement
-            new_sample = tuple(sorted(random.sample(features, group_size)))
-            samples.add(new_sample)
-
-            # Progress reporting
-            if len(samples) % 1000 == 0:
-                print(f"\033[K[DEBUG] Generated {len(samples)}/{max_samples} samples", end='\r')
-
-        return list(samples)
+        return combinations_tensor
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Memory-optimized pairwise likelihood computation with dynamic allocation"""
-        DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
-        print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
+        """Optimized non-parametric likelihood computation with precomputed feature pairs and bin edges"""
+        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel")
+        print("\033[K" +"Computing pairwise likelihoods...")
 
-        # Move inputs to CPU first to save GPU memory
-        dataset_cpu = dataset.cpu()
-        labels_cpu = labels.cpu()
+        # Input validation and preparation
+        dataset = torch.as_tensor(dataset, device=self.device).contiguous()
+        labels = torch.as_tensor(labels, device=self.device).contiguous()
 
-        # Pre-compute unique classes on CPU
-        unique_classes, class_counts = torch.unique(labels_cpu, return_counts=True)
+        # Initialize progress tracking
+        n_pairs = len(self.feature_pairs)
+        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
+
+        # Pre-compute unique classes once
+        unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
-        n_samples = len(dataset_cpu)
+        n_samples = len(dataset)
 
         # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [64])
-        n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
-        self.n_bins_per_dim = n_bins
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        if len(bin_sizes) == 1:
+            # If single bin size provided, use it for all dimensions
+            n_bins = bin_sizes[0]
+            self.n_bins_per_dim = n_bins  # Store for reference
+            DEBUG.log(f" Using uniform {n_bins} bins per dimension")
+        else:
+            DEBUG.log(f" Using variable bin sizes: {bin_sizes}")
 
-        # Initialize storage on CPU
-        all_bin_counts = []
-        all_bin_probs = []
+        # Use precomputed feature pairs and bin edges
+        if not hasattr(self, 'feature_pairs') or not hasattr(self, 'bin_edges'):
+            self.feature_pairs = self._generate_feature_combinations(
+                feature_dims,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            ).to(self.device)
+            self.bin_edges = self._compute_bin_edges(dataset, bin_sizes)
 
-        # Process feature pairs in smaller batches
-        pair_batch_size = self._calculate_safe_batch_size(n_classes, n_bins)
-        total_pairs = len(self.feature_pairs)
+        # Ensure bin_edges is not None
+        if self.bin_edges is None:
+            raise ValueError("bin_edges is not initialized. Ensure _compute_bin_edges is called before this method.")
 
-        with tqdm(total=total_pairs, desc="Processing feature pairs") as pbar:
-            for batch_start in range(0, total_pairs, pair_batch_size):
-                batch_end = min(batch_start + pair_batch_size, total_pairs)
-                batch_pairs = self.feature_pairs[batch_start:batch_end]
+        # Initialize storage for bin counts and probabilities
+        all_bin_counts = []  # Initialize the list to store bin counts for all feature pairs
+        all_bin_probs = []   # Initialize the list to store bin probabilities for all feature pairs
 
-                # Process this batch of pairs
-                batch_counts, batch_probs = self._process_pair_batch(
-                    dataset_cpu,
-                    labels_cpu,
-                    batch_pairs,
-                    unique_classes,
-                    bin_sizes
-                )
-
-                all_bin_counts.extend(batch_counts)
-                all_bin_probs.extend(batch_probs)
-                pbar.update(len(batch_pairs))
-
-                # Clear GPU cache after each batch
-                torch.cuda.empty_cache()
-
-        # Move final results to GPU
-        all_bin_counts = [t.to(self.device) for t in all_bin_counts]
-        all_bin_probs = [t.to(self.device) for t in all_bin_probs]
-
-        return {
-            'bin_counts': all_bin_counts,
-            'bin_probs': all_bin_probs,
-            'bin_edges': self.bin_edges,
-            'feature_pairs': self.feature_pairs,
-            'classes': unique_classes.to(self.device)
-        }
-
-    def _process_pair_batch(self, dataset_cpu, labels_cpu, batch_pairs, unique_classes, bin_sizes):
-        """Process a batch of feature pairs on CPU"""
-        batch_counts = []
-        batch_probs = []
-
-        for pair_idx, feature_group in enumerate(batch_pairs):
+        # Process each feature group
+        for group_idx, feature_group in enumerate(self.feature_pairs):
             feature_group = [int(x) for x in feature_group]
-            group_data = dataset_cpu[:, feature_group]
+            DEBUG.log(f" Processing feature group: {feature_group}")
+
+            # Extract group data
+            group_data = dataset[:, feature_group].contiguous()
             n_dims = len(feature_group)
 
-            # Get bin sizes for this group
+            # Get appropriate bin sizes for this group
             group_bin_sizes = bin_sizes[:n_dims] if len(bin_sizes) > 1 else [bin_sizes[0]] * n_dims
 
-            # Get bin edges for this group (already on correct device)
-            group_bin_edges = self.bin_edges[pair_idx]
+            # Use precomputed bin edges
+            bin_edges = self.bin_edges[group_idx]
 
-            # Initialize bin counts on CPU
-            bin_shape = [len(unique_classes)] + group_bin_sizes
-            bin_counts = torch.zeros(bin_shape, dtype=torch.float32)
+            # Initialize bin counts with appropriate shape for variable bin sizes
+            bin_shape = [n_classes] + [size for size in group_bin_sizes]
+            bin_counts = torch.zeros(bin_shape, device=self.device, dtype=torch.float32)
 
+            # Process each class
             for class_idx, class_label in enumerate(unique_classes):
-                class_mask = (labels_cpu == class_label)
+                class_mask = labels == class_label
                 if class_mask.any():
-                    class_data = group_data[class_mask]
+                    class_data = group_data[class_mask].contiguous()
 
-                    # Compute bin indices
-                    bin_indices = []
-                    for dim in range(n_dims):
-                        # Get edges for this dimension (already a tensor)
-                        edges = group_bin_edges[dim]
-                        indices = torch.bucketize(
-                            class_data[:, dim],
-                            edges.cpu()  # Move edges to CPU to match data
+                    # Compute bin indices for all dimensions
+                    bin_indices = torch.stack([
+                        torch.bucketize(
+                            class_data[:, dim].contiguous(),
+                            bin_edges[dim].contiguous()
                         ).sub_(1).clamp_(0, group_bin_sizes[dim] - 1)
-                        bin_indices.append(indices)
+                        for dim in range(n_dims)
+                    ])  # Shape: (n_dims, batch_size)
 
-                    # Update counts
-                    if n_dims == 1:
-                        bin_counts[class_idx] = torch.bincount(
-                            bin_indices[0],
-                            minlength=group_bin_sizes[0]
-                        ).float()
-                    else:
-                        # For multi-dimensional, use scatter_add
-                        flat_indices = torch.sum(
-                            torch.stack(bin_indices) * torch.tensor(
-                                [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)]
-                            ).unsqueeze(1),
-                            dim=0
-                        ).long()
-
-                        counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.float32)
-                        counts.scatter_add_(
-                            0,
-                            flat_indices,
-                            torch.ones_like(flat_indices, dtype=torch.float32)
-                        )
-                        bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
+                    # Use scatter_add_ for efficient counting
+                    counts = torch.zeros(np.prod(group_bin_sizes), device=self.device)
+                    flat_indices = torch.sum(
+                        bin_indices * torch.tensor(
+                            [np.prod(group_bin_sizes[i+1:]) for i in range(n_dims)],
+                            device=self.device
+                        ).unsqueeze(1),  # Add a new dimension for broadcasting
+                        dim=0
+                    ).long()  # Cast to int64
+                    counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float32))
+                    bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
             # Apply Laplace smoothing and compute probabilities
             smoothed_counts = bin_counts + 1.0
             bin_probs = smoothed_counts / smoothed_counts.sum(dim=tuple(range(1, n_dims + 1)), keepdim=True)
 
-            batch_counts.append(smoothed_counts)
-            batch_probs.append(bin_probs)
+            # Store results
+            all_bin_counts.append(smoothed_counts)
+            all_bin_probs.append(bin_probs)
 
-        return batch_counts, batch_probs
+            DEBUG.log(f" Bin counts shape: {smoothed_counts.shape}")
+            DEBUG.log(f" Bin probs shape: {bin_probs.shape}")
+            pair_pbar.update(1)
 
-    def _calculate_safe_batch_size(self, n_classes, n_bins):
-        """Calculate safe batch size based on available memory"""
-        # Conservative estimate - start small
-        base_size = 10
-
-        if torch.cuda.is_available():
-            try:
-                # Estimate memory needed per pair
-                pair_mem = n_classes * (n_bins ** 2) * 4  # 4 bytes per float
-
-                # Get available memory
-                free_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
-
-                # Calculate how many pairs we can fit (leave 50% buffer)
-                safe_pairs = int((free_mem * 0.5) / pair_mem)
-                return max(1, min(safe_pairs, 100))  # Limit between 1 and 100
-            except:
-                return base_size
-        return base_size
-
+        pair_pbar.close()
+        return {
+            'bin_counts': all_bin_counts,
+            'bin_probs': all_bin_probs,
+            'bin_edges': self.bin_edges,  # Include bin_edges in the returned dictionary
+            'feature_pairs': self.feature_pairs,
+            'classes': unique_classes.to(self.device)
+        }
 
     def _compute_gaussian_params(self, dataset: torch.Tensor, labels: torch.Tensor):
         """
@@ -4096,19 +3323,19 @@ class DBNN(GPUDBNN):
 
         # Save training data
         train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'data/{dataset_name}/Last_training.csv',header=True, index=True)
+        train_data.to_csv(f'{dataset_name}_Last_training.csv',header=True, index=True)
 
         # Save testing data
         test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'data/{dataset_name}/Last_testing.csv', header=True, index=True)
-        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to data/{dataset_name}/Last_testing.csv{Colors.ENDC}")
-        print("\033[K" +f"{Colors.GREEN}Last training data is saved to data/{dataset_name}/Last_training.csv{Colors.ENDC}")
+        test_data.to_csv(f'{dataset_name}_Last_testing.csv', header=True, index=True)
+        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to {dataset_name}_Last_testing.csv{Colors.ENDC}")
+        print("\033[K" +f"{Colors.GREEN}Last training data is saved to {dataset_name}_Last_training.csv{Colors.ENDC}")
 
     def load_last_known_split(self):
         """Load the last known good training/testing split with proper column alignment"""
         dataset_name = self.dataset_name
-        train_file = f'data/{dataset_name}/Last_training.csv'
-        test_file = f'data/{dataset_name}/Last_testing.csv'
+        train_file = f'{dataset_name}_Last_training.csv'
+        test_file = f'{dataset_name}_Last_testing.csv'
 
         if os.path.exists(train_file) and os.path.exists(test_file):
             try:
@@ -4154,81 +3381,51 @@ class DBNN(GPUDBNN):
         return None, None
 
 
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
+    def predict(self, X: torch.Tensor, batch_size: int = 128):
         """
-        Make predictions in batches with consistent NaN handling.
-        Handles both DataFrame and Tensor inputs.
+        Make predictions in batches using the best model weights.
+        This function ensures all batches are processed and predictions are concatenated correctly.
         """
         # Store current weights temporarily
+        #print("\033[K" +"Making predictions...")
         temp_W = self.current_W
+        n_batches = (len(X) + batch_size - 1) // batch_size
+        pred_pbar = tqdm(total=n_batches, desc="Prediction batches")
+
+        # Use best weights for prediction
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
 
+        X = X.to(self.device)
+        predictions = []
+
         try:
-            # Convert DataFrame to tensor if needed
-            if isinstance(X, pd.DataFrame):
-                # Preprocess with same NaN handling as training
-                X_processed = self._preprocess_data(X, is_training=False)
-                X_tensor = X_processed.to(self.device)
-            else:
-                # For tensor input, ensure proper NaN handling
-                X_tensor = X.to(self.device)
-                self.nan_mask = torch.isnan(X_tensor)
-                X_tensor = torch.where(self.nan_mask,
-                                     torch.tensor(-99999, device=X_tensor.device),
-                                     X_tensor)
+            for i in range(0, len(X), batch_size):
+                batch_X = X[i:min(i + batch_size, len(X))]
+                if self.model_type == "Histogram":
+                    # Get posteriors only, ignore bin indices
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                elif self.model_type == "Gaussian":
+                    # Get posteriors only, ignore component responsibilities
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                else:
+                    raise ValueError(f"{self.model_type} is an invalid model type. Please edit the configuration file.")
 
-            n_batches = (len(X_tensor) + batch_size - 1) // batch_size
-            predictions = []
-
-            with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
-                for i in range(0, len(X_tensor), batch_size):
-                    batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
-
-                    # Get posteriors (NaN handling happens inside these methods)
-                    if self.model_type == "Histogram":
-                        posteriors, _ = self._compute_batch_posterior(batch_X)
-                    elif self.model_type == "Gaussian":
-                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                    else:
-                        raise ValueError(f"Invalid model type: {self.model_type}")
-
-                    # Get predictions
-                    batch_predictions = torch.argmax(posteriors, dim=1)
-                    predictions.append(batch_predictions)
-                    pred_pbar.update(1)
-
-            return torch.cat(predictions).cpu()
+                # Get predictions for the current batch
+                batch_predictions = torch.argmax(posteriors, dim=1)
+                predictions.append(batch_predictions)
+                pred_pbar.update(1)
 
         finally:
-            # Restore original weights
+            # Restore current weights
             self.current_W = temp_W
 
+        pred_pbar.close()
+
+        # Concatenate predictions from all batches
+        return torch.cat(predictions).cpu()
+
+
     def _save_best_weights(self):
-        """Save the best weights and corresponding training data to file"""
-        if self.best_W is not None:
-            # Create directory for model components
-            model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-            os.makedirs(model_dir, exist_ok=True)
-
-            # Save weights
-            weights_dict = {
-                'version': 2,
-                'weights': self.best_W.cpu().numpy().tolist(),
-                'shape': list(self.best_W.shape)
-            }
-            weights_file = os.path.join(model_dir, 'weights.json')
-            with open(weights_file, 'w') as f:
-                json.dump(weights_dict, f)
-
-            # Save training data if available
-            if hasattr(self, 'train_indices') and hasattr(self, 'data'):
-                train_data = self.data.iloc[self.train_indices]
-                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
-                train_data.to_csv(train_data_file, index=False)
-
-            print(f"\033[KSaved best weights and training data to {model_dir}")
-
-    def _save_best_weights_old(self):
         """Save the best weights to file"""
         if self.best_W is not None:
             # Convert tensor to numpy for saving
@@ -4244,45 +3441,6 @@ class DBNN(GPUDBNN):
                 json.dump(weights_dict, f)
 
     def _load_best_weights(self):
-        """Load the best weights and corresponding training data from file"""
-        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-        weights_file = os.path.join(model_dir, 'weights.json')
-
-        if os.path.exists(weights_file):
-            try:
-                with open(weights_file, 'r') as f:
-                    weights_dict = json.load(f)
-
-                # Load weights
-                weights_array = np.array(weights_dict['weights'])
-                self.best_W = torch.tensor(
-                    weights_array,
-                    dtype=torch.float32,
-                    device=self.device
-                )
-
-                # Load training data if available
-                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
-                if os.path.exists(train_data_file):
-                    train_data = pd.read_csv(train_data_file)
-                    # Find matching indices in current data
-                    self.train_indices = []
-                    current_data = self.data.drop(columns=[self.target_column])
-
-                    for idx, row in train_data.drop(columns=[self.target_column]).iterrows():
-                        matches = (current_data == row).all(axis=1)
-                        if matches.any():
-                            self.train_indices.extend(matches[matches].index.tolist())
-
-                    print(f"\033[KLoaded {len(self.train_indices)} training samples from best model")
-
-                print(f"\033[KLoaded best weights from {weights_file}")
-            except Exception as e:
-                print(f"\033[KWarning: Could not load weights from {weights_file}: {str(e)}")
-                self.best_W = None
-
-
-    def _load_best_weights_old(self):
         """Load the best weights from file if they exist"""
         weights_file = self._get_weights_filename()
         if os.path.exists(weights_file):
@@ -5303,7 +4461,7 @@ class DBNN(GPUDBNN):
 
     def _get_model_components_filename(self):
         """Get filename for model components"""
-        return os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
+        return os.path.join('Model', f'Best{self.model_type}_{self.dataset_name}_components.pkl')
 #----------------Handling categorical variables across sessions -------------------------
     def _save_categorical_encoders(self):
         """Save categorical feature encoders"""
@@ -5512,14 +4670,9 @@ class DBNN(GPUDBNN):
         """Save all model components to a pickle file"""
         components = {
             'scaler': self.scaler,
-            'label_encoder': {
-                'classes': self.label_encoder.classes_.tolist()
-            },
+            'label_encoder': self.label_encoder,
             'likelihood_params': self.likelihood_params,
-            'model_type': self.model_type,
             'feature_pairs': self.feature_pairs,
-            'global_mean': self.global_mean,
-            'global_std': self.global_std,
             'categorical_encoders': self.categorical_encoders,
             'feature_columns': self.feature_columns,
             'target_column': self.target_column,
@@ -5536,21 +4689,6 @@ class DBNN(GPUDBNN):
             'bin_edges': self.bin_edges,  # Save bin_edges
             'gaussian_params': self.gaussian_params  # Save gaussian_params
         }
-
-        # Add model-specific components
-        if self.model_type == "Histogram":
-            components.update({
-                'bin_probs': self.likelihood_params['bin_probs'],
-                'bin_edges': self.likelihood_params['bin_edges'],
-                'classes': self.likelihood_params['classes']
-            })
-        elif self.model_type == "Gaussian":
-            components.update({
-                'means': self.likelihood_params['means'],
-                'covs': self.likelihood_params['covs'],
-                'classes': self.likelihood_params['classes']
-            })
-
 
         # Get the filename using existing method
         components_file = self._get_model_components_filename()
@@ -5570,21 +4708,14 @@ class DBNN(GPUDBNN):
     def _load_model_components(self):
         """Load all model components"""
         components_file = self._get_model_components_filename()
-        print(f"The model components are loaded from {components_file}")
         if os.path.exists(components_file):
             print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                # Initialize a fresh LabelEncoder first
-                self.label_encoder = LabelEncoder()
-                # If we have saved classes, set them
-                if 'target_classes' in components:
-                    self.label_encoder.classes_ = components['target_classes']
-                elif hasattr(components['label_encoder'], 'classes_'):
-                    # If the saved object has classes, use them
-                    self.label_encoder.classes_ = components['label_encoder'].classes_
+                self.label_encoder.classes_ = components['target_classes']
                 self.scaler = components['scaler']
+                self.label_encoder = components['label_encoder']
                 self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
                 self.feature_columns = components.get('feature_columns')
@@ -5822,7 +4953,7 @@ from datetime import datetime
 import json
 import os
 
-def load_or_create_config(config_path: str) -> dict:
+def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
     """
     Load the configuration file if it exists, or create a default one if it doesn't.
     Update global variables based on the configuration file.
@@ -5848,38 +4979,7 @@ def load_or_create_config(config_path: str) -> dict:
         "gen_samples": False,
         "enable_adaptive": True,
         "nokbd": False,
-        "display": None,
-        "training_params": {
-            "batch_size": None,  # Batch size will be dynamically calculated if not provided
-            "n_bins_per_dim": 128,
-            "minimum_training_accuracy": 0.95,
-            "invert_DBNN": True,
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.1,
-            "Save_training_epochs": False,
-            "training_save_path": "data",
-            "enable_vectorized": False,
-            "vectorization_warning_acknowledged": False,
-            "compute_device": "auto",
-            "use_interactive_kbd": False,
-            "modelType": "Histogram"
-        },
-        "active_learning": {
-            "tolerance": 1.0,
-            "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.3,
-            "marginal_margin_threshold": 0.1,
-            "min_divergence": 0.1
-        },
-        "execution_flags": {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True,
-            "gen_samples": False
-        }
+        "display": None
     }
 
     if os.path.exists(config_path):
@@ -5891,20 +4991,15 @@ def load_or_create_config(config_path: str) -> dict:
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         print(f"Created default configuration file at {config_path}")
-        print(config)
-        input("Press Enter Key")
-
 
     # Update global variables based on the configuration file
-    global Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+    global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
 
     # Update Train_device based on the compute_device setting in the configuration file
     Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
     Trials = config.get("trials", 100)
     cardinality_threshold = config.get("cardinality_threshold", 0.9)
     cardinality_tolerance = config.get("cardinality_tolerance", 4)
-    bin_sizes = config.get("bin_sizes", 128)
-    n_bins_per_dim = config.get("n_bins_per_dim", 128)
     LearningRate = config.get("learning_rate", 0.1)
     TrainingRandomSeed = config.get("random_seed", 42)
     Epochs = config.get("epochs", 1000)
@@ -5917,13 +5012,6 @@ def load_or_create_config(config_path: str) -> dict:
     nokbd = config.get("nokbd", False)
     display = config.get("display", None)
 
-    # Dynamically calculate batch size if not provided in the training_params section
-    if "training_params" in config:
-        if "batch_size" not in config["training_params"] or config["training_params"]["batch_size"] is None:
-            # Calculate optimal batch size dynamically
-            sample_tensor_size = 4 * 1024 * 1024  # Example: 4MB per sample (adjust based on your dataset)
-            config["training_params"]["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
-
     return config
 
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
@@ -5931,14 +5019,14 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     Recursively find all matching .conf and .csv files in the data directory structure.
 
     Args:
-        data_dir: Root directory to search for datasets.
+        data_dir: Root directory to search for datasets
 
     Returns:
-        List of tuples (basename, conf_path, csv_path).
+        List of tuples (basename, conf_path, csv_path)
     """
     # Ensure data directory exists
     if not os.path.exists(data_dir):
-        print("\033[K" + f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
+        print("\033[K" +f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
         os.makedirs(data_dir)
         return []
 
@@ -5957,27 +5045,25 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
 
             conf_path = os.path.join(root, conf_file)
 
-            # Look for matching CSV in the same directory and dataset-specific subdirectory
+            # Look for matching CSV in same directory and dataset-specific subdirectory
             csv_file = f"{basename}.csv"
             csv_paths = [
                 os.path.join(root, csv_file),
                 os.path.join(root, basename, csv_file)
             ]
-
-            # Load adaptive_dbnn.conf if it exists
+           # Load adaptive_dbnn.conf if it exists
             adaptive_conf = {}
-            adaptive_conf_path = os.path.join(data_dir, basename, 'adaptive_dbnn.conf')
+            adaptive_conf_path =f'{data_dir}/{basename}/adaptive_dbnn.conf'
             if os.path.exists(adaptive_conf_path):
                 try:
                     with open(adaptive_conf_path, 'r') as f:
                         adaptive_conf = json.load(f)
-                    print("\033[K" + f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
+                    print("\033[K" +f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
                 except Exception as e:
-                    print(f"Warning: Could not load adaptive configuration from {adaptive_conf_path}: {str(e)}")
+                    print(f"Warning: Could not load adaptive configuration from{adaptive_conf_path}: {str(e)}")
             else:
-                print("\033[K" + f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
+                print("\033[K" +f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
 
-            # Find the CSV file
             csv_path = None
             for path in csv_paths:
                 if os.path.exists(path):
@@ -5985,91 +5071,182 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                     break
 
             if csv_path:
-                # Load the dataset configuration
-                try:
-                    with open(conf_path, 'r') as f:
-                        dataset_conf = json.load(f)
-                except Exception as e:
-                    print(f"Warning: Could not update configuration for {basename}: {str(e)}")
+                # Update configuration with adaptive settings if available
+                if adaptive_conf:
+                    try:
+                        with open(conf_path, 'r') as f:
+                            dataset_conf = json.load(f)
+
+                        # Update execution flags from adaptive configuration
+                        if 'execution_flags' in adaptive_conf:
+                            dataset_conf['execution_flags'] = adaptive_conf['execution_flags']
+
+                        # Update training parameters
+                        if 'training_params' in adaptive_conf:
+                            dataset_conf['training_params'].update(adaptive_conf['training_params'])
+
+                        # Save updated configuration
+                        with open(conf_path, 'w') as f:
+                            json.dump(dataset_conf, f, indent=4)
+                        print("\033[K" +f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
+
+                    except Exception as e:
+                        print(f"Warning: Could not update configuration for {basename}: {str(e)}")
 
                 dataset_pairs.append((basename, conf_path, csv_path))
                 processed_datasets.add(basename)
-                print("\033[K" + f"Found dataset pair:", end="\r", flush=True)
-                print("\033[K" + f"  Config: {conf_path}", end="\r", flush=True)
-                print("\033[K" + f"  Data  : {csv_path}", end="\r", flush=True)
+                print("\033[K" +f"Found dataset pair:", end="\r", flush=True)
+                print("\033[K" +f"  Config: {conf_path}", end="\r", flush=True)
+                print("\033[K" +f"  Data  : {csv_path}", end="\r", flush=True)
             else:
-                print("\033[K" + f"Warning: Config file {conf_file} exists but no matching CSV found")
-                print("\033[K" + f"Looked in:")
+                print("\033[K" +f"Warning: Config file {conf_file} exists but no matching CSV found")
+                print("\033[K" +f"Looked in:")
                 for path in csv_paths:
-                    print("\033[K" + f"  - {path}")
+                    print("\033[K" +f"  - {path}")
 
     if not dataset_pairs:
-        print("\033[K" + "No matching .conf and .csv file pairs found.")
-        print("\033[K" + "Each dataset should have both a .conf configuration file and a matching .csv data file.")
-        print("\033[K" + "Example: 'dataset1.conf' and 'dataset1.csv'")
+        print("\033[K" +"No matching .conf and .csv file pairs found.")
+        print("\033[K" +"Each dataset should have both a .conf configuration file and a matching .csv data file.")
+        print("\033[K" +"Example: 'dataset1.conf' and 'dataset1.csv'")
 
     return dataset_pairs
 
+def process_datasets():
+    """Main function to process all datasets"""
+    # Find all dataset pairs
+    dataset_pairs = find_dataset_pairs()
 
-def validate_config(config: dict) -> dict:
+    if not dataset_pairs:
+        print("\033[K" +"No matching .conf and .csv file pairs found in the current directory.")
+        return
+
+    print("\033[K" +f"Found {len(dataset_pairs)} dataset pair(s)")
+
+    # Process each dataset
+    for basename, conf_path, csv_path in dataset_pairs:
+        print("\033[K" +f"{'='*60}")
+        print("\033[K" +f"Dataset: {basename}")
+        print("\033[K" +f"Config file: {conf_path}")
+        print("\033[K" +f"Data file: {csv_path}")
+        print("\033[K" +'='*60)
+
+        # Validate dataset name
+        if not basename or not isinstance(basename, str):
+            print("\033[K" +f"Invalid dataset name: {basename}. Skipping...")
+            continue
+
+        # Print dataset information
+        print_dataset_info(conf_path, csv_path)
+
+        # Ask user if they want to process this dataset
+        response = input("\nProcess this dataset? (y/n): ").lower()
+        if response == 'n':
+            print("\033[K" +f"Skipping dataset: {basename}")
+            continue
+
+        # Process dataset
+        print("\033[K" +f"Processing dataset: {basename}")
+        try:
+            # Create DBNN instance with specific dataset name
+            model = DBNN(dataset_name=basename)
+
+            # Optionally create an invertible model
+            if model.config.get('enable_invertible', False):
+                invertible_model = model.create_invertible_model(
+                    reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
+                    feedback_strength=model.config.get('feedback_strength', 0.3)
+                )
+                print("\033[K" +"Created invertible DBNN model")
+
+            start_time = datetime.now()
+            results = model.process_dataset(conf_path)
+            end_time = datetime.now()
+
+            # Print results
+            print("\033[K" +"Processing complete!")
+            print("\033[K" +f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+            print("\033[K" +f"Results saved to: {results['results_path']}")
+            print("\033[K" +f"Training log saved to: {results['log_path']}")
+            print("\033[K" +f"Processed {results['n_samples']} samples with {results['n_features']} features")
+            print("\033[K" +f"Excluded {results['n_excluded']} features")
+            # Save the label encoder after training
+            model = DBNN(dataset_name=basename)
+            save_label_encoder(model.label_encoder, basename)
+
+        except FileNotFoundError as e:
+            print("\033[K" +f"Dataset file not found: {e}")
+            print("\033[K" +"Searching UCI repository for the dataset...")
+            dataset_processor = DatasetProcessor()
+            datasets = dataset_processor.search_uci_repository(basename)
+            if datasets:
+                print("\033[K" +f"Found {len(datasets)} matching datasets in UCI repository:")
+                for i, dataset in enumerate(datasets):
+                    print("\033[K" +f"{i+1}. {dataset['name']} - {dataset['url']}")
+                choice = input("\nEnter the number of the dataset to download (or 'q' to quit): ")
+                if choice.lower() != 'q':
+                    try:
+                        selected_dataset = datasets[int(choice) - 1]
+                        print("\033[K" +f"Downloading dataset: {selected_dataset['name']}")
+                        dataset_path = dataset_processor.download_uci_dataset(selected_dataset['name'], selected_dataset['url'])
+                        print("\033[K" +f"Dataset downloaded to: {dataset_path}")
+                        # Process the downloaded dataset
+                        model = DBNN(dataset_name=selected_dataset['name'])
+                        results = model.process_dataset(dataset_path)
+                        print("\033[K" +"Processing complete!")
+                        print("\033[K" +f"Results saved to: {results['results_path']}")
+                    except Exception as e:
+                        print("\033[K" +f"Error downloading or processing dataset: {str(e)}")
+            else:
+                print("\033[K" +f"No matching datasets found in UCI repository for: {basename}")
+
+        except Exception as e:
+            print("\033[K" +f"Error processing dataset {basename}:")
+            print("\033[K" +f"Error details: {str(e)}")
+            traceback.print_exc()
+
+    print("\033[K" +"All datasets processed")
+
+
+def validate_config(conf_path: str) -> bool:
     """
-    Validate the configuration parameters, ensuring that only the batch size is dynamically updated.
+    Validate configuration file and ensure proper folder structure
 
     Args:
-        config: Configuration dictionary.
+        conf_path: Path to configuration file
 
     Returns:
-        dict: Validated configuration dictionary.
+        True if valid, False otherwise
     """
-    validated_config = config.copy()
+    try:
+        with open(conf_path, 'r') as f:
+            config = json.load(f)
 
-    # Validate other parameters (only replace with defaults if missing or invalid)
-    if "device" not in validated_config or validated_config["device"] not in ["cuda", "cpu"]:
-        validated_config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+        # Check required fields
+        required_fields = ['file_path', 'column_names', 'target_column']
+        for field in required_fields:
+            if field not in config:
+                print("\033[K" +f"Missing required field: {field}")
+                return False
 
-    if "trials" not in validated_config or not isinstance(validated_config["trials"], int):
-        validated_config["trials"] = 100
+        # Validate dataset directory exists
+        basename = os.path.splitext(os.path.basename(conf_path))[0]
+        dataset_dir = os.path.join('data', basename)
+        if not os.path.exists(dataset_dir):
+            print("\033[K" +f"Dataset directory missing: {dataset_dir}")
+            create_dir = input("Create directory? (y/n): ").lower() == 'y'
+            if create_dir:
+                os.makedirs(dataset_dir)
+                print("\033[K" +f"Created directory: {dataset_dir}")
+            else:
+                return False
 
-    if "cardinality_threshold" not in validated_config or not isinstance(validated_config["cardinality_threshold"], float):
-        validated_config["cardinality_threshold"] = 0.9
-
-    if "cardinality_tolerance" not in validated_config or not isinstance(validated_config["cardinality_tolerance"], int):
-        validated_config["cardinality_tolerance"] = 4
-
-    if "learning_rate" not in validated_config or not isinstance(validated_config["learning_rate"], float):
-        validated_config["learning_rate"] = 0.1
-
-    if "random_seed" not in validated_config or not isinstance(validated_config["random_seed"], int):
-        validated_config["random_seed"] = 42
-
-    if "epochs" not in validated_config or not isinstance(validated_config["epochs"], int):
-        validated_config["epochs"] = 1000
-
-    if "test_fraction" not in validated_config or not isinstance(validated_config["test_fraction"], float):
-        validated_config["test_fraction"] = 0.2
-
-    if "train" not in validated_config or not isinstance(validated_config["train"], bool):
-        validated_config["train"] = True
-
-    if "train_only" not in validated_config or not isinstance(validated_config["train_only"], bool):
-        validated_config["train_only"] = False
-
-    if "predict" not in validated_config or not isinstance(validated_config["predict"], bool):
-        validated_config["predict"] = True
-
-    if "gen_samples" not in validated_config or not isinstance(validated_config["gen_samples"], bool):
-        validated_config["gen_samples"] = False
-
-    if "enable_adaptive" not in validated_config or not isinstance(validated_config["enable_adaptive"], bool):
-        validated_config["enable_adaptive"] = True
-
-    if "nokbd" not in validated_config or not isinstance(validated_config["nokbd"], bool):
-        validated_config["nokbd"] = False
-
-    if "display" not in validated_config:
-        validated_config["display"] = None
-
-    return validated_config
+        return True
+    except json.JSONDecodeError:
+        print("\033[K" +f"Invalid JSON in configuration file: {conf_path}")
+        return False
+    except Exception as e:
+        print("\033[K" +f"Error validating configuration: {str(e)}")
+        return False
 
 def print_dataset_info(conf_path: str, csv_path: str):
     """Print information about the dataset with robust error handling"""
@@ -6134,270 +5311,107 @@ def print_dataset_info(conf_path: str, csv_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
-    parser.add_argument("--file_path", nargs='?', help="Path to dataset CSV file in data folder")
-    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
-                       required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
-    parser.add_argument('--interactive', action='store_true', help="Enable interactive mode to modify settings.")
+    parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
+    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
+                        required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
     args = parser.parse_args()
     processor = DatasetProcessor()
-
-    def validate_config(config):
-        """Ensure required configuration parameters exist"""
-        required_params = {
-            'training_params': ['learning_rate', 'epochs', 'test_fraction'],
-            'modelType': None,
-            'target_column': None
-        }
-
-        for section, params in required_params.items():
-            if section not in config:
-                raise ValueError(f"Missing required section '{section}' in config")
-            if params:
-                for param in params:
-                    if param not in config[section]:
-                        raise ValueError(f"Missing required parameter '{param}' in section '{section}'")
-
-    def load_or_create_config(config_path):
-        """Load or create configuration with validation"""
-        try:
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                validate_config(config)
-                return config
-            else:
-                # Create default config
-                config = DatasetConfig.create_default_config(os.path.basename(config_path).split('.')[0])
-                os.makedirs(os.path.dirname(config_path), exist_ok=True)
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                return config
-        except Exception as e:
-            print(f"\033[K{Colors.RED}Error loading/creating config: {str(e)}{Colors.ENDC}")
-            raise
-
-    def find_dataset_pairs():
-        """Find matching dataset/config pairs in data folder"""
-        dataset_pairs = []
-        data_dir = 'data'
-
-        if os.path.exists(data_dir):
-            for dataset_name in os.listdir(data_dir):
-                dataset_dir = os.path.join(data_dir, dataset_name)
-                if os.path.isdir(dataset_dir):
-                    conf_path = os.path.join(dataset_dir, f"{dataset_name}.conf")
-                    csv_path = os.path.join(dataset_dir, f"{dataset_name}.csv")
-
-                    if os.path.exists(conf_path) and os.path.exists(csv_path):
-                        dataset_pairs.append((dataset_name, conf_path, csv_path))
-
-        return dataset_pairs
-
-    def process_datasets():
-        """Process all found datasets"""
-        dataset_pairs = find_dataset_pairs()
-
-        if not dataset_pairs:
-            print("\033[K" + f"{Colors.RED}No valid dataset/config pairs found in data folder.{Colors.ENDC}")
-            return
-
-        for i, (dataset_name, conf_path, csv_path) in enumerate(dataset_pairs):
-            print(f"\033[K{Colors.BOLD}{i+1}. Found dataset: {dataset_name}{Colors.ENDC}")
-
-        choice = input("\033[K" + f"{Colors.BOLD}Select dataset to process (1-{len(dataset_pairs)} or 'all'): {Colors.ENDC}").strip()
-
-        if choice.lower() == 'all':
-            for dataset_name, conf_path, csv_path in dataset_pairs:
-                process_single_dataset(dataset_name, conf_path, csv_path)
-        elif choice.isdigit() and 1 <= int(choice) <= len(dataset_pairs):
-            dataset_name, conf_path, csv_path = dataset_pairs[int(choice)-1]
-            process_single_dataset(dataset_name, conf_path, csv_path)
-        else:
-            print("\033[K" + f"{Colors.RED}Invalid selection.{Colors.ENDC}")
-
-    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None):
-        """Process a single dataset with given mode"""
-        try:
-            # Load config
-            config = load_or_create_config(conf_path)
-
-            # Determine mode if not provided
-            if not mode:
-                mode = 'train_predict' if config.get('train', True) and config.get('predict', True) else \
-                       'train' if config.get('train', True) else 'predict'
-
-            print(f"\033[K{Colors.BOLD}Processing {dataset_name} in {mode} mode{Colors.ENDC}")
-
-            # Create DBNN instance
-            model = DBNN(dataset_name=dataset_name)
-
-            if mode in ['train', 'train_predict']:
-                # Training phase
-                start_time = datetime.now()
-
-                if config.get('enable_adaptive', True):
-                    results = model.adaptive_fit_predict()
-                else:
-                    results = model.fit_predict()
-
-                end_time = datetime.now()
-
-                # Print results
-                print("\033[K" + "Training complete!")
-                print("\033[K" + f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
-
-                if 'results_path' in results:
-                    print("\033[K" + f"Results saved to: {results['results_path']}")
-                if 'log_path' in results:
-                    print("\033[K" + f"Training log saved to: {results['log_path']}")
-
-                # Save model components
-                model._save_model_components()
-                model._save_best_weights()
-                save_label_encoder(model.label_encoder, dataset_name)
-
-            if mode in ['predict', 'train_predict']:
-                # Prediction phase
-                print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                predictor = DBNNPredictor()
-                if predictor.load_model(dataset_name):
-                    # Use either the provided CSV or default dataset CSV
-                    input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
-                    output_dir = os.path.join('data', dataset_name, 'Predictions')
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-
-                    results = predictor.predict_from_csv(input_csv, output_path)
-                    print("\033[K" + f"Predictions saved to: {output_path}")
-
-            if mode == 'invertDBNN':
-                # Invert DBNN mode
-                model._load_model_components()
-                model.label_encoder = load_label_encoder(dataset_name)
-
-                print("\033[K" + "DEBUG: Inverse DBNN Settings:")
-                for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
-                    value = config.get('training_params', {}).get(param, 0.1)
-                    print("\033[K" + f"- {param}: {value}")
-
-                inverse_model = InvertibleDBNN(
-                    forward_model=model,
-                    feature_dims=model.data.shape[1] - 1,
-                    reconstruction_weight=config['training_params'].get('reconstruction_weight', 0.5),
-                    feedback_strength=config['training_params'].get('feedback_strength', 0.3)
-                )
-
-                # Reconstruct features
-                X_test = model.data.drop(columns=[model.target_column])
-                test_probs = model._get_test_probabilities(X_test)
-                reconstruction_features = inverse_model.reconstruct_features(test_probs)
-
-                # Save reconstructed features
-                output_dir = os.path.join('data', dataset_name, 'Predicted_features')
-                os.makedirs(output_dir, exist_ok=True)
-                output_file = os.path.join(output_dir, f'{dataset_name}.csv')
-
-                feature_columns = model.data.drop(columns=[model.target_column]).columns
-                reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
-                reconstructed_df.to_csv(output_file, index=False)
-
-                print("\033[K" + f"Reconstructed features saved to {output_file}")
-
-        except Exception as e:
-            print(f"\033[K{Colors.RED}Error processing dataset {dataset_name}: {str(e)}{Colors.ENDC}")
-            traceback.print_exc()
-
-    if args.interactive:
-        # Interactive mode
-        print("\033[K" + f"{Colors.BOLD}{Colors.BLUE}Interactive Mode{Colors.ENDC}")
-        dataset_name = input("\033[K" + f"{Colors.BOLD}Enter the name of the database:{Colors.ENDC}").strip().lower()
-        conf_path = f'data/{dataset_name}/{dataset_name}.conf'
-
-        # Load or create config
-        config = load_or_create_config(conf_path)
-
-        # Display current configuration
-        print("\033[K" + f"{Colors.BOLD}Current Configuration:{Colors.ENDC}")
-        print("\033[K" + f"- Device: {config.get('compute_device', 'cuda' if torch.cuda.is_available() else 'cpu')}")
-        print("\033[K" + f"- Mode: {'Train' if config.get('train', True) else 'Predict'}")
-        print("\033[K" + f"- Learning Rate: {config.get('training_params', {}).get('learning_rate', 0.1)}")
-        print("\033[K" + f"- Epochs: {config.get('training_params', {}).get('epochs', 1000)}")
-        print("\033[K" + f"- Test Fraction: {config.get('training_params', {}).get('test_fraction', 0.2)}")
-        print("\033[K" + f"- Enable Adaptive: {config.get('training_params', {}).get('enable_adaptive', True)}")
-
-        # Get mode
-        mode = input("\033[K" + f"{Colors.BOLD}Enter mode (train/train_predict/predict/invertDBNN): {Colors.ENDC}").strip().lower()
-        while mode not in ['train', 'train_predict', 'predict', 'invertDBNN']:
-            print("\033[K" + f"{Colors.RED}Invalid mode. Please enter 'train', 'train_predict', 'predict', or 'invertDBNN'.{Colors.ENDC}")
-            mode = input("\033[K" + f"{Colors.BOLD}Enter mode: {Colors.ENDC}").strip().lower()
-
-        # Update config based on mode
-        config['train'] = mode in ['train', 'train_predict']
-        config['predict'] = mode in ['predict', 'train_predict']
-
-        # For predict mode, get input file
-        input_csv = None
-        if mode == 'predict':
-            input_csv = input("\033[K" + f"{Colors.BOLD}Enter path to input CSV file (or press Enter to use default): {Colors.ENDC}").strip()
-            if not input_csv:
-                dataset_pairs = find_dataset_pairs()
-                if dataset_pairs:
-                    input_csv = dataset_pairs[0][2]  # Use first found CSV
-                    print("\033[K" + f"{Colors.YELLOW}Using default CSV file: {input_csv}{Colors.ENDC}")
-                else:
-                    print("\033[K" + f"{Colors.RED}No default CSV file found.{Colors.ENDC}")
-                    return
-
-        # Save updated config
-        with open(conf_path, 'w') as f:
-            json.dump(config, f, indent=2)
-
-        print("\033[K" + f"{Colors.GREEN}Configuration updated.{Colors.ENDC}")
-
-        # Process the dataset
-        csv_path = input_csv if input_csv else f'data/{dataset_name}/{dataset_name}.csv'
-        process_single_dataset(dataset_name, conf_path, csv_path, mode)
-
-    elif not args.file_path and not args.mode:
-        # No arguments provided - search for datasets
+    parser.print_help()
+    if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
         process_datasets()
 
-    elif args.mode:
-        # Specific mode requested
-        if args.mode == 'invertDBNN':
-            if not args.file_path:
-                dataset_pairs = find_dataset_pairs()
-                if dataset_pairs:
-                    args.file_path = dataset_pairs[0][2]  # Use first found CSV
-                    print("\033[K" + f"{Colors.YELLOW}Using default CSV file: {args.file_path}{Colors.ENDC}")
-                else:
-                    print("\033[K" + f"{Colors.RED}No datasets found for inversion.{Colors.ENDC}")
-                    return
+    elif args.mode !="invertDBNN":
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        # Save the label encoder after training
+       # Create DBNN instance with specific dataset name
+        model = DBNN(dataset_name=basename)
 
-            basename = os.path.splitext(os.path.basename(args.file_path))[0]
-            conf_path = os.path.join('data', basename, f'{basename}.conf')
-            csv_path = os.path.join('data', basename, f'{basename}.csv')
-            process_single_dataset(basename, conf_path, csv_path, 'invertDBNN')
+        # Optionally create an invertible model
+        if model.config.get('enable_invertible', False):
+            invertible_model = model.create_invertible_model(
+                reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
+                feedback_strength=model.config.get('feedback_strength', 0.3)
+            )
+            print("\033[K" +"Created invertible DBNN model")
 
-        elif args.mode in ['train', 'train_predict', 'predict']:
-            if args.file_path:
-                basename = os.path.splitext(os.path.basename(args.file_path))[0]
-                conf_path = os.path.join('data', basename, f'{basename}.conf')
-                csv_path = os.path.join('data', basename, f'{basename}.csv')
-                process_single_dataset(basename, conf_path, csv_path, args.mode)
-            else:
-                dataset_pairs = find_dataset_pairs()
-                if dataset_pairs:
-                    basename, conf_path, csv_path = dataset_pairs[0]
-                    print("\033[K" + f"{Colors.YELLOW}Using default dataset: {basename}{Colors.ENDC}")
-                    process_single_dataset(basename, conf_path, csv_path, args.mode)
-                else:
-                    print("\033[K" + f"{Colors.RED}No datasets found.{Colors.ENDC}")
+        start_time = datetime.now()
+        results = model.process_dataset(conf_path)
+        end_time = datetime.now()
+
+        # Print results
+        print("\033[K" +"Processing complete!")
+        print("\033[K" +f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+        print("\033[K" +f"Results saved to: {results['results_path']}")
+        print("\033[K" +f"Training log saved to: {results['log_path']}")
+        print("\033[K" +f"Processed {results['n_samples']} samples with {results['n_features']} features")
+        print("\033[K" +f"Excluded {results['n_excluded']} features")
+        save_label_encoder(model.label_encoder, basename)
+
+    elif args.mode =="invertDBNN":
+        processor.process_dataset(args.file_path)
+        dataset_pairs = find_dataset_pairs()
+        basename=args.file_path.split('/')[-1].split('.')[0]
+        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
+        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+        # Invert DBNN mode
+        model = DBNN(dataset_name=basename)
+        model._load_model_components()
+        # Load configuration
+        with open(conf_path, 'r') as f:
+            config_dict = json.load(f)
+
+        print("\033[K" +"DEBUG: Inverse DBNN Settings:")
+        for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
+            value = config_dict.get('training_params', {}).get(param, 0.1)
+            print("\033[K" +f"- {param}: {value}")
+
+        print("\033[K" +"DEBUG: Initializing inverse model...")
+
+        # Load the label encoder
+        try:
+            label_encoder = load_label_encoder(basename)
+            model.label_encoder = label_encoder
+
+            # Now you can safely access model.label_encoder.classes_
+            #print("\033[K" +f"Classes in label encoder: {model.label_encoder.classes_}")
+
+            # Proceed with inverse model initialization
+            inverse_model = InvertibleDBNN(
+                forward_model=model,
+                feature_dims=model.data.shape[1] - 1,  # Exclude target column
+                reconstruction_weight=config_dict['training_params'].get('reconstruction_weight', 0.5),
+                feedback_strength=config_dict['training_params'].get('feedback_strength', 0.3)
+            )
+
+            # Reconstruct features
+            X_test = model.data.drop(columns=[model.target_column])
+            test_probs = model._get_test_probabilities(X_test)
+            reconstruction_features = inverse_model.reconstruct_features(test_probs)
+
+            # Save reconstructed features
+            output_dir = os.path.join('data', basename, 'Predicted_features')
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f'{basename}.csv')
+
+            feature_columns = model.data.drop(columns=[model.target_column]).columns
+            reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
+            reconstructed_df.to_csv(output_file, index=False)
+
+            print("\033[K" +f"Reconstructed features saved to {output_file}")
+
+        except FileNotFoundError as e:
+            print("\033[K" +f"Error: {str(e)}")
+            print("\033[K" +"Please ensure the model has been trained before using invertDBNN mode.")
+            return
 
     else:
-        parser.print_help()
+        print("\033[K" +"No datasets found in data folder")
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
     print("\033[K" +"=" * 40)
