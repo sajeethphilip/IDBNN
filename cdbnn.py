@@ -1,4 +1,5 @@
 #Working, fully functional with predcition 27/March/2025
+#Revisions on Mar29 2025 4:15 pm
 import torch
 import copy
 import sys
@@ -211,39 +212,53 @@ class PredictionManager:
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output"""
-        image_files, class_labels = self._get_image_files_with_labels(data_path)
+        """Predict features with consistent clustering output
+
+        Args:
+            data_path: Path to input (can be directory, compressed file, or single image)
+            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
+            batch_size: Batch size for prediction
+        """
+        # Get image files with labels and original filenames
+        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
 
+        # Set default output path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with cluster information
+        # Initialize CSV with additional information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(
-                ['filename', 'target', 'cluster_assignment', 'cluster_confidence'] +
-                feature_cols
-            )
+            csv_writer.writerow([
+                'original_filename',  # Original filename without path
+                'filepath',          # Full path to the image
+                'target',            # Class label if available
+                'cluster_assignment',
+                'cluster_confidence'
+            ] + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i + batch_size]
             batch_labels = class_labels[i:i + batch_size]
+            batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
             for filename in batch_files:
                 try:
-                    image = Image.open(filename).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append(image_tensor)
+                    # Open image and apply transforms
+                    with Image.open(filename) as img:
+                        image = img.convert('RGB')
+                        image_tensor = transform(image).unsqueeze(0).to(self.device)
+                        batch_images.append(image_tensor)
                 except Exception as e:
                     logger.error(f"Error loading image {filename}: {str(e)}")
                     continue
@@ -257,6 +272,7 @@ class PredictionManager:
             with torch.no_grad():
                 output = self.model(batch_tensor)
 
+                # Handle different output formats
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -274,46 +290,59 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
-            # Write predictions to CSV
+            # Write predictions to CSV with original filenames
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                for j, (filename, orig_name, true_class) in enumerate(zip(
+                    batch_files, batch_filenames, batch_labels)):
+
                     row = [
-                        os.path.basename(filename),
-                        true_class,
+                        orig_name,       # Original filename
+                        filename,        # Full filepath
+                        true_class,      # Class label
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
                     csv_writer.writerow(row)
 
-        logger.info(f"Predictions with clustering saved to {output_csv}")
+        logger.info(f"Predictions saved to {output_csv}")
 
-    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
+    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
-        Get a list of image files and their corresponding class labels from the input path.
-        Assumes images are organized in subfolders under train/test folders.
+        Get a list of image files, their corresponding class labels, and original filenames from the input path.
+        Returns:
+            Tuple[List[str], List[str], List[str]]: (image_paths, class_labels, original_filenames)
         """
         image_files = []
         class_labels = []
+        original_filenames = []
 
-        if os.path.isfile(input_path):
-            # Single image file (no class label)
-            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                image_files.append(input_path)
-                class_labels.append("unknown")  # No class label available
+        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+            # Handle compressed archive
+            extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            self._extract_archive(input_path, extract_dir)
+            return self._get_image_files_with_labels(extract_dir)  # Recursively process extracted files
+
         elif os.path.isdir(input_path):
             # Directory of images - recursively search for image files
-            for root, dirs, files in os.walk(input_path):
+            for root, _, files in os.walk(input_path):
                 for file in files:
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                         image_files.append(os.path.join(root, file))
-                        # Extract class label from subfolder name
+                        original_filenames.append(file)
+                        # Extract class label from subfolder name if available
                         class_label = os.path.basename(root)
-                        class_labels.append(class_label)
+                        class_labels.append(class_label if class_label != os.path.basename(input_path) else "unknown")
+        elif os.path.isfile(input_path) and input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+            # Single image file
+            image_files.append(input_path)
+            original_filenames.append(os.path.basename(input_path))
+            class_labels.append("unknown")
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
-        return image_files, class_labels
+        return image_files, class_labels, original_filenames
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """Create dataset with proper channel handling for torchvision datasets."""
@@ -6828,7 +6857,7 @@ def get_interactive_args():
         args.model_path = input(prompt).strip() or default_model
 
         # Set default input directory
-        default_input = args.data if args.data else ''
+        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
         args.input_dir = input(prompt).strip() or default_input
 
