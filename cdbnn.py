@@ -83,8 +83,161 @@ import traceback
 import argparse
 from datetime import datetime
 import torch
+import pickle
+import os
+from sklearn.preprocessing import LabelEncoder
+from collections import defaultdict
+from torch.utils.data import Dataset
+from PIL import Image
+import os
+from pathlib import Path
+
 
 logger = logging.getLogger(__name__)
+
+
+
+class CustomDataset(Dataset):
+    """Custom dataset that handles label encoding and image loading"""
+
+    def __init__(self, root_dir, transform=None, label_encoder=None,
+                 class_to_idx=None, extensions=('.png', '.jpg', '.jpeg')):
+        """
+        Args:
+            root_dir (string): Directory with all the images
+            transform (callable, optional): Optional transform to be applied
+            label_encoder (LabelEncoderManager): Label encoder instance
+            class_to_idx (dict, optional): Predefined class to index mapping
+            extensions (tuple): Valid image file extensions
+        """
+        self.root_dir = Path(root_dir)
+        self.transform = transform
+        self.label_encoder = label_encoder
+        self.extensions = extensions
+        self.samples = []
+        self.classes = []
+        self.class_to_idx = {}
+
+        # Build the dataset
+        self._build_dataset()
+
+        # Initialize label encoder if provided
+        if label_encoder is not None:
+            self._init_label_encoder()
+        elif class_to_idx is not None:
+            self.class_to_idx = class_to_idx
+            self.classes = list(class_to_idx.keys())
+
+    def _build_dataset(self):
+        """Build the dataset by scanning directories"""
+        self.classes = [d.name for d in sorted(self.root_dir.iterdir()) if d.is_dir()]
+        self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+
+        for class_name in self.classes:
+            class_dir = self.root_dir / class_name
+            for img_path in class_dir.iterdir():
+                if img_path.suffix.lower() in self.extensions:
+                    self.samples.append((str(img_path), self.class_to_idx[class_name]))
+
+    def _init_label_encoder(self):
+        """Initialize the label encoder with dataset classes"""
+        if self.label_encoder is not None:
+            # Get all unique labels
+            all_labels = [self.classes[idx] for _, idx in self.samples]
+            self.label_encoder.fit(all_labels)
+            # Update mappings to use encoder
+            self.class_to_idx = dict(self.label_encoder.label_to_idx)
+            self.classes = self.label_encoder.classes_
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label_idx = self.samples[idx]
+
+        try:
+            image = Image.open(img_path).convert('RGB')
+
+            if self.transform:
+                image = self.transform(image)
+
+            # Convert label index if encoder is available
+            if self.label_encoder is not None:
+                label_name = self.classes[label_idx]
+                label_idx = self.label_encoder.transform([label_name])[0]
+
+            return image, label_idx
+
+        except Exception as e:
+            print(f"Error loading image {img_path}: {str(e)}")
+            return None, None
+
+    def get_class_names(self):
+        """Get list of class names"""
+        return self.classes
+
+    def get_class_mapping(self):
+        """Get class to index mapping"""
+        return self.class_to_idx
+
+    def get_additional_info(self, idx):
+        """Get additional information about sample (for feature extraction)"""
+        img_path, label_idx = self.samples[idx]
+        return idx, img_path, self.classes[label_idx]
+
+class LabelEncoderManager:
+    """Handles label encoding consistently across training and prediction"""
+    def __init__(self):
+        self.encoder = LabelEncoder()
+        self.classes_ = None
+        self.label_to_idx = defaultdict(lambda: -1)  # Default for unknown labels
+        self.idx_to_label = defaultdict(str)  # Default for unknown indices
+
+    def fit(self, labels):
+        """Fit the encoder and create mappings"""
+        self.encoder.fit(labels)
+        self.classes_ = self.encoder.classes_
+        self._create_mappings()
+
+    def _create_mappings(self):
+        """Create bidirectional mappings"""
+        self.label_to_idx = defaultdict(
+            lambda: -1,
+            {label: idx for idx, label in enumerate(self.classes_)}
+        )
+        self.idx_to_label = defaultdict(
+            lambda: "unknown",
+            {idx: label for idx, label in enumerate(self.classes_)}
+        )
+
+    def transform(self, labels):
+        """Transform labels to indices"""
+        return [self.label_to_idx[label] for label in labels]
+
+    def inverse_transform(self, indices):
+        """Transform indices back to labels"""
+        return [self.idx_to_label[idx] for idx in indices]
+
+    def save(self, path):
+        """Save encoder state to file"""
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'classes': self.classes_,
+                'label_to_idx': dict(self.label_to_idx),
+                'idx_to_label': dict(self.idx_to_label)
+            }, f)
+
+    def load(self, path):
+        """Load encoder state from file"""
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+        self.classes_ = data['classes']
+        self.label_to_idx = defaultdict(lambda: -1, data['label_to_idx'])
+        self.idx_to_label = defaultdict(lambda: "unknown", data['idx_to_label'])
+        # Recreate sklearn encoder for compatibility
+        self.encoder = LabelEncoder()
+        self.encoder.classes_ = self.classes_
+
 class Colors:
     """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
@@ -145,6 +298,7 @@ class PredictionManager:
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
+        self.label_encoder = None
 
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
@@ -206,6 +360,9 @@ class PredictionManager:
                 checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
             else:
                 raise e
+        # Load label encoder if available
+        if 'label_encoder' in checkpoint:
+            self.label_encoder = checkpoint['label_encoder']
 
         # Load the best model state for phase 2 with KL divergence
         state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
@@ -220,7 +377,7 @@ class PredictionManager:
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output
+        """Predict features with consistent clustering output and label encoding
 
         Args:
             data_path: Path to input (can be directory, compressed file, or single image)
@@ -245,13 +402,19 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow([
-                'original_filename',  # Original filename without path
-                'filepath',          # Full path to the image
-                'target',            # Class label if available
+
+            # Enhanced header with both encoded and decoded labels
+            header = [
+                'original_filename',    # Original filename without path
+                'filepath',            # Full path to the image
+                'target_label',        # Original class label (string)
+                'target_encoded',      # Encoded class index (if encoder available)
                 'cluster_assignment',
-                'cluster_confidence'
-            ] + feature_cols)
+                'cluster_confidence',
+                'cluster_label'       # Cluster label if encoder available
+            ] + feature_cols
+
+            csv_writer.writerow(header)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -294,23 +457,43 @@ class PredictionManager:
                 if 'cluster_assignments' in latent_info:
                     cluster_assign = latent_info['cluster_assignments'].cpu().numpy()
                     cluster_conf = latent_info['cluster_probabilities'].max(1)[0].cpu().numpy()
+
+                    # Convert cluster assignments to labels if encoder available
+                    if hasattr(self, 'label_encoder'):
+                        cluster_labels = self.label_encoder.inverse_transform(cluster_assign)
+                    else:
+                        cluster_labels = ['NA'] * len(cluster_assign)
                 else:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
+                    cluster_labels = ['NA'] * len(batch_files)
 
-            # Write predictions to CSV with original filenames
+                # Convert class labels to encoded values if encoder available
+                if hasattr(self, 'label_encoder'):
+                    try:
+                        encoded_labels = self.label_encoder.transform(batch_labels)
+                    except ValueError:
+                        # Handle unknown labels
+                        encoded_labels = [-1] * len(batch_labels)
+                else:
+                    encoded_labels = ['NA'] * len(batch_labels)
+
+            # Write predictions to CSV with enhanced information
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
                     row = [
-                        orig_name,       # Original filename
-                        filename,        # Full filepath
-                        true_class,      # Class label
-                        cluster_assign[j],
-                        cluster_conf[j]
-                    ] + features[j].tolist()
+                        orig_name,               # Original filename
+                        filename,                # Full filepath
+                        true_class,              # Original class label (string)
+                        encoded_labels[j],       # Encoded class index
+                        cluster_assign[j],       # Cluster index
+                        cluster_conf[j],         # Cluster confidence
+                        cluster_labels[j]        # Cluster label (string)
+                    ] + features[j].tolist()     # Feature vector
+
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
@@ -2205,7 +2388,72 @@ class ModelFactory:
 
 
 # Update the training loop to handle the new feature dictionary format
+
 def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, val_loader: DataLoader = None) -> Dict[str, List]:
+    """Enhanced training function with built-in label handling"""
+
+    # Initialize label encoder if not already present
+    if not hasattr(model, 'label_encoder'):
+        model.label_encoder = LabelEncoderManager()
+
+    # Extract labels from dataset if possible
+    if hasattr(train_loader.dataset, 'classes'):
+        all_labels = train_loader.dataset.classes
+    else:
+        # Fallback: collect all labels from the loader
+        all_labels = []
+        for _, labels in train_loader:
+            if isinstance(labels, torch.Tensor):
+                labels = labels.tolist()
+            all_labels.extend(labels)
+        all_labels = list(set(all_labels))  # Get unique labels
+
+    # Fit the label encoder
+    model.label_encoder.fit(all_labels)
+
+    # Update dataset with encoder if possible
+    if hasattr(train_loader.dataset, 'label_encoder'):
+        train_loader.dataset.label_encoder = model.label_encoder
+
+    # Original training logic with enhanced label handling
+    early_stopping = config['training'].get('early_stopping', {})
+    patience = early_stopping.get('patience', 5)
+    min_delta = early_stopping.get('min_delta', 0.001)
+
+    best_val_metric = float('inf')
+    patience_counter = 0
+
+    for epoch in range(model.current_epoch, config['training']['epochs']):
+        model.current_epoch = epoch
+
+        # Training phase
+        train_loss, train_acc = _train_epoch(model, train_loader, config)
+
+        # Validation phase
+        val_loss, val_acc = None, None
+        if val_loader:
+            val_loss, val_acc = _validate(model, val_loader, config)
+            current_metric = val_loss
+        else:
+            current_metric = train_loss
+
+        # Checkpoint saving (now includes label encoder)
+        if current_metric < best_val_metric - min_delta:
+            best_val_metric = current_metric
+            patience_counter = 0
+            _save_checkpoint(model, is_best=True, config=config)
+        else:
+            patience_counter += 1
+
+        # Early stopping check
+        if patience_counter >= patience:
+            logger.info(f"Early stopping triggered after {epoch + 1} epochs")
+            break
+
+    return model.history
+
+def train_model_old(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with checkpoint handling"""
     # Store dataset reference in model
@@ -2308,6 +2556,8 @@ def _save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer,
         'loss': loss,
         'identifier': identifier,
         'config': config,
+        'label_encoder': model.label_encoder,  # Now includes encoder
+        'class_mapping': model.label_encoder.classes_  # For easy reference
         'active_enhancements': {
             'kl_divergence': model.use_kl_divergence,
             'class_encoding': model.use_class_encoding,
@@ -3114,7 +3364,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
-
+        self.label_encoder = LabelEncoderManager()
 
         # Set device
         if device is None:
@@ -3155,7 +3405,27 @@ class BaseFeatureExtractor(nn.Module, ABC):
         if not self.config['execution_flags'].get('fresh_start', False):
             self._load_from_checkpoint()
 
+    def save_checkpoint(self, path: str, is_best: bool = False):
+        """Save model checkpoint with label encoder"""
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config,
+            'label_encoder': self.label_encoder  # Add encoder to checkpoint
+        }
+        torch.save(checkpoint, path)
 
+    def _load_from_checkpoint(self):
+        """Load model checkpoint with label encoder"""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.feature_extractor.load_state_dict(checkpoint['state_dict'])
+        # Load label encoder if available
+        if 'label_encoder' in checkpoint:
+            self.label_encoder = checkpoint['label_encoder']
 
     @abstractmethod
     def _create_model(self) -> nn.Module:
