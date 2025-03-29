@@ -11,6 +11,27 @@ from typing import Dict, Any
 import numpy as np
 from PIL import Image
 from typing import Tuple, List, Dict, Any
+import zipfile  # Add this import at the top with other imports
+
+def create_zip_archive(source_dir: str, output_zip: str) -> None:
+    """
+    Create a zip archive of the source directory.
+
+    Args:
+        source_dir: Path to directory to be zipped
+        output_zip: Path to output zip file
+    """
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_zip), exist_ok=True)
+
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(source_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # Add file to zip with relative path
+                arcname = os.path.relpath(file_path, start=source_dir)
+                zipf.write(file_path, arcname)
+    print(f"Created zip archive: {output_zip}")
 
 def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[float], List[float]]:
     """
@@ -495,7 +516,7 @@ def interactive_mode():
         process_dataset(dataset_name)
 
 def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: bool = True) -> None:
-    """Process a single dataset including download and config creation"""
+    """Process a single dataset including download, config creation, and zip archive"""
     if dataset_name not in list_available_datasets():
         print(f"Dataset '{dataset_name}' not found.")
         return
@@ -514,33 +535,24 @@ def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: boo
         # Create configuration file with actual image properties
         create_config_file(
             dataset_name=dataset_name,
-            dataset_path=os.path.join(root, dataset_name.lower()),  # This is the parent directory
+            dataset_path=os.path.join(root, dataset_name.lower()),
             class_names=class_names
         )
 
-        # Create a copy of the train directory in root folder
-        dataset_folder = dataset_name.lower()
-        src_train_path = os.path.join(root, dataset_folder, "train")
-        dest_train_path = os.path.join(dataset_folder, "train")
-
-        # Remove existing directory if it exists
-        if os.path.exists(dest_train_path):
-            shutil.rmtree(dest_train_path)
-
-        # Create parent directories if they don't exist
-        os.makedirs(os.path.dirname(dest_train_path), exist_ok=True)
-
-        # Copy the entire train directory
-        shutil.copytree(src_train_path, dest_train_path)
-        print(f"- Copied train directory to: {dest_train_path}")
+        # Create zip archive of the training data
+        train_dir = os.path.join(root, dataset_name.lower(), 'train')
+        output_zip = os.path.join('Data', f'{dataset_name.lower()}.zip')
+        create_zip_archive(train_dir, output_zip)
 
         print(f"\nSuccessfully processed dataset:")
         print(f"- Files saved to: {final_path}")
         print(f"- Found {len(class_names)} classes")
         print(f"- Configuration file created: {os.path.join(root, dataset_name.lower(), f'{dataset_name.lower()}.json')}")
+        print(f"- Training data archived to: {output_zip}")
 
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
+
 def main():
     if len(sys.argv) > 1:
         # Command line mode
