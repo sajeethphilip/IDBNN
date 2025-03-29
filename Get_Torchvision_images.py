@@ -21,55 +21,51 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
     - Standard deviation per channel
 
     Args:
-        dataset_path: Path to the dataset directory (should contain train folder)
+        dataset_path: Path to the dataset's train directory (should be the actual directory containing class folders)
 
     Returns:
         Tuple of (channels, (width, height), mean_values, std_values)
     """
-    # Look specifically in the train directory
-    train_path = os.path.join(dataset_path, "train")
-    if not os.path.exists(train_path):
-        raise ValueError(f"No train directory found at {train_path}")
+    # dataset_path should already be the train directory in this case
+    if not os.path.exists(dataset_path):
+        raise ValueError(f"Directory not found: {dataset_path}")
 
-    # Find first image in the train directory
-    for root, _, files in os.walk(train_path):
+    # Find first image in the directory
+    for root, _, files in os.walk(dataset_path):
         if files:
             first_image = os.path.join(root, files[0])
             break
     else:
-        raise ValueError("No images found in dataset train directory")
+        raise ValueError(f"No images found in directory: {dataset_path}")
 
     # Rest of the function remains the same...
-    # Open the image and convert to numpy array
     img = Image.open(first_image)
     img_array = np.array(img)
 
-    # Determine image properties
     if len(img_array.shape) == 2:  # Grayscale
         channels = 1
         height, width = img_array.shape
     else:  # Color
         height, width, channels = img_array.shape
 
-    # Calculate mean and std from a sample of images (max 100 for efficiency)
     means = []
     stds = []
     sample_count = 0
     max_samples = 100
 
-    for root, _, files in os.walk(train_path):  # Changed to walk train_path
+    for root, _, files in os.walk(dataset_path):  # Walk the provided path directly
         for file in files:
             if file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 img = Image.open(os.path.join(root, file))
                 img_array = np.array(img)
 
                 if channels == 1:
-                    if len(img_array.shape) == 3:  # Convert color to grayscale
+                    if len(img_array.shape) == 3:
                         img_array = np.mean(img_array, axis=2)
                     means.append(np.mean(img_array))
                     stds.append(np.std(img_array))
                 else:
-                    if len(img_array.shape) == 2:  # Convert grayscale to RGB
+                    if len(img_array.shape) == 2:
                         img_array = np.stack([img_array]*3, axis=-1)
                     means.append(np.mean(img_array, axis=(0,1)))
                     stds.append(np.std(img_array, axis=(0,1)))
@@ -80,7 +76,6 @@ def get_image_properties(dataset_path: str) -> Tuple[int, Tuple[int, int], List[
         if sample_count >= max_samples:
             break
 
-    # Calculate overall mean and std
     if channels == 1:
         mean_val = [float(np.mean(means))]
         std_val = [float(np.mean(stds))]
@@ -94,17 +89,12 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
                       input_size: Tuple[int, int] = (32, 32), in_channels: int = 3) -> None:
     """
     Create a JSON configuration file for the dataset based on the template.
-
-    Args:
-        dataset_name: Name of the dataset
-        dataset_path: Path where the dataset is stored
-        class_names: List of class names in the dataset
-        input_size: Default input size (width, height)
-        in_channels: Number of input channels (1 for grayscale, 3 for RGB)
     """
     config_path = os.path.join(dataset_path, f"{dataset_name.lower()}.json")
-    channels, (width, height), mean_val, std_val=get_image_properties(dataset_name)
-    # Basic dataset information
+    # Pass the train directory path directly
+    train_path = os.path.join(dataset_path, "train")
+    channels, (width, height), mean_val, std_val = get_image_properties(train_path)
+
     config: Dict[str, Any] = {
         "dataset": {
             "name": dataset_name.lower(),
@@ -112,10 +102,10 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
             "in_channels": channels,
             "num_classes": len(class_names),
             "input_size": [width, height],
-            "mean": [mean_val],
-            "std": [mean_val],
+            "mean": mean_val,
+            "std": std_val,
             "resize_images": True,
-            "train_dir": os.path.join(dataset_path, "train"),
+            "train_dir": train_path,
             "test_dir": os.path.join(dataset_path, "test") if os.path.exists(os.path.join(dataset_path, "test")) else ""
         },
         # Rest of the configuration can be copied from template
@@ -504,8 +494,8 @@ def interactive_mode():
         # Process single dataset
         process_dataset(dataset_name)
 
-def process_dataset(dataset_name: str) -> None:
-    """Process a single dataset"""
+def process_dataset(dataset_name: str, root: str = 'data', merge_train_test: bool = True) -> None:
+    """Process a single dataset including download and config creation"""
     if dataset_name not in list_available_datasets():
         print(f"Dataset '{dataset_name}' not found.")
         return
@@ -514,20 +504,24 @@ def process_dataset(dataset_name: str) -> None:
     try:
         dataset_info = get_dataset_info(dataset_name)
 
-        # For datasets with splits, ask about merging (though we'll merge everything to train)
-        merge = True
-        if dataset_info['has_train_test_split']:
-            response = input(f"Dataset {dataset_name} has train/test split. Merge them to train? (y/n, default y): ").lower()
-            merge = response != 'n'
-
+        # Download and organize dataset
         final_path, class_names = download_dataset(
             dataset_name=dataset_name,
-            root='data',
-            merge_train_test=merge
+            root=root,
+            merge_train_test=merge_train_test
         )
 
-        print(f"Successfully processed dataset. Files saved to: {final_path}")
-        print(f"Found {len(class_names)} classes: {', '.join(class_names[:5])}{'...' if len(class_names) > 5 else ''}")
+        # Create configuration file with actual image properties
+        create_config_file(
+            dataset_name=dataset_name,
+            dataset_path=os.path.join(root, dataset_name.lower()),  # This is the parent directory
+            class_names=class_names
+        )
+
+        print(f"\nSuccessfully processed dataset:")
+        print(f"- Files saved to: {final_path}")
+        print(f"- Found {len(class_names)} classes")
+        print(f"- Configuration file created: {os.path.join(root, dataset_name.lower(), f'{dataset_name.lower()}.json')}")
 
     except Exception as e:
         print(f"Error processing dataset {dataset_name}: {str(e)}")
