@@ -96,18 +96,18 @@ def create_config_file(dataset_name: str, dataset_path: str, class_names: List[s
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
     """
     config_path = os.path.join(dataset_path, f"{dataset_name.lower()}.json")
-
+    channels, (width, height), mean_val, std_val=get_image_properties(dataset_name)
     # Basic dataset information
     config: Dict[str, Any] = {
         "dataset": {
             "name": dataset_name.lower(),
             "type": "torchvision",
-            "in_channels": in_channels,
+            "in_channels": channels,
             "num_classes": len(class_names),
-            "input_size": list(input_size),
-            "mean": [0.5] * in_channels,
-            "std": [0.5] * in_channels,
-            "resize_images": False,
+            "input_size": list(width, height),
+            "mean": [mean_val] * channels,
+            "std": [mean_val] * channels,
+            "resize_images": True,
             "train_dir": os.path.join(dataset_path, "train"),
             "test_dir": os.path.join(dataset_path, "test") if os.path.exists(os.path.join(dataset_path, "test")) else ""
         },
