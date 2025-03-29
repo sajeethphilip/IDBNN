@@ -6847,13 +6847,12 @@ def get_interactive_args():
 
     # Get data path/name
     default = last_args.get('data', '') if last_args else ''
-    prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
-    args.data = input(prompt).strip() or default
+    prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
+    dataset_name = input(prompt).strip() or default
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        dataset_name = Path(args.data).stem if args.data else 'dataset'
         default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
