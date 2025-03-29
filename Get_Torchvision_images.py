@@ -361,8 +361,12 @@ def extract_tar_file(tar_path: str, extract_to: str) -> None:
 
 def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     """
-    Move all image class subfolders to the train directory while keeping a copy in the original location.
-    Returns sorted list of class names.
+    Move all image class subfolders to the train directory.
+    Cleans the target directory first if it exists.
+    Handles cases where:
+    - There are train/test folders (move their contents to train)
+    - Only raw class folders exist (move them to train)
+    - There's a containing folder like 256_ObjectCategories (move its contents to train)
     """
     # Clean the train directory if it exists
     if os.path.exists(train_path):
@@ -375,7 +379,7 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
     for split in ['train', 'test']:
         split_path = os.path.join(dataset_root, split)
         if os.path.exists(split_path):
-            # Copy (not move) all class folders from this split to train
+            # Move all class folders from this split to train
             for class_name in os.listdir(split_path):
                 class_path = os.path.join(split_path, class_name)
                 if os.path.isdir(class_path):
@@ -386,19 +390,25 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
                         for item in os.listdir(class_path):
                             src_item = os.path.join(class_path, item)
                             if os.path.isdir(src_item):
-                                # For nested directories, copy recursively
+                                # For nested directories, merge recursively
                                 dest_item = os.path.join(dest_path, item)
-                                shutil.copytree(src_item, dest_item, dirs_exist_ok=True)
+                                if os.path.exists(dest_item):
+                                    shutil.rmtree(dest_item)
+                                shutil.move(src_item, dest_path)
                             else:
-                                # For files, copy (don't overwrite)
+                                # For files, overwrite if they exist
                                 dest_file = os.path.join(dest_path, item)
-                                if not os.path.exists(dest_file):
-                                    shutil.copy2(src_item, dest_path)
+                                if os.path.exists(dest_file):
+                                    os.remove(dest_file)
+                                shutil.move(src_item, dest_path)
                     else:
-                        shutil.copytree(class_path, dest_path)
+                        shutil.move(class_path, dest_path)
 
                     if class_name not in class_names:
                         class_names.append(class_name)
+
+            # Remove the now-empty split directory
+            shutil.rmtree(split_path)
 
     # If no train/test folders found, look for direct class folders or containing folders
     if not class_names:
@@ -411,17 +421,23 @@ def move_all_to_train(dataset_root: str, train_path: str) -> List[str]:
 
             # If this is a directory that contains class folders (like 256_ObjectCategories)
             if any(os.path.isdir(os.path.join(item_path, subitem)) for subitem in os.listdir(item_path)):
-                # Copy all its subdirectories to train
+                # Move all its subdirectories to train
                 for class_name in os.listdir(item_path):
                     class_path = os.path.join(item_path, class_name)
                     if os.path.isdir(class_path):
                         dest_path = os.path.join(train_path, class_name)
-                        shutil.copytree(class_path, dest_path)
+                        if os.path.exists(dest_path):
+                            shutil.rmtree(dest_path)
+                        shutil.move(class_path, dest_path)
                         class_names.append(class_name)
+                # Remove the now-empty containing directory
+                shutil.rmtree(item_path)
             else:
-                # It's a class folder itself, copy it to train
+                # It's a class folder itself, move it to train
                 dest_path = os.path.join(train_path, item)
-                shutil.copytree(item_path, dest_path)
+                if os.path.exists(dest_path):
+                    shutil.rmtree(dest_path)
+                shutil.move(item_path, dest_path)
                 class_names.append(item)
 
     return sorted(class_names)
