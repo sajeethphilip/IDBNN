@@ -178,7 +178,7 @@ if __name__ == "__main__":
         # Command line mode
         parser = argparse.ArgumentParser(description='Download and organize torchvision image datasets')
         parser.add_argument('--dataset', type=str, default='', help='Name of dataset to download')
-        parser.add_argument('--root', type=str, default='data', help='Root directory for downloaded datasets')
+        parser.add_argument('--root', type=str, default='./', help='Root directory for downloaded datasets')
         parser.add_argument('--merge', action='store_true', help='Merge train and test sets (if available)')
         parser.add_argument('--all', action='store_true', help='Download all available datasets')
         args = parser.parse_args()
