@@ -2917,7 +2917,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"- Free Memory: {free_memory / 1e9:.2f} GB")
             DEBUG.log(f"- Available for batch: {available_memory / 1e9:.2f} GB")
             DEBUG.log(f"- Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-            print(f"{Colors.GREEN}Batch size set to {optimal_batch_size}{Colors.ENDC}")
+            print(f"{Colors.GREEN}The new Batch size is dynamically set to {optimal_batch_size}{Colors.ENDC}")
 
             return optimal_batch_size
 
