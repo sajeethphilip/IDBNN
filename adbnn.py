@@ -4318,7 +4318,8 @@ class DBNN(GPUDBNN):
         # Store current weights temporarily
         temp_W = self.current_W
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
-
+        if hasattr(self, 'target_column') and self.target_column in X.columns:
+            X[self.target_column] = X[self.target_column].astype(str)
         try:
             # Convert DataFrame to tensor if needed
             if isinstance(X, pd.DataFrame):
