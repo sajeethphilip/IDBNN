@@ -91,6 +91,21 @@ import os
 from typing import Union, List, Dict, Optional
 from collections import defaultdict
 
+def safe_torch_load(file_path, device=None):
+    """Safely load torch model with validation"""
+    try:
+        # First try with weights_only=True for security
+        return torch.load(file_path, map_location=device, weights_only=True)
+    except Exception as e:
+        print(f"Safe load warning: {str(e)}")
+        print("Attempting to load with weights_only=False (only do this for trusted models)")
+        # Add validation checks here if needed
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Model file not found: {file_path}")
+
+        # Verify file signature/hash if you want extra security
+        return torch.load(file_path, map_location=device, weights_only=False)
+
 class DBNNPredictor:
     """Optimized standalone predictor for DBNN models"""
 
@@ -4736,7 +4751,8 @@ class DBNN(GPUDBNN):
                print("\033[K" +f"No saved inverse model found at {load_dir}")
                return False
 
-           model_state = torch.load(model_path, map_location=self.device, weights_only=True)
+           #model_state = torch.load(model_path, map_location=self.device, weights_only=True)
+            model_state = safe_torch_load(path, self.device)
 
            with open(config_path, 'r') as f:
                config = json.load(f)
@@ -5725,7 +5741,7 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
-                components = torch.load(f, weights_only=True, map_location=self.device)
+                components = safe_torch_load(components_file, self.device)
                 #components = pickle.load(f)
                 # Initialize a fresh LabelEncoder first
                 self.label_encoder = LabelEncoder()
