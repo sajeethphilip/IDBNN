@@ -5610,7 +5610,8 @@ class DBNN(GPUDBNN):
             'global_mean': self.global_mean,
             'global_std': self.global_std,
             'categorical_encoders': self.categorical_encoders,
-            'feature_columns': self.feature_columns,
+            'feature_columns': self.feature_columns,  # The actual features used
+            'original_columns': self.original_columns,  # All original features from config
             'target_column': self.target_column,
             'target_classes': self.label_encoder.classes_,
             'target_mapping': dict(zip(self.label_encoder.classes_,
@@ -5658,6 +5659,7 @@ class DBNN(GPUDBNN):
 
     def _load_model_components(self):
         """Load all model components"""
+        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
         components_file = self._get_model_components_filename()
         print(f"The model components are loaded from {components_file}")
         if os.path.exists(components_file):
@@ -5683,6 +5685,11 @@ class DBNN(GPUDBNN):
                 self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
                 self.bin_edges = components.get('bin_edges')  # Load bin_edges
                 self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
+                self.global_mean = components['global_mean']
+                self.global_std = components['global_std']
+                # Load categorical encoders if they exist
+                if 'categorical_encoders' in components:
+                    self.categorical_encoders = components['categorical_encoders']
                 print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
                 return True
         else:
