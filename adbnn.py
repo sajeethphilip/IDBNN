@@ -2142,6 +2142,12 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
+        if self.data_config is None:
+            raise ValueError(f"Failed to load configuration for dataset: {dataset_name}. "
+                            f"Please ensure the config file exists at: "
+                            f"data/{dataset_name}/{dataset_name}.conf")
+
+
         # Metadata storage (CPU only)
         self._metadata = {
             'sample_ids': [],          # Original dataset indices
