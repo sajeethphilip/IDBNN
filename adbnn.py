@@ -9,6 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import precision_recall_fscore_support
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -5463,7 +5464,55 @@ class DBNN(GPUDBNN):
                 print("\033[K" +f"Warning: Failed to load categorical encoders: {str(e)}")
                 self.categorical_encoders = {}
 
-    def _encode_categorical_features(self, df: pd.DataFrame, is_training: bool = True):
+    def _encode_categorical_features(self, df: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
+        """Encode categorical features with proper type handling"""
+        df_encoded = df.copy()
+
+        for column in df.columns:
+            if column in self.categorical_encoders or (df[column].dtype == 'object' or df[column].dtype.name == 'category'):
+                # Store original dtype
+                original_dtype = df[column].dtype
+
+                # Convert to string for consistent encoding
+                col_data = df[column].astype(str)
+
+                if is_training or column not in self.categorical_encoders:
+                    # Training mode or new column - create new mapping
+                    unique_values = col_data.unique()
+                    mapping = {v: i for i, v in enumerate(unique_values)}
+                    self.categorical_encoders[column] = mapping
+                else:
+                    # Prediction mode - use existing mapping
+                    mapping = self.categorical_encoders[column]
+
+                # Encode values
+                encoded = col_data.map(mapping)
+
+                # Handle unseen values during prediction
+                if not is_training:
+                    unmapped = encoded.isna()
+                    if unmapped.any():
+                        # Use mean value of known encodings for unseen values
+                        mean_value = np.mean(list(mapping.values()))
+                        # Convert mean to original dtype before assignment
+                        if np.issubdtype(original_dtype, np.integer):
+                            mean_value = int(round(mean_value))
+
+                        # Create new series with correct dtype
+                        fill_values = pd.Series([mean_value] * len(unmapped),
+                                              index=unmapped[unmapped].index)
+                        fill_values = fill_values.astype(original_dtype)
+
+                        # Assign with loc to avoid dtype warnings
+                        encoded = encoded.astype(float)  # Intermediate float type
+                        encoded.loc[unmapped] = fill_values
+
+                # Convert back to original dtype
+                df_encoded[column] = encoded.astype(original_dtype)
+
+        return df_encoded
+
+    def _encode_categorical_features_old(self, df: pd.DataFrame, is_training: bool = True):
         """Encode categorical features with proper dtype handling"""
         DEBUG.log("Starting categorical encoding")
         df_encoded = df.copy()
