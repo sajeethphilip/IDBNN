@@ -4424,7 +4424,7 @@ class DBNN(GPUDBNN):
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
         model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-        weights_file = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}_weights.json')
+        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
         #weights_file = os.path.join(model_dir, 'weights.json')
 
         if os.path.exists(weights_file):
