@@ -111,7 +111,7 @@ class DBNNPredictor:
         # Initialize weight_updater as None but with type hint
         self.weight_updater: Optional[BinWeightUpdater] = None
         # Initialize empty attributes
-        self.label_encoder = None
+        self.label_encoder = LabelEncoder()
         self.feature_pairs = None
         self.likelihood_params = None
         self.weight_updater = None
@@ -127,6 +127,22 @@ class DBNNPredictor:
         """Load all model components with strict initialization order"""
         try:
             # 1. Load basic config first
+            encoder_path = os.path.join(self.model_dir, f'Best_{dataset_name}', 'label_encoder.pkl')
+            if not os.path.exists(encoder_path):
+                raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
+
+            with open(encoder_path, 'rb') as f:
+                encoder_data = pickle.load(f)
+
+            # Handle both old and new format
+            if isinstance(encoder_data, dict):
+                self.label_encoder.classes_ = np.array([str(c) for c in encoder_data['classes_']])
+            else:
+                self.label_encoder = encoder_data
+                self.label_encoder.classes_ = np.array([str(c) for c in self.label_encoder.classes_])
+
+            print(f"Loaded label encoder with classes: {self.label_encoder.classes_}")
+
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -466,6 +482,10 @@ class DBNNPredictor:
         """
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
+        # Convert input labels to strings if they exist
+        if isinstance(X, pd.DataFrame) and self.target_column in X.columns:
+            X = X.copy()
+            X[self.target_column] = X[self.target_column].astype(str)
 
         # Handle input type and feature selection
         if isinstance(X, pd.DataFrame):
@@ -816,6 +836,10 @@ class DBNNPredictor:
         # Check if target column exists in input data
         target_in_data = target_column is not None and target_column in df.columns
 
+        # Convert target column to string if it exists
+        if hasattr(self, 'target_column') and self.target_column in df.columns:
+            df[self.target_column] = df[self.target_column].astype(str)
+
         # Make predictions
         results = self.predict(df)
 
@@ -833,6 +857,9 @@ class DBNNPredictor:
                 if not np.issubdtype(y_pred.dtype, np.number):
                     y_pred = self.label_encoder.transform(y_pred)
 
+                # Ensure both are strings
+                y_true = y_true.astype(str)
+                y_pred = y_pred.astype(str)
                 # Display colored confusion matrix
                 self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
 
