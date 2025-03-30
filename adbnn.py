@@ -746,14 +746,14 @@ class DBNNPredictor:
         return posteriors, None
 
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
-        # Ensure inputs are strings
-        if not isinstance(y_true[0], str):
-            y_true = [str(x) for x in y_true]
-        if not isinstance(y_pred[0], str):
-            y_pred = [str(x) for x in y_pred]
         # Decode numeric labels back to original alphanumeric labels
         y_true_labels = self.label_encoder.inverse_transform(y_true)
         y_pred_labels = self.label_encoder.inverse_transform(y_pred)
+        # Ensure inputs are strings
+        if not isinstance(y_true[0], str):
+            y_true = [str(x) for x in y_true_labels]
+        if not isinstance(y_pred[0], str):
+            y_pred = [str(x) for x in y_pred_labels]
 
         # Get unique classes from both true and predicted labels
         unique_true = np.unique(y_true_labels)
