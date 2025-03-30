@@ -5622,7 +5622,7 @@ class DBNN(GPUDBNN):
 
     def _save_model_components(self):
         """Save all model components to a pickle file"""
-        encoder_path = os.path.join('Model',  f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl')
+        encoder_path = os.path.join('Model',  f'Best_{self.model_type}_{self.dataset_name}_label_encoder.pkl')
         with open(encoder_path, 'wb') as f:
             pickle.dump(self.label_encoder, f)
         components = {
