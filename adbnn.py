@@ -1371,13 +1371,16 @@ class BinWeightUpdater:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.batch_size = batch_size
 
-        # Single storage for all weights (more memory efficient)
+        # Primary weight storage (4D tensor: classes × pairs × bins × bins)
         self.weights = torch.full(
-            (n_classes, len(feature_pairs),  # For Gaussian weights
-            torch.full((n_bins_per_dim, n_bins_per_dim), 0.1,  # For Histogram weights
+            (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
+            0.1,  # Initial value
             dtype=torch.float32,
             device=self.device
         ).contiguous()
+
+        # Gaussian weights view (scalar per class/pair)
+        self.gaussian_weights = self.weights.mean(dim=(2,3))  # [n_classes, n_pairs]
 
     def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
         """Get histogram weights with bounds checking"""
