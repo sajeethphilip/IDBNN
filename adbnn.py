@@ -4752,7 +4752,7 @@ class DBNN(GPUDBNN):
                return False
 
            #model_state = torch.load(model_path, map_location=self.device, weights_only=True)
-            model_state = safe_torch_load(path, self.device)
+           model_state = safe_torch_load(path, self.device)
 
            with open(config_path, 'r') as f:
                config = json.load(f)
