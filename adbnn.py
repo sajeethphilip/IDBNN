@@ -4365,7 +4365,7 @@ class DBNN(GPUDBNN):
 
         try:
             # Create directory for model components
-            model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
+            model_dir = os.path.join('Model')
             os.makedirs(model_dir, exist_ok=True)
             print(f"\033[KCreated model directory at {model_dir}")
 
