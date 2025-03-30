@@ -1,6 +1,5 @@
 #Working, fully functional with predcition 30/March/2025 Stable Model
-# Better Memory management 4:55 pm (has some issues with some numeric labels)
-# Fixed typo in weights file loading during predcition.
+# Better Memory management 10:44am
 import torch
 import time
 import argparse
@@ -96,7 +95,7 @@ from collections import defaultdict
 class DBNNPredictor:
     """Optimized standalone predictor for DBNN models"""
 
-    def __init__(self, model_dir='Model', data_dir='data', device=None):
+    def __init__(self, model_dir: str = 'Model', device: str = None):
         """
         Initialize predictor with model components.
 
@@ -106,8 +105,6 @@ class DBNNPredictor:
         """
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
-        self.data_dir = data_dir  # Store dataset path
-        self.data = None  # Initialize data attribute
         self.model_type = None  # Will be set during load
         self._is_initialized = False
         self.n_bins_per_dim = 128  # Default value
@@ -119,7 +116,6 @@ class DBNNPredictor:
         self.likelihood_params = None
         self.weight_updater = None
         self.current_W = None
-        self.best_W = None
         self.scaler = None
         self.categorical_encoders = None
         self.feature_columns = None
@@ -127,55 +123,7 @@ class DBNNPredictor:
         self.global_mean = None
         self.global_std = None
 
-    def load_dataset(self, dataset_name):
-        """Load dataset before model loading"""
-        dataset_path = os.path.join(self.data_dir, dataset_name, f"{dataset_name}.csv")
-        if os.path.exists(dataset_path):
-            self.data = pd.read_csv(dataset_path)
-            return True
-        return False
     def load_model(self, dataset_name: str) -> bool:
-        """Enhanced model loading with better weight handling"""
-        try:
-            # 1. Load basic config
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
-
-            # 2. Set model type
-            self.model_type = self.config.get('modelType', 'Histogram')
-
-            # 3. Load essential components
-            self._load_label_encoder(dataset_name)
-            self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
-
-            # 4. Load weights with validation
-            weights_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_weights.json')
-            if os.path.exists(weights_file):
-                with open(weights_file, 'r') as f:
-                    weights_data = json.load(f)
-
-                # Convert weights to tensor
-                weights_array = np.array(weights_data['weights'])
-                self.current_W = torch.tensor(weights_array, device=self.device)
-
-                # Validate shape matches feature pairs
-                if len(self.feature_pairs) != self.current_W.shape[1]:
-                    raise ValueError(f"Weight shape mismatch. Expected {len(self.feature_pairs)} pairs, got {self.current_W.shape[1]}")
-
-                print(f"Successfully loaded weights with shape {self.current_W.shape}")
-                self._is_initialized = True
-                return True
-
-            raise FileNotFoundError(f"Weights file not found at {weights_file}")
-
-        except Exception as e:
-            print(f"\nError loading model: {str(e)}")
-            traceback.print_exc()
-            return False
-
-    def load_model_old(self, dataset_name: str) -> bool:
         """Load all model components with strict initialization order"""
         try:
             # 1. Load basic config first
@@ -344,15 +292,10 @@ class DBNNPredictor:
             if 'categorical_encoders' in components:
                 self.categorical_encoders = components['categorical_encoders']
 
-            # Load global stats if available - ensure they are numpy arrays
+            # Load global stats if available
             if 'global_mean' in components and 'global_std' in components:
-                self.global_mean = np.asarray(components['global_mean'])
-                self.global_std = np.asarray(components['global_std'])
-
-                # Handle scalar values
-                if np.isscalar(self.global_mean) or self.global_mean.ndim == 0:
-                    self.global_mean = np.array([self.global_mean])
-                    self.global_std = np.array([self.global_std])
+                self.global_mean = components['global_mean']
+                self.global_std = components['global_std']
 
             # Load feature columns if available
             if 'feature_columns' in components:
@@ -378,9 +321,6 @@ class DBNNPredictor:
                 # New tensor format
                 weights_array = np.array(weights_data['weights'])
                 self.current_W = torch.tensor(weights_array, device=self.device)
-                self.current_W = torch.tensor(weights_array, device=self.device)
-                self.best_W = self.current_W.clone()  # Set best_W to be the same as current_W
-
             else:
                 # Old dictionary format
                 weights_array = np.zeros((n_classes, n_pairs))
@@ -453,8 +393,8 @@ class DBNNPredictor:
             if not available_cols:
                 raise ValueError("No matching features found between model and input data")
             if missing_cols:
-                print(f"\033[KWarning: Missing features in input data: {missing_cols}")
-                print(f"\033[KAvailable features: {df_processed.columns.tolist()}")
+                print(f"Warning: Missing features in input data: {missing_cols}")
+                print(f"Available features: {df_processed.columns.tolist()}")
 
                 # If we're missing critical features, raise an error
                 if len(available_cols) == 0:
@@ -463,7 +403,7 @@ class DBNNPredictor:
                                    f"Input has: {df_processed.columns.tolist()}")
 
                 # Otherwise proceed with available features but warn
-                print(f"\033[KProceeding with available features: {available_cols}")
+                print(f"Proceeding with available features: {available_cols}")
 
             # Remove target column if present
             if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
@@ -490,43 +430,29 @@ class DBNNPredictor:
         df_processed = df_processed.fillna(-99999)
 
         # Convert to numpy array - ensuring float32 dtype
-        X_numpy = df_processed.to_numpy(dtype=np.float32)
+        X_numpy = df_processed.to_numpy(dtype=np.float32)  # Convert to numpy array first
 
         # Apply standardization using precomputed global stats
         if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
             try:
-                # Convert global stats to numpy arrays if they aren't already
-                global_mean = np.asarray(self.global_mean) if not isinstance(self.global_mean, np.ndarray) else self.global_mean
-                global_std = np.asarray(self.global_std) if not isinstance(self.global_std, np.ndarray) else self.global_std
+                # Align global stats with available features
+                global_mean = np.asarray(self.global_mean)
+                global_std = np.asarray(self.global_std)
 
-                # Handle scalar values by expanding to array
-                if np.isscalar(global_mean) or global_mean.ndim == 0:
-                    global_mean = np.array([global_mean])
-                    global_std = np.array([global_std])
+                # If we have fewer features than expected, select corresponding stats
+                if X_numpy.shape[1] < len(global_mean):
+                    print(f"Adjusting standardization for feature mismatch: "
+                          f"using first {X_numpy.shape[1]} of {len(global_mean)} stats")
+                    global_mean = global_mean[:X_numpy.shape[1]]
+                    global_std = global_std[:X_numpy.shape[1]]
 
-                # Handle empty arrays by falling back to no standardization
-                if global_mean.size == 0 or global_std.size == 0:
-                    print("\033[KWarning: Empty global statistics, skipping standardization")
-                    X_scaled = X_numpy
-                else:
-                    # If we have fewer features than expected, select corresponding stats
-                    if X_numpy.shape[1] < len(global_mean):
-                        print("\033[KAdjusting standardization for feature mismatch: "
-                              f"using first {X_numpy.shape[1]} of {len(global_mean)} stats")
-                        global_mean = global_mean[:X_numpy.shape[1]]
-                        global_std = global_std[:X_numpy.shape[1]]
-
-                    # Ensure shapes match before standardization
-                    if X_numpy.shape[1] != len(global_mean):
-                        raise ValueError(
-                            f"Feature dimension mismatch. Data has {X_numpy.shape[1]} features, "
-                            f"but global stats have {len(global_mean)} dimensions"
-                        )
-
-                    X_scaled = (X_numpy - global_mean) / global_std
+                X_scaled = (X_numpy - global_mean) / global_std
             except Exception as e:
-                print(f"\033[KWarning: Standardization failed, using raw features. Error: {str(e)}")
-                X_scaled = X_numpy
+                raise ValueError(
+                    f"Standardization error with shapes - "
+                    f"Data: {X_numpy.shape}, Mean: {global_mean.shape}, Std: {global_std.shape}. "
+                    f"Error: {str(e)}"
+                ) from e
         else:
             X_scaled = X_numpy
 
@@ -536,16 +462,10 @@ class DBNNPredictor:
     def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
         """
         Make predictions on input data with proper feature validation.
-        Uses the loaded weights without any state modification.
+        Handles feature selection and ordering according to config.
         """
         if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first")
-
-        # Verify weights are loaded
-        if self.current_W is None:
-            raise RuntimeError("Weights not loaded. Check if training completed properly")
-        if len(self.feature_pairs) != self.current_W.shape[1]:
-            raise RuntimeError(f"Feature pair mismatch. Model has {len(self.feature_pairs)} pairs but weights expect {self.current_W.shape[1]}")
+            raise RuntimeError("Predictor not initialized. Call load_model() first.")
 
         # Handle input type and feature selection
         if isinstance(X, pd.DataFrame):
@@ -553,12 +473,8 @@ class DBNNPredictor:
             if hasattr(self, 'feature_columns'):
                 # Get columns that exist in both model and input
                 available_cols = [col for col in self.feature_columns if col in X.columns]
-                missing_cols = set(self.feature_columns) - set(available_cols)
-
                 if not available_cols:
                     raise ValueError("No matching features found between model and input data")
-                if missing_cols:
-                    print(f"Warning: Missing features in input data: {missing_cols}")
 
                 # Ensure we maintain the order from feature_columns
                 X_filtered = X[available_cols].copy()
@@ -2234,10 +2150,6 @@ class DBNN(GPUDBNN):
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
-        # Initialize data attribute first
-        self.data = None
-        self.Original_data = None
-        self.X_Orig = None
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
@@ -2283,9 +2195,6 @@ class DBNN(GPUDBNN):
         self.global_std = None   # Store global standard deviation
         self.global_stats_computed = False  # Flag to track if stats are computed
 
-        # Load dataset if name provided
-        if dataset_name:
-            self._load_dataset()
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
             raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
@@ -2302,29 +2211,7 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
-    def _load_dataset(self):
-        """Load dataset and store in data attribute"""
-        try:
-            config_path = os.path.join('data', self.dataset_name, f"{self.dataset_name}.conf")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found: {config_path}")
 
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
-
-            file_path = self.config.get('file_path')
-            if not file_path:
-                file_path = os.path.join('data', self.dataset_name, f"{self.dataset_name}.csv")
-
-            if os.path.exists(file_path):
-                self.data = pd.read_csv(file_path)
-                self.Original_data = self.data.copy()
-                self.X_Orig = self.Original_data.drop(columns=[self.target_column]).copy()
-                return True
-            return False
-        except Exception as e:
-            print(f"Error loading dataset: {str(e)}")
-            return False
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
         batch_size = self.batch_size  # Adjust based on available memory
@@ -4499,8 +4386,7 @@ class DBNN(GPUDBNN):
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
         model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
-        #weights_file = os.path.join(model_dir, 'weights.json')
+        weights_file = os.path.join(model_dir, 'weights.json')
 
         if os.path.exists(weights_file):
             try:
@@ -5710,192 +5596,106 @@ class DBNN(GPUDBNN):
 
         return result_df
 #--------------------------------------------------------------------------------------------------------------
+
     def _save_model_components(self):
-        """Save all model components to a pickle file with robust error handling"""
-        try:
-            # 1. Save weights
-            if self.best_W is not None:
-                weights_dict = {
-                    'version': 2,
-                    'weights': self.best_W.cpu().numpy().tolist(),
-                    'shape': list(self.best_W.shape)
-                }
-                weights_file = f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json'
-                os.makedirs(os.path.dirname(weights_file), exist_ok=True)
-                with open(weights_file, 'w') as f:
-                    json.dump(weights_dict, f)
+        """Save all model components to a pickle file"""
+        components = {
+            'scaler': self.scaler,
+            'label_encoder': {
+                'classes': self.label_encoder.classes_.tolist()
+            },
+            'likelihood_params': self.likelihood_params,
+            'model_type': self.model_type,
+            'feature_pairs': self.feature_pairs,
+            'global_mean': self.global_mean,
+            'global_std': self.global_std,
+            'categorical_encoders': self.categorical_encoders,
+            'feature_columns': self.feature_columns,  # The actual features used
+            'original_columns': self.original_columns,  # All original features from config
+            'target_column': self.target_column,
+            'target_classes': self.label_encoder.classes_,
+            'target_mapping': dict(zip(self.label_encoder.classes_,
+                                     range(len(self.label_encoder.classes_)))),
+            'config': self.config,
+            'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
+            'original_columns': getattr(self, 'original_columns', None),
+            'best_error': self.best_error,  # Explicitly save best error
+            'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
+            'weight_updater': self.weight_updater,
+            'n_bins_per_dim': self.n_bins_per_dim,
+            'bin_edges': self.bin_edges,  # Save bin_edges
+            'gaussian_params': self.gaussian_params  # Save gaussian_params
+        }
 
-            # Prepare standardization parameters
-            global_mean = self.global_mean if hasattr(self, 'global_mean') else None
-            global_std = self.global_std if hasattr(self, 'global_std') else None
+        # Add model-specific components
+        if self.model_type == "Histogram":
+            components.update({
+                'bin_probs': self.likelihood_params['bin_probs'],
+                'bin_edges': self.likelihood_params['bin_edges'],
+                'classes': self.likelihood_params['classes']
+            })
+        elif self.model_type == "Gaussian":
+            components.update({
+                'means': self.likelihood_params['means'],
+                'covs': self.likelihood_params['covs'],
+                'classes': self.likelihood_params['classes']
+            })
 
-            # Prepare likelihood parameters based on model type
-            likelihood_params = {}
-            if hasattr(self, 'likelihood_params'):
-                if self.model_type == "Histogram":
-                    likelihood_params = {
-                        'bin_probs': [probs.cpu().numpy().tolist()
-                                     for probs in self.likelihood_params.get('bin_probs', [])],
-                        'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
-                                     for edges in self.likelihood_params.get('bin_edges', [])],
-                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
-                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
-                    }
-                elif self.model_type == "Gaussian":
-                    likelihood_params = {
-                        'means': self.likelihood_params.get('means', []).cpu().numpy().tolist(),
-                        'covs': self.likelihood_params.get('covs', []).cpu().numpy().tolist(),
-                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
-                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
-                    }
 
-            components = {
-                'version': 3,  # Version identifier for compatibility
-                'scaler': self.scaler,
-                'label_encoder': {
-                    'classes': self.label_encoder.classes_.tolist()
-                },
-                'likelihood_params': likelihood_params,
-                'model_type': self.model_type,
-                'feature_pairs': self.feature_pairs.cpu().numpy().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
-                'global_mean': global_mean.tolist() if hasattr(global_mean, 'tolist') else global_mean,
-                'global_std': global_std.tolist() if hasattr(global_std, 'tolist') else global_std,
-                'categorical_encoders': self.categorical_encoders,
-                'feature_columns': self.feature_columns,
-                'original_columns': getattr(self, 'original_columns', None),
-                'target_column': self.target_column,
-                'target_classes': self.label_encoder.classes_.tolist(),
-                'target_mapping': dict(zip(range(len(self.label_encoder.classes_)),
-                                         self.label_encoder.classes_)),
-                'config': self.config,
-                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
-                'best_error': getattr(self, 'best_error', float('inf')),
-                'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
-                'n_bins_per_dim': self.n_bins_per_dim,
-                'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
-                             for edges in self.bin_edges] if hasattr(self, 'bin_edges') and self.bin_edges else None,
-                'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
-                                  for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None
-            }
+        # Get the filename using existing method
+        components_file = self._get_model_components_filename()
 
-            # Save components
-            components_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
-            os.makedirs(os.path.dirname(components_file), exist_ok=True)
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(components_file), exist_ok=True)
 
-            with open(components_file, 'wb') as f:
-                pickle.dump(components, f)
+        # Save components to file
+        with open(components_file, 'wb') as f:
+            pickle.dump(components, f)
 
-            print(f"\nSaved model components to {components_file}")
-            if global_mean is not None and global_std is not None:
-                print(f"Standardization params saved - mean: {np.array(global_mean).shape}, std: {np.array(global_std).shape}")
-            return True
+        print("\033[K" +f"Saved model components to {components_file}")
+        print("\033[K" +f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
+        return True
 
-        except Exception as e:
-            print(f"\nError saving model components: {str(e)}")
-            traceback.print_exc()
-            return False
 
     def _load_model_components(self):
-        """Load all model components with proper tensor conversion and validation"""
-        components_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
-        print(f"Loading model components from {components_file}")
-
-        if not os.path.exists(components_file):
-            print(f"Components file not found: {components_file}")
-            return False
-
-        try:
+        """Load all model components"""
+        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
+        components_file = self._get_model_components_filename()
+        print(f"The model components are loaded from {components_file}")
+        if os.path.exists(components_file):
+            print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
+            print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
+                # Initialize a fresh LabelEncoder first
+                self.label_encoder = LabelEncoder()
+                # If we have saved classes, set them
+                if 'target_classes' in components:
+                    self.label_encoder.classes_ = components['target_classes']
+                elif hasattr(components['label_encoder'], 'classes_'):
+                    # If the saved object has classes, use them
+                    self.label_encoder.classes_ = components['label_encoder'].classes_
+                self.scaler = components['scaler']
+                self.likelihood_params = components['likelihood_params']
+                self.feature_pairs = components['feature_pairs']
+                self.feature_columns = components.get('feature_columns')
+                self.categorical_encoders = components['categorical_encoders']
+                self.high_cardinality_columns = components.get('high_cardinality_columns', [])
+                self.weight_updater = components.get('weight_updater')
+                self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
+                self.bin_edges = components.get('bin_edges')  # Load bin_edges
+                self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
+                self.global_mean = components['global_mean']
+                self.global_std = components['global_std']
+                # Load categorical encoders if they exist
+                if 'categorical_encoders' in components:
+                    self.categorical_encoders = components['categorical_encoders']
+                print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
+                return True
+        else:
+            print("\033[K" +f"[DEBUG] Model components file not found: {components_file}", end="\r", flush=True)
+        return False
 
-            # Initialize core components
-            self.label_encoder = LabelEncoder()
-            if 'target_classes' in components:
-                self.label_encoder.classes_ = np.array(components['target_classes'])
-
-            # Load standardization parameters with validation
-            if 'global_mean' in components and components['global_mean'] is not None:
-                self.global_mean = np.array(components['global_mean'])
-                self.global_std = np.array(components['global_std'])
-                print(f"Loaded standardization params - mean: {self.global_mean.shape}, std: {self.global_std.shape}")
-            else:
-                print("Warning: No standardization parameters found in saved model")
-                self.global_mean = None
-                self.global_std = None
-
-            # Load other components
-            self.scaler = components.get('scaler')
-            self.feature_columns = components.get('feature_columns')
-            self.categorical_encoders = components.get('categorical_encoders', {})
-            self.high_cardinality_columns = components.get('high_cardinality_columns', [])
-            self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
-            self.model_type = components.get('model_type', 'Histogram')
-            self.target_column = components.get('target_column')
-
-            # Convert feature pairs back to tensor
-            if 'feature_pairs' in components and components['feature_pairs'] is not None:
-                self.feature_pairs = torch.tensor(components['feature_pairs'], device=self.device)
-
-            # Load likelihood parameters with proper tensor conversion
-            if 'likelihood_params' in components:
-                self.likelihood_params = {}
-                if self.model_type == "Histogram":
-                    if 'bin_probs' in components['likelihood_params']:
-                        self.likelihood_params['bin_probs'] = [
-                            torch.tensor(bp, device=self.device)
-                            for bp in components['likelihood_params']['bin_probs']
-                        ]
-                    if 'bin_edges' in components['likelihood_params']:
-                        self.likelihood_params['bin_edges'] = [
-                            [torch.tensor(edge, device=self.device) for edge in edges]
-                            for edges in components['likelihood_params']['bin_edges']
-                        ]
-                elif self.model_type == "Gaussian":
-                    if 'means' in components['likelihood_params']:
-                        self.likelihood_params['means'] = torch.tensor(
-                            components['likelihood_params']['means'], device=self.device)
-                    if 'covs' in components['likelihood_params']:
-                        self.likelihood_params['covs'] = torch.tensor(
-                            components['likelihood_params']['covs'], device=self.device)
-
-                if 'classes' in components['likelihood_params']:
-                    self.likelihood_params['classes'] = torch.tensor(
-                        components['likelihood_params']['classes'], device=self.device)
-                if 'feature_pairs' in components['likelihood_params']:
-                    self.likelihood_params['feature_pairs'] = torch.tensor(
-                        components['likelihood_params']['feature_pairs'], device=self.device)
-
-            # Load bin edges if available
-            if 'bin_edges' in components and components['bin_edges'] is not None:
-                self.bin_edges = [
-                    [torch.tensor(edge, device=self.device) for edge in edges]
-                    for edges in components['bin_edges']
-                ]
-
-            # Load Gaussian params if available
-            if 'gaussian_params' in components and components['gaussian_params'] is not None:
-                self.gaussian_params = {
-                    k: torch.tensor(v, device=self.device) if isinstance(v, (list, np.ndarray)) else v
-                    for k, v in components['gaussian_params'].items()
-                }
-
-            # Initialize weight updater after loading other components
-            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
-                n_classes = len(self.likelihood_params['classes'])
-                self.weight_updater = BinWeightUpdater(
-                    n_classes=n_classes,
-                    feature_pairs=self.feature_pairs,
-                    n_bins_per_dim=self.n_bins_per_dim,
-                    batch_size=getattr(self, 'batch_size', 128)
-                )
-
-            print("Successfully loaded all model components")
-            return True
-
-        except Exception as e:
-            print(f"Error loading model components: {str(e)}")
-            traceback.print_exc()
-            return False
 
 
     def predict_and_save(self, save_path=None, batch_size: int = 128):
@@ -6555,15 +6355,7 @@ def main():
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                #predictor = DBNNPredictor()
-                # Initialize predictor with dataset path
-                predictor = DBNNPredictor(
-                    model_dir='Model',
-                    data_dir=os.path.join('data', dataset_name)  # Add dataset path
-                )
-                # Load dataset before model
-                predictor.load_dataset(dataset_name)  # New method needed
-
+                predictor = DBNNPredictor()
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
                     input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
