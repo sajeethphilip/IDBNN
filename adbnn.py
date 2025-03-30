@@ -2159,6 +2159,10 @@ class DBNN(GPUDBNN):
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
+        # Initialize data attribute first
+        self.data = None
+        self.Original_data = None
+        self.X_Orig = None
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
