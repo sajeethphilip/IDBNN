@@ -19,7 +19,7 @@ from typing import Dict, Tuple, Any, List, Union
 from collections import defaultdict
 import requests
 from io import StringIO
-import os,re
+import os,re,sys
 import json
 from itertools import combinations
 from sklearn.mixture import GaussianMixture
@@ -4380,7 +4380,7 @@ class DBNN(GPUDBNN):
                 'dtype': str(weights_np.dtype)
             }
 
-            weights_file = sys.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
+            weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
             print(f"\033[KAttempting to save weights to {weights_file}")
 
             # Use atomic write to prevent corruption
@@ -4408,8 +4408,8 @@ class DBNN(GPUDBNN):
 
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
-        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-        weights_file = os.path.join(model_dir, 'weights.json')
+        model_dir = os.path.join('Model')
+        weights_file =os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
 
         if os.path.exists(weights_file):
             try:
