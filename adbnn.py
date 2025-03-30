@@ -1,5 +1,6 @@
 #Working, fully functional with predcition 30/March/2025 Stable Model
 # Better Memory management 3:57 pm (has some issues with some numeric labels)
+# Fixed typo in weights file loading during predcition.
 import torch
 import time
 import argparse
