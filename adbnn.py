@@ -389,6 +389,8 @@ class DBNNPredictor:
         if hasattr(self, 'feature_columns') and self.feature_columns:
             # Ensure we only keep columns that exist in both model and input data
             available_cols = [col for col in self.feature_columns if col in df_processed.columns]
+            if not available_cols:
+                raise ValueError("No matching features found between model and input data")
 
             # Remove target column if present
             if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
