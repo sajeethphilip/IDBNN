@@ -1,5 +1,5 @@
 #Working, fully functional with predcition 30/March/2025
-#Revisions on Mar30 2025 2:38 am Stable Version
+#Revisions on Mar30 2025
 import torch
 import copy
 import sys
@@ -207,17 +207,29 @@ class PredictionManager:
             else:
                 raise e
 
-        # Verify clustering parameters exist if needed
+        # Modified verification to be more flexible
         if model.use_kl_divergence:
-            if 'cluster_centers' not in checkpoint['model_states']['phase2_kld']['best']['state_dict']:
-                raise ValueError("Checkpoint missing cluster centers for KL divergence mode")
-            if 'clustering_temperature' not in checkpoint['model_states']['phase2_kld']['best']['state_dict']:
-                raise ValueError("Checkpoint missing clustering temperature for KL divergence mode")
+            state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
 
+            # Check for temperature in different possible locations
+            if 'clustering_temperature' not in state_dict:
+                # Try getting it from config if not in state_dict
+                if 'config' in checkpoint['model_states']['phase2_kld']['best']:
+                    model.clustering_temperature = torch.tensor([
+                        checkpoint['model_states']['phase2_kld']['best']['config'][
+                            'clustering_params']['temperature']
+                    ], device=self.device)
+                else:
+                    # Fallback to default
+                    model.clustering_temperature = torch.tensor(
+                        [1.0], device=self.device)
+                    logger.warning("Using default clustering temperature 1.0")
+            else:
+                model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
 
-        # Load the best model state for phase 2 with KL divergence
-        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+        # Load the state dict (strict=False to allow missing keys)
         model.load_state_dict(state_dict, strict=False)
+
         # Verify clustering parameters were loaded correctly
         if model.use_kl_divergence:
             if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
@@ -2150,7 +2162,6 @@ class UnifiedCheckpoint:
                 'image_type': self.config['dataset'].get('image_type', 'general'),
                 'clustering_params': {
                     'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
-                    'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') else 1.0
                  }
             }
         }
@@ -3355,6 +3366,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
                                    torch.randn(num_clusters, self.feature_dims))
 
             if not hasattr(self, 'clustering_temperature'):
+                temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
                 self.register_buffer('clustering_temperature',
                                    torch.tensor([config['model']['autoencoder_config']
                                                ['enhancements']['clustering_temperature']]))
@@ -7736,5 +7748,5 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
 
 if __name__ == '__main__':
     print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
-    print("Updated on March 30/2025 Stable Version")
+    print("Updated on March 30/2025 ")
     sys.exit(main())
