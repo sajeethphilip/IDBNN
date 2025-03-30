@@ -5755,7 +5755,7 @@ class DBNN(GPUDBNN):
                 'label_encoder': {
                     'classes': self.label_encoder.classes_.tolist()
                 },
-                'likelihood_params': likelihood_params,
+
                 'model_type': self.model_type,
                 'feature_pairs': self.feature_pairs.cpu().numpy().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
                 'global_mean': global_mean.tolist() if hasattr(global_mean, 'tolist') else global_mean,
@@ -5774,8 +5774,11 @@ class DBNN(GPUDBNN):
                 'n_bins_per_dim': self.n_bins_per_dim,
                 'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
                              for edges in self.bin_edges] if hasattr(self, 'bin_edges') and self.bin_edges else None,
-                'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
-                                  for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None
+                if self.model_type == "Histogram":
+                    'likelihood_params': likelihood_params,
+                elif self.model_type == "Gaussian":
+                    'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
+                                      for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None
             }
 
             # Save components
