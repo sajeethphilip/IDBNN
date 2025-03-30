@@ -471,90 +471,125 @@ class DBNNPredictor:
 
     def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
         """
-        Make predictions on input data with proper feature validation.
-        Handles feature selection and ordering according to config.
+        Make predictions on input data with proper feature validation and weight state management.
+        Ensures model uses best weights and doesn't reset during prediction.
         """
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
 
-        # Handle input type and feature selection
-        if isinstance(X, pd.DataFrame):
-            # Filter and order columns according to config
-            if hasattr(self, 'feature_columns'):
-                # Get columns that exist in both model and input
-                available_cols = [col for col in self.feature_columns if col in X.columns]
-                if not available_cols:
-                    raise ValueError("No matching features found between model and input data")
+        # Store original weights and state
+        original_state = {
+            'current_W': self.current_W.clone() if self.current_W is not None else None,
+            'best_W': self.best_W.clone() if self.best_W is not None else None,
+            'weight_updater': copy.deepcopy(self.weight_updater) if hasattr(self, 'weight_updater') else None
+        }
 
-                # Ensure we maintain the order from feature_columns
-                X_filtered = X[available_cols].copy()
+        try:
+            # Ensure we use the best weights for prediction
+            if self.best_W is not None:
+                self.current_W = self.best_W.clone()
+                if hasattr(self, 'weight_updater'):
+                    # Update weight updater to use best weights
+                    for class_id in range(self.best_W.shape[0]):
+                        for pair_idx in range(self.best_W.shape[1]):
+                            if self.model_type == "Histogram":
+                                self.weight_updater.histogram_weights[class_id][pair_idx] = (
+                                    self.best_W[class_id, pair_idx].clone()
+                                )
+                            elif self.model_type == "Gaussian":
+                                self.weight_updater.gaussian_weights[class_id][pair_idx] = (
+                                    self.best_W[class_id, pair_idx].clone()
+                                )
 
-                # Check if we need to drop target column (if present)
-                if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
-                    X_filtered = X_filtered.drop(columns=[self.target_column])
+            # Handle input type and feature selection
+            if isinstance(X, pd.DataFrame):
+                # Filter and order columns according to config
+                if hasattr(self, 'feature_columns'):
+                    # Get columns that exist in both model and input
+                    available_cols = [col for col in self.feature_columns if col in X.columns]
+                    missing_cols = set(self.feature_columns) - set(available_cols)
 
-                # Store original for results
-                original_df = X.copy()
-                X_tensor = self.preprocess_data(X_filtered)
-            else:
-                raise RuntimeError("Model not properly initialized - missing feature columns")
-        else:
-            X_tensor = X.to(self.device) if not X.is_cuda else X
-            original_df = None
+                    if not available_cols:
+                        raise ValueError("No matching features found between model and input data")
+                    if missing_cols:
+                        print(f"Warning: Missing features in input data: {missing_cols}")
 
-        # Initialize storage for results
-        all_predictions = []
-        all_probabilities = []
+                    # Ensure we maintain the order from feature_columns
+                    X_filtered = X[available_cols].copy()
 
-        # Process in batches
-        n_batches = (len(X_tensor) + batch_size - 1) // batch_size
-        batch_pbar = tqdm(total=n_batches, desc="Prediction batches")
+                    # Check if we need to drop target column (if present)
+                    if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
+                        X_filtered = X_filtered.drop(columns=[self.target_column])
 
-        for i in range(0, len(X_tensor), batch_size):
-            batch_end = min(i + batch_size, len(X_tensor))
-            batch_X = X_tensor[i:batch_end]
-
-            # Compute posteriors
-            try:
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                    # Store original for results
+                    original_df = X.copy()
+                    X_tensor = self.preprocess_data(X_filtered)
                 else:
-                    raise ValueError(f"Unknown model type: {self.model_type}")
-            except Exception as e:
-                raise RuntimeError(f"Error computing posteriors: {str(e)}")
+                    raise RuntimeError("Model not properly initialized - missing feature columns")
+            else:
+                X_tensor = X.to(self.device) if not X.is_cuda else X
+                original_df = None
 
-            # Get predictions
-            batch_pred = torch.argmax(posteriors, dim=1)
+            # Initialize storage for results
+            all_predictions = []
+            all_probabilities = []
 
-            # Store results
-            all_predictions.append(batch_pred.cpu())
-            all_probabilities.append(posteriors.cpu())
-            batch_pbar.update(1)
+            # Process in batches
+            n_batches = (len(X_tensor) + batch_size - 1) // batch_size
+            batch_pbar = tqdm(total=n_batches, desc="Prediction batches")
 
-        batch_pbar.close()
+            for i in range(0, len(X_tensor), batch_size):
+                batch_end = min(i + batch_size, len(X_tensor))
+                batch_X = X_tensor[i:batch_end]
 
-        # Combine results
-        predictions = torch.cat(all_predictions).numpy()
-        probabilities = torch.cat(all_probabilities).numpy()
+                # Compute posteriors
+                try:
+                    if self.model_type == "Histogram":
+                        posteriors, _ = self._compute_batch_posterior(batch_X)
+                    elif self.model_type == "Gaussian":
+                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                    else:
+                        raise ValueError(f"Unknown model type: {self.model_type}")
+                except Exception as e:
+                    raise RuntimeError(f"Error computing posteriors: {str(e)}")
 
-        # Create results DataFrame
-        if original_df is not None:
-            results_df = original_df.copy()
-        else:
-            results_df = pd.DataFrame(index=range(len(X_tensor)))
+                # Get predictions
+                batch_pred = torch.argmax(posteriors, dim=1)
 
-        # Add predictions and probabilities
-        pred_labels = self.label_encoder.inverse_transform(predictions)
-        results_df['predicted_class'] = pred_labels
+                # Store results
+                all_predictions.append(batch_pred.cpu())
+                all_probabilities.append(posteriors.cpu())
+                batch_pbar.update(1)
 
-        for i, class_name in enumerate(self.label_encoder.classes_):
-            results_df[f'prob_{class_name}'] = probabilities[:, i]
+            batch_pbar.close()
 
-        results_df['max_probability'] = probabilities.max(axis=1)
+            # Combine results
+            predictions = torch.cat(all_predictions).numpy()
+            probabilities = torch.cat(all_probabilities).numpy()
 
-        return results_df
+            # Create results DataFrame
+            if original_df is not None:
+                results_df = original_df.copy()
+            else:
+                results_df = pd.DataFrame(index=range(len(X_tensor)))
+
+            # Add predictions and probabilities
+            pred_labels = self.label_encoder.inverse_transform(predictions)
+            results_df['predicted_class'] = pred_labels
+
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                results_df[f'prob_{class_name}'] = probabilities[:, i]
+
+            results_df['max_probability'] = probabilities.max(axis=1)
+
+            return results_df
+
+        finally:
+            # Restore original state
+            self.current_W = original_state['current_W']
+            self.best_W = original_state['best_W']
+            if hasattr(self, 'weight_updater') and original_state['weight_updater'] is not None:
+                self.weight_updater = original_state['weight_updater']
 
     def _initialize_weight_updater(self):
         """Initialize weight updater with verified dimensions"""
