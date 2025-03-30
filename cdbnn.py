@@ -5833,7 +5833,7 @@ class DatasetProcessor:
              "model": {
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
-                "feature_dims": 32,
+                "feature_dims": feature_dims,
                 "learning_rate": 0.001,
                 "optimizer": {
                     "type": "Adam",
