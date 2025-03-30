@@ -3378,7 +3378,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
 
         # Model configuration
         model = config.setdefault('model', {})
-        model.setdefault('feature_dims', 128)
+        model.setdefault('feature_dims', 32)
         model.setdefault('learning_rate', 0.001)
         model.setdefault('encoder_type', 'cnn')
         model.setdefault('modelType', 'Histogram')
@@ -4676,7 +4676,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
 class FeatureExtractorCNN(nn.Module):
     """CNN-based feature extractor model with self-attention"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
+    def __init__(self, in_channels: int = 3, feature_dims: int = 32, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
 
@@ -5815,7 +5815,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+        feature_dims = min(32, np.prod(input_size) // 4)
 
         return {
             "dataset": {
@@ -5833,7 +5833,7 @@ class DatasetProcessor:
              "model": {
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
-                "feature_dims": 128,
+                "feature_dims": 32,
                 "learning_rate": 0.001,
                 "optimizer": {
                     "type": "Adam",
