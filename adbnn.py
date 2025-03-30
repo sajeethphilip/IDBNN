@@ -273,6 +273,60 @@ class DBNNPredictor:
                 self.feature_pairs = components.get('feature_pairs')
                 self.feature_columns = components.get('feature_columns')
 
+    def _load_likelihood_params(self, dataset_name: str):
+        """Load likelihood parameters and initialize weight updater"""
+        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
+
+        if not os.path.exists(components_file):
+            raise FileNotFoundError(f"Model components file not found at {components_file}")
+
+        try:
+            with open(components_file, 'rb') as f:
+                components = pickle.load(f)
+
+            # Load likelihood params
+            if 'likelihood_params' in components:
+                self.likelihood_params = components['likelihood_params']
+            elif self.model_type == "Histogram":
+                required = ['bin_probs', 'bin_edges', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'bin_probs': components['bin_probs'],
+                        'bin_edges': components['bin_edges'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
+            elif self.model_type == "Gaussian":
+                required = ['means', 'covs', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'means': components['means'],
+                        'covs': components['covs'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
+
+            # Initialize weight updater
+            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
+                n_classes = len(self.likelihood_params['classes'])
+                feature_pairs = self.likelihood_params.get('feature_pairs', [])
+                if not feature_pairs and hasattr(self, 'feature_pairs'):
+                    feature_pairs = self.feature_pairs
+
+                # Get n_bins_per_dim from components or use default
+                n_bins = self.n_bins_per_dim
+                if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
+                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # Get from first bin_probs dim
+
+                self.weight_updater = BinWeightUpdater(
+                    n_classes=n_classes,
+                    feature_pairs=feature_pairs,
+                    n_bins_per_dim=n_bins,
+                    batch_size=128
+                )
+
+        except Exception as e:
+            raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
 
     def _load_preprocessing_params(self, dataset_name: str):
         """Load preprocessing parameters (scalers, encoders, etc.)"""
@@ -335,50 +389,6 @@ class DBNNPredictor:
                         weights_array[int(class_id), pair_idx] = weight
                 self.current_W = torch.tensor(weights_array, device=self.device)
 
-    def _load_likelihood_params(self, dataset_name: str):
-        """Load likelihood parameters from the comprehensive components file"""
-        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
-
-        if not os.path.exists(components_file):
-            raise FileNotFoundError(f"Model components file not found at {components_file}")
-
-        try:
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-
-            # First try loading from the structured likelihood_params
-            if 'likelihood_params' in components:
-                self.likelihood_params = components['likelihood_params']
-                print("\033[K" +f"Loaded likelihood_params from components file")
-                return
-
-            # Fallback to direct component loading (backward compatibility)
-            if self.model_type == "Histogram":
-                required = ['bin_probs', 'bin_edges', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'bin_probs': components['bin_probs'],
-                        'bin_edges': components['bin_edges'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required histogram components")
-
-            elif self.model_type == "Gaussian":
-                required = ['means', 'covs', 'classes']
-                if all(k in components for k in required):
-                    self.likelihood_params = {
-                        'means': components['means'],
-                        'covs': components['covs'],
-                        'classes': components['classes']
-                    }
-                else:
-                    raise ValueError("Missing required Gaussian components")
-
-            print("\033[K" +f"Loaded {self.model_type} likelihood parameters from {components_file}")
-
-        except Exception as e:
-            raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
 
     def preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
         """
