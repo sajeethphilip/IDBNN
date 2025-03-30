@@ -1,4 +1,5 @@
 #Working, fully functional with predcition 30/March/2025 Stable Model
+# Better Memory management 10:44am
 import torch
 import time
 import argparse
@@ -2118,11 +2119,7 @@ class DBNNConfig:
             config_data = json.load(f)
         return cls(**config_data)
 
-    def save_old(self, config_path: str):
-        """Save configuration to JSON file"""
-        config_dict = {k: v for k, v in self.__dict__.items()}
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2)
+
 
 class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
@@ -2924,47 +2921,6 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
-
-    def _calculate_optimal_batch_size_old(self, sample_tensor_size):
-        """
-        Calculate optimal batch size based on available GPU memory and sample size.
-
-        Args:
-            sample_tensor_size: Size of one sample tensor in bytes
-
-        Returns:
-            optimal_batch_size: int
-        """
-        if not torch.cuda.is_available():
-            print(f"{Colors.RED} The GPU cuda library is unavailable. setting batch size to 128{Colors.ENDC}")
-            return 128  # Default for CPU
-
-        # Get total and reserved GPU memory
-        total_memory = torch.cuda.get_device_properties(0).total_memory
-        reserved_memory = torch.cuda.memory_reserved(0)
-        allocated_memory = torch.cuda.memory_allocated(0)
-
-        # Calculate available memory (leaving 20% as buffer)
-        available_memory = (total_memory - reserved_memory - allocated_memory) * 0.8
-
-        # Calculate memory needed per sample (with buffer for intermediate computations)
-        memory_per_sample = sample_tensor_size * 4  # Factor of 4 for intermediate computations
-
-        # Calculate optimal batch size
-        optimal_batch_size = int(available_memory / memory_per_sample)
-
-        # Enforce minimum and maximum bounds
-        optimal_batch_size = max(32, min(optimal_batch_size, 4096))
-
-        DEBUG.log(f" Memory Analysis:")
-        DEBUG.log(f" - Total GPU Memory: {total_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Reserved Memory: {reserved_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Allocated Memory: {allocated_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Available Memory: {available_memory / 1e9:.2f} GB")
-        DEBUG.log(f" - Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-        print(f" {Colors.GREEN}Batch size updated to- Optimal batch size: {optimal_batch_size}{Colors.ENDC}")
-
-        return optimal_batch_size
 
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
@@ -4415,20 +4371,6 @@ class DBNN(GPUDBNN):
 
             print(f"\033[KSaved best weights and training data to {model_dir}")
 
-    def _save_best_weights_old(self):
-        """Save the best weights to file"""
-        if self.best_W is not None:
-            # Convert tensor to numpy for saving
-            weights_array = self.best_W.cpu().numpy()
-
-            weights_dict = {
-                'version': 2,  # Add version to track format
-                'weights': weights_array.tolist(),
-                'shape': list(weights_array.shape)
-            }
-
-            with open(self._get_weights_filename(), 'w') as f:
-                json.dump(weights_dict, f)
 
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
@@ -4469,51 +4411,6 @@ class DBNN(GPUDBNN):
                 self.best_W = None
 
 
-    def _load_best_weights_old(self):
-        """Load the best weights from file if they exist"""
-        weights_file = self._get_weights_filename()
-        if os.path.exists(weights_file):
-            with open(weights_file, 'r') as f:
-                weights_dict = json.load(f)
-
-            try:
-                if 'version' in weights_dict and weights_dict['version'] == 2:
-                    # New format (tensor-based)
-                    weights_array = np.array(weights_dict['weights'])
-                    self.best_W = torch.tensor(
-                        weights_array,
-                        dtype=torch.float32,
-                        device=self.device
-                    )
-                else:
-                    # Old format (dictionary-based)
-                    # Convert old format to tensor format
-                    class_ids = sorted([int(k) for k in weights_dict.keys()])
-                    max_class_id = max(class_ids)
-
-                    # Get number of feature pairs from first class
-                    first_class = weights_dict[str(class_ids[0])]
-                    n_pairs = len(first_class)
-
-                    # Initialize tensor
-                    weights_array = np.zeros((max_class_id + 1, n_pairs))
-
-                    # Fill in weights from old format
-                    for class_id in class_ids:
-                        class_weights = weights_dict[str(class_id)]
-                        for pair_idx, (pair, weight) in enumerate(class_weights.items()):
-                            weights_array[class_id, pair_idx] = float(weight)
-
-                    self.best_W = torch.tensor(
-                        weights_array,
-                        dtype=torch.float32,
-                        device=self.device
-                    )
-
-                print("\033[K" +f"Loaded best weights from {weights_file}")
-            except Exception as e:
-                print("\033[K" +f"Warning: Could not load weights from {weights_file}: {str(e)}")
-                self.best_W = None
 
     def _init_keyboard_listener(self):
         """Initialize keyboard listener with shared display connection"""
@@ -5599,60 +5496,6 @@ class DBNN(GPUDBNN):
 
         return df_encoded
 
-    def _encode_categorical_features_old(self, df: pd.DataFrame, is_training: bool = True):
-        """Encode categorical features with proper dtype handling"""
-        DEBUG.log("Starting categorical encoding")
-        df_encoded = df.copy()
-        categorical_columns = self._detect_categorical_columns(df)
-
-        for column in categorical_columns:
-            if is_training:
-                if column not in self.categorical_encoders:
-                    # Create new encoder
-                    unique_values = df[column].fillna('MISSING').unique()
-                    self.categorical_encoders[column] = {
-                        value: idx for idx, value in enumerate(unique_values)
-                    }
-
-            if column not in self.categorical_encoders:
-                continue
-
-            # Get original dtype
-            original_dtype = df[column].dtype
-            mapping = self.categorical_encoders[column]
-
-            # Handle missing values and new categories
-            df_encoded[column] = df[column].fillna('MISSING').map(
-                lambda x: mapping.get(x, -1)
-            )
-
-            # Handle unmapped values
-            unmapped = df_encoded[df_encoded[column] == -1].index
-            if len(unmapped) > 0:
-                DEBUG.log(f"Found {len(unmapped)} unmapped values in column {column}")
-
-                # Calculate mean value
-                mapped_values = [v for v in mapping.values() if isinstance(v, (int, float))]
-                if mapped_values:
-                    mean_value = float(np.mean(mapped_values))
-
-                    # Convert to proper dtype based on original column type
-                    if pd.api.types.is_integer_dtype(original_dtype):
-                        mean_value = int(round(mean_value))
-
-                    # Update unmapped values with proper type casting
-                    df_encoded.loc[unmapped, column] = pd.Series([mean_value] * len(unmapped), index=unmapped).astype(original_dtype)
-
-        # Verify no categorical columns remain
-        remaining_object_cols = df_encoded.select_dtypes(include=['object']).columns
-        if len(remaining_object_cols) > 0:
-            DEBUG.log(f"Remaining object columns after encoding: {remaining_object_cols}")
-            # Convert any remaining object columns to numeric
-            for col in remaining_object_cols:
-                df_encoded[col] = pd.to_numeric(df_encoded[col], errors='coerce').fillna(0)
-
-        DEBUG.log(f"Categorical encoding complete. Shape: {df_encoded.shape}")
-        return df_encoded
 
     def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, output_file: str, true_labels: pd.Series = None):
         """Save predictions with proper class handling and probability computation"""
