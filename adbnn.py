@@ -309,14 +309,19 @@ class DBNNPredictor:
             # Initialize weight updater
             if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
                 n_classes = len(self.likelihood_params['classes'])
-                feature_pairs = self.likelihood_params.get('feature_pairs', [])
-                if not feature_pairs and hasattr(self, 'feature_pairs'):
-                    feature_pairs = self.feature_pairs
+
+                # Modified condition to properly check feature_pairs
+                feature_pairs = self.likelihood_params.get('feature_pairs', None)
+                if feature_pairs is None or len(feature_pairs) == 0:
+                    if hasattr(self, 'feature_pairs'):
+                        feature_pairs = self.feature_pairs
+                    else:
+                        feature_pairs = []
 
                 # Get n_bins_per_dim from components or use default
                 n_bins = self.n_bins_per_dim
                 if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
-                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # Get from first bin_probs dim
+                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]
 
                 self.weight_updater = BinWeightUpdater(
                     n_classes=n_classes,
