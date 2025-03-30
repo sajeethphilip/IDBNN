@@ -4380,7 +4380,7 @@ class DBNN(GPUDBNN):
                 'dtype': str(weights_np.dtype)
             }
 
-            weights_file = s.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
+            weights_file = sys.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
             print(f"\033[KAttempting to save weights to {weights_file}")
 
             # Use atomic write to prevent corruption
