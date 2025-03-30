@@ -5710,79 +5710,94 @@ class DBNN(GPUDBNN):
 
         return result_df
 #--------------------------------------------------------------------------------------------------------------
-
     def _save_model_components(self):
-        """Save all model components to a pickle file"""
-        # 1. Save weights
-        if self.best_W is not None:
-            weights_dict = {
-                'version': 2,
-                'weights': self.best_W.cpu().numpy().tolist(),
-                'shape': list(self.best_W.shape)
+        """Save all model components to a pickle file with robust error handling"""
+        try:
+            # 1. Save weights
+            if self.best_W is not None:
+                weights_dict = {
+                    'version': 2,
+                    'weights': self.best_W.cpu().numpy().tolist(),
+                    'shape': list(self.best_W.shape)
+                }
+                weights_file = f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json'
+                os.makedirs(os.path.dirname(weights_file), exist_ok=True)
+                with open(weights_file, 'w') as f:
+                    json.dump(weights_dict, f)
+
+            # Prepare standardization parameters
+            global_mean = self.global_mean if hasattr(self, 'global_mean') else None
+            global_std = self.global_std if hasattr(self, 'global_std') else None
+
+            # Prepare likelihood parameters based on model type
+            likelihood_params = {}
+            if hasattr(self, 'likelihood_params'):
+                if self.model_type == "Histogram":
+                    likelihood_params = {
+                        'bin_probs': [probs.cpu().numpy().tolist()
+                                     for probs in self.likelihood_params.get('bin_probs', [])],
+                        'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
+                                     for edges in self.likelihood_params.get('bin_edges', [])],
+                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
+                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
+                    }
+                elif self.model_type == "Gaussian":
+                    likelihood_params = {
+                        'means': self.likelihood_params.get('means', []).cpu().numpy().tolist(),
+                        'covs': self.likelihood_params.get('covs', []).cpu().numpy().tolist(),
+                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
+                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
+                    }
+
+            components = {
+                'version': 3,  # Version identifier for compatibility
+                'scaler': self.scaler,
+                'label_encoder': {
+                    'classes': self.label_encoder.classes_.tolist()
+                },
+                'likelihood_params': likelihood_params,
+                'model_type': self.model_type,
+                'feature_pairs': self.feature_pairs.cpu().numpy().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
+                'global_mean': global_mean.tolist() if hasattr(global_mean, 'tolist') else global_mean,
+                'global_std': global_std.tolist() if hasattr(global_std, 'tolist') else global_std,
+                'categorical_encoders': self.categorical_encoders,
+                'feature_columns': self.feature_columns,
+                'original_columns': getattr(self, 'original_columns', None),
+                'target_column': self.target_column,
+                'target_classes': self.label_encoder.classes_.tolist(),
+                'target_mapping': dict(zip(range(len(self.label_encoder.classes_)),
+                                         self.label_encoder.classes_)),
+                'config': self.config,
+                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
+                'best_error': getattr(self, 'best_error', float('inf')),
+                'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
+                             for edges in self.bin_edges] if hasattr(self, 'bin_edges') and self.bin_edges else None,
+                'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
+                                  for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None
             }
-            with open(f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json', 'w') as f:
-                json.dump(weights_dict, f)
 
-        # Ensure standardization parameters are numpy arrays before saving
-        global_mean = self.global_mean if hasattr(self, 'global_mean') else None
-        global_std = self.global_std if hasattr(self, 'global_std') else None
+            # Save components
+            components_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
+            os.makedirs(os.path.dirname(components_file), exist_ok=True)
 
-        components = {
-            'scaler': self.scaler,
-            'label_encoder': {
-                'classes': self.label_encoder.classes_.tolist()
-            },
-            'likelihood_params': self.likelihood_params,
-            'model_type': self.model_type,
-            'feature_pairs': self.feature_pairs,
-            # Convert standardization params to lists for safe serialization
-            'global_mean': global_mean.tolist() if global_mean is not None else None,
-            'global_std': global_std.tolist() if global_std is not None else None,
-            'categorical_encoders': self.categorical_encoders,
-            'feature_columns': self.feature_columns,
-            'original_columns': getattr(self, 'original_columns', None),
-            'target_column': self.target_column,
-            'target_classes': self.label_encoder.classes_.tolist(),
-            'target_mapping': dict(zip(range(len(self.label_encoder.classes_)),
-                                     self.label_encoder.classes_)),
-            'config': self.config,
-            'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
-            'best_error': getattr(self, 'best_error', float('inf')),
-            'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
-            'weight_updater': self.weight_updater,
-            'n_bins_per_dim': self.n_bins_per_dim,
-            'bin_edges': [edges.tolist() for edges in self.bin_edges] if hasattr(self, 'bin_edges') else None,
-            'gaussian_params': self.gaussian_params
-        }
+            with open(components_file, 'wb') as f:
+                pickle.dump(components, f)
 
-        # Add model-specific components
-        if self.model_type == "Histogram":
-            components.update({
-                'bin_probs': [probs.tolist() for probs in self.likelihood_params['bin_probs']],
-                'bin_edges': [[edges.tolist() for edges in group] for group in self.likelihood_params['bin_edges']],
-                'classes': self.likelihood_params['classes'].tolist()
-            })
-        elif self.model_type == "Gaussian":
-            components.update({
-                'means': self.likelihood_params['means'].tolist(),
-                'covs': self.likelihood_params['covs'].tolist(),
-                'classes': self.likelihood_params['classes'].tolist()
-            })
+            print(f"\nSaved model components to {components_file}")
+            if global_mean is not None and global_std is not None:
+                print(f"Standardization params saved - mean: {np.array(global_mean).shape}, std: {np.array(global_std).shape}")
+            return True
 
-        # Save components
-        components_file = self._get_model_components_filename()
-        os.makedirs(os.path.dirname(components_file), exist_ok=True)
-
-        with open(components_file, 'wb') as f:
-            pickle.dump(components, f)
-
-        print(f"\nSaved model components to {components_file}")
-        print(f"Standardization params saved - mean: {global_mean.shape if global_mean is not None else None}, std: {global_std.shape if global_std is not None else None}")
-        return True
+        except Exception as e:
+            print(f"\nError saving model components: {str(e)}")
+            traceback.print_exc()
+            return False
 
     def _load_model_components(self):
-        """Load all model components with proper standardization parameter handling"""
-        components_file = self._get_model_components_filename()
+        """Load all model components with proper tensor conversion and validation"""
+        components_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
         print(f"Loading model components from {components_file}")
 
         if not os.path.exists(components_file):
@@ -5810,21 +5825,69 @@ class DBNN(GPUDBNN):
 
             # Load other components
             self.scaler = components.get('scaler')
-            self.likelihood_params = components['likelihood_params']
-            self.feature_pairs = components['feature_pairs']
             self.feature_columns = components.get('feature_columns')
             self.categorical_encoders = components.get('categorical_encoders', {})
             self.high_cardinality_columns = components.get('high_cardinality_columns', [])
-            self.weight_updater = components.get('weight_updater')
             self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
+            self.model_type = components.get('model_type', 'Histogram')
+            self.target_column = components.get('target_column')
 
-            # Convert lists back to tensors where needed
+            # Convert feature pairs back to tensor
+            if 'feature_pairs' in components and components['feature_pairs'] is not None:
+                self.feature_pairs = torch.tensor(components['feature_pairs'], device=self.device)
+
+            # Load likelihood parameters with proper tensor conversion
+            if 'likelihood_params' in components:
+                self.likelihood_params = {}
+                if self.model_type == "Histogram":
+                    if 'bin_probs' in components['likelihood_params']:
+                        self.likelihood_params['bin_probs'] = [
+                            torch.tensor(bp, device=self.device)
+                            for bp in components['likelihood_params']['bin_probs']
+                        ]
+                    if 'bin_edges' in components['likelihood_params']:
+                        self.likelihood_params['bin_edges'] = [
+                            [torch.tensor(edge, device=self.device) for edge in edges]
+                            for edges in components['likelihood_params']['bin_edges']
+                        ]
+                elif self.model_type == "Gaussian":
+                    if 'means' in components['likelihood_params']:
+                        self.likelihood_params['means'] = torch.tensor(
+                            components['likelihood_params']['means'], device=self.device)
+                    if 'covs' in components['likelihood_params']:
+                        self.likelihood_params['covs'] = torch.tensor(
+                            components['likelihood_params']['covs'], device=self.device)
+
+                if 'classes' in components['likelihood_params']:
+                    self.likelihood_params['classes'] = torch.tensor(
+                        components['likelihood_params']['classes'], device=self.device)
+                if 'feature_pairs' in components['likelihood_params']:
+                    self.likelihood_params['feature_pairs'] = torch.tensor(
+                        components['likelihood_params']['feature_pairs'], device=self.device)
+
+            # Load bin edges if available
             if 'bin_edges' in components and components['bin_edges'] is not None:
-                self.bin_edges = [torch.tensor(edges, device=self.device)
-                                for edges in components['bin_edges']]
+                self.bin_edges = [
+                    [torch.tensor(edge, device=self.device) for edge in edges]
+                    for edges in components['bin_edges']
+                ]
 
-            if 'gaussian_params' in components:
-                self.gaussian_params = components['gaussian_params']
+            # Load Gaussian params if available
+            if 'gaussian_params' in components and components['gaussian_params'] is not None:
+                self.gaussian_params = {
+                    k: torch.tensor(v, device=self.device) if isinstance(v, (list, np.ndarray)) else v
+                    for k, v in components['gaussian_params'].items()
+                }
+
+            # Initialize weight updater after loading other components
+            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
+                n_classes = len(self.likelihood_params['classes'])
+                self.weight_updater = BinWeightUpdater(
+                    n_classes=n_classes,
+                    feature_pairs=self.feature_pairs,
+                    n_bins_per_dim=self.n_bins_per_dim,
+                    batch_size=getattr(self, 'batch_size', 128)
+                )
 
             print("Successfully loaded all model components")
             return True
