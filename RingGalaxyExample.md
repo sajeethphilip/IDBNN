@@ -1,4 +1,7 @@
 ```
+Single-line command for training
+>> git pull && python cdbnn.py --data_name galaxies --input_path galaxies.zip --mode train &&  python adbnn.py --file_path data/galaxies/galaxies.csv --mode train
+OR
 >> git pull && python cdbnn.py && python adbnn.py
 
 Enter mode (train/predict) [train]:
