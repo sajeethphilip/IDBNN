@@ -95,7 +95,7 @@ from collections import defaultdict
 class DBNNPredictor:
     """Optimized standalone predictor for DBNN models"""
 
-    def __init__(self, model_dir: str = 'Model', device: str = None):
+    def __init__(self, model_dir='Model', data_dir='data', device=None):
         """
         Initialize predictor with model components.
 
@@ -105,6 +105,8 @@ class DBNNPredictor:
         """
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
+        self.data_dir = data_dir  # Store dataset path
+        self.data = None  # Initialize data attribute
         self.model_type = None  # Will be set during load
         self._is_initialized = False
         self.n_bins_per_dim = 128  # Default value
@@ -123,6 +125,13 @@ class DBNNPredictor:
         self.global_mean = None
         self.global_std = None
 
+    def load_dataset(self, dataset_name):
+        """Load dataset before model loading"""
+        dataset_path = os.path.join(self.data_dir, dataset_name, f"{dataset_name}.csv")
+        if os.path.exists(dataset_path):
+            self.data = pd.read_csv(dataset_path)
+            return True
+        return False
     def load_model(self, dataset_name: str) -> bool:
         """Load all model components with strict initialization order"""
         try:
@@ -6355,7 +6364,15 @@ def main():
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                predictor = DBNNPredictor()
+                #predictor = DBNNPredictor()
+                # Initialize predictor with dataset path
+                predictor = DBNNPredictor(
+                    model_dir='Model',
+                    data_dir=os.path.join('data', dataset_name)  # Add dataset path
+                )
+                # Load dataset before model
+                predictor.load_dataset(dataset_name)  # New method needed
+
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
                     input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
