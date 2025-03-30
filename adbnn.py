@@ -284,7 +284,7 @@ class DBNNPredictor:
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
 
-
+            # Load scaler if available
             if 'scaler' in components:
                 self.scaler = components['scaler']
 
@@ -301,14 +301,6 @@ class DBNNPredictor:
             if 'feature_columns' in components:
                 self.feature_columns = components['feature_columns']
 
-            # Load feature filtering information
-            self.training_feature_columns = components.get('training_feature_columns')
-            self.training_feature_indices = components.get('training_feature_indices')
-            self.global_mean = components.get('global_mean')
-            self.global_std = components.get('global_std')
-
-            print(f"Loaded preprocessing params - using {len(self.training_feature_columns)} features")
-            # Load scaler if available
             print("\033[K" + "Loaded preprocessing parameters", end="\r", flush=True)
 
     def _load_weights(self, dataset_name: str):
@@ -387,21 +379,11 @@ class DBNNPredictor:
         Preprocess input data using saved preprocessing parameters.
         Handles target column removal and feature ordering according to config.
         """
-        if not hasattr(self, 'training_feature_columns'):
-            raise RuntimeError("Model not trained - missing feature columns information")
-
         if not self._is_initialized:
             raise RuntimeError("Predictor not initialized. Call load_model() first.")
-        # Filter to only include expected features from training
-        available_cols = [col for col in self.training_feature_columns if col in df.columns]
-        missing = set(self.training_feature_columns) - set(available_cols)
-        if missing:
-            raise ValueError(f"Missing required columns that were used in training: {missing}")
 
-        # Reorder columns exactly as during training
-        df_processed = df[available_cols].copy()
         # Make a copy to avoid modifying original
-        #df_processed = df.copy()
+        df_processed = df.copy()
 
         # Filter to only include expected features from config
         if hasattr(self, 'feature_columns') and self.feature_columns:
@@ -2160,12 +2142,6 @@ class DBNN(GPUDBNN):
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
-        if self.data_config is None:
-            raise ValueError(f"Failed to load configuration for dataset: {dataset_name}. "
-                            f"Please ensure the config file exists at: "
-                            f"data/{dataset_name}/{dataset_name}.conf")
-
-
         # Metadata storage (CPU only)
         self._metadata = {
             'sample_ids': [],          # Original dataset indices
@@ -3570,10 +3546,6 @@ class DBNN(GPUDBNN):
         """Preprocess data with robust NaN handling and type safety."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
-        # Store original columns if DataFrame
-        if isinstance(X, pd.DataFrame):
-            self.original_columns = X.columns.tolist()
-
         # Check if X is a DataFrame or a tensor
         if isinstance(X, pd.DataFrame):
             DEBUG.log(f"Input shape: {X.shape}")
@@ -3582,8 +3554,8 @@ class DBNN(GPUDBNN):
 
             # Replace NA/NaN with -99999 and keep track of locations
             X = X.copy()
-            self.nan_mask = X.isna()
-            X = X.fillna(-99999)
+            self.nan_mask = X.isna()  # Store NaN locations using pandas' isna()
+            X = X.fillna(-99999)      # Replace with sentinel value
 
             # Convert object/string columns to numeric where possible
             for col in X.select_dtypes(include=['object', 'string']):
@@ -3591,109 +3563,125 @@ class DBNN(GPUDBNN):
                     X[col] = pd.to_numeric(X[col], errors='ignore')
                 except Exception as e:
                     DEBUG.log(f"Could not convert column {col} to numeric: {str(e)}")
+
         else:  # Tensor input
             DEBUG.log("Input is a tensor, skipping column-specific operations")
             X = X.clone().detach()
-            self.nan_mask = torch.isnan(X)
+            self.nan_mask = torch.isnan(X)  # For tensor input
             X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
 
-        # Filter features to match training set if not in training mode
-        if not is_training and hasattr(self, 'training_feature_columns'):
-            if isinstance(X, pd.DataFrame):
-                # Filter and order columns to match training
-                available_cols = [col for col in self.training_feature_columns if col in X.columns]
-                missing = set(self.training_feature_columns) - set(available_cols)
-                if missing:
-                    raise ValueError(f"Missing required columns used in training: {missing}")
-                X = X[available_cols]
-                DEBUG.log(f"Filtered to training features. New shape: {X.shape}")
-            else:
-                # For tensors, assume they're already in correct feature order
-                if X.shape[1] != len(self.training_feature_columns):
-                    raise ValueError(
-                        f"Feature dimension mismatch. Input has {X.shape[1]} features, "
-                        f"but model expects {len(self.training_feature_columns)}"
-                    )
-
-        # Compute global statistics only during training
+        # Step 1: Compute global statistics only once during training
         if is_training and not self.global_stats_computed:
             DEBUG.log("Training mode preprocessing - computing global statistics")
-            self.compute_global_statistics(X)
-            self.global_stats_computed = True
-            # Store the features we actually use
-            self.training_feature_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
-            DEBUG.log(f"Stored training feature columns: {self.training_feature_columns}")
+            self.compute_global_statistics(X)  # Compute global stats only once
+            self.global_stats_computed = True  # Mark stats as computed
+        elif is_training:
+            DEBUG.log("Training mode preprocessing - using precomputed global statistics")
 
-        # Handle high cardinality columns only during training
+        # Step 2: Handle high cardinality columns (only during training)
         if is_training:
+            self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
             cardinality_threshold = self._calculate_cardinality_threshold()
             DEBUG.log(f"Cardinality threshold: {cardinality_threshold}")
             if isinstance(X, pd.DataFrame):
                 X = self._remove_high_cardinality_columns(X, cardinality_threshold)
-                self.training_feature_columns = X.columns.tolist()
-                DEBUG.log(f"Updated training features after cardinality filtering: {self.training_feature_columns}")
+            DEBUG.log(f"Shape after cardinality filtering: {X.shape}")
 
-        # Handle categorical encoding
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+            DEBUG.log(f"Selected feature columns: {self.feature_columns}")
+
+            # Store high cardinality columns for future reference
+            if isinstance(X, pd.DataFrame):
+                self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+                if self.high_cardinality_columns:
+                    DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
+
+        # Step 3: Handle categorical features with safe type conversion
+        DEBUG.log("Starting categorical encoding")
         try:
             if isinstance(X, pd.DataFrame):
                 X_encoded = self._encode_categorical_features(X, is_training)
             else:
-                X_encoded = X
-            DEBUG.log(f"Shape after encoding: {X_encoded.shape}")
+                X_encoded = X  # Skip encoding if X is already a tensor
+            DEBUG.log(f"Shape after categorical encoding: {X_encoded.shape}")
+            if isinstance(X_encoded, pd.DataFrame):
+                DEBUG.log(f"Encoded dtypes:\n{X_encoded.dtypes}")
         except Exception as e:
             DEBUG.log(f"Error in categorical encoding: {str(e)}")
             raise
 
-        # Convert to numpy array
+        # Step 4: Safe conversion to numpy with improved NaN checking
         try:
             if isinstance(X_encoded, pd.DataFrame):
-                X_numpy = X_encoded.to_numpy(dtype=np.float32)
+                X_numpy = X_encoded.to_numpy(dtype=np.float32)  # Force float32 conversion
             else:
                 X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float32)
+
+            DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
+
+            # Safe NaN/Inf checking
+            try:
+                DEBUG.log(f"Any NaN: {np.any(np.isnan(X_numpy))}")
+            except TypeError:
+                DEBUG.log("NaN check skipped - incompatible dtype")
+
+            try:
+                DEBUG.log(f"Any Inf: {np.any(np.isinf(X_numpy))}")
+            except TypeError:
+                DEBUG.log("Inf check skipped - incompatible dtype")
+
         except Exception as e:
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
-        # Apply standardization
+        # Step 5: Scale the features using precomputed global statistics
         try:
             X_scaled = np.zeros_like(X_numpy, dtype=np.float32)
             batch_size = self._calculate_optimal_batch_size(X_numpy.nbytes) if hasattr(self, '_calculate_optimal_batch_size') else 1024
 
-            # Use filtered mean/std if available
-            current_mean = self.global_mean
-            current_std = self.global_std
-            if hasattr(self, 'training_feature_columns') and not is_training:
-                # For prediction, ensure we're using the right subset of features
-                if isinstance(X, pd.DataFrame) and len(current_mean) != X_numpy.shape[1]:
-                    raise ValueError(
-                        f"Feature dimension mismatch. Data has {X_numpy.shape[1]} features, "
-                        f"but mean/std have {len(current_mean)} features"
-                    )
-
             for i in range(0, len(X_numpy), batch_size):
                 batch_end = min(i + batch_size, len(X_numpy))
                 batch_X = X_numpy[i:batch_end]
-                X_scaled[i:batch_end] = (batch_X - current_mean) / current_std
-        except Exception as e:
-            DEBUG.log(f"Standard scaling failed: {str(e)}")
-            raise
 
-        # Convert to tensor
+                # Scale the batch using precomputed global statistics
+                X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
+
+            DEBUG.log("Scaling successful")
+        except Exception as e:
+            DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
+            if X_numpy.size == 0:
+                print("\033[K" + "[WARNING] Empty feature array! Returning original data")
+                X_scaled = X_numpy
+            else:
+                means = np.nanmean(X_numpy, axis=0)
+                stds = np.nanstd(X_numpy, axis=0)
+                stds[stds == 0] = 1
+                X_scaled = (X_numpy - means) / stds
+
+        # Step 6: Convert scaled data to a PyTorch tensor
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
 
-        # Compute feature pairs and bin edges during training
+        # Step 7: Compute feature pairs and bin edges (only during training)
         if is_training:
-            remaining_feature_indices = list(range(len(self.training_feature_columns))) if self.training_feature_columns else list(range(X_scaled.shape[1]))
+            remaining_feature_indices = list(range(len(self.feature_columns))) if self.feature_columns else list(range(X_scaled.shape[1]))
             DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
 
+            # Generate feature pairs using the updated set of features
             self.feature_pairs = self._generate_feature_combinations(
                 remaining_feature_indices,
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
             )
-            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
+            DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
 
+            # Compute bin edges using the preprocessed data (now a tensor)
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
+            DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
+
+        DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
+
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations with memory-efficient handling.
@@ -5608,8 +5596,6 @@ class DBNN(GPUDBNN):
             'likelihood_params': self.likelihood_params,
             'model_type': self.model_type,
             'feature_pairs': self.feature_pairs,
-            'training_feature_columns': self.training_feature_columns,
-            'training_feature_indices': self.training_feature_indices,
             'global_mean': self.global_mean,
             'global_std': self.global_std,
             'categorical_encoders': self.categorical_encoders,
@@ -6223,16 +6209,6 @@ def print_dataset_info(conf_path: str, csv_path: str):
         print("\033[K" +f"Error reading dataset info: {str(e)}")
         print("\033[K" +f"Traceback: {traceback.format_exc()}")
 
-def get_dataset_name(file_path):
-    """Extracts dataset name from file path (e.g., 'data/mnist/test.csv' → 'mnist')"""
-    path_parts = os.path.normpath(file_path).split(os.sep)
-    if len(path_parts) >= 2 and path_parts[-2] == "data":
-        return path_parts[-1].split('.')[0]  # Handles 'data/mydata.csv'
-    elif "data" in path_parts:
-        data_idx = path_parts.index("data")
-        if data_idx + 1 < len(path_parts):
-            return path_parts[data_idx + 1]  # Handles 'data/mnist/test.csv'
-    return os.path.splitext(os.path.basename(file_path))[0]  # Fallback (e.g., 'mydata.csv')
 
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
@@ -6485,8 +6461,7 @@ def main():
 
         elif args.mode in ['train', 'train_predict', 'predict']:
             if args.file_path:
-                basename =  get_dataset_name(args.file_path)
-                #basename = os.path.splitext(os.path.basename(args.file_path))[0]
+                basename = os.path.splitext(os.path.basename(args.file_path))[0]
                 conf_path = os.path.join('data', basename, f'{basename}.conf')
                 csv_path = os.path.join('data', basename, f'{basename}.csv')
                 process_single_dataset(basename, conf_path, csv_path, args.mode)
