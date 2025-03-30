@@ -2810,29 +2810,57 @@ class DBNN(GPUDBNN):
 
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
         """
-        Vectorized computation of pairwise feature divergence.
+        Memory-efficient computation of pairwise feature divergence.
+        Processes feature pairs in batches to avoid OOM errors.
         """
         n_samples = sample_data.shape[0]
         if n_samples <= 1:
             return torch.zeros((1, 1), device=self.device)
 
-        # Pre-allocate tensor for pair distances
-        pair_distances = torch.zeros((len(feature_pairs), n_samples, n_samples),
-                                   device=self.device)
+        # Calculate maximum number of pairs we can process at once
+        pair_element_size = 4  # bytes per float32 element
+        matrix_size = n_samples * n_samples * pair_element_size
+        available_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
+        max_pairs_per_batch = max(1, int(available_mem * 0.5 / matrix_size))  # Use only 50% of available memory
 
-        # Compute distances for all pairs in one batch
-        for i, pair in enumerate(feature_pairs):
-            pair_data = sample_data[:, pair]
-            # Vectorized pairwise difference computation
-            diff = pair_data.unsqueeze(1) - pair_data.unsqueeze(0)
-            pair_distances[i] = torch.norm(diff, dim=2)
+        # Initialize result on CPU (we'll move to GPU later if needed)
+        total_distances = torch.zeros((n_samples, n_samples), device='cpu')
 
-        # Average across feature pairs
-        distances = torch.mean(pair_distances, dim=0)
+        # Process feature pairs in batches
+        for batch_start in range(0, len(feature_pairs), max_pairs_per_batch):
+            batch_end = min(batch_start + max_pairs_per_batch, len(feature_pairs))
+            batch_pairs = feature_pairs[batch_start:batch_end]
 
-        # Normalize
-        if distances.max() > 0:
-            distances /= distances.max()
+            # Move only the needed data to GPU
+            with torch.no_grad():
+                # Get batch data (shape: [n_samples, n_pairs, 2])
+                batch_data = torch.stack([sample_data[:, pair] for pair in batch_pairs], dim=1)
+                batch_data = batch_data.to(self.device)
+
+                # Compute pairwise differences (shape: [n_samples, n_samples, n_pairs, 2])
+                diff = batch_data.unsqueeze(1) - batch_data.unsqueeze(0)
+
+                # Compute distances for this batch (shape: [n_samples, n_samples, n_pairs])
+                batch_distances = torch.norm(diff, dim=3)
+
+                # Sum distances and move to CPU immediately
+                total_distances += batch_distances.sum(dim=2).cpu()
+
+                # Clean up
+                del batch_data, diff, batch_distances
+                torch.cuda.empty_cache()
+
+        # Compute mean distance across all pairs
+        distances = total_distances / len(feature_pairs)
+
+        # Normalize if needed
+        max_val = distances.max()
+        if max_val > 0:
+            distances /= max_val
+
+        # Move to device if it's small enough
+        if n_samples * n_samples * 4 < 1e8:  # ~100MB
+            distances = distances.to(self.device)
 
         return distances
 
@@ -2861,6 +2889,43 @@ class DBNN(GPUDBNN):
         return cardinalities
 
     def _calculate_optimal_batch_size(self, sample_tensor_size):
+        """Calculate optimal batch size with more conservative estimates"""
+        if not torch.cuda.is_available():
+            return 128  # Default for CPU
+
+        try:
+            # Get memory stats
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            allocated = torch.cuda.memory_allocated(0)
+            reserved = torch.cuda.memory_reserved(0)
+            free_memory = total_memory - allocated - reserved
+
+            # Be more conservative - use only 30% of free memory
+            available_memory = free_memory * 0.3
+
+            # Calculate memory needed per sample (with safety factor)
+            memory_per_sample = sample_tensor_size * 8  # More conservative estimate
+
+            # Calculate optimal batch size
+            optimal_batch_size = int(available_memory / memory_per_sample)
+
+            # Enforce reasonable bounds
+            optimal_batch_size = max(32, min(optimal_batch_size, 2048))  # Reduced max from 4096
+
+            DEBUG.log(f"Memory Analysis:")
+            DEBUG.log(f"- Total GPU Memory: {total_memory / 1e9:.2f} GB")
+            DEBUG.log(f"- Free Memory: {free_memory / 1e9:.2f} GB")
+            DEBUG.log(f"- Available for batch: {available_memory / 1e9:.2f} GB")
+            DEBUG.log(f"- Memory per sample: {memory_per_sample / 1e6:.2f} MB")
+            print(f"{Colors.GREEN}Batch size set to {optimal_batch_size}{Colors.ENDC}")
+
+            return optimal_batch_size
+
+        except Exception as e:
+            print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
+            return 128  # Fallback value
+
+    def _calculate_optimal_batch_size_old(self, sample_tensor_size):
         """
         Calculate optimal batch size based on available GPU memory and sample size.
 
