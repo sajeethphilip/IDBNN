@@ -2573,8 +2573,6 @@ class DBNN(GPUDBNN):
 
             # Handle target column
             target_col = self.config['target_column']
-            if target_col in df.columns:
-                df[target_col] = df[target_col].astype(str)
             if isinstance(target_col, int):
                 target_col = df.columns[target_col]
                 self.config['target_column'] = target_col
@@ -4318,8 +4316,7 @@ class DBNN(GPUDBNN):
         # Store current weights temporarily
         temp_W = self.current_W
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
-        if hasattr(self, 'target_column') and self.target_column in X.columns:
-            X[self.target_column] = X[self.target_column].astype(str)
+
         try:
             # Convert DataFrame to tensor if needed
             if isinstance(X, pd.DataFrame):
