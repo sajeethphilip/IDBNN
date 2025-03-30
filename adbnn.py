@@ -2208,6 +2208,9 @@ class DBNN(GPUDBNN):
         self.global_std = None   # Store global standard deviation
         self.global_stats_computed = False  # Flag to track if stats are computed
 
+        # Load dataset if name provided
+        if dataset_name:
+            self._load_dataset()
         # Validate dataset_name
         if not dataset_name or not isinstance(dataset_name, str):
             raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
@@ -2224,7 +2227,29 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
+    def _load_dataset(self):
+        """Load dataset and store in data attribute"""
+        try:
+            config_path = os.path.join('data', self.dataset_name, f"{self.dataset_name}.conf")
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config file not found: {config_path}")
 
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+
+            file_path = self.config.get('file_path')
+            if not file_path:
+                file_path = os.path.join('data', self.dataset_name, f"{self.dataset_name}.csv")
+
+            if os.path.exists(file_path):
+                self.data = pd.read_csv(file_path)
+                self.Original_data = self.data.copy()
+                self.X_Orig = self.Original_data.drop(columns=[self.target_column]).copy()
+                return True
+            return False
+        except Exception as e:
+            print(f"Error loading dataset: {str(e)}")
+            return False
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
         batch_size = self.batch_size  # Adjust based on available memory
