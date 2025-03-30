@@ -389,8 +389,21 @@ class DBNNPredictor:
         if hasattr(self, 'feature_columns') and self.feature_columns:
             # Ensure we only keep columns that exist in both model and input data
             available_cols = [col for col in self.feature_columns if col in df_processed.columns]
+            missing_cols = set(self.feature_columns) - set(available_cols)
             if not available_cols:
                 raise ValueError("No matching features found between model and input data")
+            if missing_cols:
+                print(f"Warning: Missing features in input data: {missing_cols}")
+                print(f"Available features: {df_processed.columns.tolist()}")
+
+                # If we're missing critical features, raise an error
+                if len(available_cols) == 0:
+                    raise ValueError(f"No matching features found between model and input data. "
+                                   f"Model expects: {self.feature_columns}, "
+                                   f"Input has: {df_processed.columns.tolist()}")
+
+                # Otherwise proceed with available features but warn
+                print(f"Proceeding with available features: {available_cols}")
 
             # Remove target column if present
             if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
@@ -422,26 +435,22 @@ class DBNNPredictor:
         # Apply standardization using precomputed global stats
         if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
             try:
-                # Ensure global_mean and global_std are numpy arrays
+                # Align global stats with available features
                 global_mean = np.asarray(self.global_mean)
                 global_std = np.asarray(self.global_std)
 
-                # Check shapes match
-                if X_numpy.shape[1] != len(global_mean):
-                    raise ValueError(
-                        f"Feature dimension mismatch. "
-                        f"Data has {X_numpy.shape[1]} features, "
-                        f"but mean/std have {len(global_mean)} features"
-                    )
+                # If we have fewer features than expected, select corresponding stats
+                if X_numpy.shape[1] < len(global_mean):
+                    print(f"Adjusting standardization for feature mismatch: "
+                          f"using first {X_numpy.shape[1]} of {len(global_mean)} stats")
+                    global_mean = global_mean[:X_numpy.shape[1]]
+                    global_std = global_std[:X_numpy.shape[1]]
 
-                # Perform standardization on numpy array
                 X_scaled = (X_numpy - global_mean) / global_std
-            except ValueError as e:
+            except Exception as e:
                 raise ValueError(
-                    f"Standardization error. "
-                    f"Data shape: {X_numpy.shape}, "
-                    f"Mean shape: {global_mean.shape}, "
-                    f"Std shape: {global_std.shape}. "
+                    f"Standardization error with shapes - "
+                    f"Data: {X_numpy.shape}, Mean: {global_mean.shape}, Std: {global_std.shape}. "
                     f"Error: {str(e)}"
                 ) from e
         else:
