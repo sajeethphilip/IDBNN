@@ -936,7 +936,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 256:
+            if current_size < 128:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
@@ -4881,7 +4881,7 @@ class DynamicAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 256:
+            if current_size < 128:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
@@ -5473,7 +5473,7 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
+                 target_size: int = 128, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size  # Store target_size as an instance variable
@@ -5550,7 +5550,7 @@ class CustomImageDataset(Dataset):
 
     def _preprocess_all_images(self):
         """
-        Preprocess all images to ensure consistent shapes (256x256).
+        Preprocess all images to ensure consistent shapes (128x128).
         """
         # Create a directory to store preprocessed images (if saving to disk)
         self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
