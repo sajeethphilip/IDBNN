@@ -6215,6 +6215,16 @@ def print_dataset_info(conf_path: str, csv_path: str):
         print("\033[K" +f"Error reading dataset info: {str(e)}")
         print("\033[K" +f"Traceback: {traceback.format_exc()}")
 
+def get_dataset_name(file_path):
+    """Extracts dataset name from file path (e.g., 'data/mnist/test.csv' → 'mnist')"""
+    path_parts = os.path.normpath(file_path).split(os.sep)
+    if len(path_parts) >= 2 and path_parts[-2] == "data":
+        return path_parts[-1].split('.')[0]  # Handles 'data/mydata.csv'
+    elif "data" in path_parts:
+        data_idx = path_parts.index("data")
+        if data_idx + 1 < len(path_parts):
+            return path_parts[data_idx + 1]  # Handles 'data/mnist/test.csv'
+    return os.path.splitext(os.path.basename(file_path))[0]  # Fallback (e.g., 'mydata.csv')
 
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
@@ -6467,7 +6477,8 @@ def main():
 
         elif args.mode in ['train', 'train_predict', 'predict']:
             if args.file_path:
-                basename = os.path.splitext(os.path.basename(args.file_path))[0]
+                basename =  = get_dataset_name(args.file_path)
+                #basename = os.path.splitext(os.path.basename(args.file_path))[0]
                 conf_path = os.path.join('data', basename, f'{basename}.conf')
                 csv_path = os.path.join('data', basename, f'{basename}.csv')
                 process_single_dataset(basename, conf_path, csv_path, args.mode)
