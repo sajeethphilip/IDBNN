@@ -124,6 +124,37 @@ class DBNNPredictor:
         self.global_std = None
         self.data = None
 
+    def _load_dataset(self, dataset_name: str) -> None:
+        """Load the dataset for the predictor"""
+        try:
+            # Load configuration
+            config = DatasetConfig.load_config(dataset_name)
+            if config is None:
+                raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
+
+            self.target_column = config['target_column']
+
+            # Load data
+            file_path = config.get('file_path')
+            if not file_path:
+                raise ValueError("No file path in config")
+
+            if file_path.startswith(('http://', 'https://')):
+                self.data = pd.read_csv(StringIO(requests.get(file_path).text),
+                                     sep=config.get('separator', ','),
+                                     header=0 if config.get('has_header', True) else None)
+            else:
+                self.data = pd.read_csv(file_path,
+                                     sep=config.get('separator', ','),
+                                     header=0 if config.get('has_header', True) else None)
+
+            # Filter features if specified
+            if 'column_names' in config:
+                self.data = _filter_features_from_config(self.data, config)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to load dataset: {str(e)}")
+
     def load_model(self, dataset_name: str) -> bool:
         """Load all model components with strict initialization order"""
         try:
