@@ -1,5 +1,5 @@
 #Working, fully functional with predcition 30/March/2025
-#Revisions on Mar30 2025
+#Revisions on Mar30 2025 Stable version 8:56 AM
 import torch
 import copy
 import sys
@@ -7750,5 +7750,5 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
 
 if __name__ == '__main__':
     print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
-    print("Updated on March 30/2025 ")
+    print("Updated on March 30/2025 Stable version")
     sys.exit(main())
