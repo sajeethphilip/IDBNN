@@ -201,7 +201,8 @@ class DBNNPredictor:
             if isinstance(encoder, dict):
                 if 'classes_' in encoder:
                     new_encoder = LabelEncoder()
-                    new_encoder.classes_ = np.array(encoder['classes_'])
+                    # Ensure classes are loaded as strings
+                    new_encoder.classes_ = np.array([str(c) for c in encoder['classes_']])
                     encoder = new_encoder
                     # Resave it properly
                     with open(encoder_path, 'wb') as f:
@@ -212,6 +213,8 @@ class DBNNPredictor:
             # Validate the loaded encoder
             if not hasattr(encoder, 'classes_') or not hasattr(encoder, 'transform'):
                 raise ValueError("Invalid label encoder format")
+            # Ensure classes are strings
+            encoder.classes_ = np.array([str(c) for c in encoder.classes_])
 
             self.label_encoder = encoder
             print(f"\033[KLoaded label encoder with classes: {encoder.classes_}")
