@@ -2190,7 +2190,7 @@ class DBNN(GPUDBNN):
         self.best_round_initial_conditions = None  # Save initial conditions of the best round
         self.best_combined_accuracy = 0.00
         self.best_model_weights = None
-
+        self.data = None
         self.global_mean = None  # Store global mean
         self.global_std = None   # Store global standard deviation
         self.global_stats_computed = False  # Flag to track if stats are computed
