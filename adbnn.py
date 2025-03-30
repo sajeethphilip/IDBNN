@@ -172,7 +172,7 @@ class DBNNPredictor:
 
     def _load_label_encoder(self, dataset_name: str):
         """Robust label encoder loading with validation"""
-        encoder_path = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}', 'label_encoder.pkl')
+        encoder_path = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl')
 
         if not os.path.exists(encoder_path):
             raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
