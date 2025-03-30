@@ -5775,13 +5775,13 @@ class DBNN(GPUDBNN):
                 'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
                              for edges in self.bin_edges] if hasattr(self, 'bin_edges') and self.bin_edges else None,
                  }
-                if self.model_type == "Histogram":
-                    components.update({
-                    'likelihood_params': likelihood_params})
-                elif self.model_type == "Gaussian":
-                    components.update({
-                    'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
-                                      for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None})
+            if self.model_type == "Histogram":
+                components.update({
+                'likelihood_params': likelihood_params})
+            elif self.model_type == "Gaussian":
+                components.update({
+                'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
+                                  for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None})
 
 
             # Save components
