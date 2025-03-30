@@ -5669,11 +5669,21 @@ class DBNN(GPUDBNN):
     def _save_model_components(self):
         """Save all model components to a pickle file with robust error handling and tensor preservation"""
         try:
+            # Helper function to safely convert to numpy
+            def to_numpy(data):
+                if isinstance(data, pd.Series):
+                    return data.to_numpy()
+                elif torch.is_tensor(data):
+                    return data.cpu().numpy()
+                elif isinstance(data, (list, np.ndarray)):
+                    return np.array(data)
+                return data
+
             # 1. Save weights
             if self.best_W is not None:
                 weights_dict = {
                     'version': 2,
-                    'weights': self.best_W.cpu().numpy().tolist(),
+                    'weights': to_numpy(self.best_W).tolist(),
                     'shape': list(self.best_W.shape)
                 }
                 weights_file = f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json'
@@ -5681,55 +5691,53 @@ class DBNN(GPUDBNN):
                 with open(weights_file, 'w') as f:
                     json.dump(weights_dict, f)
 
-            # Prepare components dictionary with tensor preservation
+            # Prepare components dictionary
             components = {
-                'version': 4,  # New version to indicate tensor preservation
+                'version': 4,
                 'model_type': self.model_type,
                 'feature_columns': getattr(self, 'feature_columns', None),
                 'original_columns': getattr(self, 'original_columns', None),
                 'target_column': self.target_column,
-                'target_classes': self.label_encoder.classes_.tolist(),
+                'target_classes': to_numpy(self.label_encoder.classes_),
                 'config': self.config,
                 'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
                 'n_bins_per_dim': self.n_bins_per_dim,
             }
 
-            # Add tensor components with proper preservation
+            # Add tensor components
             if hasattr(self, 'global_mean'):
-                components['global_mean'] = self.global_mean if isinstance(self.global_mean, (list, np.ndarray)) else self.global_mean.cpu().numpy()
+                components['global_mean'] = to_numpy(self.global_mean)
             if hasattr(self, 'global_std'):
-                components['global_std'] = self.global_std if isinstance(self.global_std, (list, np.ndarray)) else self.global_std.cpu().numpy()
+                components['global_std'] = to_numpy(self.global_std)
 
             # Handle feature pairs
             if hasattr(self, 'feature_pairs'):
-                components['feature_pairs'] = self.feature_pairs.cpu().numpy() if torch.is_tensor(self.feature_pairs) else self.feature_pairs
+                components['feature_pairs'] = to_numpy(self.feature_pairs)
 
-            # Handle likelihood parameters based on model type
+            # Handle likelihood parameters
             if hasattr(self, 'likelihood_params'):
                 if self.model_type == "Histogram":
                     components['likelihood_params'] = {
-                        'bin_probs': [probs.cpu().numpy() for probs in self.likelihood_params.get('bin_probs', [])],
-                        'bin_edges': [[edge.cpu().numpy() for edge in edges] for edges in self.likelihood_params.get('bin_edges', [])],
-                        'classes': self.likelihood_params.get('classes', torch.tensor([])).cpu().numpy(),
-                        'feature_pairs': self.likelihood_params.get('feature_pairs', torch.tensor([])).cpu().numpy()
+                        'bin_probs': [to_numpy(probs) for probs in self.likelihood_params.get('bin_probs', [])],
+                        'bin_edges': [[to_numpy(edge) for edge in edges] for edges in self.likelihood_params.get('bin_edges', [])],
+                        'classes': to_numpy(self.likelihood_params.get('classes', [])),
+                        'feature_pairs': to_numpy(self.likelihood_params.get('feature_pairs', []))
                     }
                 elif self.model_type == "Gaussian":
                     components['likelihood_params'] = {
-                        'means': self.likelihood_params.get('means', torch.tensor([])).cpu().numpy(),
-                        'covs': self.likelihood_params.get('covs', torch.tensor([])).cpu().numpy(),
-                        'classes': self.likelihood_params.get('classes', torch.tensor([])).cpu().numpy(),
-                        'feature_pairs': self.likelihood_params.get('feature_pairs', torch.tensor([])).cpu().numpy()
+                        'means': to_numpy(self.likelihood_params.get('means', [])),
+                        'covs': to_numpy(self.likelihood_params.get('covs', [])),
+                        'classes': to_numpy(self.likelihood_params.get('classes', [])),
+                        'feature_pairs': to_numpy(self.likelihood_params.get('feature_pairs', []))
                     }
 
-            # Handle bin edges
+            # Handle bin edges and Gaussian params
             if hasattr(self, 'bin_edges') and self.bin_edges:
-                components['bin_edges'] = [[edge.cpu().numpy() for edge in edges] for edges in self.bin_edges]
+                components['bin_edges'] = [[to_numpy(edge) for edge in edges] for edges in self.bin_edges]
 
-            # Handle Gaussian params if they exist
             if hasattr(self, 'gaussian_params') and self.gaussian_params:
                 components['gaussian_params'] = {
-                    k: v.cpu().numpy() if torch.is_tensor(v) else v
-                    for k, v in self.gaussian_params.items()
+                    k: to_numpy(v) for k, v in self.gaussian_params.items()
                 }
 
             # Save components
@@ -5737,7 +5745,7 @@ class DBNN(GPUDBNN):
             os.makedirs(os.path.dirname(components_file), exist_ok=True)
 
             with open(components_file, 'wb') as f:
-                pickle.dump(components, f)
+                pickle.dump(components, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             print(f"\nSaved model components to {components_file}")
             return True
