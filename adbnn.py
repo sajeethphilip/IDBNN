@@ -5710,7 +5710,7 @@ class DBNN(GPUDBNN):
 
         return result_df
 #--------------------------------------------------------------------------------------------------------------
-     def _save_model_components(self):
+    def _save_model_components(self):
         """Save all model components to a pickle file with robust error handling and tensor preservation"""
         try:
             # 1. Save weights
