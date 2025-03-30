@@ -5694,6 +5694,16 @@ class DBNN(GPUDBNN):
 
     def _save_model_components(self):
         """Save all model components to a pickle file"""
+
+         # 1. Save weights
+        if self.best_W is not None:
+            weights_dict = {
+                'version': 2,
+                'weights': self.best_W.cpu().numpy().tolist(),
+                'shape': list(self.best_W.shape)
+            }
+            with open(f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json', 'w') as f:
+                json.dump(weights_dict, f)
         components = {
             'scaler': self.scaler,
             'label_encoder': {
