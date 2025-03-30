@@ -344,10 +344,15 @@ class DBNNPredictor:
             if 'categorical_encoders' in components:
                 self.categorical_encoders = components['categorical_encoders']
 
-            # Load global stats if available
+            # Load global stats if available - ensure they are numpy arrays
             if 'global_mean' in components and 'global_std' in components:
-                self.global_mean = components['global_mean']
-                self.global_std = components['global_std']
+                self.global_mean = np.asarray(components['global_mean'])
+                self.global_std = np.asarray(components['global_std'])
+
+                # Handle scalar values
+                if np.isscalar(self.global_mean) or self.global_mean.ndim == 0:
+                    self.global_mean = np.array([self.global_mean])
+                    self.global_std = np.array([self.global_std])
 
             # Load feature columns if available
             if 'feature_columns' in components:
@@ -448,8 +453,8 @@ class DBNNPredictor:
             if not available_cols:
                 raise ValueError("No matching features found between model and input data")
             if missing_cols:
-                print(f"Warning: Missing features in input data: {missing_cols}")
-                print(f"Available features: {df_processed.columns.tolist()}")
+                print(f"\033[KWarning: Missing features in input data: {missing_cols}")
+                print(f"\033[KAvailable features: {df_processed.columns.tolist()}")
 
                 # If we're missing critical features, raise an error
                 if len(available_cols) == 0:
@@ -458,7 +463,7 @@ class DBNNPredictor:
                                    f"Input has: {df_processed.columns.tolist()}")
 
                 # Otherwise proceed with available features but warn
-                print(f"Proceeding with available features: {available_cols}")
+                print(f"\033[KProceeding with available features: {available_cols}")
 
             # Remove target column if present
             if hasattr(self, 'target_column') and self.target_column in df_processed.columns:
@@ -485,29 +490,43 @@ class DBNNPredictor:
         df_processed = df_processed.fillna(-99999)
 
         # Convert to numpy array - ensuring float32 dtype
-        X_numpy = df_processed.to_numpy(dtype=np.float32)  # Convert to numpy array first
+        X_numpy = df_processed.to_numpy(dtype=np.float32)
 
         # Apply standardization using precomputed global stats
         if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
             try:
-                # Align global stats with available features
-                global_mean = np.asarray(self.global_mean)
-                global_std = np.asarray(self.global_std)
+                # Convert global stats to numpy arrays if they aren't already
+                global_mean = np.asarray(self.global_mean) if not isinstance(self.global_mean, np.ndarray) else self.global_mean
+                global_std = np.asarray(self.global_std) if not isinstance(self.global_std, np.ndarray) else self.global_std
 
-                # If we have fewer features than expected, select corresponding stats
-                if X_numpy.shape[1] < len(global_mean):
-                    print(f"Adjusting standardization for feature mismatch: "
-                          f"using first {X_numpy.shape[1]} of {len(global_mean)} stats")
-                    global_mean = global_mean[:X_numpy.shape[1]]
-                    global_std = global_std[:X_numpy.shape[1]]
+                # Handle scalar values by expanding to array
+                if np.isscalar(global_mean) or global_mean.ndim == 0:
+                    global_mean = np.array([global_mean])
+                    global_std = np.array([global_std])
 
-                X_scaled = (X_numpy - global_mean) / global_std
+                # Handle empty arrays by falling back to no standardization
+                if global_mean.size == 0 or global_std.size == 0:
+                    print("\033[KWarning: Empty global statistics, skipping standardization")
+                    X_scaled = X_numpy
+                else:
+                    # If we have fewer features than expected, select corresponding stats
+                    if X_numpy.shape[1] < len(global_mean):
+                        print("\033[KAdjusting standardization for feature mismatch: "
+                              f"using first {X_numpy.shape[1]} of {len(global_mean)} stats")
+                        global_mean = global_mean[:X_numpy.shape[1]]
+                        global_std = global_std[:X_numpy.shape[1]]
+
+                    # Ensure shapes match before standardization
+                    if X_numpy.shape[1] != len(global_mean):
+                        raise ValueError(
+                            f"Feature dimension mismatch. Data has {X_numpy.shape[1]} features, "
+                            f"but global stats have {len(global_mean)} dimensions"
+                        )
+
+                    X_scaled = (X_numpy - global_mean) / global_std
             except Exception as e:
-                raise ValueError(
-                    f"Standardization error with shapes - "
-                    f"Data: {X_numpy.shape}, Mean: {global_mean.shape}, Std: {global_std.shape}. "
-                    f"Error: {str(e)}"
-                ) from e
+                print(f"\033[KWarning: Standardization failed, using raw features. Error: {str(e)}")
+                X_scaled = X_numpy
         else:
             X_scaled = X_numpy
 
