@@ -273,56 +273,60 @@ class DBNNPredictor:
                 self.feature_pairs = components.get('feature_pairs')
                 self.feature_columns = components.get('feature_columns')
 
-    def _load_likelihood_params(self, dataset_name: str) -> bool:
-        """Load likelihood parameters with proper tensor conversion and validation"""
+    def _load_likelihood_params(self, dataset_name: str):
+        """Load likelihood parameters and initialize weight updater"""
         components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
 
         if not os.path.exists(components_file):
             raise FileNotFoundError(f"Model components file not found at {components_file}")
 
         try:
-            components = torch.load(components_file, map_location=self.device)
+            with open(components_file, 'rb') as f:
+                components = pickle.load(f)
 
-            # Initialize likelihood params structure
-            self.likelihood_params = {
-                'model_type': components.get('model_type', 'Histogram'),
-                'classes': components.get('classes', torch.tensor([], device=self.device))
-            }
-
-            # Handle different model types
-            if self.model_type == "Histogram":
-                self._load_histogram_params(components)
+            # Load likelihood params
+            if 'likelihood_params' in components:
+                self.likelihood_params = components['likelihood_params']
+            elif self.model_type == "Histogram":
+                required = ['bin_probs', 'bin_edges', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'bin_probs': components['bin_probs'],
+                        'bin_edges': components['bin_edges'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
             elif self.model_type == "Gaussian":
-                self._load_gaussian_params(components)
+                required = ['means', 'covs', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'means': components['means'],
+                        'covs': components['covs'],
+                        'classes': components['classes'],
+                        'feature_pairs': components.get('feature_pairs', [])
+                    }
 
             # Initialize weight updater
-            self._initialize_weight_updater()
-            return True
+            if hasattr(self, 'likelihood_params') and 'classes' in self.likelihood_params:
+                n_classes = len(self.likelihood_params['classes'])
+                feature_pairs = self.likelihood_params.get('feature_pairs', [])
+                if not feature_pairs and hasattr(self, 'feature_pairs'):
+                    feature_pairs = self.feature_pairs
+
+                # Get n_bins_per_dim from components or use default
+                n_bins = self.n_bins_per_dim
+                if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
+                    n_bins = self.likelihood_params['bin_probs'][0].shape[0]  # Get from first bin_probs dim
+
+                self.weight_updater = BinWeightUpdater(
+                    n_classes=n_classes,
+                    feature_pairs=feature_pairs,
+                    n_bins_per_dim=n_bins,
+                    batch_size=128
+                )
 
         except Exception as e:
             raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
-
-    def _load_histogram_params(self, components: dict):
-        """Load histogram-specific parameters with tensor validation"""
-        self.likelihood_params.update({
-            'bin_probs': [self._ensure_tensor(bp) for bp in components.get('bin_probs', [])],
-            'bin_edges': [self._ensure_tensor(be) for be in components.get('bin_edges', [])],
-            'feature_pairs': components.get('feature_pairs', [])
-        })
-
-    def _load_gaussian_params(self, components: dict):
-        """Load Gaussian-specific parameters with tensor validation"""
-        self.likelihood_params.update({
-            'means': self._ensure_tensor(components.get('means')),
-            'covs': self._ensure_tensor(components.get('covs')),
-            'feature_pairs': components.get('feature_pairs', [])
-        })
-
-    def _ensure_tensor(self, data, dtype=torch.float32):
-        """Ensure data is a properly configured tensor"""
-        if not isinstance(data, torch.Tensor):
-            data = torch.tensor(data, dtype=dtype, device=self.device)
-        return data.contiguous()
 
     def _load_preprocessing_params(self, dataset_name: str):
         """Load preprocessing parameters (scalers, encoders, etc.)"""
@@ -385,6 +389,50 @@ class DBNNPredictor:
                         weights_array[int(class_id), pair_idx] = weight
                 self.current_W = torch.tensor(weights_array, device=self.device)
 
+    def _load_likelihood_params(self, dataset_name: str):
+        """Load likelihood parameters from the comprehensive components file"""
+        components_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_components.pkl')
+
+        if not os.path.exists(components_file):
+            raise FileNotFoundError(f"Model components file not found at {components_file}")
+
+        try:
+            with open(components_file, 'rb') as f:
+                components = pickle.load(f)
+
+            # First try loading from the structured likelihood_params
+            if 'likelihood_params' in components:
+                self.likelihood_params = components['likelihood_params']
+                print("\033[K" +f"Loaded likelihood_params from components file")
+                return
+
+            # Fallback to direct component loading (backward compatibility)
+            if self.model_type == "Histogram":
+                required = ['bin_probs', 'bin_edges', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'bin_probs': components['bin_probs'],
+                        'bin_edges': components['bin_edges'],
+                        'classes': components['classes']
+                    }
+                else:
+                    raise ValueError("Missing required histogram components")
+
+            elif self.model_type == "Gaussian":
+                required = ['means', 'covs', 'classes']
+                if all(k in components for k in required):
+                    self.likelihood_params = {
+                        'means': components['means'],
+                        'covs': components['covs'],
+                        'classes': components['classes']
+                    }
+                else:
+                    raise ValueError("Missing required Gaussian components")
+
+            print("\033[K" +f"Loaded {self.model_type} likelihood parameters from {components_file}")
+
+        except Exception as e:
+            raise RuntimeError(f"Error loading likelihood parameters: {str(e)}")
 
     def preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
         """
@@ -615,58 +663,92 @@ class DBNNPredictor:
                     device=self.device
                 )
 
-    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> Tuple[torch.Tensor, dict]:
-        """Compute posterior probabilities with robust tensor handling"""
+    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
+        """Dimension-aware posterior computation with NaN handling"""
         # Input validation
-        features = self._ensure_tensor(features)
-        if not hasattr(self, 'likelihood_params'):
+        if not hasattr(self, 'likelihood_params') or 'bin_probs' not in self.likelihood_params:
             raise RuntimeError("Likelihood parameters not properly initialized")
 
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
-        device = features.device
-
-        # Initialize tensors
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=device)
-        bin_indices_dict = {}
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs per sample
 
         # Process feature pairs
-        for group_idx, (pair, bin_edges) in enumerate(zip(
-            self.likelihood_params['feature_pairs'],
-            self.likelihood_params['bin_edges']
-        )):
-            # Prepare feature group
-            group_data = features[:, pair]
+        feature_groups = torch.stack([
+            features[:, pair].contiguous().to(self.device)
+            for pair in self.feature_pairs
+        ]).transpose(0, 1)
 
-            # Compute bin indices
-            indices = []
-            for dim, edges in enumerate(bin_edges):
-                dim_edges = self._ensure_tensor(edges)
-                dim_data = group_data[:, dim]
-                indices.append(
+        # Bin indices computation with NaN handling
+        bin_indices_dict = {}
+        for group_idx in range(len(self.feature_pairs)):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])
+
+            # Skip if either feature is NaN (-99999)
+            valid_mask = (feature_groups[:, group_idx, 0] != -99999) & \
+                         (feature_groups[:, group_idx, 1] != -99999)
+
+            indices = torch.stack([
+                torch.where(
+                    valid_mask,
                     torch.bucketize(
-                        dim_data.contiguous(),
-                        dim_edges.contiguous()
-                    ).sub_(1).clamp_(0, len(dim_edges) - 2)
+                        feature_groups[:, group_idx, dim].contiguous(),
+                        edges[dim].contiguous()
+                    ).sub_(1).clamp_(0, len(edges[dim]) - 2),
+                    -1  # Invalid index for NaN values
                 )
+                for dim in range(2)
+            ])
+            bin_indices_dict[group_idx] = indices
 
-            bin_indices_dict[group_idx] = torch.stack(indices)
+        # Weighted probability computation with NaN handling
+        for group_idx in range(len(self.feature_pairs)):
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
+            indices = bin_indices_dict[group_idx]
 
-            # Get probabilities and weights
-            bin_probs = self._ensure_tensor(self.likelihood_params['bin_probs'][group_idx])
+            # Skip NaN pairs
+            valid_mask = (indices[0] != -1) & (indices[1] != -1)
+            valid_counts += valid_mask.float()
+
+            # Get weights and verify dimensions
             weights = torch.stack([
                 self.weight_updater.get_histogram_weights(c, group_idx)
                 for c in range(n_classes)
-            ])
+            ]).to(self.device)
 
-            # Compute weighted probabilities
+            # Ensure weights and bin_probs have compatible shapes
+            if weights.shape != bin_probs.shape:
+                raise ValueError(f"Shape mismatch between weights {weights.shape} and bin_probs {bin_probs.shape}")
+
+            # Apply weights to probabilities
             weighted_probs = bin_probs * weights
-            probs = weighted_probs[:, indices[0], indices[1]]
-            log_likelihoods += torch.log(probs.t() + epsilon)
 
-        # Compute final probabilities
-        max_log = log_likelihoods.max(dim=1, keepdim=True)[0]
-        posteriors = torch.exp(log_likelihoods - max_log)
+            # Gather probabilities for all samples and classes
+            # Need to handle batch dimension properly
+            batch_probs = torch.zeros((n_classes, batch_size), device=self.device)
+
+            for class_idx in range(n_classes):
+                # Get probabilities for this class
+                class_probs = weighted_probs[class_idx]
+
+                # Gather probabilities using indices
+                batch_probs[class_idx] = torch.where(
+                    valid_mask,
+                    class_probs[indices[0], indices[1]],
+                    torch.ones_like(valid_mask, dtype=torch.float32)
+                )
+
+            log_likelihoods += torch.log(batch_probs.t() + epsilon)
+
+        # Normalize posteriors by number of valid feature pairs
+        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
+        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
+
+        # Final softmax normalization
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
         return posteriors, bin_indices_dict
@@ -1357,52 +1439,57 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=128, batch_size=128):
-        """
-        Optimized weight updater initialization
-        Maintains all functionality while removing:
-        - Redundant weight storage
-        - Unused buffers
-        - Debug prints
-        """
+    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5,batch_size=128):
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.batch_size = batch_size
+        self.device=Train_device
+        # Initialize histogram_weights as empty dictionary first
+        self.histogram_weights = {}
+        self.batch_size=batch_size
 
-        # Primary weight storage (4D tensor: classes × pairs × bins × bins)
+        # Create weights for each class and feature pair
+        for class_id in range(n_classes):
+            self.histogram_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                # Initialize with default weight of 0.1
+                #print("\033[K" +f"[DEBUG] Creating weights for class {class_id}, pair {pair_idx}")
+                self.histogram_weights[class_id][pair_idx] = torch.full(
+                    (n_bins_per_dim, n_bins_per_dim),
+                    0.1,
+                    dtype=torch.float32,
+                    device=self.device  # Ensure weights are created on correct device
+                ).contiguous()
+
+        # Initialize weights for each class and feature pair
+        self.gaussian_weights = {}
+        for class_id in range(n_classes):
+            self.gaussian_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                # Initialize with default weight of 0.1
+                self.gaussian_weights[class_id][pair_idx] = torch.tensor(0.1,
+                    dtype=torch.float32,
+                    device=self.device
+                ).contiguous()
+
+        # Verify initialization
+        print("\033[K" +f"[DEBUG] Weight initialization complete. Structure:")
+        print("\033[K" +f"- Number of classes: {len(self.histogram_weights)}")
+        for class_id in self.histogram_weights:
+            print("\033[K" +f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
+
+        # Use a single contiguous tensor for all weights
         self.weights = torch.full(
             (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
-            0.1,  # Initial value
+            0.1,
             dtype=torch.float32,
-            device=self.device
+            device=self.device  # Ensure weights are created on correct device
         ).contiguous()
 
-        # Gaussian weights view (scalar per class/pair)
-        self.gaussian_weights = self.weights.mean(dim=(2,3))  # [n_classes, n_pairs]
-
-    def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
-        """Get histogram weights with bounds checking"""
-        if not (0 <= class_id < self.n_classes):
-            raise ValueError(f"Invalid class_id: {class_id}")
-        if not (0 <= pair_idx < len(self.feature_pairs)):
-            raise ValueError(f"Invalid pair_idx: {pair_idx}")
-        return self.weights[class_id, pair_idx].contiguous()
-
-    def get_gaussian_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
-        """Get Gaussian weights with bounds checking"""
-        if not (0 <= class_id < self.n_classes):
-            raise ValueError(f"Invalid class_id: {class_id}")
-        if not (0 <= pair_idx < len(self.feature_pairs)):
-            raise ValueError(f"Invalid pair_idx: {pair_idx}")
-        return self.weights[class_id, pair_idx].mean()  # Scalar weight for Gaussian
-
-    def update_weights(self, class_id: int, pair_idx: int, adjustment: float):
-        """Unified weight update for both model types"""
-        weights = self.get_histogram_weights(class_id, pair_idx)
-        weights += adjustment
-        weights.clamp_(min=0.01, max=1.0)  # Maintain reasonable bounds
+        # Pre-allocate update buffers
+        self.update_indices = torch.zeros((3, 1000), dtype=torch.long)  # [dim, max_updates]
+        self.update_values = torch.zeros(1000, dtype=torch.float32)
+        self.update_count = 0
 
 
     def batch_update_weights(self, class_indices, pair_indices, bin_indices, adjustments):
@@ -1436,6 +1523,23 @@ class BinWeightUpdater:
                     self.histogram_weights[class_id][pair_idx][bin_i, bin_j] += adjustment
 
 
+    def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
+        """Get weights ensuring proper dimensions"""
+        class_id = int(class_id)
+        pair_idx = int(pair_idx)
+
+        if class_id not in self.histogram_weights:
+            raise KeyError(f"Invalid class_id: {class_id}")
+        if pair_idx not in self.histogram_weights[class_id]:
+            raise KeyError(f"Invalid pair_idx: {pair_idx}")
+
+        weights = self.histogram_weights[class_id][pair_idx]
+        if len(weights.shape) != 2:
+            raise ValueError(f"Invalid weight shape: {weights.shape}, expected 2D tensor")
+        if weights.shape[0] != self.n_bins_per_dim or weights.shape[1] != self.n_bins_per_dim:
+            raise ValueError(f"Invalid weight dimensions: {weights.shape}, expected ({self.n_bins_per_dim}, {self.n_bins_per_dim})")
+
+        return weights
 
 
     def _ensure_buffers(self, batch_size):
@@ -1558,6 +1662,26 @@ class BinWeightUpdater:
             DEBUG.log(" Traceback:", traceback.format_exc())
             raise
 
+    def get_gaussian_weights(self, class_id, pair_idx):
+        """Get Gaussian weights with proper type conversion and validation"""
+        try:
+            # Convert tensor values to Python integers
+            class_id = int(class_id) if isinstance(class_id, torch.Tensor) else class_id
+            pair_idx = int(pair_idx) if isinstance(pair_idx, torch.Tensor) else pair_idx
+
+            if class_id not in self.gaussian_weights:
+                raise KeyError(f"Invalid class_id: {class_id}")
+            if pair_idx not in self.gaussian_weights[class_id]:
+                raise KeyError(f"Invalid pair_idx: {pair_idx}")
+
+            weights = self.gaussian_weights[class_id][pair_idx]
+            DEBUG.log(f" Retrieved Gaussian weights for class {class_id}, pair {pair_idx}, shape: {weights.shape}")
+            return weights
+
+        except Exception as e:
+            DEBUG.log(f" Error retrieving Gaussian weights: {str(e)}")
+            DEBUG.log(" Traceback:", traceback.format_exc())
+            raise
 
     # Modified posterior computation for Histogram model
     def compute_histogram_posterior(self, features, bin_indices):
@@ -2606,61 +2730,79 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Dataset load error: {str(e)}")
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
-    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> Tuple[torch.Tensor, dict]:
-        """Compute posterior probabilities with robust tensor handling"""
-        # Input validation
-        features = self._ensure_tensor(features)
-        if not hasattr(self, 'likelihood_params'):
-            raise RuntimeError("Likelihood parameters not properly initialized")
+    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
+        """Optimized batch posterior with vectorized operations"""
+        # Ensure input features are on the correct device
+        features = features.to(self.device)
+
+        # Safety checks
+        if self.weight_updater is None:
+            DEBUG.log(" Weight updater not initialized, initializing now...")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
+
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
 
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
-        device = features.device
 
-        # Initialize tensors
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=device)
+        # Pre-allocate tensors on the correct device
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+        # Process all feature pairs at once
+        feature_groups = torch.stack([
+            features[:, pair].contiguous().to(self.device)  # Ensure on correct device
+            for pair in self.likelihood_params['feature_pairs']
+        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+
+        # Compute all bin indices at once
         bin_indices_dict = {}
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])  # Ensure on correct device
 
-        # Process feature pairs
-        for group_idx, (pair, bin_edges) in enumerate(zip(
-            self.likelihood_params['feature_pairs'],
-            self.likelihood_params['bin_edges']
-        )):
-            # Prepare feature group
-            group_data = features[:, pair]
+            # Vectorized binning with contiguous tensors
+            indices = torch.stack([
+                torch.bucketize(
+                    feature_groups[:, group_idx, dim].contiguous(),
+                    edges[dim].contiguous()
+                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+                for dim in range(2)
+            ])  # Shape: (2, batch_size)
+            bin_indices_dict[group_idx] = indices
 
-            # Compute bin indices
-            indices = []
-            for dim, edges in enumerate(bin_edges):
-                dim_edges = self._ensure_tensor(edges)
-                dim_data = group_data[:, dim]
-                indices.append(
-                    torch.bucketize(
-                        dim_data.contiguous(),
-                        dim_edges.contiguous()
-                    ).sub_(1).clamp_(0, len(dim_edges) - 2)
-                )
 
-            bin_indices_dict[group_idx] = torch.stack(indices)
+        # Process all classes simultaneously
+        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+            bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
+            indices = bin_indices_dict[group_idx]  # [2, batch_size]
 
-            # Get probabilities and weights
-            bin_probs = self._ensure_tensor(self.likelihood_params['bin_probs'][group_idx])
+            # Get all weights at once
             weights = torch.stack([
                 self.weight_updater.get_histogram_weights(c, group_idx)
                 for c in range(n_classes)
-            ])
+            ])  # [n_classes, n_bins, n_bins]
 
-            # Compute weighted probabilities
-            weighted_probs = bin_probs * weights
-            probs = weighted_probs[:, indices[0], indices[1]]
+            # Ensure weights are contiguous
+            if not weights.is_contiguous():
+                weights = weights.contiguous()
+
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+
+            # Gather probabilities for all samples and classes at once
+            probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
             log_likelihoods += torch.log(probs.t() + epsilon)
 
-        # Compute final probabilities
-        max_log = log_likelihoods.max(dim=1, keepdim=True)[0]
-        posteriors = torch.exp(log_likelihoods - max_log)
+        # Compute posteriors efficiently
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-        return posteriors, bin_indices_dict
+        return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
+
 
 #----------------------
 
@@ -3524,48 +3666,145 @@ class DBNN(GPUDBNN):
         DEBUG.log(f" Detected categorical columns: {categorical_columns}")
         return categorical_columns
 
-    def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = False) -> torch.Tensor:
-        """Robust preprocessing pipeline with consistent tensor output"""
-        # Convert input to tensor if needed
+    def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
+        """Preprocess data with robust NaN handling and type safety."""
+        DEBUG.log(f"Starting preprocessing (is_training={is_training})")
+
+        # Check if X is a DataFrame or a tensor
         if isinstance(X, pd.DataFrame):
-            X_tensor = self._dataframe_to_tensor(X)
-        else:
-            X_tensor = self._ensure_tensor(X)
+            DEBUG.log(f"Input shape: {X.shape}")
+            DEBUG.log(f"Input columns: {X.columns.tolist()}")
+            DEBUG.log(f"Input dtypes:\n{X.dtypes}")
 
-        # Handle NaN values
-        X_tensor = self._handle_nan_values(X_tensor)
+            # Replace NA/NaN with -99999 and keep track of locations
+            X = X.copy()
+            self.nan_mask = X.isna()  # Store NaN locations using pandas' isna()
+            X = X.fillna(-99999)      # Replace with sentinel value
 
-        # Standardize features
-        if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
-            X_tensor = self._standardize_features(X_tensor)
+            # Convert object/string columns to numeric where possible
+            for col in X.select_dtypes(include=['object', 'string']):
+                try:
+                    X[col] = pd.to_numeric(X[col], errors='ignore')
+                except Exception as e:
+                    DEBUG.log(f"Could not convert column {col} to numeric: {str(e)}")
 
+        else:  # Tensor input
+            DEBUG.log("Input is a tensor, skipping column-specific operations")
+            X = X.clone().detach()
+            self.nan_mask = torch.isnan(X)  # For tensor input
+            X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
+
+        # Step 1: Compute global statistics only once during training
+        if is_training and not self.global_stats_computed:
+            DEBUG.log("Training mode preprocessing - computing global statistics")
+            self.compute_global_statistics(X)  # Compute global stats only once
+            self.global_stats_computed = True  # Mark stats as computed
+        elif is_training:
+            DEBUG.log("Training mode preprocessing - using precomputed global statistics")
+
+        # Step 2: Handle high cardinality columns (only during training)
+        if is_training:
+            self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+            cardinality_threshold = self._calculate_cardinality_threshold()
+            DEBUG.log(f"Cardinality threshold: {cardinality_threshold}")
+            if isinstance(X, pd.DataFrame):
+                X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            DEBUG.log(f"Shape after cardinality filtering: {X.shape}")
+
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+            DEBUG.log(f"Selected feature columns: {self.feature_columns}")
+
+            # Store high cardinality columns for future reference
+            if isinstance(X, pd.DataFrame):
+                self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+                if self.high_cardinality_columns:
+                    DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
+
+        # Step 3: Handle categorical features with safe type conversion
+        DEBUG.log("Starting categorical encoding")
+        try:
+            if isinstance(X, pd.DataFrame):
+                X_encoded = self._encode_categorical_features(X, is_training)
+            else:
+                X_encoded = X  # Skip encoding if X is already a tensor
+            DEBUG.log(f"Shape after categorical encoding: {X_encoded.shape}")
+            if isinstance(X_encoded, pd.DataFrame):
+                DEBUG.log(f"Encoded dtypes:\n{X_encoded.dtypes}")
+        except Exception as e:
+            DEBUG.log(f"Error in categorical encoding: {str(e)}")
+            raise
+
+        # Step 4: Safe conversion to numpy with improved NaN checking
+        try:
+            if isinstance(X_encoded, pd.DataFrame):
+                X_numpy = X_encoded.to_numpy(dtype=np.float32)  # Force float32 conversion
+            else:
+                X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float32)
+
+            DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
+
+            # Safe NaN/Inf checking
+            try:
+                DEBUG.log(f"Any NaN: {np.any(np.isnan(X_numpy))}")
+            except TypeError:
+                DEBUG.log("NaN check skipped - incompatible dtype")
+
+            try:
+                DEBUG.log(f"Any Inf: {np.any(np.isinf(X_numpy))}")
+            except TypeError:
+                DEBUG.log("Inf check skipped - incompatible dtype")
+
+        except Exception as e:
+            DEBUG.log(f"Error converting to numpy: {str(e)}")
+            raise
+
+        # Step 5: Scale the features using precomputed global statistics
+        try:
+            X_scaled = np.zeros_like(X_numpy, dtype=np.float32)
+            batch_size = self._calculate_optimal_batch_size(X_numpy.nbytes) if hasattr(self, '_calculate_optimal_batch_size') else 1024
+
+            for i in range(0, len(X_numpy), batch_size):
+                batch_end = min(i + batch_size, len(X_numpy))
+                batch_X = X_numpy[i:batch_end]
+
+                # Scale the batch using precomputed global statistics
+                X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
+
+            DEBUG.log("Scaling successful")
+        except Exception as e:
+            DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
+            if X_numpy.size == 0:
+                print("\033[K" + "[WARNING] Empty feature array! Returning original data")
+                X_scaled = X_numpy
+            else:
+                means = np.nanmean(X_numpy, axis=0)
+                stds = np.nanstd(X_numpy, axis=0)
+                stds[stds == 0] = 1
+                X_scaled = (X_numpy - means) / stds
+
+        # Step 6: Convert scaled data to a PyTorch tensor
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
+
+        # Step 7: Compute feature pairs and bin edges (only during training)
+        if is_training:
+            remaining_feature_indices = list(range(len(self.feature_columns))) if self.feature_columns else list(range(X_scaled.shape[1]))
+            DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
+
+            # Generate feature pairs using the updated set of features
+            self.feature_pairs = self._generate_feature_combinations(
+                remaining_feature_indices,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            )
+            DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
+
+            # Compute bin edges using the preprocessed data (now a tensor)
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
+            DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
+
+        DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
-
-    def _dataframe_to_tensor(self, df: pd.DataFrame) -> torch.Tensor:
-        """Convert DataFrame to properly configured tensor"""
-        # Filter and align columns
-        if hasattr(self, 'feature_columns'):
-            df = df[[col for col in self.feature_columns if col in df.columns]]
-
-        # Convert categorical features
-        if hasattr(self, 'categorical_encoders'):
-            for col, mapping in self.categorical_encoders.items():
-                if col in df.columns:
-                    df[col] = df[col].map(mapping).fillna(-1)
-
-        return torch.tensor(df.values, dtype=torch.float32, device=self.device)
-
-    def _handle_nan_values(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Replace NaN values with sentinel value"""
-        nan_mask = torch.isnan(tensor)
-        self.nan_mask = nan_mask  # Store for reference
-        return torch.where(nan_mask, torch.tensor(-99999, device=self.device), tensor)
-
-    def _standardize_features(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Apply standardization using precomputed stats"""
-        mean = self._ensure_tensor(self.global_mean[:tensor.shape[1]])
-        std = self._ensure_tensor(self.global_std[:tensor.shape[1]])
-        return (tensor - mean) / std
 
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
@@ -5472,34 +5711,89 @@ class DBNN(GPUDBNN):
         return result_df
 #--------------------------------------------------------------------------------------------------------------
     def _save_model_components(self):
-        """Save all model components with proper tensor handling"""
-        components = {
-            'model_type': self.model_type,
-            'feature_pairs': self.feature_pairs,
-            'feature_columns': self.feature_columns,
-            'classes': self.label_encoder.classes_,
-            'scaler': self.scaler,
-            'categorical_encoders': self.categorical_encoders,
-            'global_mean': self.global_mean,
-            'global_std': self.global_std
-        }
+        """Save all model components to a pickle file with robust error handling"""
+        try:
+            # 1. Save weights
+            if self.best_W is not None:
+                weights_dict = {
+                    'version': 2,
+                    'weights': self.best_W.cpu().numpy().tolist(),
+                    'shape': list(self.best_W.shape)
+                }
+                weights_file = f'Model/Best_{self.model_type}_{self.dataset_name}_weights.json'
+                os.makedirs(os.path.dirname(weights_file), exist_ok=True)
+                with open(weights_file, 'w') as f:
+                    json.dump(weights_dict, f)
 
-        # Model-specific components
-        if self.model_type == "Histogram":
-            components.update({
-                'bin_probs': [bp.cpu() for bp in self.likelihood_params['bin_probs']],
-                'bin_edges': [be.cpu() for be in self.likelihood_params['bin_edges']]
-            })
-        elif self.model_type == "Gaussian":
-            components.update({
-                'means': self.likelihood_params['means'].cpu(),
-                'covs': self.likelihood_params['covs'].cpu()
-            })
+            # Prepare standardization parameters
+            global_mean = self.global_mean if hasattr(self, 'global_mean') else None
+            global_std = self.global_std if hasattr(self, 'global_std') else None
 
-        # Save to file
-        save_path = os.path.join(self.model_dir, f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
-        torch.save(components, save_path)
-        print(f"Saved model components to {save_path}")
+            # Prepare likelihood parameters based on model type
+            likelihood_params = {}
+            if hasattr(self, 'likelihood_params'):
+                if self.model_type == "Histogram":
+                    likelihood_params = {
+                        'bin_probs': [probs.cpu().numpy().tolist()
+                                     for probs in self.likelihood_params.get('bin_probs', [])],
+                        'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
+                                     for edges in self.likelihood_params.get('bin_edges', [])],
+                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
+                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
+                    }
+                elif self.model_type == "Gaussian":
+                    likelihood_params = {
+                        'means': self.likelihood_params.get('means', []).cpu().numpy().tolist(),
+                        'covs': self.likelihood_params.get('covs', []).cpu().numpy().tolist(),
+                        'classes': self.likelihood_params.get('classes', []).cpu().numpy().tolist(),
+                        'feature_pairs': self.likelihood_params.get('feature_pairs', []).cpu().numpy().tolist()
+                    }
+
+            components = {
+                'version': 3,  # Version identifier for compatibility
+                'scaler': self.scaler,
+                'label_encoder': {
+                    'classes': self.label_encoder.classes_.tolist()
+                },
+                'likelihood_params': likelihood_params,
+                'model_type': self.model_type,
+                'feature_pairs': self.feature_pairs.cpu().numpy().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
+                'global_mean': global_mean.tolist() if hasattr(global_mean, 'tolist') else global_mean,
+                'global_std': global_std.tolist() if hasattr(global_std, 'tolist') else global_std,
+                'categorical_encoders': self.categorical_encoders,
+                'feature_columns': self.feature_columns,
+                'original_columns': getattr(self, 'original_columns', None),
+                'target_column': self.target_column,
+                'target_classes': self.label_encoder.classes_.tolist(),
+                'target_mapping': dict(zip(range(len(self.label_encoder.classes_)),
+                                         self.label_encoder.classes_)),
+                'config': self.config,
+                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
+                'best_error': getattr(self, 'best_error', float('inf')),
+                'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'bin_edges': [[edge.cpu().numpy().tolist() for edge in edges]
+                             for edges in self.bin_edges] if hasattr(self, 'bin_edges') and self.bin_edges else None,
+                'gaussian_params': {k: v.cpu().numpy().tolist() if hasattr(v, 'cpu') else v
+                                  for k, v in self.gaussian_params.items()} if hasattr(self, 'gaussian_params') else None
+            }
+
+            # Save components
+            components_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_components.pkl')
+            os.makedirs(os.path.dirname(components_file), exist_ok=True)
+
+            with open(components_file, 'wb') as f:
+                pickle.dump(components, f)
+
+            print(f"\nSaved model components to {components_file}")
+            if global_mean is not None and global_std is not None:
+                print(f"Standardization params saved - mean: {np.array(global_mean).shape}, std: {np.array(global_std).shape}")
+            return True
+
+        except Exception as e:
+            print(f"\nError saving model components: {str(e)}")
+            traceback.print_exc()
+            return False
 
     def _load_model_components(self):
         """Load all model components with proper tensor conversion and validation"""
@@ -5519,10 +5813,15 @@ class DBNN(GPUDBNN):
             if 'target_classes' in components:
                 self.label_encoder.classes_ = np.array(components['target_classes'])
 
-            # Load standardization parameters
+            # Load standardization parameters with validation
             if 'global_mean' in components and components['global_mean'] is not None:
-                self.global_mean = torch.tensor(np.array(components['global_mean']), device=self.device)
-                self.global_std = torch.tensor(np.array(components['global_std']), device=self.device)
+                self.global_mean = np.array(components['global_mean'])
+                self.global_std = np.array(components['global_std'])
+                print(f"Loaded standardization params - mean: {self.global_mean.shape}, std: {self.global_std.shape}")
+            else:
+                print("Warning: No standardization parameters found in saved model")
+                self.global_mean = None
+                self.global_std = None
 
             # Load other components
             self.scaler = components.get('scaler')
@@ -5535,7 +5834,7 @@ class DBNN(GPUDBNN):
 
             # Convert feature pairs back to tensor
             if 'feature_pairs' in components and components['feature_pairs'] is not None:
-                self.feature_pairs = torch.tensor(np.array(components['feature_pairs']), device=self.device)
+                self.feature_pairs = torch.tensor(components['feature_pairs'], device=self.device)
 
             # Load likelihood parameters with proper tensor conversion
             if 'likelihood_params' in components:
@@ -5543,40 +5842,40 @@ class DBNN(GPUDBNN):
                 if self.model_type == "Histogram":
                     if 'bin_probs' in components['likelihood_params']:
                         self.likelihood_params['bin_probs'] = [
-                            torch.tensor(np.array(bp), device=self.device)
+                            torch.tensor(bp, device=self.device)
                             for bp in components['likelihood_params']['bin_probs']
                         ]
                     if 'bin_edges' in components['likelihood_params']:
                         self.likelihood_params['bin_edges'] = [
-                            [torch.tensor(np.array(edge), device=self.device) for edge in edges]
+                            [torch.tensor(edge, device=self.device) for edge in edges]
                             for edges in components['likelihood_params']['bin_edges']
                         ]
                 elif self.model_type == "Gaussian":
                     if 'means' in components['likelihood_params']:
                         self.likelihood_params['means'] = torch.tensor(
-                            np.array(components['likelihood_params']['means']), device=self.device)
+                            components['likelihood_params']['means'], device=self.device)
                     if 'covs' in components['likelihood_params']:
                         self.likelihood_params['covs'] = torch.tensor(
-                            np.array(components['likelihood_params']['covs']), device=self.device)
+                            components['likelihood_params']['covs'], device=self.device)
 
                 if 'classes' in components['likelihood_params']:
                     self.likelihood_params['classes'] = torch.tensor(
-                        np.array(components['likelihood_params']['classes']), device=self.device)
+                        components['likelihood_params']['classes'], device=self.device)
                 if 'feature_pairs' in components['likelihood_params']:
                     self.likelihood_params['feature_pairs'] = torch.tensor(
-                        np.array(components['likelihood_params']['feature_pairs']), device=self.device)
+                        components['likelihood_params']['feature_pairs'], device=self.device)
 
-            # Load bin edges if available - ensure they are tensors
+            # Load bin edges if available
             if 'bin_edges' in components and components['bin_edges'] is not None:
                 self.bin_edges = [
-                    [torch.tensor(np.array(edge), device=self.device) for edge in edges]
+                    [torch.tensor(edge, device=self.device) for edge in edges]
                     for edges in components['bin_edges']
                 ]
 
             # Load Gaussian params if available
             if 'gaussian_params' in components and components['gaussian_params'] is not None:
                 self.gaussian_params = {
-                    k: torch.tensor(np.array(v), device=self.device) if isinstance(v, (list, np.ndarray)) else v
+                    k: torch.tensor(v, device=self.device) if isinstance(v, (list, np.ndarray)) else v
                     for k, v in components['gaussian_params'].items()
                 }
 
@@ -5597,6 +5896,7 @@ class DBNN(GPUDBNN):
             print(f"Error loading model components: {str(e)}")
             traceback.print_exc()
             return False
+
 
     def predict_and_save(self, save_path=None, batch_size: int = 128):
         """Make predictions on data and save them using best model weights"""
