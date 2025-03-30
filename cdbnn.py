@@ -211,21 +211,23 @@ class PredictionManager:
         if model.use_kl_divergence:
             state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
 
+            # Handle missing clustering_params gracefully
+            config = checkpoint['model_states']['phase2_kld']['best'].get('config', {})
+            clustering_params = config.get('clustering_params', {})
+
             # Check for temperature in different possible locations
-            if 'clustering_temperature' not in state_dict:
-                # Try getting it from config if not in state_dict
-                if 'config' in checkpoint['model_states']['phase2_kld']['best']:
-                    model.clustering_temperature = torch.tensor([
-                        checkpoint['model_states']['phase2_kld']['best']['config'][
-                            'clustering_params']['temperature']
-                    ], device=self.device)
-                else:
-                    # Fallback to default
-                    model.clustering_temperature = torch.tensor(
-                        [1.0], device=self.device)
-                    logger.warning("Using default clustering temperature 1.0")
-            else:
+            # Initialize temperature - check multiple possible locations
+            if 'clustering_temperature' in state_dict:
                 model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
+            elif 'temperature' in clustering_params:  # Backward compatibility
+                model.clustering_temperature = torch.tensor(
+                    [clustering_params['temperature']],
+                    device=self.device
+                )
+            else:
+                model.clustering_temperature = torch.tensor([1.0], device=self.device)
+                logger.warning("Using default clustering temperature 1.0")
+
 
         # Load the state dict (strict=False to allow missing keys)
         model.load_state_dict(state_dict, strict=False)
