@@ -122,6 +122,7 @@ class DBNNPredictor:
         self.target_column = None
         self.global_mean = None
         self.global_std = None
+        self.data = None
 
     def load_model(self, dataset_name: str) -> bool:
         """Load all model components with strict initialization order"""
@@ -137,7 +138,10 @@ class DBNNPredictor:
             # 2. Set model type
             self.model_type = self.config.get('modelType', 'Histogram')
 
-            # 3. Load essential components in strict order
+            # 3. Load the dataset
+            self._load_dataset(dataset_name)
+
+            # Rest of the loading logic...
             self._load_label_encoder(dataset_name)
             self._load_feature_pairs(dataset_name)
             self._load_likelihood_params(dataset_name)
@@ -4409,7 +4413,7 @@ class DBNN(GPUDBNN):
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
         model_dir = os.path.join('Model')
-        weights_file =os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
+        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
 
         if os.path.exists(weights_file):
             try:
@@ -4424,20 +4428,21 @@ class DBNN(GPUDBNN):
                     device=self.device
                 )
 
-                # Load training data if available
-                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
-                if os.path.exists(train_data_file):
-                    train_data = pd.read_csv(train_data_file)
-                    # Find matching indices in current data
-                    self.train_indices = []
-                    current_data = self.data.drop(columns=[self.target_column])
+                # Only try to load training data if self.data exists
+                if hasattr(self, 'data'):
+                    train_data_file = os.path.join(model_dir, 'best_training_data.csv')
+                    if os.path.exists(train_data_file):
+                        train_data = pd.read_csv(train_data_file)
+                        # Find matching indices in current data
+                        self.train_indices = []
+                        current_data = self.data.drop(columns=[self.target_column])
 
-                    for idx, row in train_data.drop(columns=[self.target_column]).iterrows():
-                        matches = (current_data == row).all(axis=1)
-                        if matches.any():
-                            self.train_indices.extend(matches[matches].index.tolist())
+                        for idx, row in train_data.drop(columns=[self.target_column]).iterrows():
+                            matches = (current_data == row).all(axis=1)
+                            if matches.any():
+                                self.train_indices.extend(matches[matches].index.tolist())
 
-                    print(f"\033[KLoaded {len(self.train_indices)} training samples from best model")
+                        print(f"\033[KLoaded {len(self.train_indices)} training samples from best model")
 
                 print(f"\033[KLoaded best weights from {weights_file}")
             except Exception as e:
