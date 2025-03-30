@@ -2573,6 +2573,8 @@ class DBNN(GPUDBNN):
 
             # Handle target column
             target_col = self.config['target_column']
+            if target_col in df.columns:
+                df[target_col] = df[target_col].astype(str)
             if isinstance(target_col, int):
                 target_col = df.columns[target_col]
                 self.config['target_column'] = target_col
