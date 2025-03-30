@@ -3587,7 +3587,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with improved error handling and column consistency."""
+        """Preprocess data with robust NaN handling and type safety."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
         # Check if X is a DataFrame or a tensor
@@ -3598,9 +3598,17 @@ class DBNN(GPUDBNN):
 
             # Replace NA/NaN with -99999 and keep track of locations
             X = X.copy()
-            self.nan_mask = X.isna()  # Store NaN locations
+            self.nan_mask = X.isna()  # Store NaN locations using pandas' isna()
             X = X.fillna(-99999)      # Replace with sentinel value
-        else:
+
+            # Convert object/string columns to numeric where possible
+            for col in X.select_dtypes(include=['object', 'string']):
+                try:
+                    X[col] = pd.to_numeric(X[col], errors='ignore')
+                except Exception as e:
+                    DEBUG.log(f"Could not convert column {col} to numeric: {str(e)}")
+
+        else:  # Tensor input
             DEBUG.log("Input is a tensor, skipping column-specific operations")
             X = X.clone().detach()
             self.nan_mask = torch.isnan(X)  # For tensor input
@@ -3633,7 +3641,7 @@ class DBNN(GPUDBNN):
                 if self.high_cardinality_columns:
                     DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
 
-        # Step 3: Handle categorical features
+        # Step 3: Handle categorical features with safe type conversion
         DEBUG.log("Starting categorical encoding")
         try:
             if isinstance(X, pd.DataFrame):
@@ -3647,23 +3655,34 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error in categorical encoding: {str(e)}")
             raise
 
-        # Step 4: Convert to numpy and check for issues
+        # Step 4: Safe conversion to numpy with improved NaN checking
         try:
             if isinstance(X_encoded, pd.DataFrame):
-                X_numpy = X_encoded.to_numpy()
+                X_numpy = X_encoded.to_numpy(dtype=np.float32)  # Force float32 conversion
             else:
-                X_numpy = X_encoded.cpu().numpy()
+                X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float32)
+
             DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
-            DEBUG.log(f"Any NaN: {np.isnan(X_numpy).any()}")
-            DEBUG.log(f"Any Inf: {np.isinf(X_numpy).any()}")
+
+            # Safe NaN/Inf checking
+            try:
+                DEBUG.log(f"Any NaN: {np.any(np.isnan(X_numpy))}")
+            except TypeError:
+                DEBUG.log("NaN check skipped - incompatible dtype")
+
+            try:
+                DEBUG.log(f"Any Inf: {np.any(np.isinf(X_numpy))}")
+            except TypeError:
+                DEBUG.log("Inf check skipped - incompatible dtype")
+
         except Exception as e:
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
         # Step 5: Scale the features using precomputed global statistics
         try:
-            X_scaled = np.zeros_like(X_numpy)
-            #batch_size = 1024  # Adjust based on available memory
+            X_scaled = np.zeros_like(X_numpy, dtype=np.float32)
+            batch_size = self._calculate_optimal_batch_size(X_numpy.nbytes) if hasattr(self, '_calculate_optimal_batch_size') else 1024
 
             for i in range(0, len(X_numpy), batch_size):
                 batch_end = min(i + batch_size, len(X_numpy))
@@ -3676,7 +3695,7 @@ class DBNN(GPUDBNN):
         except Exception as e:
             DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
             if X_numpy.size == 0:
-                print("\033[K" +"[WARNING] Empty feature array! Returning original data")
+                print("\033[K" + "[WARNING] Empty feature array! Returning original data")
                 X_scaled = X_numpy
             else:
                 means = np.nanmean(X_numpy, axis=0)
@@ -3706,6 +3725,7 @@ class DBNN(GPUDBNN):
 
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
+
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations with memory-efficient handling.
