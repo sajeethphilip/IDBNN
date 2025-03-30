@@ -5725,7 +5725,8 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
             print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
             with open(components_file, 'rb') as f:
-                components = pickle.load(f)
+                components = torch.load(f, weights_only=True, map_location=self.device)
+                #components = pickle.load(f)
                 # Initialize a fresh LabelEncoder first
                 self.label_encoder = LabelEncoder()
                 # If we have saved classes, set them
