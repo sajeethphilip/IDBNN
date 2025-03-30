@@ -5811,8 +5811,8 @@ class DBNN(GPUDBNN):
 
             # Load standardization parameters
             if 'global_mean' in components and components['global_mean'] is not None:
-                self.global_mean = torch.tensor(components['global_mean'], device=self.device) if isinstance(components['global_mean'], (list, np.ndarray)) else components['global_mean']
-                self.global_std = torch.tensor(components['global_std'], device=self.device) if isinstance(components['global_std'], (list, np.ndarray)) else components['global_std']
+                self.global_mean = torch.tensor(np.array(components['global_mean']), device=self.device)
+                self.global_std = torch.tensor(np.array(components['global_std']), device=self.device)
 
             # Load other components
             self.scaler = components.get('scaler')
@@ -5825,7 +5825,7 @@ class DBNN(GPUDBNN):
 
             # Convert feature pairs back to tensor
             if 'feature_pairs' in components and components['feature_pairs'] is not None:
-                self.feature_pairs = torch.tensor(components['feature_pairs'], device=self.device)
+                self.feature_pairs = torch.tensor(np.array(components['feature_pairs']), device=self.device)
 
             # Load likelihood parameters with proper tensor conversion
             if 'likelihood_params' in components:
@@ -5833,40 +5833,40 @@ class DBNN(GPUDBNN):
                 if self.model_type == "Histogram":
                     if 'bin_probs' in components['likelihood_params']:
                         self.likelihood_params['bin_probs'] = [
-                            torch.tensor(bp, device=self.device)
+                            torch.tensor(np.array(bp), device=self.device)
                             for bp in components['likelihood_params']['bin_probs']
                         ]
                     if 'bin_edges' in components['likelihood_params']:
                         self.likelihood_params['bin_edges'] = [
-                            [torch.tensor(edge, device=self.device) for edge in edges]
+                            [torch.tensor(np.array(edge), device=self.device) for edge in edges]
                             for edges in components['likelihood_params']['bin_edges']
                         ]
                 elif self.model_type == "Gaussian":
                     if 'means' in components['likelihood_params']:
                         self.likelihood_params['means'] = torch.tensor(
-                            components['likelihood_params']['means'], device=self.device)
+                            np.array(components['likelihood_params']['means']), device=self.device)
                     if 'covs' in components['likelihood_params']:
                         self.likelihood_params['covs'] = torch.tensor(
-                            components['likelihood_params']['covs'], device=self.device)
+                            np.array(components['likelihood_params']['covs']), device=self.device)
 
                 if 'classes' in components['likelihood_params']:
                     self.likelihood_params['classes'] = torch.tensor(
-                        components['likelihood_params']['classes'], device=self.device)
+                        np.array(components['likelihood_params']['classes']), device=self.device)
                 if 'feature_pairs' in components['likelihood_params']:
                     self.likelihood_params['feature_pairs'] = torch.tensor(
-                        components['likelihood_params']['feature_pairs'], device=self.device)
+                        np.array(components['likelihood_params']['feature_pairs']), device=self.device)
 
-            # Load bin edges if available
+            # Load bin edges if available - ensure they are tensors
             if 'bin_edges' in components and components['bin_edges'] is not None:
                 self.bin_edges = [
-                    [torch.tensor(edge, device=self.device) for edge in edges]
+                    [torch.tensor(np.array(edge), device=self.device) for edge in edges]
                     for edges in components['bin_edges']
                 ]
 
             # Load Gaussian params if available
             if 'gaussian_params' in components and components['gaussian_params'] is not None:
                 self.gaussian_params = {
-                    k: torch.tensor(v, device=self.device) if isinstance(v, (list, np.ndarray)) else v
+                    k: torch.tensor(np.array(v), device=self.device) if isinstance(v, (list, np.ndarray)) else v
                     for k, v in components['gaussian_params'].items()
                 }
 
