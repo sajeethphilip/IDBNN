@@ -135,6 +135,47 @@ class DBNNPredictor:
             return True
         return False
     def load_model(self, dataset_name: str) -> bool:
+        """Enhanced model loading with better weight handling"""
+        try:
+            # 1. Load basic config
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+
+            # 2. Set model type
+            self.model_type = self.config.get('modelType', 'Histogram')
+
+            # 3. Load essential components
+            self._load_label_encoder(dataset_name)
+            self._load_feature_pairs(dataset_name)
+            self._load_likelihood_params(dataset_name)
+
+            # 4. Load weights with validation
+            weights_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_weights.json')
+            if os.path.exists(weights_file):
+                with open(weights_file, 'r') as f:
+                    weights_data = json.load(f)
+
+                # Convert weights to tensor
+                weights_array = np.array(weights_data['weights'])
+                self.current_W = torch.tensor(weights_array, device=self.device)
+
+                # Validate shape matches feature pairs
+                if len(self.feature_pairs) != self.current_W.shape[1]:
+                    raise ValueError(f"Weight shape mismatch. Expected {len(self.feature_pairs)} pairs, got {self.current_W.shape[1]}")
+
+                print(f"Successfully loaded weights with shape {self.current_W.shape}")
+                self._is_initialized = True
+                return True
+
+            raise FileNotFoundError(f"Weights file not found at {weights_file}")
+
+        except Exception as e:
+            print(f"\nError loading model: {str(e)}")
+            traceback.print_exc()
+            return False
+
+    def load_model_old(self, dataset_name: str) -> bool:
         """Load all model components with strict initialization order"""
         try:
             # 1. Load basic config first
@@ -483,7 +524,9 @@ class DBNNPredictor:
 
         # Verify weights are loaded
         if self.current_W is None:
-            raise RuntimeError("Model weights not loaded properly")
+            raise RuntimeError("Weights not loaded. Check if training completed properly")
+        if len(self.feature_pairs) != self.current_W.shape[1]:
+            raise RuntimeError(f"Feature pair mismatch. Model has {len(self.feature_pairs)} pairs but weights expect {self.current_W.shape[1]}")
 
         # Handle input type and feature selection
         if isinstance(X, pd.DataFrame):
