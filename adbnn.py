@@ -5838,15 +5838,15 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
 
 
 def save_label_encoder(label_encoder, dataset_name):
-    save_dir = os.path.join('Model', f'Best_{dataset_name}')
+    save_dir = os.path.join('Model')
     os.makedirs(save_dir, exist_ok=True)
-    encoder_path = os.path.join(save_dir, 'label_encoder.pkl')
+    encoder_path = os.path.join(save_dir,  f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl')
     with open(encoder_path, 'wb') as f:
         pickle.dump(label_encoder, f)
     print("\033[K" +f"Label encoder saved to {encoder_path}", end="\r", flush=True)
 
 def load_label_encoder(dataset_name):
-    encoder_path = os.path.join('Model', f'Best_{dataset_name}', 'label_encoder.pkl')
+    encoder_path = os.path.join(save_dir,  f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl')
     if os.path.exists(encoder_path):
         with open(encoder_path, 'rb') as f:
             label_encoder = pickle.load(f)
