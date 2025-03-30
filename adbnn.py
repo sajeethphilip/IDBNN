@@ -710,7 +710,7 @@ class DBNNPredictor:
 
         return posteriors, None
 
-    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None,header=None):
+    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
         # Decode numeric labels back to original alphanumeric labels
         y_true_labels = self.label_encoder.inverse_transform(y_true)
         y_pred_labels = self.label_encoder.inverse_transform(y_pred)
@@ -739,17 +739,17 @@ class DBNNPredictor:
                 cm[class_to_idx[t], class_to_idx[p]] += 1
 
         # Print confusion matrix with colors
-        print("\033[K" +f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
-        print("\033[K" +f"{'Actual/Predicted':<15}", end='')
+        print("\033[K" + f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
+        print("\033[K" + f"{'Actual/Predicted':<15}", end='')
         for label in all_classes:
-            print("\033[K" +f"{str(label):<8}", end='')
-        print("\033[K" +"Accuracy")
-        print("\033[K" +"-" * (15 + 8 * n_classes + 10))
+            print("\033[K" + f"{str(label):<8}", end='')
+        print("\033[K" + "Accuracy")
+        print("\033[K" + "-" * (15 + 8 * n_classes + 10))
 
         # Print matrix with colors
         for i in range(n_classes):
             # Print actual class label
-            print("\033[K" +f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
+            print("\033[K" + f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
 
             # Print confusion matrix row
             for j in range(n_classes):
@@ -759,7 +759,7 @@ class DBNNPredictor:
                 else:
                     # Incorrect predictions in red
                     color = Colors.RED
-                print("\033[K" +f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
+                print("\033[K" + f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
 
             # Print class accuracy with color based on performance
             acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
@@ -769,18 +769,20 @@ class DBNNPredictor:
                 color = Colors.YELLOW
             else:
                 color = Colors.BLUE
-            print("\033[K" +f"{color}{acc:>7.2%}{Colors.ENDC}")
+            print("\033[K" + f"{color}{acc:>7.2%}{Colors.ENDC}")
 
         # Print overall accuracy
         total_correct = np.diag(cm).sum()
         total_samples = cm.sum()
         if total_samples > 0:
             overall_acc = total_correct / total_samples
-            print("\033[K" +"-" * (15 + 8 * n_classes + 10))
+            print("\033[K" + "-" * (15 + 8 * n_classes + 10))
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
-            print("\033[K" +f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
-            print("\033[K" +f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+            print("\033[K" + f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
 
+            # Only print best accuracy if the attribute exists
+            if hasattr(self, 'best_combined_accuracy'):
+                print("\033[K" + f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """
