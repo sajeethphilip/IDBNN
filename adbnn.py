@@ -6785,7 +6785,7 @@ def main():
                 #save_label_encoder(model.label_encoder, dataset_name)
 
             if mode in ['predict', 'train_predict']:
-                if not os.path.exists(f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"):
+                if not os.path.exists(f"Model/Best_{model_type}_{dataset_name}_full.pt"):
                     warnings.warn(
                         "Full model state not found - predictions may be degraded\n"
                         "Solution: Retrain with fresh_start=True",
