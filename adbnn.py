@@ -4495,6 +4495,7 @@ class DBNN(GPUDBNN):
 
         if os.path.exists(weights_file):
             try:
+                print(f"Attempting to load weights file {weights_file}")
                 with open(weights_file, 'r') as f:
                     weights_dict = json.load(f)
 
@@ -4510,6 +4511,7 @@ class DBNN(GPUDBNN):
                     dtype=torch.float32,
                     device=self.device
                 )
+                print(f"Weights file {weights_file} loaded succesfully")
                 # Only try to load training data if self.data exists
                 if hasattr(self, 'data'):
                     train_data_file = os.path.join(model_dir, 'best_training_data.csv')
