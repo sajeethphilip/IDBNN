@@ -833,6 +833,50 @@ class DBNNPredictor:
 
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """
+        Make predictions directly from a CSV file and use the parent directory name
+        to determine which model to load.
+        """
+        # Extract dataset name from path (e.g., 'data/mnist/mnist_predictions.csv' -> 'mnist')
+        dataset_name = os.path.basename(os.path.dirname(csv_path))
+        print(f"\033[KUsing dataset name from path: {dataset_name}")
+
+        # Load model components
+        if not self.load_model(dataset_name):
+            raise ValueError(f"Failed to load model for dataset: {dataset_name}")
+
+        # Load data
+        df = pd.read_csv(csv_path)
+
+        # Rest of the prediction logic remains the same...
+        target_column = self.config.get('target_column') if hasattr(self, 'config') else None
+        target_in_data = target_column is not None and target_column in df.columns
+
+        results = self.predict(df)
+
+        if target_in_data:
+            try:
+                y_true = df[target_column]
+                y_pred = results['predicted_class']
+
+                if not np.issubdtype(y_true.dtype, np.number):
+                    y_true = self.label_encoder.transform(y_true)
+
+                if not np.issubdtype(y_pred.dtype, np.number):
+                    y_pred = self.label_encoder.transform(y_pred)
+
+                self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
+            except Exception as e:
+                print(f"\033[KError generating confusion matrix: {str(e)}")
+                traceback.print_exc()
+
+        if output_path:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            results.to_csv(output_path, index=False)
+
+        return results
+
+    def predict_from_csv_old(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+        """
         Make predictions directly from a CSV file and display confusion matrix if target column exists in config.
 
         Args:
