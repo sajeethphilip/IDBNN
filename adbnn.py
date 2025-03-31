@@ -3616,40 +3616,52 @@ class DBNN(GPUDBNN):
             self.nan_mask = torch.isnan(X)  # For tensor input
             X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
 
-        # Step 1: Compute global statistics only once during training
-        if is_training and not self.global_stats_computed:
-            DEBUG.log("Training mode preprocessing - computing global statistics")
-            self.compute_global_statistics(X)  # Compute global stats only once
-            self.global_stats_computed = True  # Mark stats as computed
-        elif is_training:
-            DEBUG.log("Training mode preprocessing - using precomputed global statistics")
-
-        # Step 2: Handle high cardinality columns (only during training)
+        # Step 1: Handle feature selection and statistics computation
         if is_training:
+            # Store original columns before any filtering
             self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
-            cardinality_threshold = self._calculate_cardinality_threshold()
-            DEBUG.log(f"Cardinality threshold: {cardinality_threshold}")
+
+            # Apply feature filtering (e.g., high cardinality removal)
             if isinstance(X, pd.DataFrame):
+                cardinality_threshold = self._calculate_cardinality_threshold()
+                DEBUG.log(f"Cardinality threshold: {cardinality_threshold}")
                 X = self._remove_high_cardinality_columns(X, cardinality_threshold)
-            DEBUG.log(f"Shape after cardinality filtering: {X.shape}")
+                DEBUG.log(f"Shape after cardinality filtering: {X.shape}")
 
-            # Store the features we'll actually use
-            self.feature_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
-            DEBUG.log(f"Selected feature columns: {self.feature_columns}")
+                # Store the final selected features
+                self.feature_columns = X.columns.tolist()
+                DEBUG.log(f"Selected feature columns: {self.feature_columns}")
 
-            # Store high cardinality columns for future reference
-            if isinstance(X, pd.DataFrame):
+                # Store removed columns for reference
                 self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
                 if self.high_cardinality_columns:
                     DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
 
-        # Step 3: Handle categorical features with safe type conversion
+            # Compute statistics ONLY on the selected features
+            self.global_mean = X.mean(axis=0).values
+            self.global_std = X.std(axis=0).values
+            self.global_std[self.global_std == 0] = 1  # Avoid division by zero
+            self.global_stats_computed = True
+        else:
+            # During prediction: enforce exact feature matching
+            if isinstance(X, pd.DataFrame):
+                missing = set(self.feature_columns) - set(X.columns)
+                if missing:
+                    raise ValueError(
+                        f"Prediction data missing {len(missing)} required features: {sorted(missing)}\n"
+                        f"Expected features: {self.feature_columns}\n"
+                        f"Provided features: {X.columns.tolist()}"
+                    )
+                # Reorder to match training features exactly
+                X = X[self.feature_columns]
+
+        # Step 2: Handle categorical features
         DEBUG.log("Starting categorical encoding")
         try:
             if isinstance(X, pd.DataFrame):
                 X_encoded = self._encode_categorical_features(X, is_training)
             else:
-                X_encoded = X  # Skip encoding if X is already a tensor
+                X_encoded = X
             DEBUG.log(f"Shape after categorical encoding: {X_encoded.shape}")
             if isinstance(X_encoded, pd.DataFrame):
                 DEBUG.log(f"Encoded dtypes:\n{X_encoded.dtypes}")
@@ -3657,63 +3669,36 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error in categorical encoding: {str(e)}")
             raise
 
-        # Step 4: Safe conversion to numpy with improved NaN checking
+        # Step 3: Convert to numpy array
         try:
             if isinstance(X_encoded, pd.DataFrame):
-                X_numpy = X_encoded.to_numpy(dtype=np.float32)  # Force float32 conversion
+                X_numpy = X_encoded.to_numpy(dtype=np.float32)
             else:
                 X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float32)
-
             DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
-
-            # Safe NaN/Inf checking
-            try:
-                DEBUG.log(f"Any NaN: {np.any(np.isnan(X_numpy))}")
-            except TypeError:
-                DEBUG.log("NaN check skipped - incompatible dtype")
-
-            try:
-                DEBUG.log(f"Any Inf: {np.any(np.isinf(X_numpy))}")
-            except TypeError:
-                DEBUG.log("Inf check skipped - incompatible dtype")
-
         except Exception as e:
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
-        # Step 5: Scale the features using precomputed global statistics
+        # Step 4: Standardize using the correct stats
         try:
-            X_scaled = np.zeros_like(X_numpy, dtype=np.float32)
-            batch_size = self._calculate_optimal_batch_size(X_numpy.nbytes) if hasattr(self, '_calculate_optimal_batch_size') else 1024
-
-            for i in range(0, len(X_numpy), batch_size):
-                batch_end = min(i + batch_size, len(X_numpy))
-                batch_X = X_numpy[i:batch_end]
-
-                # Scale the batch using precomputed global statistics
-                X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
-
+            X_scaled = (X_numpy - self.global_mean) / self.global_std
             DEBUG.log("Scaling successful")
         except Exception as e:
             DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
-            if X_numpy.size == 0:
-                print("\033[K" + "[WARNING] Empty feature array! Returning original data")
-                X_scaled = X_numpy
-            else:
-                means = np.nanmean(X_numpy, axis=0)
-                stds = np.nanstd(X_numpy, axis=0)
-                stds[stds == 0] = 1
-                X_scaled = (X_numpy - means) / stds
+            means = np.nanmean(X_numpy, axis=0)
+            stds = np.nanstd(X_numpy, axis=0)
+            stds[stds == 0] = 1
+            X_scaled = (X_numpy - means) / stds
 
-        # Step 6: Convert scaled data to a PyTorch tensor
+        # Step 5: Convert to tensor
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
 
-        # Step 7: Compute feature pairs and bin edges (only during training)
+        # Step 6: Compute feature pairs and bin edges (training only)
         if is_training:
-            remaining_feature_indices = list(range(len(self.feature_columns))) if self.feature_columns else list(range(X_scaled.shape[1]))
+            remaining_feature_indices = list(range(len(self.feature_columns)))
             DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
 
-            # Generate feature pairs using the updated set of features
             self.feature_pairs = self._generate_feature_combinations(
                 remaining_feature_indices,
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
@@ -3721,7 +3706,6 @@ class DBNN(GPUDBNN):
             )
             DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
 
-            # Compute bin edges using the preprocessed data (now a tensor)
             self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
             DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
 
