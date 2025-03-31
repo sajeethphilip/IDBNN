@@ -834,7 +834,7 @@ class DBNNPredictor:
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
-        dataset_name = self.get_dataset_name_from_path(csv_path)
+        dataset_name = get_dataset_name_from_path(csv_path)
         print(f"\033[KUsing model for dataset: {dataset_name}")
 
         # Verify model files exist
