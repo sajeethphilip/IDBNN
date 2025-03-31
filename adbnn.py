@@ -835,7 +835,7 @@ class DBNNPredictor:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
         dataset_name = self.get_dataset_name_from_path(csv_path)
-        print(f"\033[KUsing model for dataset: {dataset_name}")
+        print(f"\033[KUsing model for dataset: {dataset_name}---------------------------------")
 
         # Verify model files exist
         model_files = [
@@ -855,7 +855,6 @@ class DBNNPredictor:
 
         # Load data
         df = pd.read_csv(csv_path)
-        print(df)
         # Rest of the prediction logic remains the same...
         target_column = self.config.get('target_column') if hasattr(self, 'config') else None
         target_in_data = target_column is not None and target_column in df.columns
