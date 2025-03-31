@@ -855,7 +855,7 @@ class DBNNPredictor:
 
         # Load data
         df = pd.read_csv(csv_path)
-
+        print(df)
         # Rest of the prediction logic remains the same...
         target_column = self.config.get('target_column') if hasattr(self, 'config') else None
         target_in_data = target_column is not None and target_column in df.columns
