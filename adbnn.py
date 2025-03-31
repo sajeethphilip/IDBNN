@@ -5401,7 +5401,7 @@ class DBNN(GPUDBNN):
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
                 self._save_best_weights()
-
+                self.reset_to_initial_state()
 
             # Extract predictions for training and test data using stored indices
             y_train_pred = all_predictions[:len(y_train)]  # Predictions for training data
