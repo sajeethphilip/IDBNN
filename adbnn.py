@@ -4687,12 +4687,25 @@ class DBNN(GPUDBNN):
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
         checkpoint = {
-            # Core weights
-            'weights': self.best_W.cpu().numpy(),
+            # Core weights (already tensors)
+            'weights': self.best_W.cpu(),
 
-            # Weight updater state
-            'histogram_weights': {k: v.cpu() for k,v in self.weight_updater.histogram_weights.items()},
-            'gaussian_weights': {k: v.cpu() for k,v in self.weight_updater.gaussian_weights.items()},
+            # Weight updater state - recursive tensor handling
+            'histogram_weights': {
+                str(class_id): {
+                    str(pair_idx): weight.cpu()
+                    for pair_idx, weight in class_weights.items()
+                }
+                for class_id, class_weights in self.weight_updater.histogram_weights.items()
+            },
+
+            'gaussian_weights': {
+                str(class_id): {
+                    str(pair_idx): weight.cpu()
+                    for pair_idx, weight in class_weights.items()
+                }
+                for class_id, class_weights in self.weight_updater.gaussian_weights.items()
+            },
 
             # Feature processing
             'global_mean': self.global_mean,
@@ -4700,11 +4713,16 @@ class DBNN(GPUDBNN):
             'feature_columns': self.feature_columns,
 
             # Training state
-            'best_round_initial_conditions': self.best_round_initial_conditions,
+            'best_round_initial_conditions': {
+                'weights': self.best_round_initial_conditions['weights'].cpu(),
+                # ... other conditions ...
+            } if self.best_round_initial_conditions else None,
             'cardinality_threshold': self.cardinality_threshold
         }
 
         torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
+
+
         if self.best_W is None:
             print("\033[KWarning: No best weights to save")
             return
@@ -4760,8 +4778,17 @@ class DBNN(GPUDBNN):
             checkpoint = torch.load(path, map_location=self.device)
 
             # Restore core weights
-            self.best_W = torch.tensor(checkpoint['weights'], device=self.device)
+            self.best_W = checkpoint['weights'].to(self.device)
             self.current_W = self.best_W.clone()
+
+            # Restore weight updater (with proper type conversion)
+            self.weight_updater.histogram_weights = {
+                int(class_id): {
+                    int(pair_idx): weight.to(self.device)
+                    for pair_idx, weight in class_weights.items()
+                }
+                for class_id, class_weights in checkpoint['histogram_weights'].items()
+            }
 
             # Restore weight updater
             for class_id in checkpoint['histogram_weights']:
