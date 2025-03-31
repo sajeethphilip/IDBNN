@@ -4449,7 +4449,13 @@ class DBNN(GPUDBNN):
             print(f"\033[KCreated model directory at {model_dir}")
 
             # Convert weights to numpy and then to list for JSON serialization
-            weights_np = self.best_W.cpu().numpy()
+            #weights_np = self.best_W.cpu().numpy()
+                       # Get weights and verify dimensions
+            weights_np = torch.stack([
+                self.weight_updater.get_histogram_weights(c, group_idx)
+                for c in range(n_classes)
+            ]).cpu().numpy()
+
 
             # Save weights
             weights_dict = {
