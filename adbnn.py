@@ -937,7 +937,7 @@ class DBNNPredictor:
 def get_dataset_name_from_path(file_path):
     """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
     # Normalize path and split into parts
-    return file_path.split('/')[1]
+    return file_path.split('/')[1:2]
 
 
 
