@@ -263,7 +263,7 @@ class PredictionManager:
         # Set default output path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
@@ -6895,7 +6895,7 @@ def get_interactive_args():
         args.input_path= input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+        default_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
@@ -7181,7 +7181,7 @@ def main():
 
             # Handle output path
             if not hasattr(args, 'output') or not args.output:
-                args.output = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+                args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
@@ -7226,7 +7226,7 @@ def interactive_input():
     # Mode-specific inputs
     if mode == 'predict':
         args.model_path = input(f"Enter path to trained model [data/{data_name}/checkpoints/{data_name}_unified.pth]: ").strip() or f"data/{data_name}/checkpoints/{data_name}_unified.pth"
-        args.output = input(f"Enter output CSV path [data/{data_name}/{data_name}_predictions.csv]: ").strip() or f"data/{data_name}/{data_name}_predictions.csv"
+        args.output = input(f"Enter output CSV path [data/{data_name}/{data_name}.csv]: ").strip() or f"data/{data_name}/{data_name}.csv"
         args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
         args.cpu = input("Force CPU even if GPU available? (y/n) [n]: ").strip().lower() == 'y'
 
