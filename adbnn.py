@@ -1,6 +1,7 @@
 #Working, fully functional with predcition 31/March/2025 Stable Model
 # Better Memory management 06:28am
 # Saves the weights that provide the best trainign accuracy if it is found to give the best test accuracy as well. 9:40 pm
+#Complete state saving and predcition loading validations added. April 1st 2025
 import torch
 import warnings
 import time
