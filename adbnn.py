@@ -6461,26 +6461,11 @@ def main():
                 #save_label_encoder(model.label_encoder, dataset_name)
 
             if mode in ['predict', 'train_predict']:
-                print(f"\033[KDBNN Dataset Processor\n{'='*40}")
-
-                # Get clean dataset name
-                dataset_name = get_dataset_name_from_path(args.file_path)
-                print(f"Processing {dataset_name} in predict mode")
-
-                try:
-                    predictor = DBNNPredictor()
-                    results = predictor.predict_from_csv(
-                        args.file_path,
-                        output_path=f"data/{dataset_name}/predictions.csv"
-                    )
-                    print("\033[KPrediction completed successfully")
-                except Exception as e:
-                    print(f"\033[KError during prediction: {str(e)}")
-                    traceback.print_exc()
-                    sys.exit(1)
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 predictor = DBNNPredictor()
+                dataset_name = get_dataset_name_from_path(args.file_path)
+                print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
                     input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
