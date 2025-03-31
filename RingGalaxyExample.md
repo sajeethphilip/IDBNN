@@ -59,6 +59,14 @@ Loaded likelihood_params from components file
 - Number of classes: 2
 - Class 0: 8128 feature pairs
 - Class 1: 8128 feature pairs
+Prediction batches: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 99/99 [06:18<00:00,  3.83s/it]
+Confusion Matrix and Class-wise Accuracy for [Prediction Results]:
+Actual/PredictedNonRingsRings   Accuracy
+-----------------------------------------
+NonRings       10015   1422     87.57%
+Rings          218     977      81.76%
+-----------------------------------------
+Overall Accuracy: 87.02%
 
 
 #----------------------------------------Previous ---------------------
