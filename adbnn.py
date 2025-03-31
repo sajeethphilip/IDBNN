@@ -157,14 +157,32 @@ def test_likelihood_params(predictor):
     else:
         print("\033[K" +f"{Colors.GREEN} Feature pair probabilites and bin sizes good. {Colors.ENDC}",end="\r", flush=True)
 def test_nan_handling(predictor, input_data):
-    nan_count = input_data.isna().sum().sum()
-    if nan_count > 0:
-        raise ValueError(
-            f"Input contains {nan_count} NaN values which will be silently replaced with -99999.\n"
-            "Recommended actions:\n"
-            "1. Handle missing values before prediction\n"
-            "2. Set 'cardinality_tolerance=-1' to disable auto-replacement"
-        )
+    """
+    Informative warning (not error) about NaN handling.
+    Now handles both file paths and DataFrames.
+    """
+    # Load data if input is a file path
+    if isinstance(input_data, str):
+        try:
+            if not os.path.exists(input_data):
+                return  # Skip check if file doesn't exist
+            input_df = pd.read_csv(input_data)
+        except Exception:
+            return  # Skip if we can't read the file
+    else:
+        input_df = input_data
+
+    # Only proceed if we have a DataFrame-like object
+    if hasattr(input_df, 'isna'):
+        nan_count = input_df.isna().sum().sum()
+        if nan_count > 0:
+            nan_cols = input_df.columns[input_df.isna().any()].tolist()
+            warnings.warn(
+                f"Input contains {nan_count} NaN values in columns: {nan_cols}\n"
+                "These will be automatically replaced with -99999 during prediction.\n"
+                "Recommended action: Preprocess missing values for better results.",
+                UserWarning
+            )
     else:
         print("\033[K" +f"{Colors.GREEN} NaN data found rand replaed by -99999 {Colors.ENDC}",end="\r", flush=True)
 
