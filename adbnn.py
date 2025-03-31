@@ -938,7 +938,6 @@ def get_dataset_name_from_path(file_path):
     """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
     # Normalize path and split into parts
     dataset_name=file_path.split('/')[1]
-    print('_'*20,dataset_name)
     return dataset_name
 
 
