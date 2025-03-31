@@ -832,17 +832,26 @@ class DBNNPredictor:
                 print("\033[K" + f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """
-        Make predictions directly from a CSV file and use the parent directory name
-        to determine which model to load.
-        """
-        # Extract dataset name from path (e.g., 'data/mnist/mnist_predictions.csv' -> 'mnist')
-        dataset_name = os.path.basename(os.path.dirname(csv_path))
-        print(f"\033[KUsing dataset name from path: {dataset_name}")
+        """Make predictions using model from the same directory as the input file"""
+        # Get dataset name from path structure
+        dataset_name = self.get_dataset_name_from_path(csv_path)
+        print(f"\033[KUsing model for dataset: {dataset_name}")
 
-        # Load model components
+        # Verify model files exist
+        model_files = [
+            f"Model/Best_Histogram_{dataset_name}_components.pkl",
+            f"Model/Best_Histogram_{dataset_name}_weights.json",
+            f"Model/Best_Histogram_{dataset_name}_label_encoder.pkl"
+        ]
+
+        if not all(os.path.exists(f) for f in model_files):
+            raise FileNotFoundError(
+                f"Missing model files for {dataset_name}. Required files:\n" +
+                "\n".join(model_files)
+
+        # Load the model
         if not self.load_model(dataset_name):
-            raise ValueError(f"Failed to load model for dataset: {dataset_name}")
+            raise ValueError(f"Failed to load model for {dataset_name}")
 
         # Load data
         df = pd.read_csv(csv_path)
@@ -926,6 +935,22 @@ class DBNNPredictor:
 
         return results
 #-------------------------------------------DBNN Predictor Ends ------------------------------------
+def get_dataset_name_from_path(file_path):
+    """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
+    try:
+        # Normalize path and split into parts
+        normalized = os.path.normpath(file_path)
+        parts = normalized.split(os.sep)
+
+        # Look for 'data' directory and get next component
+        if 'data' in parts:
+            data_idx = parts.index('data')
+            if data_idx + 1 < len(parts):
+                return parts[data_idx + 1]
+        return os.path.splitext(os.path.basename(file_path))[0].split('_')[0]
+    except:
+        return os.path.splitext(os.path.basename(file_path))[0].split('_')[0]
+
 class DatasetProcessor:
     """A class to handle dataset-related operations such as downloading, processing, and formatting."""
 
