@@ -113,13 +113,13 @@ def test_prediction_output(predictor, input_data):
             "2. Check input data types\n"
             "3. Verify GPU memory is available"
         ) from None
-    print("\033[K" +f"{Colors.GREEN} Passed Model Initialisation, data type validation and GPU memory availability/handling{Colors.ENDC}",end=\r, flush=True)
+    print("\033[K" +f"{Colors.GREEN} Passed Model Initialisation, data type validation and GPU memory availability/handling{Colors.ENDC}",end="\r", flush=True)
     if len(preds) != len(input_data):
         raise RuntimeError(
             "Prediction count mismatch input samples!\n"
             f"Expected {len(input_data)} predictions, got {len(preds)}"
         )
-    print(f"{Colors.GREEN} Prediction match data{Colors.ENDC}",end=\r, flush=True)
+    print(f"{Colors.GREEN} Prediction match data{Colors.ENDC}",end="\r", flush=True)
     invalid_classes = set(preds['predicted_class']) - set(predictor.label_encoder.classes_)
     if invalid_classes:
         raise ValueError(
@@ -129,7 +129,7 @@ def test_prediction_output(predictor, input_data):
             "2. Weights were modified post-training"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Passed class validation, label encoder correctness and weights {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Passed class validation, label encoder correctness and weights {Colors.ENDC}",end="\r", flush=True)
 def test_likelihood_params(predictor):
     params = predictor.likelihood_params
     required_keys = {
@@ -145,7 +145,7 @@ def test_likelihood_params(predictor):
             "2. Manual modification of 'components.pkl'"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Likelihood parameters good, Model training and components validated {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Likelihood parameters good, Model training and components validated {Colors.ENDC}",end="\r", flush=True)
     # Check for NaN/inf in probabilities
     if predictor.model_type == "Histogram":
         for i, probs in enumerate(params['bin_probs']):
@@ -155,7 +155,7 @@ def test_likelihood_params(predictor):
                     "Solution: Retrain model with different bin sizes"
                 )
     else:
-        print("\033[K" +f"{Colors.GREEN} Feature pair probabilites and bin sizes good. {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Feature pair probabilites and bin sizes good. {Colors.ENDC}",end="\r", flush=True)
 def test_nan_handling(predictor, input_data):
     nan_count = input_data.isna().sum().sum()
     if nan_count > 0:
@@ -166,7 +166,7 @@ def test_nan_handling(predictor, input_data):
             "2. Set 'cardinality_tolerance=-1' to disable auto-replacement"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} NaN data found rand replaed by -99999 {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} NaN data found rand replaed by -99999 {Colors.ENDC}",end="\r", flush=True)
 
 def test_feature_consistency(predictor, input_data):
     if not hasattr(predictor, 'feature_columns'):
@@ -176,7 +176,7 @@ def test_feature_consistency(predictor, input_data):
             "2. 'feature_columns' exists in components.pkl"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Passed Feature tests {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Passed Feature tests {Colors.ENDC}",end="\r", flush=True)
     missing = set(predictor.feature_columns) - set(input_data.columns)
     if missing:
         raise ValueError(
@@ -186,7 +186,7 @@ def test_feature_consistency(predictor, input_data):
             "Solution: Retrain model or add missing features to input"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Passed Feature tests -  second round {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Passed Feature tests -  second round {Colors.ENDC}",end="\r", flush=True)
 def test_weight_consistency(predictor):
     if not hasattr(predictor, 'current_W'):
         raise RuntimeError(
@@ -196,7 +196,7 @@ def test_weight_consistency(predictor):
             "3. Model was never trained"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Weights loading works {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Weights loading works {Colors.ENDC}",end="\r", flush=True)
     n_classes = len(predictor.label_encoder.classes_)
     n_pairs = len(predictor.feature_pairs)
 
@@ -208,7 +208,7 @@ def test_weight_consistency(predictor):
             "2. Weight file is from incompatible version"
         )
     else:
-        print("\033[K" +f"{Colors.GREEN} Weights shapes valid {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Weights shapes valid {Colors.ENDC}",end="\r", flush=True)
 def test_model_initialization(predictor):
     required_components = [
         ('label_encoder', "Label encoder not loaded. Check if 'Best_*_label_encoder.pkl' exists in Model/"),
@@ -226,7 +226,7 @@ def test_model_initialization(predictor):
         error_msg = "CRITICAL MODEL LOAD FAILURES:\n" + "\n".join(f"• {m}" for m in missing)
         raise RuntimeError(error_msg)
     else:
-        print("\033[K" +f"{Colors.GREEN} Mandatory componet loading works {Colors.ENDC}",end=\r, flush=True)
+        print("\033[K" +f"{Colors.GREEN} Mandatory componet loading works {Colors.ENDC}",end="\r", flush=True)
 
 class DBNNPredictor:
     """Optimized standalone predictor for DBNN models"""
