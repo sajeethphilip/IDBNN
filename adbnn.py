@@ -2892,7 +2892,8 @@ class DBNN(GPUDBNN):
                 'label_encoder': self.label_encoder.classes_
             }
         }
-        torch.save(checkpoint, f"Model/FullState_{self.model_type}_{self.dataset_name}.pt")
+        torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
+
 
 
     def _update_training_log(self, round_num: int, metrics: Dict):
