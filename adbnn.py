@@ -847,7 +847,7 @@ class DBNNPredictor:
         if not all(os.path.exists(f) for f in model_files):
             raise FileNotFoundError(
                 f"Missing model files for {dataset_name}. Required files:\n" +
-                "\n".join(model_files)
+                "\n".join(model_files))
 
         # Load the model
         if not self.load_model(dataset_name):
