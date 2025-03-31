@@ -2721,6 +2721,9 @@ class DBNN(GPUDBNN):
         else:
             results = self.fit_predict()
 
+        print(f"The training is over. The full model state is being saved for next round. Please wait...")
+        self._save_full_state()  # Save complete state
+        print("Model state fully saved including training metadata")
         # Preprocess features and convert to tensors
         X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
         y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
@@ -4683,6 +4686,25 @@ class DBNN(GPUDBNN):
 
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
+    checkpoint = {
+        # Core weights
+        'weights': self.best_W.cpu().numpy(),
+
+        # Weight updater state
+        'histogram_weights': {k: v.cpu() for k,v in self.weight_updater.histogram_weights.items()},
+        'gaussian_weights': {k: v.cpu() for k,v in self.weight_updater.gaussian_weights.items()},
+
+        # Feature processing
+        'global_mean': self.global_mean,
+        'global_std': self.global_std,
+        'feature_columns': self.feature_columns,
+
+        # Training state
+        'best_round_initial_conditions': self.best_round_initial_conditions,
+        'cardinality_threshold': self.cardinality_threshold
+    }
+
+    torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
         if self.best_W is None:
             print("\033[KWarning: No best weights to save")
             return
@@ -4732,6 +4754,28 @@ class DBNN(GPUDBNN):
             print(f"\033[KError saving best weights: {str(e)}")
             traceback.print_exc()
 
+    def _load_full_state(self):
+        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+        if os.path.exists(path):
+            checkpoint = torch.load(path, map_location=self.device)
+
+            # Restore core weights
+            self.best_W = torch.tensor(checkpoint['weights'], device=self.device)
+            self.current_W = self.best_W.clone()
+
+            # Restore weight updater
+            for class_id in checkpoint['histogram_weights']:
+                for pair_idx in checkpoint['histogram_weights'][class_id]:
+                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
+                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
+
+            # Restore preprocessing
+            self.global_mean = checkpoint['global_mean']
+            self.global_std = checkpoint['global_std']
+            self.feature_columns = checkpoint['feature_columns']
+
+            # Restore training state
+            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
 
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
@@ -6714,6 +6758,12 @@ def main():
                 #save_label_encoder(model.label_encoder, dataset_name)
 
             if mode in ['predict', 'train_predict']:
+                if not os.path.exists(f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"):
+                    warnings.warn(
+                        "Full model state not found - predictions may be degraded\n"
+                        "Solution: Retrain with fresh_start=True",
+                        UserWarning
+                    )
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 predictor = DBNNPredictor()
