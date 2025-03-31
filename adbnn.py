@@ -4828,6 +4828,7 @@ class DBNN(GPUDBNN):
         # Training complete
         epoch_pbar.close()
         #self._save_model_components()
+        self.current_W= self.best_W.clone()   # Let us return the best weight we found during training for testing on test data and saving if foud better.
         return self.current_W.cpu(), error_rates
 
     #---------------------------------Train InvertableDBNN on the fly ------------------------------------
