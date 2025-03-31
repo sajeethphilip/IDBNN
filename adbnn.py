@@ -6582,9 +6582,10 @@ def main():
 
         elif args.mode in ['train', 'train_predict', 'predict']:
             if args.file_path:
-                basename = os.path.splitext(os.path.basename(args.file_path))[0]
+                basename =get_dataset_name_from_path(args.file_path)
+                workfile=os.path.splitext(os.path.basename(args.file_path))[0]
                 conf_path = os.path.join('data', basename, f'{basename}.conf')
-                csv_path = os.path.join('data', basename, f'{basename}.csv')
+                csv_path = os.path.join('data', basename, f'{workfile}.csv')
                 process_single_dataset(basename, conf_path, csv_path, args.mode)
             else:
                 dataset_pairs = find_dataset_pairs()
