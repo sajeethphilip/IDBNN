@@ -93,6 +93,132 @@ import os
 from typing import Union, List, Dict, Optional
 from collections import defaultdict
 
+
+def safe_predict(predictor, input_data):
+    test_model_initialization(predictor)
+    test_weight_consistency(predictor)
+    test_feature_consistency(predictor, input_data)
+    test_nan_handling(predictor, input_data)
+    test_likelihood_params(predictor)
+    return test_prediction_output(predictor, input_data)
+
+def test_prediction_output(predictor, input_data):
+    try:
+        preds = predictor.predict(input_data)
+    except Exception as e:
+        raise RuntimeError(
+            f"Prediction failed with: {str(e)}\n"
+            "Debug steps:\n"
+            "1. Run test_model_initialization()\n"
+            "2. Check input data types\n"
+            "3. Verify GPU memory is available"
+        ) from None
+
+    if len(preds) != len(input_data):
+        raise RuntimeError(
+            "Prediction count mismatch input samples!\n"
+            f"Expected {len(input_data)} predictions, got {len(preds)}"
+        )
+
+    invalid_classes = set(preds['predicted_class']) - set(predictor.label_encoder.classes_)
+    if invalid_classes:
+        raise ValueError(
+            f"Model produced invalid classes: {invalid_classes}\n"
+            "Likely causes:\n"
+            "1. Label encoder corrupted\n"
+            "2. Weights were modified post-training"
+        )
+
+def test_likelihood_params(predictor):
+    params = predictor.likelihood_params
+    required_keys = {
+        'Histogram': ['bin_probs', 'bin_edges', 'classes'],
+        'Gaussian': ['means', 'covs', 'classes']
+    }[predictor.model_type]
+
+    missing = [k for k in required_keys if k not in params]
+    if missing:
+        raise RuntimeError(
+            f"Corrupted likelihood parameters. Missing: {missing}\n"
+            "Possible causes:\n"
+            "1. Incomplete model training\n"
+            "2. Manual modification of 'components.pkl'"
+        )
+
+    # Check for NaN/inf in probabilities
+    if predictor.model_type == "Histogram":
+        for i, probs in enumerate(params['bin_probs']):
+            if not torch.isfinite(probs).all():
+                raise ValueError(
+                    f"NaN/Inf values detected in bin_probs for feature pair {i}.\n"
+                    "Solution: Retrain model with different bin sizes"
+                )
+
+def test_nan_handling(predictor, input_data):
+    nan_count = input_data.isna().sum().sum()
+    if nan_count > 0:
+        raise ValueError(
+            f"Input contains {nan_count} NaN values which will be silently replaced with -99999.\n"
+            "Recommended actions:\n"
+            "1. Handle missing values before prediction\n"
+            "2. Set 'cardinality_tolerance=-1' to disable auto-replacement"
+        )
+
+
+def test_feature_consistency(predictor, input_data):
+    if not hasattr(predictor, 'feature_columns'):
+        raise RuntimeError(
+            "Feature columns not defined. Check if:\n"
+            "1. Model was properly trained\n"
+            "2. 'feature_columns' exists in components.pkl"
+        )
+
+    missing = set(predictor.feature_columns) - set(input_data.columns)
+    if missing:
+        raise ValueError(
+            f"Input missing {len(missing)} required features:\n"
+            f"Missing: {sorted(missing)}\n"
+            f"Expected: {predictor.feature_columns}\n"
+            "Solution: Retrain model or add missing features to input"
+        )
+
+def test_weight_consistency(predictor):
+    if not hasattr(predictor, 'current_W'):
+        raise RuntimeError(
+            "Weights not loaded. Possible causes:\n"
+            "1. 'Best_*_weights.json' missing in Model/\n"
+            "2. Weight file corrupted\n"
+            "3. Model was never trained"
+        )
+
+    n_classes = len(predictor.label_encoder.classes_)
+    n_pairs = len(predictor.feature_pairs)
+
+    if predictor.current_W.shape != (n_classes, n_pairs):
+        raise ValueError(
+            f"Weight matrix shape mismatch. Expected ({n_classes}, {n_pairs}), got {predictor.current_W.shape}.\n"
+            "Likely causes:\n"
+            "1. Model was trained with different features/classes\n"
+            "2. Weight file is from incompatible version"
+        )
+
+def test_model_initialization(predictor):
+    required_components = [
+        ('label_encoder', "Label encoder not loaded. Check if 'Best_*_label_encoder.pkl' exists in Model/"),
+        ('feature_pairs', "Feature pairs not loaded. Check 'Best_*_components.pkl' in Model/"),
+        ('likelihood_params', "Likelihood parameters missing. Verify model training completed successfully."),
+        ('current_W', "Model weights not initialized. Check 'Best_*_weights.json' in Model/")
+    ]
+
+    missing = []
+    for attr, msg in required_components:
+        if not hasattr(predictor, attr) or getattr(predictor, attr) is None:
+            missing.append(msg)
+
+    if missing:
+        error_msg = "CRITICAL MODEL LOAD FAILURES:\n" + "\n".join(f"• {m}" for m in missing)
+        raise RuntimeError(error_msg)
+
 class DBNNPredictor:
     """Optimized standalone predictor for DBNN models"""
 
@@ -6481,7 +6607,7 @@ def main():
                     output_dir = os.path.join('data', dataset_name, 'Predictions')
                     os.makedirs(output_dir, exist_ok=True)
                     output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-
+                    safe_predict(predictor, input_csv)
                     results = predictor.predict_from_csv(input_csv, output_path)
                     print("\033[K" + f"Predictions saved to: {output_path}")
 
