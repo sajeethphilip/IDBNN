@@ -3414,7 +3414,7 @@ class DBNN(GPUDBNN):
                 #self.reset_to_initial_state()
 
                 # Save indices for this epoch
-                self.save_epoch_data(round_num, train_indices, test_indices)
+                #self.save_epoch_data(round_num, train_indices, test_indices)
 
                 # Create feature tensors for training
                 X_train = self.X_tensor[train_indices]
