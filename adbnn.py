@@ -938,17 +938,9 @@ def get_dataset_name_from_path(file_path):
     """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
     try:
         # Normalize path and split into parts
-        normalized = os.path.normpath(file_path)
-        parts = normalized.split(os.sep)
+        return file_path.split('/')[1]
 
-        # Look for 'data' directory and get next component
-        if 'data' in parts:
-            data_idx = parts.index('data')
-            if data_idx + 1 < len(parts):
-                return parts[data_idx + 1]
-        return os.path.splitext(os.path.basename(file_path))[0].split('_')[0]
-    except:
-        return os.path.splitext(os.path.basename(file_path))[0].split('_')[0]
+
 
 class DatasetProcessor:
     """A class to handle dataset-related operations such as downloading, processing, and formatting."""
