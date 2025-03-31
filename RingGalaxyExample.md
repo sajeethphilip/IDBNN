@@ -1,4 +1,67 @@
 ```
+March 31 2025 version Train the CDBNN, predict with it and train the adbnn and finally predcit with it.
+Later you can skip the training process and use the predcit modes on your own images.
+
+git pull && python cdbnn.py --data_name galaxies --input_path  galaxies.zip --mode train
+git pull && python cdbnn.py --data_name galaxies --input_path  galaxies.zip --mode predict
+&& python adbnn.py --file_path data/galaxies/galaxies.csv --mode train
+&& python adbnn.py --file_path data/galaxies/galaxies.csv --mode predict
+Already up to date.
+The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead
+Updated on March 30/2025 Stable version
+2025-03-31 21:05:54,190 - INFO - Logging setup complete. Log file: logs/prediction_20250331_210554.log
+2025-03-31 21:05:54,834 - INFO - Loaded unified checkpoint from data/galaxies/checkpoints/galaxies_unified.pth
+2025-03-31 21:05:54,834 - INFO - Layer sizes: [32, 64, 128, 128, 128, 128]
+2025-03-31 21:05:55,055 - WARNING - Using default clustering temperature 1.0
+2025-03-31 21:05:55,057 - INFO - Model loaded successfully with clustering parameters.
+2025-03-31 21:05:55,058 - INFO - Dataset created with 12 images
+2025-03-31 21:05:55,058 - INFO - Using default output path: data/galaxies/galaxies.csv
+2025-03-31 21:05:55,058 - INFO - Starting prediction process...
+2025-03-31 21:05:57,429 - INFO - Processing 12632 images with batch size 128
+Predicting features: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 99/99 [00:18<00:00,  5.47it/s]
+2025-03-31 21:06:15,539 - INFO - Predictions saved to data/galaxies/galaxies.csv
+2025-03-31 21:06:15,541 - INFO - Predictions saved to data/galaxies/galaxies.csv
+DBNN Dataset Processor
+========================================
+Processing galaxies in predict mode
+The model components are loaded from Model/Best_Histogram_galaxies_components.pkl
+Attempting to load weights file Model/Best_Histogram_galaxies_weights.json
+Weights file Model/Best_Histogram_galaxies_weights.json loaded succesfully
+Loaded best weights from Model/Best_Histogram_galaxies_weights.json
+Using device: cuda
+Attempting to load weights file Model/Best_Histogram_galaxies_weights.json
+Weights file Model/Best_Histogram_galaxies_weights.json loaded succesfully
+Loaded 0 training samples from best model
+Loaded best weights from Model/Best_Histogram_galaxies_weights.json
+[DEBUG] Generating feature combinations after filtering:
+- n_features: 128
+- group_size: 2
+- max_combinations: 100000
+- bin_sizes: [128]
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loading cached feature combinations from training_data/galaxies/feature_combinations.pkl
+---------------------BEWARE!! Remove if you get Error on retraining------------------------
+[DEBUG] Loaded feature combinations: torch.Size([8128, 2])
+adbnn.py:2012: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  feature_indices = torch.unique(torch.cat([torch.tensor(pair, device=self.device)
+Starting prediction...
+Processing galaxies in predict mode
+Loaded label encoder with classes: ['NonRings' 'Rings']
+Loaded likelihood_params from components file
+[DEBUG] Weight initialization complete. Structure:
+- Number of classes: 2
+- Class 0: 8128 feature pairs
+- Class 1: 8128 feature pairs
+Using model for dataset: galaxies
+Loaded label encoder with classes: ['NonRings' 'Rings']
+Loaded likelihood_params from components file
+[DEBUG] Weight initialization complete. Structure:
+- Number of classes: 2
+- Class 0: 8128 feature pairs
+- Class 1: 8128 feature pairs
+
+
+#----------------------------------------Previous ---------------------
 Single-line command for training
 >> git pull && python cdbnn.py --data_name galaxies --input_path galaxies.zip --mode train &&  python adbnn.py --file_path data/galaxies/galaxies.csv --mode train
 OR
