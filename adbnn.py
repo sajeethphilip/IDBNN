@@ -4449,7 +4449,8 @@ class DBNN(GPUDBNN):
             print(f"\033[KCreated model directory at {model_dir}")
 
             # Convert weights to numpy and then to list for JSON serialization
-            weights_np = self.best_W.cpu().numpy()
+            #weights_np = self.best_W.cpu().numpy()
+            weights_np = self.current_W.cpu().numpy()
 
             # Save weights
             weights_dict = {
@@ -4504,7 +4505,11 @@ class DBNN(GPUDBNN):
                     dtype=torch.float32,
                     device=self.device
                 )
-
+                self.current_W = torch.tensor(
+                    weights_array,
+                    dtype=torch.float32,
+                    device=self.device
+                )
                 # Only try to load training data if self.data exists
                 if hasattr(self, 'data'):
                     train_data_file = os.path.join(model_dir, 'best_training_data.csv')
