@@ -111,7 +111,9 @@ def safe_predict(predictor, input_data):
     test_nan_handling(predictor, input_data)
 
     # Stage 4: Prediction with GPU->CPU fallback
-    return test_prediction_output(predictor, input_data)
+    #test_prediction_output(predictor, input_data)   # Use this for testing only.
+    return
+
 def check_gpu_availability():
     """Informative GPU check without failing"""
     if not torch.cuda.is_available():
@@ -122,6 +124,7 @@ def check_gpu_availability():
             UserWarning
         )
     return 'cuda' if torch.cuda.is_available() else 'cpu'
+
 def test_prediction_output(predictor, input_data):
     """Robust prediction test handling both paths and DataFrames"""
     # Convert string paths to DataFrames
