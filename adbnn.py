@@ -4686,25 +4686,25 @@ class DBNN(GPUDBNN):
 
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
-    checkpoint = {
-        # Core weights
-        'weights': self.best_W.cpu().numpy(),
+        checkpoint = {
+            # Core weights
+            'weights': self.best_W.cpu().numpy(),
 
-        # Weight updater state
-        'histogram_weights': {k: v.cpu() for k,v in self.weight_updater.histogram_weights.items()},
-        'gaussian_weights': {k: v.cpu() for k,v in self.weight_updater.gaussian_weights.items()},
+            # Weight updater state
+            'histogram_weights': {k: v.cpu() for k,v in self.weight_updater.histogram_weights.items()},
+            'gaussian_weights': {k: v.cpu() for k,v in self.weight_updater.gaussian_weights.items()},
 
-        # Feature processing
-        'global_mean': self.global_mean,
-        'global_std': self.global_std,
-        'feature_columns': self.feature_columns,
+            # Feature processing
+            'global_mean': self.global_mean,
+            'global_std': self.global_std,
+            'feature_columns': self.feature_columns,
 
-        # Training state
-        'best_round_initial_conditions': self.best_round_initial_conditions,
-        'cardinality_threshold': self.cardinality_threshold
-    }
+            # Training state
+            'best_round_initial_conditions': self.best_round_initial_conditions,
+            'cardinality_threshold': self.cardinality_threshold
+        }
 
-    torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
+        torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
         if self.best_W is None:
             print("\033[KWarning: No best weights to save")
             return
