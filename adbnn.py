@@ -6669,14 +6669,13 @@ def main():
     parser.add_argument('--model_type', type=str, choices=['Histogram','Gaussian'],default='Histogram',
                         help='Select the model type. Default is Histogram')
     args = parser.parse_args()
-    args = parser.parse_args()
     processor = DatasetProcessor()
 
     def validate_config(config):
         """Ensure required configuration parameters exist"""
         required_params = {
             'training_params': ['learning_rate', 'epochs', 'test_fraction'],
-            'modelType': None,
+            'modelType': 'Histogram',
             'target_column': None
         }
 
@@ -6788,6 +6787,7 @@ def main():
                 #save_label_encoder(model.label_encoder, dataset_name)
 
             if mode in ['predict', 'train_predict']:
+                model_type=args.model_type
                 if not os.path.exists(f"Model/Best_{model_type}_{dataset_name}_full.pt"):
                     warnings.warn(
                         "Full model state not found - predictions may be degraded\n"
