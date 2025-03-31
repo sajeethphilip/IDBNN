@@ -1068,7 +1068,7 @@ class BaseAutoencoder(nn.Module):
         if img.size != target_size:
             img = img.resize(target_size, Image.Resampling.LANCZOS)
 
-        img.save(path, quality=95, optimize=True)
+        img.save(path, quality=99, optimize=True)
         logging.debug(f"Saved image to {path} with size {img.size}")
 
     def plot_reconstruction_samples(self, inputs: torch.Tensor,
@@ -3378,7 +3378,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
 
         # Model configuration
         model = config.setdefault('model', {})
-        model.setdefault('feature_dims', 32)
+        model.setdefault('feature_dims', 128)
         model.setdefault('learning_rate', 0.001)
         model.setdefault('encoder_type', 'cnn')
         model.setdefault('modelType', 'Histogram')
@@ -4676,7 +4676,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
 class FeatureExtractorCNN(nn.Module):
     """CNN-based feature extractor model with self-attention"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 32, dropout_prob: float = 0.5):
+    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
 
@@ -5473,7 +5473,7 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 target_size: int = 128, overlap: float = 0.5, config: Optional[Dict] = None):
+                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size  # Store target_size as an instance variable
@@ -5550,7 +5550,7 @@ class CustomImageDataset(Dataset):
 
     def _preprocess_all_images(self):
         """
-        Preprocess all images to ensure consistent shapes (128x128).
+        Preprocess all images to ensure consistent shapes (256x256).
         """
         # Create a directory to store preprocessed images (if saving to disk)
         self.preprocessed_dir = os.path.join(self.data_dir, "preprocessed")
@@ -5815,7 +5815,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(32, np.prod(input_size) // 4)
+        feature_dims = min(128, np.prod(input_size) // 4)
 
         return {
             "dataset": {
