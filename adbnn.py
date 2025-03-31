@@ -169,22 +169,63 @@ def test_nan_handling(predictor, input_data):
         print("\033[K" +f"{Colors.GREEN} NaN data found rand replaed by -99999 {Colors.ENDC}",end="\r", flush=True)
 
 def test_feature_consistency(predictor, input_data):
+    """
+    Validate that input data contains all required features.
+    Handles both file paths and DataFrames as input.
+    """
+    # Step 1: Load data if input is a file path
+    if isinstance(input_data, str):
+        try:
+            if not os.path.exists(input_data):
+                raise FileNotFoundError(f"Input file not found: {input_data}")
+            input_df = pd.read_csv(input_data)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load input data from {input_data}:\n"
+                f"Error: {str(e)}\n"
+                "Solution: Verify file exists and is a valid CSV"
+            ) from None
+    elif hasattr(input_data, 'columns'):  # Already a DataFrame-like object
+        input_df = input_data
+    else:
+        raise TypeError(
+            f"Unsupported input type: {type(input_data)}\n"
+            "Expected: pandas.DataFrame or file path (str)"
+        )
+
+    # Step 2: Verify predictor has feature definitions
     if not hasattr(predictor, 'feature_columns'):
         raise RuntimeError(
-            "Feature columns not defined. Check if:\n"
-            "1. Model was properly trained\n"
-            "2. 'feature_columns' exists in components.pkl"
+            "Model missing feature definitions. Likely causes:\n"
+            "1. Model was not properly trained\n"
+            "2. 'feature_columns' not saved in components.pkl\n"
+            "Solution: Retrain model with fresh_start=True"
         )
     else:
         print("\033[K" +f"{Colors.GREEN} Passed Feature tests {Colors.ENDC}",end="\r", flush=True)
-    missing = set(predictor.feature_columns) - set(input_data.columns)
+    # Step 3: Check feature alignment
+    missing = set(predictor.feature_columns) - set(input_df.columns)
     if missing:
+        # Suggest similar existing features (fuzzy matching)
+        suggestions = []
+        for missing_feat in missing:
+            matches = [f for f in input_df.columns
+                      if f.lower() == missing_feat.lower() or
+                      f.lower().replace('_','') == missing_feat.lower().replace('_','')]
+            suggestions.append(f"'{missing_feat}': possible matches {matches}")
+
         raise ValueError(
             f"Input missing {len(missing)} required features:\n"
-            f"Missing: {sorted(missing)}\n"
-            f"Expected: {predictor.feature_columns}\n"
-            "Solution: Retrain model or add missing features to input"
+            f"• Missing: {sorted(missing)}\n"
+            f"• Expected: {predictor.feature_columns}\n"
+            f"• Available: {list(input_df.columns)}\n"
+            "Potential fixes:\n"
+            "1. Rename columns to match training data\n"
+            "2. Use feature aliasing in config\n"
+            "3. Retrain model with current features\n\n"
+            "Similarity suggestions:\n" + "\n".join(suggestions)
         )
+
     else:
         print("\033[K" +f"{Colors.GREEN} Passed Feature tests -  second round {Colors.ENDC}",end="\r", flush=True)
 def test_weight_consistency(predictor):
