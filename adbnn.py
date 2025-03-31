@@ -6666,6 +6666,9 @@ def main():
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
                        required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
     parser.add_argument('--interactive', action='store_true', help="Enable interactive mode to modify settings.")
+    parser.add_argument('--model_type', type=str, choices=['Histogram','Gaussian'],default='Histogram',
+                        help='Select the model type. Default is Histogram')
+    args = parser.parse_args()
     args = parser.parse_args()
     processor = DatasetProcessor()
 
