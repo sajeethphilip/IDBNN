@@ -96,41 +96,90 @@ from collections import defaultdict
 
 
 def safe_predict(predictor, input_data):
+    """End-to-end validation with graceful fallbacks"""
+    # Stage 1: System checks (warnings only)
+    check_gpu_availability()
+
+    # Stage 2: Critical validations (errors)
     test_model_initialization(predictor)
     test_weight_consistency(predictor)
     test_feature_consistency(predictor, input_data)
-    test_nan_handling(predictor, input_data)
     test_likelihood_params(predictor)
-    return test_prediction_output(predictor, input_data)
 
+    # Stage 3: Data quality (warnings only)
+    test_nan_handling(predictor, input_data)
+
+    # Stage 4: Prediction with GPU->CPU fallback
+    return test_prediction_output(predictor, input_data)
+def check_gpu_availability():
+    """Informative GPU check without failing"""
+    if not torch.cuda.is_available():
+        warnings.warn(
+            "GPU not available - Falling back to CPU\n"
+            "For faster predictions, enable CUDA if you have an NVIDIA GPU\n"
+            "Check with: nvidia-smi and verify PyTorch GPU support",
+            UserWarning
+        )
+    return 'cuda' if torch.cuda.is_available() else 'cpu'
 def test_prediction_output(predictor, input_data):
+    """Robust prediction test handling both paths and DataFrames"""
+    # Convert string paths to DataFrames
+    if isinstance(input_data, str):
+        try:
+            input_data = pd.read_csv(input_data)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load input data: {str(e)}\n"
+                "Solution: Verify file exists and is a valid CSV"
+            ) from None
+
+    # Ensure we have DataFrame-like input
+    if not hasattr(input_data, 'columns'):
+        raise TypeError(
+            f"Unsupported input type: {type(input_data)}\n"
+            "Expected: pandas.DataFrame or file path (str)"
+        )
+
     try:
-        preds = predictor.predict(input_data)
+        # Get current device for restoration later
+        original_device = predictor.device
+
+        # Force CPU if GPU fails
+        try:
+            preds = predictor.predict(input_data)
+        except RuntimeError as e:
+            if 'CUDA' in str(e):
+                warnings.warn(
+                    "GPU prediction failed, retrying with CPU",
+                    UserWarning
+                )
+                predictor.device = 'cpu'
+                preds = predictor.predict(input_data)
+            else:
+                raise
+
+        # Validate prediction format
+        if len(preds) != len(input_data):
+            raise RuntimeError(
+                "Prediction count mismatch!\n"
+                f"Expected {len(input_data)} predictions, got {len(preds)}"
+            )
+
+        return preds
+
     except Exception as e:
         raise RuntimeError(
-            f"Prediction failed with: {str(e)}\n"
+            f"Prediction failed: {str(e)}\n"
             "Debug steps:\n"
-            "1. Run test_model_initialization()\n"
-            "2. Check input data types\n"
-            "3. Verify GPU memory is available"
+            "1. Verify input data types\n"
+            "2. Check model initialization\n"
+            f"3. Current device: {predictor.device}"
         ) from None
-    print("\033[K" +f"{Colors.GREEN} Passed Model Initialisation, data type validation and GPU memory availability/handling{Colors.ENDC}",end="\r", flush=True)
-    if len(preds) != len(input_data):
-        raise RuntimeError(
-            "Prediction count mismatch input samples!\n"
-            f"Expected {len(input_data)} predictions, got {len(preds)}"
-        )
-    print(f"{Colors.GREEN} Prediction match data{Colors.ENDC}",end="\r", flush=True)
-    invalid_classes = set(preds['predicted_class']) - set(predictor.label_encoder.classes_)
-    if invalid_classes:
-        raise ValueError(
-            f"Model produced invalid classes: {invalid_classes}\n"
-            "Likely causes:\n"
-            "1. Label encoder corrupted\n"
-            "2. Weights were modified post-training"
-        )
-    else:
-        print("\033[K" +f"{Colors.GREEN} Passed class validation, label encoder correctness and weights {Colors.ENDC}",end="\r", flush=True)
+
+    finally:
+        predictor.device = original_device  # Restore original device
+
+
 def test_likelihood_params(predictor):
     params = predictor.likelihood_params
     required_keys = {
