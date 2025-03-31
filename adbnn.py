@@ -3414,7 +3414,7 @@ class DBNN(GPUDBNN):
                 #self.reset_to_initial_state()
 
                 # Save indices for this epoch
-                #self.save_epoch_data(round_num, train_indices, test_indices)
+                self.save_epoch_data(round_num, train_indices, test_indices)
 
                 # Create feature tensors for training
                 X_train = self.X_tensor[train_indices]
@@ -4466,6 +4466,8 @@ class DBNN(GPUDBNN):
             temp_file = weights_file + '.tmp'
             with open(temp_file, 'w') as f:
                 json.dump(weights_dict, f, indent=2)
+                f.flush()  # Ensure the buffer is flushed to disk
+                os.fsync(f.fileno())  # Force write to disk
 
             # Atomic rename
             os.replace(temp_file, weights_file)
@@ -5706,6 +5708,9 @@ class DBNN(GPUDBNN):
         encoder_path = os.path.join('Model',  f'Best_{self.model_type}_{self.dataset_name}_label_encoder.pkl')
         with open(encoder_path, 'wb') as f:
             pickle.dump(self.label_encoder, f)
+            f.flush()  # Ensure the buffer is flushed to disk
+            os.fsync(f.fileno())  # Force write to disk
+
         components = {
             'scaler': self.scaler,
             'label_encoder': {
@@ -5758,6 +5763,8 @@ class DBNN(GPUDBNN):
         # Save components to file
         with open(components_file, 'wb') as f:
             pickle.dump(components, f)
+            f.flush()  # Ensure the buffer is flushed to disk
+            os.fsync(f.fileno())  # Force write to disk
 
         print("\033[K" +f"Saved model components to {components_file}")
         print("\033[K" +f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
