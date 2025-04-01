@@ -6906,7 +6906,10 @@ def main():
 
             # Create DBNN instance
             model = DBNN(dataset_name=dataset_name)
-            model._load_full_state()
+            try:
+                model._load_full_state()
+            except:
+                pass
 
             if mode in ['train', 'train_predict']:
                 # Training phase
