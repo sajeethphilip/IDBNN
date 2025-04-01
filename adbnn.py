@@ -456,19 +456,41 @@ class DBNNPredictor:
             return False
 
     def _load_label_encoder(self, dataset_name: str):
-        """Load label encoder from consolidated checkpoint"""
+        """Robust label encoder loading from unified checkpoint"""
+        encoder_path = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}_full.pt')
+
+        if not os.path.exists(encoder_path):
+            raise FileNotFoundError(f"Model checkpoint not found at {encoder_path}")
+
         try:
-            self._load_full_state()
+            # Load just the label encoder portion from the full checkpoint
+            checkpoint = torch.load(encoder_path, map_location='cpu')
+
+            # Validate checkpoint structure
+            if 'label_encoder' not in checkpoint:
+                raise ValueError("Checkpoint missing label encoder data")
+
+            # Reconstruct label encoder
+            self.label_encoder = LabelEncoder()
+            if 'classes' in checkpoint['label_encoder']:
+                classes = checkpoint['label_encoder']['classes']
+                if isinstance(classes, dict) and 'data' in classes:  # Handle serialized numpy array
+                    classes = np.array(classes['data'])
+                self.label_encoder.classes_ = classes
+            else:
+                raise ValueError("Invalid label encoder format in checkpoint")
+
             return self.label_encoder
+
         except Exception as e:
-            print(f"Error loading label encoder: {str(e)}")
-            # Fallback to creating from data if available
-            if hasattr(self, 'data'):
+            print(f"\033[KError loading label encoder: {str(e)}")
+            # Attempt to recreate from data if we have it
+            if hasattr(self, 'data') and hasattr(self, 'target_column'):
+                print("Attempting to recreate label encoder from data...")
                 self.label_encoder = LabelEncoder()
                 self.label_encoder.fit(self.data[self.target_column])
                 return self.label_encoder
             raise
-
 
     def _load_feature_pairs(self, dataset_name: str):
         """Load feature combinations from saved file"""
