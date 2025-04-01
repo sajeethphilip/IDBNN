@@ -6541,18 +6541,32 @@ class DBNNPredictor:
         self.global_std = components.get('global_std')
 
     def _initialize_weight_updater(self):
-        """Initialize weight updater based on model type"""
-        if self.model_type == "Histogram":
-            n_bins = self.likelihood_params['bin_probs'][0].shape[0]
-        else:
-            n_bins = 1  # For Gaussian models
+        """Initialize weight updater with verified dimensions"""
+        if not hasattr(self, 'likelihood_params'):
+            raise RuntimeError("Likelihood parameters not loaded")
 
-        self.weight_updater = BinWeightUpdater(
-            n_classes=len(self.label_encoder.classes_),
-            feature_pairs=self.feature_pairs,
-            n_bins_per_dim=n_bins,
-            batch_size=128
-        )
+        # Get dimensions from the first bin_probs entry
+        if 'bin_probs' in self.likelihood_params and len(self.likelihood_params['bin_probs']) > 0:
+            first_bin_probs = self.likelihood_params['bin_probs'][0]
+            n_classes, n_bins_i, n_bins_j = first_bin_probs.shape
+
+            # Initialize weight updater with correct dimensions
+            self.weight_updater = BinWeightUpdater(
+                n_classes=n_classes,
+                feature_pairs=self.feature_pairs,
+                n_bins_per_dim=n_bins_i,  # Use actual bin size from data
+                batch_size=128
+            )
+
+            # Initialize weights to match bin_probs dimensions
+            for class_id in range(n_classes):
+                for pair_idx in range(len(self.feature_pairs)):
+                    self.weight_updater.histogram_weights[class_id][pair_idx] = torch.ones(
+                        (n_bins_i, n_bins_j),
+                        device=self.device
+                    )
+        else:
+            raise RuntimeError("Invalid likelihood parameters - missing or empty bin_probs")
 
     def _validate_loaded_state(self):
         """Verify all required components are loaded"""
