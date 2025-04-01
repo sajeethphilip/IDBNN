@@ -2860,36 +2860,123 @@ class DBNN(GPUDBNN):
         return results_df
 
     def _save_full_state(self):
-        """Saves complete training state including hidden parameters"""
+        """Saves COMPLETE model state including all parameters needed for full reconstruction"""
         checkpoint = {
-            # Core weights (matches _save_best_weights)
-            'weights': self.best_W.cpu(),
-            'model_type': self.model_type,
-            'feature_columns': self.feature_columns,
+            # 1. Core Model Parameters
+            'model_parameters': {
+                'weights': {
+                    'current': self.current_W.cpu() if self.current_W is not None else None,
+                    'best': self.best_W.cpu() if self.best_W is not None else None
+                },
+                'model_type': self.model_type,
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'device': self.device
+            },
 
-            # Extended state
-            'weight_updater_state': {
+            # 2. Feature Processing Configuration
+            'feature_config': {
+                'columns': self.feature_columns,
+                'pairs': self.feature_pairs,
+                'bin_edges': [edges.cpu() for edges in self.bin_edges] if hasattr(self, 'bin_edges') else None,
+                'target_column': self.target_column,
+                'original_columns': getattr(self, 'original_columns', None),
+                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', None)
+            },
+
+            # 3. Likelihood Parameters (Model-Specific)
+            'likelihood_params': {
                 'histogram': {
-                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
-                    for k1,v1 in self.weight_updater.histogram_weights.items()
+                    'bin_probs': [probs.cpu() for probs in self.likelihood_params['bin_probs']]
+                    if self.model_type == "Histogram" and 'bin_probs' in self.likelihood_params else None,
+                    'bin_counts': [counts.cpu() for counts in self.likelihood_params['bin_counts']]
+                    if self.model_type == "Histogram" and 'bin_counts' in self.likelihood_params else None
                 },
                 'gaussian': {
-                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
-                    for k1,v1 in self.weight_updater.gaussian_weights.items()
-                }
+                    'means': self.likelihood_params['means'].cpu()
+                    if self.model_type == "Gaussian" and 'means' in self.likelihood_params else None,
+                    'covs': self.likelihood_params['covs'].cpu()
+                    if self.model_type == "Gaussian" and 'covs' in self.likelihood_params else None
+                },
+                'classes': self.likelihood_params['classes'].cpu()
+                if 'classes' in self.likelihood_params else None
             },
-            'training_state': {
-                'best_round_initial_conditions': self.best_round_initial_conditions,
-                'learning_rate': self.learning_rate,
-                'cardinality_threshold': self.cardinality_threshold
+
+            # 4. Weight Updater State
+            'weight_updater': {
+                'histogram': {
+                    str(class_id): {
+                        str(pair_idx): weights.cpu()
+                        for pair_idx, weights in class_weights.items()
+                    }
+                    for class_id, class_weights in self.weight_updater.histogram_weights.items()
+                },
+                'gaussian': {
+                    str(class_id): {
+                        str(pair_idx): weights.cpu()
+                        for pair_idx, weights in class_weights.items()
+                    }
+                    for class_id, class_weights in self.weight_updater.gaussian_weights.items()
+                },
+                'batch_size': self.weight_updater.batch_size
             },
+
+            # 5. Preprocessing State
             'preprocessing': {
                 'global_mean': self.global_mean,
                 'global_std': self.global_std,
-                'label_encoder': self.label_encoder.classes_
+                'label_encoder': {
+                    'classes_': self.label_encoder.classes_,
+                    'dtype': str(self.label_encoder.classes_.dtype)
+                },
+                'categorical_encoders': getattr(self, 'categorical_encoders', None),
+                'nan_handling': {
+                    'sentinel_value': -99999,
+                    'nan_mask': getattr(self, 'nan_mask', None)
+                }
+            },
+
+            # 6. Training State
+            'training_state': {
+                'best_round': self.best_round,
+                'best_round_initial_conditions': {
+                    'weights': self.best_round_initial_conditions['weights'].cpu()
+                    if self.best_round_initial_conditions else None,
+                    'likelihood_params': self.best_round_initial_conditions['likelihood_params']
+                    if self.best_round_initial_conditions else None
+                },
+                'learning_rate': self.learning_rate,
+                'cardinality_threshold': self.cardinality_threshold,
+                'best_combined_accuracy': self.best_combined_accuracy,
+                'consecutive_successes': getattr(self, 'consecutive_successes', 0)
+            },
+
+            # 7. Configuration
+            'config': {
+                'dataset_config': self.config,
+                'model_config': {
+                    'trials': Trials,
+                    'cardinality_tolerance': cardinality_tolerance,
+                    'enable_adaptive': EnableAdaptive
+                }
+            },
+
+            # 8. Metadata
+            'metadata': {
+                'save_timestamp': datetime.datetime.now().isoformat(),
+                'pytorch_version': torch.__version__,
+                'model_class': self.__class__.__name__,
+                'dataset_name': self.dataset_name
             }
         }
-        torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
+
+        # Atomic save operation
+        save_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        # Use temporary file + atomic rename for crash safety
+        temp_path = save_path + '.tmp'
+        torch.save(checkpoint, temp_path)
+        os.replace(temp_path, save_path)
 
 
 
@@ -4807,36 +4894,58 @@ class DBNN(GPUDBNN):
             traceback.print_exc()
 
     def _load_full_state(self):
-        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-        if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=self.device)
+        """Loads complete model state with proper initialization"""
+        load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
 
-            # Restore core weights
-            self.best_W = checkpoint['weights'].to(self.device)
-            self.current_W = self.best_W.clone()
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"No saved state found at {load_path}")
 
-            # Restore weight updater (with proper type conversion)
-            self.weight_updater.histogram_weights = {
-                int(class_id): {
-                    int(pair_idx): weight.to(self.device)
-                    for pair_idx, weight in class_weights.items()
-                }
-                for class_id, class_weights in checkpoint['histogram_weights'].items()
-            }
+        checkpoint = torch.load(load_path, map_location=self.device)
 
-            # Restore weight updater
-            for class_id in checkpoint['histogram_weights']:
-                for pair_idx in checkpoint['histogram_weights'][class_id]:
-                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
-                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
+        # 1. Restore Core Parameters
+        self.model_type = checkpoint['model_parameters']['model_type']
+        self.n_bins_per_dim = checkpoint['model_parameters']['n_bins_per_dim']
+        self.current_W = checkpoint['model_parameters']['weights']['current'].to(self.device)
+        self.best_W = checkpoint['model_parameters']['weights']['best'].to(self.device)
 
-            # Restore preprocessing
-            self.global_mean = checkpoint['global_mean']
-            self.global_std = checkpoint['global_std']
-            self.feature_columns = checkpoint['feature_columns']
+        # 2. Restore Feature Processing
+        self.feature_columns = checkpoint['feature_config']['columns']
+        self.feature_pairs = checkpoint['feature_config']['pairs']
+        self.target_column = checkpoint['feature_config']['target_column']
+        if checkpoint['feature_config']['bin_edges']:
+            self.bin_edges = [edges.to(self.device) for edges in checkpoint['feature_config']['bin_edges']]
 
-            # Restore training state
-            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
+        # 3. Initialize Weight Updater
+        self.weight_updater = BinWeightUpdater(
+            n_classes=len(checkpoint['preprocessing']['label_encoder']['classes_']),
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=self.n_bins_per_dim,
+            batch_size=checkpoint['weight_updater'].get('batch_size', 128)
+        )
+
+        # 4. Restore Weight Updater State
+        for class_id, class_weights in checkpoint['weight_updater']['histogram'].items():
+            for pair_idx, weights in class_weights.items():
+                self.weight_updater.histogram_weights[int(class_id)][int(pair_idx)] = weights.to(self.device)
+
+        # 5. Restore Likelihood Parameters
+        self.likelihood_params = {
+            'bin_probs': [probs.to(self.device) for probs in checkpoint['likelihood_params']['histogram']['bin_probs']],
+            'bin_edges': self.bin_edges,
+            'classes': checkpoint['likelihood_params']['classes'].to(self.device),
+            'feature_pairs': self.feature_pairs
+        }
+
+        # 6. Restore Preprocessing
+        self.global_mean = checkpoint['preprocessing']['global_mean']
+        self.global_std = checkpoint['preprocessing']['global_std']
+        self.label_encoder = LabelEncoder()
+        self.label_encoder.classes_ = np.array(checkpoint['preprocessing']['label_encoder']['classes_'])
+
+        # 7. Restore Training State
+        self.best_round = checkpoint['training_state']['best_round']
+        self.learning_rate = checkpoint['training_state']['learning_rate']
+        self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy']
 
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
@@ -5177,7 +5286,6 @@ class DBNN(GPUDBNN):
 
         # Training complete
         epoch_pbar.close()
-        #self._save_model_components()
         self.current_W= self.best_W.clone()   # Let us return the best weight we found during training for testing on test data and saving if foud better.
         return self.current_W.cpu(), error_rates
 
@@ -5760,7 +5868,7 @@ class DBNN(GPUDBNN):
                 print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
-                self._save_best_weights()
+                #self._save_best_weights()
                 print("\033[K" +f"{Colors.GREEN}Model state fully saved including training metadata{Colors.ENDC}", end='\r', flush=True)
                 self._save_full_state()  # Save complete state
 
@@ -6185,7 +6293,9 @@ class DBNN(GPUDBNN):
                 return results
 
             # Load the model weights and encoders
-            self._load_best_weights()
+            #self._load_best_weights()
+            self._load_full_state()
+
             self._load_categorical_encoders()
 
             # Explicitly use best weights for prediction
@@ -6796,6 +6906,7 @@ def main():
 
             # Create DBNN instance
             model = DBNN(dataset_name=dataset_name)
+            model._load_full_state
 
             if mode in ['train', 'train_predict']:
                 # Training phase
