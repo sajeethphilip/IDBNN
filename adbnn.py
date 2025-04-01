@@ -6644,6 +6644,224 @@ class DBNNPredictor:
             print(f"\033[KError during prediction: {str(e)}")
             traceback.print_exc()
             raise
+
+    def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
+        """Dimension-aware posterior computation with NaN handling"""
+        # Input validation
+        if not hasattr(self, 'likelihood_params') or 'bin_probs' not in self.likelihood_params:
+            raise RuntimeError("Likelihood parameters not properly initialized")
+
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs per sample
+
+        # Process feature pairs
+        feature_groups = torch.stack([
+            features[:, pair].contiguous().to(self.device)
+            for pair in self.feature_pairs
+        ]).transpose(0, 1)
+
+        # Bin indices computation with NaN handling
+        bin_indices_dict = {}
+        for group_idx in range(len(self.feature_pairs)):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])
+
+            # Skip if either feature is NaN (-99999)
+            valid_mask = (feature_groups[:, group_idx, 0] != -99999) & \
+                         (feature_groups[:, group_idx, 1] != -99999)
+
+            indices = torch.stack([
+                torch.where(
+                    valid_mask,
+                    torch.bucketize(
+                        feature_groups[:, group_idx, dim].contiguous(),
+                        edges[dim].contiguous()
+                    ).sub_(1).clamp_(0, len(edges[dim]) - 2),
+                    -1  # Invalid index for NaN values
+                )
+                for dim in range(2)
+            ])
+            bin_indices_dict[group_idx] = indices
+
+        # Weighted probability computation with NaN handling
+        for group_idx in range(len(self.feature_pairs)):
+            bin_probs = self.likelihood_params['bin_probs'][group_idx].to(self.device)
+            indices = bin_indices_dict[group_idx]
+
+            # Skip NaN pairs
+            valid_mask = (indices[0] != -1) & (indices[1] != -1)
+            valid_counts += valid_mask.float()
+
+            # Get weights and verify dimensions
+            weights = torch.stack([
+                self.weight_updater.get_histogram_weights(c, group_idx)
+                for c in range(n_classes)
+            ]).to(self.device)
+
+            # Ensure weights and bin_probs have compatible shapes
+            if weights.shape != bin_probs.shape:
+                raise ValueError(f"Shape mismatch between weights {weights.shape} and bin_probs {bin_probs.shape}")
+
+            # Apply weights to probabilities
+            weighted_probs = bin_probs * weights
+
+            # Gather probabilities for all samples and classes
+            # Need to handle batch dimension properly
+            batch_probs = torch.zeros((n_classes, batch_size), device=self.device)
+
+            for class_idx in range(n_classes):
+                # Get probabilities for this class
+                class_probs = weighted_probs[class_idx]
+
+                # Gather probabilities using indices
+                batch_probs[class_idx] = torch.where(
+                    valid_mask,
+                    class_probs[indices[0], indices[1]],
+                    torch.ones_like(valid_mask, dtype=torch.float32)
+                )
+
+            log_likelihoods += torch.log(batch_probs.t() + epsilon)
+
+        # Normalize posteriors by number of valid feature pairs
+        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
+        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
+
+        # Final softmax normalization
+        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+
+        return posteriors, bin_indices_dict
+
+    def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
+        """Gaussian posterior computation with NaN handling"""
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+        valid_counts = torch.zeros(batch_size, device=self.device)  # Track valid feature pairs
+
+        # Process each feature group
+        for pair_idx, pair in enumerate(self.feature_pairs):
+            pair_data = features[:, pair]
+
+            # Skip if either feature is NaN (-99999)
+            valid_mask = (pair_data[:, 0] != -99999) & (pair_data[:, 1] != -99999)
+            valid_counts += valid_mask.float()
+
+            # Process each class
+            for class_idx in range(n_classes):
+                mean = self.likelihood_params['means'][class_idx, pair_idx]
+                cov = self.likelihood_params['covs'][class_idx, pair_idx]
+                weight = self.weight_updater.get_gaussian_weights(class_idx, pair_idx)
+
+                # Center the data
+                centered = pair_data - mean.unsqueeze(0)
+
+                # Compute class likelihood only for valid pairs
+                try:
+                    reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
+                    prec = torch.inverse(reg_cov)
+                    quad = torch.sum(
+                        torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
+                        dim=1
+                    )
+                    class_ll = torch.where(
+                        valid_mask,
+                        -0.5 * quad + torch.log(weight + epsilon),
+                        torch.zeros(batch_size, device=self.device)
+                    )
+                except RuntimeError:
+                    class_ll = torch.zeros(batch_size, device=self.device)
+
+                log_likelihoods[:, class_idx] += class_ll
+
+        # Normalize by number of valid feature pairs
+        valid_counts = torch.clamp(valid_counts, min=1)  # Avoid division by zero
+        log_likelihoods = log_likelihoods / valid_counts.unsqueeze(1)
+
+        # Convert to probabilities using softmax
+        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
+        exp_ll = torch.exp(log_likelihoods - max_log_ll)
+        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + epsilon)
+
+        return posteriors, None
+
+    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
+        # Decode numeric labels back to original alphanumeric labels
+        y_true_labels = self.label_encoder.inverse_transform(y_true)
+        y_pred_labels = self.label_encoder.inverse_transform(y_pred)
+
+        # Get unique classes from both true and predicted labels
+        unique_true = np.unique(y_true_labels)
+        unique_pred = np.unique(y_pred_labels)
+
+        # Use provided class labels or get from label encoder
+        if class_labels is None:
+            class_labels = self.label_encoder.classes_
+
+        # Ensure all classes are represented in confusion matrix
+        all_classes = np.unique(np.concatenate([unique_true, unique_pred, class_labels]))
+        n_classes = len(all_classes)
+
+        # Create class index mapping
+        class_to_idx = {cls: idx for idx, cls in enumerate(all_classes)}
+
+        # Initialize confusion matrix with zeros
+        cm = np.zeros((n_classes, n_classes), dtype=int)
+
+        # Fill confusion matrix
+        for t, p in zip(y_true_labels, y_pred_labels):
+            if t in class_to_idx and p in class_to_idx:
+                cm[class_to_idx[t], class_to_idx[p]] += 1
+
+        # Print confusion matrix with colors
+        print("\033[K" + f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
+        print("\033[K" + f"{'Actual/Predicted':<15}", end='')
+        for label in all_classes:
+            print("\033[K" + f"{str(label):<8}", end='')
+        print("\033[K" + "Accuracy")
+        print("\033[K" + "-" * (15 + 8 * n_classes + 10))
+
+        # Print matrix with colors
+        for i in range(n_classes):
+            # Print actual class label
+            print("\033[K" + f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
+
+            # Print confusion matrix row
+            for j in range(n_classes):
+                if i == j:
+                    # Correct predictions in green
+                    color = Colors.GREEN
+                else:
+                    # Incorrect predictions in red
+                    color = Colors.RED
+                print("\033[K" + f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
+
+            # Print class accuracy with color based on performance
+            acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
+            if acc >= 0.9:
+                color = Colors.GREEN
+            elif acc >= 0.7:
+                color = Colors.YELLOW
+            else:
+                color = Colors.BLUE
+            print("\033[K" + f"{color}{acc:>7.2%}{Colors.ENDC}")
+
+        # Print overall accuracy
+        total_correct = np.diag(cm).sum()
+        total_samples = cm.sum()
+        if total_samples > 0:
+            overall_acc = total_correct / total_samples
+            print("\033[K" + "-" * (15 + 8 * n_classes + 10))
+            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
+            print("\033[K" + f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
+
+            # Only print best accuracy if the attribute exists
+            if hasattr(self, 'best_combined_accuracy'):
+                print("\033[K" + f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+
 #--------------------------------------------------DBNN Predictor Ends ----------------------------------------------------
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
@@ -7238,6 +7456,8 @@ def main():
 
             if mode in ['predict', 'train_predict']:
                 model_type=args.model_type
+                if not dataset_name:
+                    dataset_name = get_dataset_name_from_path(args.file_path)
                 if not os.path.exists(f"Model/Best_{model_type}_{dataset_name}_full.pt"):
                     warnings.warn(
                         "Full model state not found - predictions may be degraded\n"
@@ -7247,7 +7467,6 @@ def main():
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 predictor = DBNNPredictor()
-                dataset_name = get_dataset_name_from_path(args.file_path)
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
