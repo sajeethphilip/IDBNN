@@ -405,9 +405,55 @@ class DBNNPredictor:
         except Exception as e:
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
-    def load_model(self, dataset_name: str):
-        """Public method to load complete model state"""
-        return self._load_full_state()
+    def load_model(self, dataset_name: str) -> bool:
+        """Load all model components with strict initialization order"""
+        try:
+            # 1. Load basic config first
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config file not found: {config_path}")
+
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+
+            # 2. Set model type
+            self.model_type = self.config.get('modelType', 'Histogram')
+
+            # 3. Load the dataset
+            self._load_dataset(dataset_name)
+
+            # Rest of the loading logic...
+            self._load_label_encoder(dataset_name)
+            self._load_feature_pairs(dataset_name)
+            self._load_likelihood_params(dataset_name)
+
+            # 4. Initialize weight updater after all params are loaded
+            self._initialize_weight_updater()
+
+            # 5. Load weights
+            self._load_weights(dataset_name)
+
+            # 6. Load optional preprocessing params
+            if hasattr(self, '_load_preprocessing_params'):
+                self._load_preprocessing_params(dataset_name)
+
+            # Final validation
+            required_attrs = [
+                'likelihood_params', 'feature_pairs',
+                'current_W', 'label_encoder',
+                'weight_updater'  # Now explicitly required
+            ]
+            missing = [attr for attr in required_attrs if not hasattr(self, attr)]
+            if missing:
+                raise RuntimeError(f"Missing required model components: {missing}")
+
+            self._is_initialized = True
+            return True
+
+        except Exception as e:
+            print(f"\033[KError loading model: {str(e)}")
+            traceback.print_exc()
+            return False
 
     def _load_label_encoder(self, dataset_name: str):
         """Load label encoder from consolidated checkpoint"""
@@ -2020,6 +2066,7 @@ class InvertibleDBNN(nn.Module):
                 print("\033[K" +f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}")
 
 
+
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
     """GPU-Optimized Deep Bayesian Neural Network with Parallel Feature Pair Processing"""
@@ -3117,14 +3164,19 @@ class DBNN(GPUDBNN):
                 }
 
     def _clean_existing_model(self):
-        """Remove existing model files - now just removes the single checkpoint"""
+        """Remove existing model files for a fresh start"""
         try:
-            model_file = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-            if os.path.exists(model_file):
-                os.remove(model_file)
-                print(f"Removed existing model file: {model_file}")
+            files_to_remove = [
+                self._get_weights_filename(),
+                self._get_encoders_filename(),
+                self._get_model_components_filename()
+            ]
+            for file in files_to_remove:
+                if os.path.exists(file):
+                    os.remove(file)
+                    print("\033[K" +f"Removed existing model file: {file}")
         except Exception as e:
-            print(f"Warning: Error cleaning model files: {str(e)}")
+            print("\033[K" +f"Warning: Error cleaning model files: {str(e)}")
 
 
     #------------------------------------------Adaptive Learning--------------------------------------
