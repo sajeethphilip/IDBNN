@@ -6936,14 +6936,14 @@ def main():
 
             if mode in ['train', 'train_predict']:
                 # Training phase
-                start_time = datetime.now()
+                start_time = datetime.datetime.now()
 
                 if config.get('enable_adaptive', True):
                     results = model.adaptive_fit_predict()
                 else:
                     results = model.fit_predict()
 
-                end_time = datetime.now()
+                end_time = datetime.datetime.now()
 
                 # Print results
                 print("\033[K" + "Training complete!")
