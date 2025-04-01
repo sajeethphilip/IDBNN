@@ -5522,7 +5522,7 @@ class DBNN(GPUDBNN):
 class DBNNPredictor:
     """Standalone DBNN Predictor with robust initialization"""
 
-    def __init__(self, model_dir: str = 'Model', device: str = None):
+    def __init__(self, model_dir='Model', dataset_name=None, device=None):
         """
         Initialize predictor without requiring immediate dataset loading.
 
@@ -5736,47 +5736,104 @@ class DBNNPredictor:
         return torch.tensor(df.values, dtype=torch.float32, device=self.device)
 
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """Make predictions with full output and optional confusion matrix"""
-        # Load data while preserving original columns
-        df = pd.read_csv(csv_path)
-        original_columns = df.columns.tolist()
+        """
+        Enhanced prediction with single-state loading and full output preservation.
 
-        # Check if target column exists
-        target_in_data = self.target_column in df.columns
+        Args:
+            csv_path: Path to input CSV file
+            output_path: Optional path to save predictions (with confusion matrix if target exists)
 
-        # Make predictions
-        results = self.predict(df)
+        Returns:
+            DataFrame with original data + predictions + probabilities
 
-        # Merge predictions with original data
-        if target_in_data:
-            # Keep original target column
-            output_df = pd.concat([
+        Raises:
+            RuntimeError: If model not initialized or input validation fails
+        """
+        # 1. Validate model state
+        if not hasattr(self, '_is_initialized') or not self._is_initialized:
+            try:
+                self.load_full_state()  # Single-point initialization
+            except Exception as e:
+                raise RuntimeError(f"Model initialization failed: {str(e)}")
+
+        # 2. Load and validate input data
+        try:
+            df = pd.read_csv(csv_path)
+            original_columns = df.columns.tolist()
+
+            # Critical validation (before processing)
+            missing_features = set(getattr(self, 'feature_columns', [])) - set(df.columns)
+            if missing_features:
+                raise ValueError(f"Missing required features: {missing_features}")
+
+        except Exception as e:
+            raise RuntimeError(f"Input data loading failed: {str(e)}")
+
+        # 3. Make predictions (with NaN handling)
+        try:
+            results = self.predict(df)  # Uses self.current_W and self.likelihood_params
+        except Exception as e:
+            raise RuntimeError(f"Prediction failed: {str(e)}")
+
+        # 4. Merge results with original data
+        output_df = self._merge_results(df, original_columns, results)
+
+        # 5. Generate confusion matrix if target exists
+        if self._should_generate_confusion(df):
+            self._generate_and_display_confusion(df, results, output_path)
+
+        # 6. Save results if requested
+        if output_path:
+            self._safe_save(output_df, output_path)
+
+        return output_df
+
+    # Helper methods (could be class methods if reused)
+    def _merge_results(self, df, original_columns, results):
+        """Merge predictions with original data"""
+        if self.target_column in df.columns:
+            return pd.concat([
                 df[original_columns],
                 results[['predicted_class'] + [c for c in results.columns if c.startswith('prob_')]]
             ], axis=1)
+        return pd.concat([df, results], axis=1)
 
-            # Generate confusion matrix if target exists
-            y_true = df[self.target_column]
-            y_pred = results['predicted_class']
+    def _should_generate_confusion(self, df):
+        """Check if confusion matrix should be generated"""
+        return (self.target_column in df.columns and
+                hasattr(self, 'print_colored_confusion_matrix'))
 
-            # Convert to numeric if needed (using parent DBNN's label encoder)
-            if not np.issubdtype(y_true.dtype, np.number):
-                y_true = self.label_encoder.transform(y_true)
-            if not np.issubdtype(y_pred.dtype, np.number):
-                y_pred = self.label_encoder.transform(y_pred)
+    def _generate_and_display_confusion(self, df, results, output_path):
+        """Generate and display/save confusion matrix"""
+        y_true = df[self.target_column]
+        y_pred = results['predicted_class']
 
-            # Use parent class's confusion matrix printer
-            self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
+        # Convert labels if needed
+        if not np.issubdtype(y_true.dtype, np.number):
+            y_true = self.label_encoder.transform(y_true)
+        if not np.issubdtype(y_pred.dtype, np.number):
+            y_pred = self.label_encoder.transform(y_pred)
 
-        else:
-            output_df = pd.concat([df, results], axis=1)
+        # Generate matrix
+        self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
 
-        # Save results if path specified
+        # Optional save
         if output_path:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            output_df.to_csv(output_path, index=False)
+            cm_path = os.path.join(os.path.dirname(output_path),
+                                 f"{os.path.splitext(os.path.basename(output_path))[0]}_confusion.png")
+            self._save_confusion_matrix(y_true, y_pred, cm_path)
 
-        return output_df
+    def _safe_save(self, df, path):
+        """Thread-safe results saving"""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp_path = f"{path}.tmp"
+        try:
+            df.to_csv(temp_path, index=False)
+            os.replace(temp_path, path)
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise RuntimeError(f"Failed to save results: {str(e)}")
 
 
 
