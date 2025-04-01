@@ -5422,7 +5422,9 @@ class DBNNPredictor(DBNN):
         self.global_std = None
         self.data = None
         self.load_full_state()
-
+    super().__init__(
+    _load_full_state=_load_full_state
+    )
     def _load_dataset(self, dataset_name: str) -> None:
         """Load the dataset for the predictor"""
         try:
