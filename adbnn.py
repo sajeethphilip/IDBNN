@@ -96,6 +96,11 @@ import json
 import os
 from typing import Union, List, Dict, Optional
 from collections import defaultdict
+import torch.serialization
+import numpy as np
+
+# Allowlist necessary globals for safe loading
+torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
 
 
 def safe_predict(predictor, input_data):
@@ -446,6 +451,55 @@ class DBNNPredictor:
             'feature_pairs': self._safe_restore(likelihood.get('params', {}).get('feature_pairs', None))
         }
 
+    def _load_secure(self, path: str):
+        """Attempt secure loading with proper allowlisting"""
+        try:
+            # Try with weights_only first
+            return torch.load(path, map_location='cpu', weights_only=True)
+        except pickle.UnpicklingError as e:
+            if "_reconstruct" in str(e):
+                # Retry with our pre-allowlisted globals
+                return torch.load(path, map_location='cpu', weights_only=True)
+            raise
+
+    def _is_trusted_source(self, path: str) -> bool:
+        """Determine if we trust the model file source"""
+        # Implement your trust verification logic here
+        trusted_dirs = [
+            os.path.abspath('Model'),
+            # Add other trusted directories as needed
+        ]
+        path = os.path.abspath(path)
+        return any(path.startswith(trusted_dir) for trusted_dir in trusted_dirs)
+
+    def _validate_checkpoint(self, checkpoint: dict):
+        """Validate checkpoint structure"""
+        required = {
+            'model_config': ['model_type', 'n_bins_per_dim'],
+            'labels': ['encoder'],
+            'features': ['columns']
+        }
+
+        for section, keys in required.items():
+            if section not in checkpoint:
+                raise ValueError(f"Missing section: {section}")
+            for key in keys:
+                if key not in checkpoint[section]:
+                    raise ValueError(f"Missing key: {section}.{key}")
+
+        # Validate label encoder specifically
+        if 'classes' not in checkpoint['labels']['encoder']:
+            raise ValueError("Missing label encoder classes")
+
+    def _find_model_file(self, dataset_name: str) -> Optional[str]:
+        """Find the most appropriate model file"""
+        for model_type in ['Histogram', 'Gaussian']:
+            path = os.path.join(self.model_dir, f'Best_{model_type}_{dataset_name}_full.pt')
+            if os.path.exists(path):
+                self.model_type = model_type
+                return path
+        return None
+
     def _load_weights(self, weights: dict):
         """Load model weights"""
         self.current_W = self._safe_restore(weights.get('current', None))
@@ -460,54 +514,29 @@ class DBNNPredictor:
         self.consecutive_successes = training.get('state', {}).get('consecutive_successes', 0)
 
     def load_model(self, dataset_name: str) -> bool:
-        """Safely load all model components with proper error handling"""
+        """Safely load model with proper weights_only handling"""
         try:
-            # Determine available model types
-            available_models = self._get_available_model_types(dataset_name)
-            if not available_models:
-                raise FileNotFoundError(f"No model files found for dataset {dataset_name}")
+            # Find available model files
+            checkpoint_path = self._find_model_file(dataset_name)
+            if not checkpoint_path:
+                raise FileNotFoundError(f"No valid model found for {dataset_name}")
 
-            # Try loading Histogram first, then Gaussian
-            for model_type in ['Histogram', 'Gaussian']:
-                if model_type in available_models:
-                    self.model_type = model_type
-                    checkpoint_path = os.path.join(self.model_dir, f'Best_{model_type}_{dataset_name}_full.pt')
-                    break
-
-            if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
-
-            # Safe loading with weights_only=True
+            # First try secure loading
             try:
-                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-            except RuntimeError as e:
-                print(f"Security restriction encountered: {str(e)}")
-                # Fallback to unsafe load only if absolutely necessary
-                checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-            # Validate basic checkpoint structure
-            required_sections = ['model_config', 'labels']
-            missing = [section for section in required_sections if section not in checkpoint]
-            if missing:
-                raise ValueError(f"Checkpoint missing required sections: {missing}")
-
-            # Load model config first
-            self._load_model_config(checkpoint.get('model_config', {}))
-
-            # Load label encoder with fallback
-            if not self._load_label_encoder(checkpoint.get('labels', {})):
-                if hasattr(self, 'data') and hasattr(self, 'target_column'):
-                    print("Recreating label encoder from data...")
-                    self.label_encoder = LabelEncoder()
-                    self.label_encoder.fit(self.data[self.target_column])
+                checkpoint = self._load_secure(checkpoint_path)
+            except (pickle.UnpicklingError, RuntimeError) as e:
+                print(f"Secure loading failed: {str(e)}")
+                if self._is_trusted_source(checkpoint_path):
+                    print("Attempting unsafe load for trusted source")
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
                 else:
-                    raise ValueError("Could not load or recreate label encoder")
+                    raise RuntimeError("Untrusted model file - cannot load safely")
 
-            # Load remaining components
-            self._load_features(checkpoint.get('features', {}))
-            self._load_likelihood(checkpoint.get('likelihood', {}))
-            self._load_weights(checkpoint.get('weights', {}))
-            self._load_training_state(checkpoint.get('training', {}))
+            # Validate checkpoint structure
+            self._validate_checkpoint(checkpoint)
+
+            # Load components
+            self._load_components(checkpoint)
 
             self._is_initialized = True
             return True
