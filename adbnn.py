@@ -405,92 +405,19 @@ class DBNNPredictor:
         except Exception as e:
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
-    def load_model(self, dataset_name: str) -> bool:
-        """Load all model components with strict initialization order"""
-        try:
-            # 1. Load basic config first
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found: {config_path}")
-
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
-
-            # 2. Set model type
-            self.model_type = self.config.get('modelType', 'Histogram')
-
-            # 3. Load the dataset
-            self._load_dataset(dataset_name)
-
-            # Rest of the loading logic...
-            self._load_label_encoder(dataset_name)
-            self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
-
-            # 4. Initialize weight updater after all params are loaded
-            self._initialize_weight_updater()
-
-            # 5. Load weights
-            self._load_weights(dataset_name)
-
-            # 6. Load optional preprocessing params
-            if hasattr(self, '_load_preprocessing_params'):
-                self._load_preprocessing_params(dataset_name)
-
-            # Final validation
-            required_attrs = [
-                'likelihood_params', 'feature_pairs',
-                'current_W', 'label_encoder',
-                'weight_updater'  # Now explicitly required
-            ]
-            missing = [attr for attr in required_attrs if not hasattr(self, attr)]
-            if missing:
-                raise RuntimeError(f"Missing required model components: {missing}")
-
-            self._is_initialized = True
-            return True
-
-        except Exception as e:
-            print(f"\033[KError loading model: {str(e)}")
-            traceback.print_exc()
-            return False
+    def load_model(self, dataset_name: str):
+        """Public method to load complete model state"""
+        return self._load_full_state()
 
     def _load_label_encoder(self, dataset_name: str):
-        """Robust label encoder loading with validation"""
-        encoder_path = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl')
-
-        if not os.path.exists(encoder_path):
-            raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
-
+        """Load label encoder from consolidated checkpoint"""
         try:
-            with open(encoder_path, 'rb') as f:
-                encoder = pickle.load(f)
-
-            # Handle case where encoder was saved as dict
-            if isinstance(encoder, dict):
-                if 'classes_' in encoder:
-                    new_encoder = LabelEncoder()
-                    new_encoder.classes_ = np.array(encoder['classes_'])
-                    encoder = new_encoder
-                    # Resave it properly
-                    with open(encoder_path, 'wb') as f:
-                        pickle.dump(encoder, f)
-                else:
-                    raise ValueError("Saved encoder dict missing classes_")
-
-            # Validate the loaded encoder
-            if not hasattr(encoder, 'classes_') or not hasattr(encoder, 'transform'):
-                raise ValueError("Invalid label encoder format")
-
-            self.label_encoder = encoder
-            print(f"\033[KLoaded label encoder with classes: {encoder.classes_}")
-            return encoder
-
+            self._load_full_state()
+            return self.label_encoder
         except Exception as e:
-            print(f"\033[KError loading label encoder: {str(e)}")
-            # Attempt to recreate from data
+            print(f"Error loading label encoder: {str(e)}")
+            # Fallback to creating from data if available
             if hasattr(self, 'data'):
-                print("Attempting to recreate label encoder from data...")
                 self.label_encoder = LabelEncoder()
                 self.label_encoder.fit(self.data[self.target_column])
                 return self.label_encoder
@@ -2092,15 +2019,7 @@ class InvertibleDBNN(nn.Module):
             if (epoch + 1) % 10 == 0:
                 print("\033[K" +f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}")
 
-    def save_model(self, path: str):
-        """Save the inverse model to a file."""
-        torch.save(self.state_dict(), path)
-        print("\033[K" +f"Model saved to {path}")
 
-    def load_model(self, path: str):
-        """Load the inverse model from a file."""
-        self.load_state_dict(torch.load(path, map_location=self.device, weights_only=True))
-        print("\033[K" +f"Model loaded from {path}")
 #----------------------------------------------DBNN class-------------------------------------------------------------
 class GPUDBNN:
     """GPU-Optimized Deep Bayesian Neural Network with Parallel Feature Pair Processing"""
@@ -3198,19 +3117,14 @@ class DBNN(GPUDBNN):
                 }
 
     def _clean_existing_model(self):
-        """Remove existing model files for a fresh start"""
+        """Remove existing model files - now just removes the single checkpoint"""
         try:
-            files_to_remove = [
-                self._get_weights_filename(),
-                self._get_encoders_filename(),
-                self._get_model_components_filename()
-            ]
-            for file in files_to_remove:
-                if os.path.exists(file):
-                    os.remove(file)
-                    print("\033[K" +f"Removed existing model file: {file}")
+            model_file = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+            if os.path.exists(model_file):
+                os.remove(model_file)
+                print(f"Removed existing model file: {model_file}")
         except Exception as e:
-            print("\033[K" +f"Warning: Error cleaning model files: {str(e)}")
+            print(f"Warning: Error cleaning model files: {str(e)}")
 
 
     #------------------------------------------Adaptive Learning--------------------------------------
@@ -4972,49 +4886,13 @@ class DBNN(GPUDBNN):
         self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy']
 
     def _load_best_weights(self):
-        """Load the best weights and corresponding training data from file"""
-        model_dir = os.path.join('Model')
-        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
-
-        if os.path.exists(weights_file):
-            try:
-                print(f"Attempting to load weights file {weights_file}")
-                with open(weights_file, 'r') as f:
-                    weights_dict = json.load(f)
-
-                # Load weights
-                weights_array = np.array(weights_dict['weights'])
-                self.best_W = torch.tensor(
-                    weights_array,
-                    dtype=torch.float32,
-                    device=self.device
-                )
-                self.current_W = torch.tensor(
-                    weights_array,
-                    dtype=torch.float32,
-                    device=self.device
-                )
-                print(f"Weights file {weights_file} loaded succesfully")
-                # Only try to load training data if self.data exists
-                if hasattr(self, 'data'):
-                    train_data_file = os.path.join(model_dir, 'best_training_data.csv')
-                    if os.path.exists(train_data_file):
-                        train_data = pd.read_csv(train_data_file)
-                        # Find matching indices in current data
-                        self.train_indices = []
-                        current_data = self.data.drop(columns=[self.target_column])
-
-                        for idx, row in train_data.drop(columns=[self.target_column]).iterrows():
-                            matches = (current_data == row).all(axis=1)
-                            if matches.any():
-                                self.train_indices.extend(matches[matches].index.tolist())
-
-                        print(f"\033[KLoaded {len(self.train_indices)} training samples from best model")
-
-                print(f"\033[KLoaded best weights from {weights_file}")
-            except Exception as e:
-                print(f"\033[KWarning: Could not load weights from {weights_file}: {str(e)}")
-                self.best_W = None
+        """Load weights from consolidated checkpoint"""
+        try:
+            self._load_full_state()
+            return True
+        except Exception as e:
+            print(f"Error loading weights: {str(e)}")
+            return False
 
 
 
@@ -6264,43 +6142,13 @@ class DBNN(GPUDBNN):
 
 
     def _load_model_components(self):
-        """Load all model components"""
-        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
-        components_file = self._get_model_components_filename()
-        print(f"The model components are loaded from {components_file}")
-        if os.path.exists(components_file):
-            print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
-            print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
-            with open(components_file, 'rb') as f:
-                components = pickle.load(f)
-                # Initialize a fresh LabelEncoder first
-                self.label_encoder = LabelEncoder()
-                # If we have saved classes, set them
-                if 'target_classes' in components:
-                    self.label_encoder.classes_ = components['target_classes']
-                elif hasattr(components['label_encoder'], 'classes_'):
-                    # If the saved object has classes, use them
-                    self.label_encoder.classes_ = components['label_encoder'].classes_
-                self.scaler = components['scaler']
-                self.likelihood_params = components['likelihood_params']
-                self.feature_pairs = components['feature_pairs']
-                self.feature_columns = components.get('feature_columns')
-                self.categorical_encoders = components['categorical_encoders']
-                self.high_cardinality_columns = components.get('high_cardinality_columns', [])
-                self.weight_updater = components.get('weight_updater')
-                self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
-                self.bin_edges = components.get('bin_edges')  # Load bin_edges
-                self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
-                self.global_mean = components['global_mean']
-                self.global_std = components['global_std']
-                # Load categorical encoders if they exist
-                if 'categorical_encoders' in components:
-                    self.categorical_encoders = components['categorical_encoders']
-                print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
-                return True
-        else:
-            print("\033[K" +f"[DEBUG] Model components file not found: {components_file}", end="\r", flush=True)
-        return False
+        """Load all model components from single checkpoint file"""
+        try:
+            self._load_full_state()
+            return True
+        except Exception as e:
+            print(f"Error loading model components: {str(e)}")
+            return False
 
 
 
@@ -6317,8 +6165,7 @@ class DBNN(GPUDBNN):
                 return results
 
             # Load the model weights and encoders
-            #self._load_best_weights()
-            self._load_full_state()
+            self._load_best_weights()
 
             self._load_categorical_encoders()
 
