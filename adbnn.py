@@ -341,7 +341,7 @@ def test_model_initialization(predictor):
     else:
         print("\033[K" +f"{Colors.GREEN} Mandatory componet loading works {Colors.ENDC}",end="\r", flush=True)
 
-class DBNNPredictor:
+class DBNNPredictor(DBNN):
     """Optimized standalone predictor for DBNN models"""
 
     def __init__(self, model_dir: str = 'Model', device: str = None):
@@ -372,41 +372,7 @@ class DBNNPredictor:
         self.global_mean = None
         self.global_std = None
         self.data = None
-        self.dataset_name=None
-        self._load_full_state()
-
-    def _load_full_state(self):
-        self.dataset_name = get_dataset_name_from_path(args.file_path)
-        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-        if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=self.device)
-
-            # Restore core weights
-            self.best_W = checkpoint['weights'].to(self.device)
-            self.current_W = self.best_W.clone()
-
-            # Restore weight updater (with proper type conversion)
-            self.weight_updater.histogram_weights = {
-                int(class_id): {
-                    int(pair_idx): weight.to(self.device)
-                    for pair_idx, weight in class_weights.items()
-                }
-                for class_id, class_weights in checkpoint['histogram_weights'].items()
-            }
-
-            # Restore weight updater
-            for class_id in checkpoint['histogram_weights']:
-                for pair_idx in checkpoint['histogram_weights'][class_id]:
-                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
-                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
-
-            # Restore preprocessing
-            self.global_mean = checkpoint['global_mean']
-            self.global_std = checkpoint['global_std']
-            self.feature_columns = checkpoint['feature_columns']
-
-            # Restore training state
-            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
+        self.load_full_state()
 
     def _load_dataset(self, dataset_name: str) -> None:
         """Load the dataset for the predictor"""
