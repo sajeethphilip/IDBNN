@@ -406,39 +406,68 @@ class DBNNPredictor:
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def load_model(self, dataset_name: str) -> bool:
-        """Load all model components from unified checkpoint"""
+        """Load all model components from unified checkpoint with proper model type handling"""
         try:
-            checkpoint_path = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_full.pt')
+            # First determine available model types
+            available_models = self._get_available_model_types(dataset_name)
+
+            if not available_models:
+                raise FileNotFoundError(f"No model files found for dataset {dataset_name}")
+
+            # Try to load the first available model (or prefer Histogram if available)
+            for model_type in ['Histogram', 'Gaussian']:
+                if model_type in available_models:
+                    self.model_type = model_type
+                    checkpoint_path = os.path.join(self.model_dir, f'Best_{model_type}_{dataset_name}_full.pt')
+                    break
+            else:
+                self.model_type = available_models[0]  # Fallback to first available
 
             if not os.path.exists(checkpoint_path):
                 raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
 
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-            # Load basic config
-            self.model_type = checkpoint.get('model_type', 'Histogram')
+            # Validate model type matches
+            if 'model_config' in checkpoint and checkpoint['model_config']['model_type'] != self.model_type:
+                print(f"Warning: Model type mismatch. Expected {self.model_type}, found {checkpoint['model_config']['model_type']}")
+                self.model_type = checkpoint['model_config']['model_type']
 
-            # Load label encoder
-            self._load_label_encoder(dataset_name)
+            # Load label encoder first as other components may depend on it
+            self._load_label_encoder(checkpoint)
 
             # Load other components
-            self.feature_pairs = checkpoint.get('feature_pairs', [])
-            self.likelihood_params = checkpoint.get('likelihood_params', {})
+            if 'features' in checkpoint:
+                self.feature_columns = checkpoint['features'].get('columns', [])
+                self.feature_pairs = self._safe_restore(checkpoint['features'].get('pairs', []))
+                self.bin_edges = self._safe_restore(checkpoint['features'].get('bin_edges', None))
 
-            # Initialize weight updater
+            if 'likelihood' in checkpoint:
+                self.likelihood_params = {
+                    'bin_probs': self._safe_restore(checkpoint['likelihood']['params'].get('bin_probs', None)),
+                    'bin_edges': self._safe_restore(checkpoint['likelihood']['params'].get('bin_edges', None)),
+                    'classes': self._safe_restore(checkpoint['likelihood']['params'].get('classes', None)),
+                    'feature_pairs': self._safe_restore(checkpoint['likelihood']['params'].get('feature_pairs', None))
+                }
+                # Ensure model type matches likelihood params
+                if checkpoint['likelihood']['model_type'] != self.model_type:
+                    self.model_type = checkpoint['likelihood']['model_type']
+
+            # Initialize weight updater after all params are loaded
             self._initialize_weight_updater()
 
             # Load weights
             if 'weights' in checkpoint:
                 weights = checkpoint['weights']
-                if isinstance(weights, dict):
-                    self.current_W = torch.tensor(weights['current'], device=self.device)
-                    self.best_W = torch.tensor(weights['best'], device=self.device)
+                self.current_W = self._safe_restore(weights['current'])
+                self.best_W = self._safe_restore(weights['best'])
+                if 'learning_rate' in weights:
+                    self.learning_rate = weights['learning_rate']
 
             # Load preprocessing params
-            self.global_mean = checkpoint.get('global_mean')
-            self.global_std = checkpoint.get('global_std')
-            self.feature_columns = checkpoint.get('feature_columns', [])
+            if 'features' in checkpoint and 'global_stats' in checkpoint['features']:
+                self.global_mean = self._safe_restore(checkpoint['features']['global_stats']['mean'])
+                self.global_std = self._safe_restore(checkpoint['features']['global_stats']['std'])
 
             self._is_initialized = True
             return True
@@ -448,42 +477,47 @@ class DBNNPredictor:
             traceback.print_exc()
             return False
 
-    def _load_label_encoder(self, dataset_name: str):
-        """Robust label encoder loading from unified checkpoint"""
-        encoder_path = os.path.join('Model', f'Best_{self.model_type}_{dataset_name}_full.pt')
+    def _get_available_model_types(self, dataset_name: str) -> List[str]:
+        """Check which model types are available for this dataset"""
+        available = []
+        for model_type in ['Histogram', 'Gaussian']:
+            path = os.path.join(self.model_dir, f'Best_{model_type}_{dataset_name}_full.pt')
+            if os.path.exists(path):
+                available.append(model_type)
+        return available
 
-        if not os.path.exists(encoder_path):
-            raise FileNotFoundError(f"Model checkpoint not found at {encoder_path}")
+    def _load_label_encoder(self, checkpoint: dict):
+        """Load label encoder from checkpoint dict"""
+        if 'labels' not in checkpoint or 'encoder' not in checkpoint['labels']:
+            raise ValueError("Checkpoint missing label encoder data")
 
-        try:
-            # Load just the label encoder portion from the full checkpoint
-            checkpoint = torch.load(encoder_path, map_location='cpu')
+        encoder_data = checkpoint['labels']['encoder']
+        self.label_encoder = LabelEncoder()
 
-            # Validate checkpoint structure
-            if 'label_encoder' not in checkpoint:
-                raise ValueError("Checkpoint missing label encoder data")
+        if 'classes' in encoder_data:
+            classes = self._safe_restore(encoder_data['classes'])
+            self.label_encoder.classes_ = classes
+        else:
+            raise ValueError("Invalid label encoder format in checkpoint")
 
-            # Reconstruct label encoder
-            self.label_encoder = LabelEncoder()
-            if 'classes' in checkpoint['label_encoder']:
-                classes = checkpoint['label_encoder']['classes']
-                if isinstance(classes, dict) and 'data' in classes:  # Handle serialized numpy array
-                    classes = np.array(classes['data'])
-                self.label_encoder.classes_ = classes
-            else:
-                raise ValueError("Invalid label encoder format in checkpoint")
-
-            return self.label_encoder
-
-        except Exception as e:
-            print(f"\033[KError loading label encoder: {str(e)}")
-            # Attempt to recreate from data if we have it
-            if hasattr(self, 'data') and hasattr(self, 'target_column'):
-                print("Attempting to recreate label encoder from data...")
-                self.label_encoder = LabelEncoder()
-                self.label_encoder.fit(self.data[self.target_column])
-                return self.label_encoder
-            raise
+    def _safe_restore(self, obj):
+        """Restore objects from serialized format"""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            if '__tensor__' in obj:
+                tensor = torch.from_numpy(np.array(obj['data']))
+                if 'device' in obj:
+                    tensor = tensor.to(self.device)
+                if 'requires_grad' in obj:
+                    tensor.requires_grad = obj['requires_grad']
+                return tensor
+            if '__ndarray__' in obj:
+                return np.array(obj['data']).reshape(obj.get('shape', -1))
+            return {k: self._safe_restore(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._safe_restore(x) for x in obj]
+        return obj
 
     def _load_feature_pairs(self, dataset_name: str):
         """Load feature combinations from saved file"""
