@@ -2726,9 +2726,6 @@ class DBNN(GPUDBNN):
         else:
             results = self.fit_predict()
 
-        print(f"{Colors.YELLOW}The training is over. The full model state is being saved for next round. Please wait...{Colors.ENDC}")
-        self._save_full_state()  # Save complete state
-        print("Model state fully saved including training metadata")
         # Preprocess features and convert to tensors
         X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
         y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
