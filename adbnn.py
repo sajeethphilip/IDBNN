@@ -405,70 +405,109 @@ class DBNNPredictor:
 
         except Exception as e:
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
+    def _load_model_config(self, config: dict):
+        """Load model configuration"""
+        self.model_type = config.get('model_type', 'Histogram')
+        self.n_bins_per_dim = config.get('n_bins_per_dim', 128)
+        self.target_column = config.get('target_column', 'target')
+
+    def _load_label_encoder(self, labels: dict) -> bool:
+        """Load label encoder with validation"""
+        try:
+            if 'encoder' not in labels:
+                return False
+
+            encoder_data = labels['encoder']
+            self.label_encoder = LabelEncoder()
+
+            if 'classes' in encoder_data:
+                classes = self._safe_restore(encoder_data['classes'])
+                if classes is not None:
+                    self.label_encoder.classes_ = classes
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _load_features(self, features: dict):
+        """Load feature processing data"""
+        self.feature_columns = features.get('columns', [])
+        self.feature_pairs = self._safe_restore(features.get('pairs', []))
+        self.bin_edges = self._safe_restore(features.get('bin_edges', None))
+        self.global_mean = self._safe_restore(features.get('global_stats', {}).get('mean', None))
+        self.global_std = self._safe_restore(features.get('global_stats', {}).get('std', None))
+
+    def _load_likelihood(self, likelihood: dict):
+        """Load likelihood parameters"""
+        self.likelihood_params = {
+            'bin_probs': self._safe_restore(likelihood.get('params', {}).get('bin_probs', None)),
+            'bin_edges': self._safe_restore(likelihood.get('params', {}).get('bin_edges', None)),
+            'classes': self._safe_restore(likelihood.get('params', {}).get('classes', None)),
+            'feature_pairs': self._safe_restore(likelihood.get('params', {}).get('feature_pairs', None))
+        }
+
+    def _load_weights(self, weights: dict):
+        """Load model weights"""
+        self.current_W = self._safe_restore(weights.get('current', None))
+        self.best_W = self._safe_restore(weights.get('best', None))
+        if 'learning_rate' in weights:
+            self.learning_rate = weights['learning_rate']
+
+    def _load_training_state(self, training: dict):
+        """Load training state"""
+        self.best_round = training.get('state', {}).get('best_round', None)
+        self.best_combined_accuracy = training.get('state', {}).get('best_accuracy', 0.0)
+        self.consecutive_successes = training.get('state', {}).get('consecutive_successes', 0)
 
     def load_model(self, dataset_name: str) -> bool:
-        """Load all model components from unified checkpoint with proper model type handling"""
+        """Safely load all model components with proper error handling"""
         try:
-            # First determine available model types
+            # Determine available model types
             available_models = self._get_available_model_types(dataset_name)
-
             if not available_models:
                 raise FileNotFoundError(f"No model files found for dataset {dataset_name}")
 
-            # Try to load the first available model (or prefer Histogram if available)
+            # Try loading Histogram first, then Gaussian
             for model_type in ['Histogram', 'Gaussian']:
                 if model_type in available_models:
                     self.model_type = model_type
                     checkpoint_path = os.path.join(self.model_dir, f'Best_{model_type}_{dataset_name}_full.pt')
                     break
-            else:
-                self.model_type = available_models[0]  # Fallback to first available
 
             if not os.path.exists(checkpoint_path):
                 raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
 
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            # Safe loading with weights_only=True
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+            except RuntimeError as e:
+                print(f"Security restriction encountered: {str(e)}")
+                # Fallback to unsafe load only if absolutely necessary
+                checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-            # Validate model type matches
-            if 'model_config' in checkpoint and checkpoint['model_config']['model_type'] != self.model_type:
-                print(f"Warning: Model type mismatch. Expected {self.model_type}, found {checkpoint['model_config']['model_type']}")
-                self.model_type = checkpoint['model_config']['model_type']
+            # Validate basic checkpoint structure
+            required_sections = ['model_config', 'labels']
+            missing = [section for section in required_sections if section not in checkpoint]
+            if missing:
+                raise ValueError(f"Checkpoint missing required sections: {missing}")
 
-            # Load label encoder first as other components may depend on it
-            self._load_label_encoder(checkpoint)
+            # Load model config first
+            self._load_model_config(checkpoint.get('model_config', {}))
 
-            # Load other components
-            if 'features' in checkpoint:
-                self.feature_columns = checkpoint['features'].get('columns', [])
-                self.feature_pairs = self._safe_restore(checkpoint['features'].get('pairs', []))
-                self.bin_edges = self._safe_restore(checkpoint['features'].get('bin_edges', None))
+            # Load label encoder with fallback
+            if not self._load_label_encoder(checkpoint.get('labels', {})):
+                if hasattr(self, 'data') and hasattr(self, 'target_column'):
+                    print("Recreating label encoder from data...")
+                    self.label_encoder = LabelEncoder()
+                    self.label_encoder.fit(self.data[self.target_column])
+                else:
+                    raise ValueError("Could not load or recreate label encoder")
 
-            if 'likelihood' in checkpoint:
-                self.likelihood_params = {
-                    'bin_probs': self._safe_restore(checkpoint['likelihood']['params'].get('bin_probs', None)),
-                    'bin_edges': self._safe_restore(checkpoint['likelihood']['params'].get('bin_edges', None)),
-                    'classes': self._safe_restore(checkpoint['likelihood']['params'].get('classes', None)),
-                    'feature_pairs': self._safe_restore(checkpoint['likelihood']['params'].get('feature_pairs', None))
-                }
-                # Ensure model type matches likelihood params
-                if checkpoint['likelihood']['model_type'] != self.model_type:
-                    self.model_type = checkpoint['likelihood']['model_type']
-
-            # Initialize weight updater after all params are loaded
-            self._initialize_weight_updater()
-
-            # Load weights
-            if 'weights' in checkpoint:
-                weights = checkpoint['weights']
-                self.current_W = self._safe_restore(weights['current'])
-                self.best_W = self._safe_restore(weights['best'])
-                if 'learning_rate' in weights:
-                    self.learning_rate = weights['learning_rate']
-
-            # Load preprocessing params
-            if 'features' in checkpoint and 'global_stats' in checkpoint['features']:
-                self.global_mean = self._safe_restore(checkpoint['features']['global_stats']['mean'])
-                self.global_std = self._safe_restore(checkpoint['features']['global_stats']['std'])
+            # Load remaining components
+            self._load_features(checkpoint.get('features', {}))
+            self._load_likelihood(checkpoint.get('likelihood', {}))
+            self._load_weights(checkpoint.get('weights', {}))
+            self._load_training_state(checkpoint.get('training', {}))
 
             self._is_initialized = True
             return True
