@@ -6362,11 +6362,11 @@ class DBNN(GPUDBNN):
 
 #--------------------------------------------------DBNN Class Ends ----------------------------------------------------------
 class DBNNPredictor(DBNN):
-    """Optimized predictor for DBNN models with inherited functionality"""
+    """Optimized predictor for DBNN models with proper initialization"""
 
     def __init__(self, model_dir: str = 'Model', device: str = None):
         """
-        Initialize predictor with model components.
+        Initialize predictor without automatic dataset loading.
 
         Args:
             model_dir: Directory containing saved model components
@@ -6377,68 +6377,68 @@ class DBNNPredictor(DBNN):
         self.model_dir = model_dir
         self._is_initialized = False
 
-        # Initialize parent with dummy config (will be overridden by load_model)
-        super().__init__(config={}, dataset_name="temp")
+        # Initialize parent with empty config
+        super().__init__(config={}, dataset_name=None)
 
         # Override device settings
         self.device = self.device
-        self.computation_cache.device = self.device
+        if hasattr(self, 'computation_cache'):
+            self.computation_cache.device = self.device
 
         # Initialize empty attributes
         self.model_type = None
         self.weight_updater = None
 
     def load_model(self, dataset_name: str) -> bool:
-        """Load all model components with proper initialization order"""
+        """Load all model components for a specific dataset"""
+        if not dataset_name or not isinstance(dataset_name, str):
+            raise ValueError("Dataset name must be a non-empty string")
+
+        self.dataset_name = dataset_name
+
         try:
-            self.dataset_name = dataset_name
+            # 1. Check model files exist
+            required_files = [
+                f'Best_Histogram_{dataset_name}_full.pt',
+                f'Best_Histogram_{dataset_name}_components.pkl',
+                f'Best_Histogram_{dataset_name}_weights.json',
+                f'Best_Histogram_{dataset_name}_label_encoder.pkl'
+            ]
 
-            # 1. Load configuration first
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found: {config_path}")
+            missing_files = [
+                f for f in required_files
+                if not os.path.exists(os.path.join(self.model_dir, f))
+            ]
 
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
+            if missing_files:
+                raise FileNotFoundError(
+                    f"Missing model files for {dataset_name}: {missing_files}"
+                )
 
-            # 2. Set model type from config
-            self.model_type = self.config.get('modelType', 'Histogram')
-
-            # 3. Try loading full state first (most efficient)
+            # 2. Try loading full state first
             if self._load_full_state():
-                print(f"\033[KLoaded complete model state for {dataset_name}")
-                self._is_initialized = True
                 return True
 
-            # 4. Fall back to component-wise loading if full state not available
+            # 3. Fall back to component-wise loading
             return self._load_components_individually()
 
         except Exception as e:
-            print(f"\033[KError loading model: {str(e)}")
+            print(f"\033[KError loading model for {dataset_name}: {str(e)}")
             traceback.print_exc()
             return False
 
     def _load_full_state(self) -> bool:
-        """Load complete model state from single file with validation"""
-        state_file = os.path.join(self.model_dir, f'Best_{self.model_type}_{self.dataset_name}_full.pt')
+        """Load complete model state from single file"""
+        state_file = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_full.pt'
+        )
 
         if not os.path.exists(state_file):
-            print(f"\033[KNo full state file found at {state_file}")
             return False
 
         try:
-            # Load checkpoint with device mapping
             checkpoint = torch.load(state_file, map_location=self.device)
-
-            # Validate checkpoint structure
-            required_keys = {
-                'weights', 'model_type', 'feature_columns',
-                'likelihood_params', 'label_encoder', 'feature_pairs'
-            }
-
-            missing_keys = required_keys - set(checkpoint.keys())
-            if missing_keys:
-                raise ValueError(f"Checkpoint missing required keys: {missing_keys}")
 
             # Restore core attributes
             self.model_type = checkpoint['model_type']
@@ -6447,45 +6447,71 @@ class DBNNPredictor(DBNN):
             self.best_W = self.current_W.clone()
 
             # Restore likelihood parameters
-            self.likelihood_params = checkpoint['likelihood_params']
-            for key in self.likelihood_params:
-                if torch.is_tensor(self.likelihood_params[key]):
-                    self.likelihood_params[key] = self.likelihood_params[key].to(self.device)
+            self.likelihood_params = {
+                k: v.to(self.device) if torch.is_tensor(v) else v
+                for k, v in checkpoint['likelihood_params'].items()
+            }
 
             # Restore label encoder
             self.label_encoder = LabelEncoder()
-            if 'classes_' in checkpoint['label_encoder']:
-                self.label_encoder.classes_ = checkpoint['label_encoder']['classes_']
-            else:
-                self.label_encoder.classes_ = np.array(checkpoint['label_encoder'])
+            self.label_encoder.classes_ = np.array(
+                checkpoint['label_encoder']['classes_']
+            )
 
             # Restore feature pairs
-            self.feature_pairs = checkpoint['feature_pairs']
-            if isinstance(self.feature_pairs, list):
-                self.feature_pairs = torch.tensor(self.feature_pairs, device=self.device)
+            self.feature_pairs = torch.tensor(
+                checkpoint['feature_pairs'],
+                device=self.device,
+                dtype=torch.long
+            )
 
-            # Restore weight updater
+            # Restore preprocessing
+            self.global_mean = checkpoint['global_mean']
+            self.global_std = checkpoint['global_std']
+            self.categorical_encoders = checkpoint.get('categorical_encoders', {})
+            self.scaler = checkpoint.get('scaler', None)
+
+            # Initialize weight updater
             self._initialize_weight_updater()
 
-            # Restore preprocessing parameters if available
-            if 'global_mean' in checkpoint and 'global_std' in checkpoint:
-                self.global_mean = checkpoint['global_mean']
-                self.global_std = checkpoint['global_std']
-                self.global_stats_computed = True
-
-            # Restore additional components
-            if 'categorical_encoders' in checkpoint:
-                self.categorical_encoders = checkpoint['categorical_encoders']
-
-            if 'scaler' in checkpoint:
-                self.scaler = checkpoint['scaler']
-
+            # Mark as initialized
+            self._is_initialized = True
             return True
 
         except Exception as e:
             print(f"\033[KError loading full state: {str(e)}")
-            traceback.print_exc()
             return False
+
+    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+        """Make predictions from CSV file with validation"""
+        if not self._is_initialized:
+            raise RuntimeError("Predictor not initialized. Call load_model() first.")
+
+        try:
+            # Load and validate input data
+            df = pd.read_csv(csv_path)
+
+            # Check required features
+            missing = set(self.feature_columns) - set(df.columns)
+            if missing:
+                raise ValueError(
+                    f"Input missing {len(missing)} required features: {sorted(missing)}"
+                )
+
+            # Make predictions
+            results = self.predict(df)
+
+            # Save if requested
+            if output_path:
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                results.to_csv(output_path, index=False)
+
+            return results
+
+        except Exception as e:
+            print(f"\033[KError during prediction: {str(e)}")
+            traceback.print_exc()
+            raise
 
     def _load_components_individually(self) -> bool:
         """Fallback loading of individual components"""
@@ -6555,39 +6581,6 @@ class DBNNPredictor(DBNN):
             batch_size=128
         )
 
-    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """Make predictions from CSV file with proper validation"""
-        # Run validation checks first
-        safe_predict(self, csv_path)
-
-        # Load data
-        df = pd.read_csv(csv_path)
-
-        # Check if target column exists in data
-        target_in_data = hasattr(self, 'target_column') and self.target_column in df.columns
-
-        # Make predictions
-        results = self.predict(df)
-
-        # Generate confusion matrix if target exists
-        if target_in_data:
-            y_true = df[self.target_column]
-            y_pred = results['predicted_class']
-
-            # Ensure numeric labels
-            if not np.issubdtype(y_true.dtype, np.number):
-                y_true = self.label_encoder.transform(y_true)
-            if not np.issubdtype(y_pred.dtype, np.number):
-                y_pred = self.label_encoder.transform(y_pred)
-
-            self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
-
-        # Save results if requested
-        if output_path:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            results.to_csv(output_path, index=False)
-
-        return results
 
     # Inherited methods that work as-is:
     # - predict()
