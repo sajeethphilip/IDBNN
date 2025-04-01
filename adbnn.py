@@ -6361,33 +6361,34 @@ class DBNN(GPUDBNN):
 
 
 #--------------------------------------------------DBNN Class Ends ----------------------------------------------------------
-class DBNNPredictor(DBNN):
-    """Optimized predictor for DBNN models with proper initialization"""
+class DBNNPredictor:
+    """Standalone DBNN Predictor with robust initialization"""
 
     def __init__(self, model_dir: str = 'Model', device: str = None):
         """
-        Initialize predictor without automatic dataset loading.
+        Initialize predictor without requiring immediate dataset loading.
 
         Args:
             model_dir: Directory containing saved model components
             device: Device to run predictions on ('cuda' or 'cpu')
         """
-        # Initialize with minimal configuration
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
         self._is_initialized = False
 
-        # Initialize parent with empty config
-        super().__init__(config={}, dataset_name=None)
-
-        # Override device settings
-        self.device = self.device
-        if hasattr(self, 'computation_cache'):
-            self.computation_cache.device = self.device
-
-        # Initialize empty attributes
+        # Core model components
         self.model_type = None
+        self.feature_columns = None
+        self.target_column = None
+        self.label_encoder = LabelEncoder()
+        self.likelihood_params = None
+        self.feature_pairs = None
+        self.current_W = None
         self.weight_updater = None
+        self.scaler = None
+        self.categorical_encoders = None
+        self.global_mean = None
+        self.global_std = None
 
     def load_model(self, dataset_name: str) -> bool:
         """Load all model components for a specific dataset"""
@@ -6397,12 +6398,22 @@ class DBNNPredictor(DBNN):
         self.dataset_name = dataset_name
 
         try:
-            # 1. Check model files exist
+            # 1. Load configuration
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config file not found: {config_path}")
+
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+
+            self.model_type = self.config.get('modelType', 'Histogram')
+            self.target_column = self.config.get('target_column', 'target')
+
+            # 2. Check for required model files
             required_files = [
-                f'Best_Histogram_{dataset_name}_full.pt',
-                f'Best_Histogram_{dataset_name}_components.pkl',
-                f'Best_Histogram_{dataset_name}_weights.json',
-                f'Best_Histogram_{dataset_name}_label_encoder.pkl'
+                f'Best_{self.model_type}_{dataset_name}_components.pkl',
+                f'Best_{self.model_type}_{dataset_name}_weights.json',
+                f'Best_{self.model_type}_{dataset_name}_label_encoder.pkl'
             ]
 
             missing_files = [
@@ -6412,96 +6423,217 @@ class DBNNPredictor(DBNN):
 
             if missing_files:
                 raise FileNotFoundError(
-                    f"Missing model files for {dataset_name}: {missing_files}"
+                    f"Missing required model files: {missing_files}"
                 )
 
-            # 2. Try loading full state first
-            if self._load_full_state():
-                return True
+            # 3. Load components
+            self._load_label_encoder()
+            self._load_feature_pairs()
+            self._load_likelihood_params()
+            self._load_weights()
+            self._load_preprocessing_params()
 
-            # 3. Fall back to component-wise loading
-            return self._load_components_individually()
-
-        except Exception as e:
-            print(f"\033[KError loading model for {dataset_name}: {str(e)}")
-            traceback.print_exc()
-            return False
-
-    def _load_full_state(self) -> bool:
-        """Load complete model state from single file"""
-        state_file = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_full.pt'
-        )
-
-        if not os.path.exists(state_file):
-            return False
-
-        try:
-            checkpoint = torch.load(state_file, map_location=self.device)
-
-            # Restore core attributes
-            self.model_type = checkpoint['model_type']
-            self.feature_columns = checkpoint['feature_columns']
-            self.current_W = checkpoint['weights'].to(self.device)
-            self.best_W = self.current_W.clone()
-
-            # Restore likelihood parameters
-            self.likelihood_params = {
-                k: v.to(self.device) if torch.is_tensor(v) else v
-                for k, v in checkpoint['likelihood_params'].items()
-            }
-
-            # Restore label encoder
-            self.label_encoder = LabelEncoder()
-            self.label_encoder.classes_ = np.array(
-                checkpoint['label_encoder']['classes_']
-            )
-
-            # Restore feature pairs
-            self.feature_pairs = torch.tensor(
-                checkpoint['feature_pairs'],
-                device=self.device,
-                dtype=torch.long
-            )
-
-            # Restore preprocessing
-            self.global_mean = checkpoint['global_mean']
-            self.global_std = checkpoint['global_std']
-            self.categorical_encoders = checkpoint.get('categorical_encoders', {})
-            self.scaler = checkpoint.get('scaler', None)
-
-            # Initialize weight updater
+            # 4. Initialize weight updater
             self._initialize_weight_updater()
 
-            # Mark as initialized
+            # 5. Validate loaded state
+            self._validate_loaded_state()
+
             self._is_initialized = True
             return True
 
         except Exception as e:
-            print(f"\033[KError loading full state: {str(e)}")
+            print(f"\033[KError loading model: {str(e)}")
+            traceback.print_exc()
             return False
 
-    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """Make predictions from CSV file with validation"""
+    def _load_label_encoder(self):
+        """Load label encoder from file"""
+        encoder_path = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_label_encoder.pkl'
+        )
+
+        with open(encoder_path, 'rb') as f:
+            encoder_data = pickle.load(f)
+
+        if isinstance(encoder_data, dict):
+            self.label_encoder.classes_ = np.array(encoder_data['classes_'])
+        else:
+            self.label_encoder = encoder_data
+
+    def _load_feature_pairs(self):
+        """Load feature combinations from saved file"""
+        components_path = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
+        )
+
+        with open(components_path, 'rb') as f:
+            components = pickle.load(f)
+
+        self.feature_pairs = components['feature_pairs']
+        self.feature_columns = components['feature_columns']
+
+        if isinstance(self.feature_pairs, list):
+            self.feature_pairs = torch.tensor(
+                self.feature_pairs,
+                device=self.device,
+                dtype=torch.long
+            )
+
+    def _load_likelihood_params(self):
+        """Load likelihood parameters"""
+        components_path = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
+        )
+
+        with open(components_path, 'rb') as f:
+            components = pickle.load(f)
+
+        self.likelihood_params = components['likelihood_params']
+
+        # Move tensors to device
+        for key, value in self.likelihood_params.items():
+            if torch.is_tensor(value):
+                self.likelihood_params[key] = value.to(self.device)
+
+    def _load_weights(self):
+        """Load model weights"""
+        weights_path = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_weights.json'
+        )
+
+        with open(weights_path, 'r') as f:
+            weights_data = json.load(f)
+
+        if weights_data.get('version', 1) == 2:
+            # New format
+            weights_array = np.array(weights_data['weights'])
+            self.current_W = torch.tensor(weights_array, device=self.device)
+        else:
+            # Old format
+            n_classes = len(self.label_encoder.classes_)
+            n_pairs = len(self.feature_pairs)
+            weights_array = np.zeros((n_classes, n_pairs))
+
+            for class_id, class_weights in weights_data.items():
+                for pair_idx, weight in enumerate(class_weights.values()):
+                    weights_array[int(class_id), pair_idx] = weight
+
+            self.current_W = torch.tensor(weights_array, device=self.device)
+
+    def _load_preprocessing_params(self):
+        """Load preprocessing parameters"""
+        components_path = os.path.join(
+            self.model_dir,
+            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
+        )
+
+        with open(components_path, 'rb') as f:
+            components = pickle.load(f)
+
+        self.scaler = components.get('scaler')
+        self.categorical_encoders = components.get('categorical_encoders', {})
+        self.global_mean = components.get('global_mean')
+        self.global_std = components.get('global_std')
+
+    def _initialize_weight_updater(self):
+        """Initialize weight updater based on model type"""
+        if self.model_type == "Histogram":
+            n_bins = self.likelihood_params['bin_probs'][0].shape[0]
+        else:
+            n_bins = 1  # For Gaussian models
+
+        self.weight_updater = BinWeightUpdater(
+            n_classes=len(self.label_encoder.classes_),
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=n_bins,
+            batch_size=128
+        )
+
+    def _validate_loaded_state(self):
+        """Verify all required components are loaded"""
+        required_attrs = [
+            ('model_type', "Model type not loaded"),
+            ('current_W', "Weights not loaded"),
+            ('likelihood_params', "Likelihood parameters not loaded"),
+            ('label_encoder', "Label encoder not loaded"),
+            ('feature_pairs', "Feature pairs not loaded"),
+            ('weight_updater', "Weight updater not initialized"),
+            ('feature_columns', "Feature columns not loaded")
+        ]
+
+        missing = []
+        for attr, msg in required_attrs:
+            if not hasattr(self, attr) or getattr(self, attr) is None:
+                missing.append(msg)
+
+        if missing:
+            raise RuntimeError(
+                "Incomplete model state. Missing:\n" +
+                "\n".join(f"• {m}" for m in missing)
+            )
+
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor]) -> pd.DataFrame:
+        """Make predictions with proper validation"""
         if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first.")
+            raise RuntimeError("Predictor not initialized. Call load_model() first")
+
+        # Convert input to tensor if needed
+        if isinstance(X, pd.DataFrame):
+            X_tensor = self._preprocess_data(X)
+        else:
+            X_tensor = X.to(self.device)
+
+        # Compute predictions
+        if self.model_type == "Histogram":
+            posteriors, _ = self._compute_batch_posterior(X_tensor)
+        else:
+            posteriors, _ = self._compute_batch_posterior_std(X_tensor)
+
+        predictions = torch.argmax(posteriors, dim=1).cpu().numpy()
+
+        # Create results DataFrame
+        results = pd.DataFrame()
+        results['predicted_class'] = self.label_encoder.inverse_transform(predictions)
+
+        # Add probabilities if requested
+        for i, class_name in enumerate(self.label_encoder.classes_):
+            results[f'prob_{class_name}'] = posteriors[:, i].cpu().numpy()
+
+        return results
+
+    def _preprocess_data(self, df: pd.DataFrame) -> torch.Tensor:
+        """Preprocess input data matching training preprocessing"""
+        # Filter to only expected features
+        df = df[[col for col in self.feature_columns if col in df.columns]]
+
+        # Handle categorical features
+        for col, mapping in self.categorical_encoders.items():
+            if col in df.columns:
+                df[col] = df[col].map(mapping).fillna(-1)
+
+        # Handle missing values
+        df = df.fillna(-99999)
+
+        # Standardize
+        if self.global_mean is not None and self.global_std is not None:
+            df = (df - self.global_mean) / self.global_std
+
+        return torch.tensor(df.values, dtype=torch.float32, device=self.device)
+
+    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+        """Make predictions from CSV file"""
+        if not self._is_initialized:
+            raise RuntimeError("Predictor not initialized. Call load_model() first")
 
         try:
-            # Load and validate input data
             df = pd.read_csv(csv_path)
-
-            # Check required features
-            missing = set(self.feature_columns) - set(df.columns)
-            if missing:
-                raise ValueError(
-                    f"Input missing {len(missing)} required features: {sorted(missing)}"
-                )
-
-            # Make predictions
             results = self.predict(df)
 
-            # Save if requested
             if output_path:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 results.to_csv(output_path, index=False)
@@ -6512,83 +6644,6 @@ class DBNNPredictor(DBNN):
             print(f"\033[KError during prediction: {str(e)}")
             traceback.print_exc()
             raise
-
-    def _load_components_individually(self) -> bool:
-        """Fallback loading of individual components"""
-        print(f"\033[KLoading model components individually for {self.dataset_name}")
-
-        # Load label encoder
-        if not self._load_label_encoder():
-            return False
-
-        # Load feature pairs and likelihood params
-        if not self._load_feature_pairs() or not self._load_likelihood_params():
-            return False
-
-        # Initialize weight updater after params are loaded
-        self._initialize_weight_updater()
-
-        # Load weights
-        if not self._load_weights():
-            return False
-
-        # Load preprocessing params if available
-        self._load_preprocessing_params()
-
-        # Final validation
-        required_attrs = [
-            'likelihood_params', 'feature_pairs',
-            'current_W', 'label_encoder',
-            'weight_updater'
-        ]
-
-        missing = [attr for attr in required_attrs if not hasattr(self, attr)]
-        if missing:
-            raise RuntimeError(f"Missing required model components: {missing}")
-
-        self._is_initialized = True
-        return True
-
-    def _initialize_weight_updater(self):
-        """Initialize weight updater with verified dimensions"""
-        if not hasattr(self, 'likelihood_params'):
-            raise RuntimeError("Likelihood parameters not loaded")
-
-        # Get dimensions from likelihood params
-        if self.model_type == "Histogram":
-            if 'bin_probs' not in self.likelihood_params:
-                raise ValueError("Missing bin_probs in likelihood_params")
-
-            first_bin_probs = self.likelihood_params['bin_probs'][0]
-            n_classes, n_bins_i, n_bins_j = first_bin_probs.shape
-            n_bins = n_bins_i  # Assuming square bins
-
-        elif self.model_type == "Gaussian":
-            if 'means' not in self.likelihood_params:
-                raise ValueError("Missing means in likelihood_params")
-
-            n_classes = len(self.likelihood_params['classes'])
-            n_bins = self.n_bins_per_dim  # Use default for Gaussian
-
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
-
-        # Initialize updater
-        self.weight_updater = BinWeightUpdater(
-            n_classes=n_classes,
-            feature_pairs=self.feature_pairs,
-            n_bins_per_dim=n_bins,
-            batch_size=128
-        )
-
-
-    # Inherited methods that work as-is:
-    # - predict()
-    # - _compute_batch_posterior()
-    # - _compute_batch_posterior_std()
-    # - print_colored_confusion_matrix()
-    # - preprocess_data()
-
 #--------------------------------------------------DBNN Predictor Ends ----------------------------------------------------
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
