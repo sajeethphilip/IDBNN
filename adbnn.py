@@ -6640,24 +6640,49 @@ class DBNNPredictor:
         return torch.tensor(df.values, dtype=torch.float32, device=self.device)
 
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """Make predictions from CSV file"""
-        if not self._is_initialized:
-            raise RuntimeError("Predictor not initialized. Call load_model() first")
+        """Make predictions with full output and optional confusion matrix"""
+        # Load data while preserving original columns
+        df = pd.read_csv(csv_path)
+        original_columns = df.columns.tolist()
 
-        try:
-            df = pd.read_csv(csv_path)
-            results = self.predict(df)
+        # Check if target column exists
+        target_in_data = self.target_column in df.columns
 
-            if output_path:
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                results.to_csv(output_path, index=False)
+        # Make predictions
+        results = self.predict(df)
 
-            return results
+        # Merge predictions with original data
+        if target_in_data:
+            # Keep original target column
+            output_df = pd.concat([
+                df[original_columns],
+                results[['predicted_class'] + [c for c in results.columns if c.startswith('prob_')]]
+            ], axis=1)
 
-        except Exception as e:
-            print(f"\033[KError during prediction: {str(e)}")
-            traceback.print_exc()
-            raise
+            # Generate confusion matrix if target exists
+            y_true = df[self.target_column]
+            y_pred = results['predicted_class']
+
+            # Convert to numeric if needed (using parent DBNN's label encoder)
+            if not np.issubdtype(y_true.dtype, np.number):
+                y_true = self.label_encoder.transform(y_true)
+            if not np.issubdtype(y_pred.dtype, np.number):
+                y_pred = self.label_encoder.transform(y_pred)
+
+            # Use parent class's confusion matrix printer
+            self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
+
+        else:
+            output_df = pd.concat([df, results], axis=1)
+
+        # Save results if path specified
+        if output_path:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            output_df.to_csv(output_path, index=False)
+
+        return output_df
+
+
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10) -> torch.Tensor:
         """Dimension-aware posterior computation with NaN handling"""
@@ -6802,79 +6827,6 @@ class DBNNPredictor:
 
         return posteriors, None
 
-    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
-        # Decode numeric labels back to original alphanumeric labels
-        y_true_labels = self.label_encoder.inverse_transform(y_true)
-        y_pred_labels = self.label_encoder.inverse_transform(y_pred)
-
-        # Get unique classes from both true and predicted labels
-        unique_true = np.unique(y_true_labels)
-        unique_pred = np.unique(y_pred_labels)
-
-        # Use provided class labels or get from label encoder
-        if class_labels is None:
-            class_labels = self.label_encoder.classes_
-
-        # Ensure all classes are represented in confusion matrix
-        all_classes = np.unique(np.concatenate([unique_true, unique_pred, class_labels]))
-        n_classes = len(all_classes)
-
-        # Create class index mapping
-        class_to_idx = {cls: idx for idx, cls in enumerate(all_classes)}
-
-        # Initialize confusion matrix with zeros
-        cm = np.zeros((n_classes, n_classes), dtype=int)
-
-        # Fill confusion matrix
-        for t, p in zip(y_true_labels, y_pred_labels):
-            if t in class_to_idx and p in class_to_idx:
-                cm[class_to_idx[t], class_to_idx[p]] += 1
-
-        # Print confusion matrix with colors
-        print("\033[K" + f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
-        print("\033[K" + f"{'Actual/Predicted':<15}", end='')
-        for label in all_classes:
-            print("\033[K" + f"{str(label):<8}", end='')
-        print("\033[K" + "Accuracy")
-        print("\033[K" + "-" * (15 + 8 * n_classes + 10))
-
-        # Print matrix with colors
-        for i in range(n_classes):
-            # Print actual class label
-            print("\033[K" + f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
-
-            # Print confusion matrix row
-            for j in range(n_classes):
-                if i == j:
-                    # Correct predictions in green
-                    color = Colors.GREEN
-                else:
-                    # Incorrect predictions in red
-                    color = Colors.RED
-                print("\033[K" + f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
-
-            # Print class accuracy with color based on performance
-            acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
-            if acc >= 0.9:
-                color = Colors.GREEN
-            elif acc >= 0.7:
-                color = Colors.YELLOW
-            else:
-                color = Colors.BLUE
-            print("\033[K" + f"{color}{acc:>7.2%}{Colors.ENDC}")
-
-        # Print overall accuracy
-        total_correct = np.diag(cm).sum()
-        total_samples = cm.sum()
-        if total_samples > 0:
-            overall_acc = total_correct / total_samples
-            print("\033[K" + "-" * (15 + 8 * n_classes + 10))
-            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
-            print("\033[K" + f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
-
-            # Only print best accuracy if the attribute exists
-            if hasattr(self, 'best_combined_accuracy'):
-                print("\033[K" + f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
 #--------------------------------------------------DBNN Predictor Ends ----------------------------------------------------
 
