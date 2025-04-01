@@ -454,13 +454,18 @@ class DBNNPredictor:
     def _load_secure(self, path: str):
         """Attempt secure loading with proper allowlisting"""
         try:
-            # Try with weights_only first
+            # First try with weights_only=True
             return torch.load(path, map_location='cpu', weights_only=True)
-        except pickle.UnpicklingError as e:
+        except (pickle.UnpicklingError, RuntimeError) as e:
             if "_reconstruct" in str(e):
-                # Retry with our pre-allowlisted globals
+                # If we get a specific error about reconstruction, try with allowlisted globals
+                torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
                 return torch.load(path, map_location='cpu', weights_only=True)
-            raise
+            elif self._is_trusted_source(path):
+                print("Attempting unsafe load for trusted source")
+                return torch.load(path, map_location='cpu', weights_only=False)
+            else:
+                raise RuntimeError("Untrusted model file - cannot load safely")
 
     def _is_trusted_source(self, path: str) -> bool:
         """Determine if we trust the model file source"""
@@ -473,23 +478,44 @@ class DBNNPredictor:
         return any(path.startswith(trusted_dir) for trusted_dir in trusted_dirs)
 
     def _validate_checkpoint(self, checkpoint: dict):
-        """Validate checkpoint structure"""
-        required = {
-            'model_config': ['model_type', 'n_bins_per_dim'],
+        """More flexible checkpoint validation that handles older versions"""
+        required_sections = {
+            'model_config': ['model_type'],
             'labels': ['encoder'],
             'features': ['columns']
         }
 
-        for section, keys in required.items():
+        for section, keys in required_sections.items():
             if section not in checkpoint:
-                raise ValueError(f"Missing section: {section}")
+                # Try to reconstruct missing sections from older format
+                if section == 'model_config' and 'modelType' in checkpoint:
+                    checkpoint['model_config'] = {
+                        'model_type': checkpoint['modelType'],
+                        'n_bins_per_dim': checkpoint.get('n_bins_per_dim', 128)
+                    }
+                elif section == 'labels' and 'label_encoder' in checkpoint:
+                    checkpoint['labels'] = {
+                        'encoder': {
+                            'classes': checkpoint['label_encoder'].classes_
+                        }
+                    }
+                else:
+                    raise ValueError(f"Missing required section: {section}")
+
+            # Validate keys within each section
             for key in keys:
                 if key not in checkpoint[section]:
-                    raise ValueError(f"Missing key: {section}.{key}")
+                    if section == 'model_config' and key == 'n_bins_per_dim':
+                        checkpoint[section][key] = 128  # Default value
+                    else:
+                        raise ValueError(f"Missing key: {section}.{key}")
 
-        # Validate label encoder specifically
+        # Special handling for label encoder
         if 'classes' not in checkpoint['labels']['encoder']:
-            raise ValueError("Missing label encoder classes")
+            if hasattr(checkpoint['labels']['encoder'], 'classes_'):
+                checkpoint['labels']['encoder']['classes'] = checkpoint['labels']['encoder'].classes_
+            else:
+                raise ValueError("Missing label encoder classes")
 
     def _find_model_file(self, dataset_name: str) -> Optional[str]:
         """Find the most appropriate model file"""
