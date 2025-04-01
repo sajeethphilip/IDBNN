@@ -2842,13 +2842,21 @@ class DBNN(GPUDBNN):
         return results_df
 
     def _save_full_state(self):
-        """Saves complete model state with proper handling of all data types"""
+        """Saves complete model state with proper handling of all data types.
+        Includes additional validation and more comprehensive state capture."""
+
         def _safe_convert(obj):
-            """Safely convert objects to serializable formats"""
+            """Enhanced object serialization with better type handling"""
             if obj is None:
                 return None
             if isinstance(obj, torch.Tensor):
-                return {'__tensor__': True, 'data': obj.cpu().numpy(), 'dtype': str(obj.dtype)}
+                return {
+                    '__tensor__': True,
+                    'data': obj.cpu().numpy(),
+                    'dtype': str(obj.dtype),
+                    'device': str(obj.device),
+                    'requires_grad': obj.requires_grad
+                }
             if isinstance(obj, (list, tuple)):
                 return [_safe_convert(x) for x in obj]
             if isinstance(obj, dict):
@@ -2856,70 +2864,132 @@ class DBNN(GPUDBNN):
             if isinstance(obj, (int, float, str, bool)):
                 return obj
             if isinstance(obj, np.ndarray):
-                return {'__ndarray__': True, 'data': obj.tolist(), 'dtype': str(obj.dtype)}
+                return {
+                    '__ndarray__': True,
+                    'data': obj.tolist(),
+                    'dtype': str(obj.dtype),
+                    'shape': list(obj.shape)
+                }
+            if hasattr(obj, '__dict__'):  # Handle generic objects
+                return _safe_convert(obj.__dict__)
             return str(obj)  # Fallback for other types
 
+        # Validate critical components before saving
+        required_attrs = [
+            ('current_W', "Model weights not initialized"),
+            ('feature_pairs', "Feature pairs not computed"),
+            ('label_encoder', "Label encoder not initialized"),
+            ('model_type', "Model type not specified")
+        ]
+
+        missing = [msg for attr, msg in required_attrs if not hasattr(self, attr)]
+        if missing:
+            raise RuntimeError(f"Cannot save model state. Missing: {', '.join(missing)}")
+
+        # Build comprehensive checkpoint dictionary
         checkpoint = {
-            # Core model parameters
+            # Core model configuration
+            'model_config': {
+                'model_type': self.model_type,
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'device': str(self.device),
+                'dataset_name': self.dataset_name,
+                'target_column': self.target_column
+            },
+
+            # Model parameters and weights
             'weights': {
                 'current': _safe_convert(self.current_W),
-                'best': _safe_convert(self.best_W)
+                'best': _safe_convert(self.best_W),
+                'learning_rate': self.learning_rate
             },
-            'model_type': self.model_type,
-            'n_bins_per_dim': self.n_bins_per_dim,
-            'device': str(self.device),
 
-            # Feature processing
-            'feature_columns': self.feature_columns,
-            'feature_pairs': _safe_convert(self.feature_pairs),
-            'bin_edges': _safe_convert(getattr(self, 'bin_edges', None)),
-            'target_column': self.target_column,
+            # Feature processing state
+            'features': {
+                'columns': self.feature_columns,
+                'pairs': _safe_convert(self.feature_pairs),
+                'bin_edges': _safe_convert(getattr(self, 'bin_edges', None)),
+                'global_stats': {
+                    'mean': _safe_convert(self.global_mean),
+                    'std': _safe_convert(self.global_std)
+                }
+            },
 
-            # Likelihood parameters
-            'likelihood_params': {
-                'bin_probs': _safe_convert(getattr(self.likelihood_params, 'bin_probs', None)),
-                'bin_edges': _safe_convert(getattr(self.likelihood_params, 'bin_edges', None)),
-                'classes': _safe_convert(getattr(self.likelihood_params, 'classes', None)),
-                'feature_pairs': _safe_convert(getattr(self.likelihood_params, 'feature_pairs', None))
+            # Likelihood parameters (model-specific)
+            'likelihood': {
+                'params': {
+                    'bin_probs': _safe_convert(getattr(self.likelihood_params, 'bin_probs', None)),
+                    'bin_edges': _safe_convert(getattr(self.likelihood_params, 'bin_edges', None)),
+                    'classes': _safe_convert(getattr(self.likelihood_params, 'classes', None)),
+                    'feature_pairs': _safe_convert(getattr(self.likelihood_params, 'feature_pairs', None))
+                },
+                'model_type': self.model_type
             },
 
             # Weight updater state
-            'weight_updater': {
-                'histogram': _safe_convert(getattr(self.weight_updater, 'histogram_weights', None)),
-                'gaussian': _safe_convert(getattr(self.weight_updater, 'gaussian_weights', None)),
-                'batch_size': self.weight_updater.batch_size
+            'training': {
+                'weight_updater': {
+                    'histogram': _safe_convert(getattr(self.weight_updater, 'histogram_weights', None)),
+                    'gaussian': _safe_convert(getattr(self.weight_updater, 'gaussian_weights', None)),
+                    'batch_size': self.weight_updater.batch_size
+                },
+                'state': {
+                    'best_round': self.best_round,
+                    'best_accuracy': self.best_combined_accuracy,
+                    'consecutive_successes': getattr(self, 'consecutive_successes', 0),
+                    'trials': getattr(self, 'trials', Trials)
+                }
             },
 
-            # Preprocessing
-            'global_mean': _safe_convert(self.global_mean),
-            'global_std': _safe_convert(self.global_std),
-            'label_encoder': {
-                'classes': _safe_convert(self.label_encoder.classes_),
-                'dtype': str(self.label_encoder.classes_.dtype)
+            # Label processing
+            'labels': {
+                'encoder': {
+                    'classes': _safe_convert(self.label_encoder.classes_),
+                    'dtype': str(self.label_encoder.classes_.dtype)
+                }
             },
 
-            # Training state
-            'training_state': {
-                'best_round': self.best_round,
-                'learning_rate': self.learning_rate,
-                'best_combined_accuracy': self.best_combined_accuracy,
-                'consecutive_successes': getattr(self, 'consecutive_successes', 0)
-            },
-
-            # Version info
-            'version': {
+            # Version and metadata
+            'metadata': {
                 'save_time': datetime.datetime.now().isoformat(),
                 'pytorch_version': torch.__version__,
-                'model_version': 2
+                'model_version': 3,  # Incremented version
+                'checksum': hashlib.md5(str(datetime.datetime.now()).encode()).hexdigest()
             }
         }
 
-        # Atomic save operation
+        # Add configuration if available
+        if hasattr(self, 'config'):
+            checkpoint['config'] = _safe_convert(self.config)
+
+        # Add data statistics if available
+        if hasattr(self, 'data_stats'):
+            checkpoint['data_stats'] = _safe_convert(self.data_stats)
+
+        # Atomic save with checksum validation
         save_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        temp_path = save_path + '.tmp'
-        torch.save(checkpoint, temp_path)
-        os.replace(temp_path, save_path)
+
+        try:
+            # Save to temporary file first
+            temp_path = save_path + '.tmp'
+            torch.save(checkpoint, temp_path)
+
+            # Verify the saved file
+            with open(temp_path, 'rb') as f:
+                saved_data = torch.load(f)
+                if not isinstance(saved_data, dict):
+                    raise RuntimeError("Saved file verification failed")
+
+            # Only replace existing file after successful verification
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            os.rename(temp_path, save_path)
+
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise RuntimeError(f"Failed to save model state: {str(e)}")
 
     def _load_full_state(self):
         """Loads complete model state with proper restoration"""
