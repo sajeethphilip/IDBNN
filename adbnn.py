@@ -355,7 +355,6 @@ class DBNNPredictor:
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
         self.model_type = None  # Will be set during load
-        self.dataset_name=None
         self._is_initialized = False
         self.n_bins_per_dim = 128  # Default value
         # Initialize weight_updater as None but with type hint
@@ -373,39 +372,6 @@ class DBNNPredictor:
         self.global_mean = None
         self.global_std = None
         self.data = None
-
-
-    def _load_full_state(self):
-        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-        if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=self.device)
-
-            # Restore core weights
-            self.best_W = checkpoint['weights'].to(self.device)
-            self.current_W = self.best_W.clone()
-
-            # Restore weight updater (with proper type conversion)
-            self.weight_updater.histogram_weights = {
-                int(class_id): {
-                    int(pair_idx): weight.to(self.device)
-                    for pair_idx, weight in class_weights.items()
-                }
-                for class_id, class_weights in checkpoint['histogram_weights'].items()
-            }
-
-            # Restore weight updater
-            for class_id in checkpoint['histogram_weights']:
-                for pair_idx in checkpoint['histogram_weights'][class_id]:
-                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
-                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
-
-            # Restore preprocessing
-            self.global_mean = checkpoint['global_mean']
-            self.global_std = checkpoint['global_std']
-            self.feature_columns = checkpoint['feature_columns']
-
-            # Restore training state
-            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
 
     def _load_dataset(self, dataset_name: str) -> None:
         """Load the dataset for the predictor"""
@@ -1118,7 +1084,6 @@ class DBNNPredictor:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
         dataset_name = get_dataset_name_from_path(csv_path)
-        self.dataset_name=dataset_name
         print(f"\033[KUsing model for dataset: {dataset_name}")
 
         # Verify model files exist
@@ -1142,8 +1107,7 @@ class DBNNPredictor:
         # Rest of the prediction logic remains the same...
         target_column = self.config.get('target_column') if hasattr(self, 'config') else None
         target_in_data = target_column is not None and target_column in df.columns
-        #Restore the state of the trained model
-        self._load_full_state()
+
         results = self.predict(df)
 
         if target_in_data:
@@ -2762,7 +2726,9 @@ class DBNN(GPUDBNN):
         else:
             results = self.fit_predict()
 
-
+        print(f"{Colors.YELLOW}The training is over. The full model state is being saved for next round. Please wait...{Colors.ENDC}")
+        self._save_full_state()  # Save complete state
+        print("Model state fully saved including training metadata")
         # Preprocess features and convert to tensors
         X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
         y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
