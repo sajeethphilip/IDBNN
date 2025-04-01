@@ -5892,7 +5892,7 @@ class DBNN(GPUDBNN):
                 print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
-                #self._save_best_weights()
+                self._save_best_weights()
                 print("\033[K" +f"{Colors.GREEN}Model state fully saved including training metadata{Colors.ENDC}", end='\r', flush=True)
                 self._save_full_state()  # Save complete state
 
