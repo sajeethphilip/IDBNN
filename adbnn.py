@@ -2860,124 +2860,152 @@ class DBNN(GPUDBNN):
         return results_df
 
     def _save_full_state(self):
-        """Saves COMPLETE model state including all parameters needed for full reconstruction"""
+        """Saves complete model state with all components as tensors"""
+        # Convert all components to tensors first
         checkpoint = {
             # 1. Core Model Parameters
             'model_parameters': {
                 'weights': {
-                    'current': self.current_W.cpu() if self.current_W is not None else None,
-                    'best': self.best_W.cpu() if self.best_W is not None else None
+                    'current': torch.tensor(self.current_W.cpu() if self.current_W is not None else None),
+                    'best': torch.tensor(self.best_W.cpu() if self.best_W is not None else None)
                 },
                 'model_type': self.model_type,
-                'n_bins_per_dim': self.n_bins_per_dim,
+                'n_bins_per_dim': torch.tensor(self.n_bins_per_dim),
                 'device': self.device
             },
 
             # 2. Feature Processing Configuration
             'feature_config': {
-                'columns': self.feature_columns,
-                'pairs': self.feature_pairs,
-                'bin_edges': [edges.cpu() for edges in self.bin_edges] if hasattr(self, 'bin_edges') else None,
+                'columns': self.feature_columns,  # List of strings
+                'pairs': torch.tensor(self.feature_pairs),
+                'bin_edges': [torch.tensor(edges.cpu()) for edges in self.bin_edges] if hasattr(self, 'bin_edges') else None,
                 'target_column': self.target_column,
-                'original_columns': getattr(self, 'original_columns', None),
-                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', None)
+                'original_columns': self.original_columns if hasattr(self, 'original_columns') else None,
+                'high_cardinality_columns': self.high_cardinality_columns if hasattr(self, 'high_cardinality_columns') else None
             },
 
-            # 3. Likelihood Parameters (Model-Specific)
+            # 3. Likelihood Parameters
             'likelihood_params': {
                 'histogram': {
-                    'bin_probs': [probs.cpu() for probs in self.likelihood_params['bin_probs']]
-                    if self.model_type == "Histogram" and 'bin_probs' in self.likelihood_params else None,
-                    'bin_counts': [counts.cpu() for counts in self.likelihood_params['bin_counts']]
-                    if self.model_type == "Histogram" and 'bin_counts' in self.likelihood_params else None
-                },
+                    'bin_probs': [torch.tensor(probs.cpu()) for probs in self.likelihood_params.get('bin_probs', [])],
+                    'bin_counts': [torch.tensor(counts.cpu()) for counts in self.likelihood_params.get('bin_counts', [])]
+                } if self.model_type == "Histogram" else None,
                 'gaussian': {
-                    'means': self.likelihood_params['means'].cpu()
-                    if self.model_type == "Gaussian" and 'means' in self.likelihood_params else None,
-                    'covs': self.likelihood_params['covs'].cpu()
-                    if self.model_type == "Gaussian" and 'covs' in self.likelihood_params else None
+                    'means': torch.tensor(self.likelihood_params.get('means', None).cpu()) if self.model_type == "Gaussian" else None,
+                    'covs': torch.tensor(self.likelihood_params.get('covs', None).cpu()) if self.model_type == "Gaussian" else None
                 },
-                'classes': self.likelihood_params['classes'].cpu()
-                if 'classes' in self.likelihood_params else None
+                'classes': torch.tensor(self.likelihood_params.get('classes', None).cpu())
             },
 
             # 4. Weight Updater State
             'weight_updater': {
                 'histogram': {
                     str(class_id): {
-                        str(pair_idx): weights.cpu()
+                        str(pair_idx): torch.tensor(weights.cpu())
                         for pair_idx, weights in class_weights.items()
                     }
                     for class_id, class_weights in self.weight_updater.histogram_weights.items()
                 },
                 'gaussian': {
                     str(class_id): {
-                        str(pair_idx): weights.cpu()
+                        str(pair_idx): torch.tensor(weights.cpu())
                         for pair_idx, weights in class_weights.items()
                     }
                     for class_id, class_weights in self.weight_updater.gaussian_weights.items()
                 },
-                'batch_size': self.weight_updater.batch_size
+                'batch_size': torch.tensor(self.weight_updater.batch_size)
             },
 
             # 5. Preprocessing State
             'preprocessing': {
-                'global_mean': self.global_mean,
-                'global_std': self.global_std,
+                'global_mean': torch.tensor(self.global_mean),
+                'global_std': torch.tensor(self.global_std),
                 'label_encoder': {
-                    'classes_': self.label_encoder.classes_,
+                    'classes_': torch.tensor(self.label_encoder.classes_),
                     'dtype': str(self.label_encoder.classes_.dtype)
                 },
-                'categorical_encoders': getattr(self, 'categorical_encoders', None),
+                'categorical_encoders': {k: torch.tensor(v) for k, v in self.categorical_encoders.items()} if hasattr(self, 'categorical_encoders') else None,
                 'nan_handling': {
-                    'sentinel_value': -99999,
-                    'nan_mask': getattr(self, 'nan_mask', None)
+                    'sentinel_value': torch.tensor(-99999),
+                    'nan_mask': torch.tensor(getattr(self, 'nan_mask', None))
                 }
             },
 
             # 6. Training State
             'training_state': {
-                'best_round': self.best_round,
+                'best_round': torch.tensor(self.best_round) if self.best_round is not None else None,
                 'best_round_initial_conditions': {
-                    'weights': self.best_round_initial_conditions['weights'].cpu()
-                    if self.best_round_initial_conditions else None,
-                    'likelihood_params': self.best_round_initial_conditions['likelihood_params']
-                    if self.best_round_initial_conditions else None
+                    'weights': torch.tensor(self.best_round_initial_conditions['weights'].cpu()) if self.best_round_initial_conditions else None,
+                    'likelihood_params': self.best_round_initial_conditions['likelihood_params'] if self.best_round_initial_conditions else None
                 },
-                'learning_rate': self.learning_rate,
-                'cardinality_threshold': self.cardinality_threshold,
-                'best_combined_accuracy': self.best_combined_accuracy,
-                'consecutive_successes': getattr(self, 'consecutive_successes', 0)
-            },
-
-            # 7. Configuration
-            'config': {
-                'dataset_config': self.config,
-                'model_config': {
-                    'trials': Trials,
-                    'cardinality_tolerance': cardinality_tolerance,
-                    'enable_adaptive': EnableAdaptive
-                }
-            },
-
-            # 8. Metadata
-            'metadata': {
-                'save_timestamp': datetime.datetime.now().isoformat(),
-                'pytorch_version': torch.__version__,
-                'model_class': self.__class__.__name__,
-                'dataset_name': self.dataset_name
+                'learning_rate': torch.tensor(self.learning_rate),
+                'cardinality_threshold': torch.tensor(self.cardinality_threshold),
+                'best_combined_accuracy': torch.tensor(self.best_combined_accuracy),
+                'consecutive_successes': torch.tensor(getattr(self, 'consecutive_successes', 0))
             }
         }
 
-        # Atomic save operation
+        # Save with atomic operation
         save_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        # Use temporary file + atomic rename for crash safety
         temp_path = save_path + '.tmp'
         torch.save(checkpoint, temp_path)
         os.replace(temp_path, save_path)
 
+    def _load_full_state(self):
+        """Loads complete model state with proper tensor conversion"""
+        load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"No saved state found at {load_path}")
+
+        checkpoint = torch.load(load_path, map_location='cpu')  # Load to CPU first
+
+        # 1. Restore Core Parameters
+        self.model_type = checkpoint['model_parameters']['model_type']
+        self.n_bins_per_dim = checkpoint['model_parameters']['n_bins_per_dim'].item()
+        self.current_W = checkpoint['model_parameters']['weights']['current'].to(self.device)
+        self.best_W = checkpoint['model_parameters']['weights']['best'].to(self.device) if checkpoint['model_parameters']['weights']['best'] is not None else None
+
+        # 2. Restore Feature Processing
+        self.feature_columns = checkpoint['feature_config']['columns']
+        self.feature_pairs = checkpoint['feature_config']['pairs'].tolist()
+        self.target_column = checkpoint['feature_config']['target_column']
+        if checkpoint['feature_config']['bin_edges'] is not None:
+            self.bin_edges = [edges.to(self.device) for edges in checkpoint['feature_config']['bin_edges']]
+
+        # 3. Initialize Weight Updater
+        n_classes = len(checkpoint['preprocessing']['label_encoder']['classes_'])
+        self.weight_updater = BinWeightUpdater(
+            n_classes=n_classes,
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=self.n_bins_per_dim,
+            batch_size=checkpoint['weight_updater']['batch_size'].item()
+        )
+
+        # 4. Restore Weight Updater State
+        for class_id, class_weights in checkpoint['weight_updater']['histogram'].items():
+            for pair_idx, weights in class_weights.items():
+                self.weight_updater.histogram_weights[int(class_id)][int(pair_idx)] = weights.to(self.device)
+
+        # 5. Restore Likelihood Parameters
+        self.likelihood_params = {
+            'bin_probs': [probs.to(self.device) for probs in checkpoint['likelihood_params']['histogram']['bin_probs']],
+            'bin_edges': self.bin_edges,
+            'classes': checkpoint['likelihood_params']['classes'].to(self.device),
+            'feature_pairs': self.feature_pairs
+        }
+
+        # 6. Restore Preprocessing
+        self.global_mean = checkpoint['preprocessing']['global_mean'].numpy()
+        self.global_std = checkpoint['preprocessing']['global_std'].numpy()
+        self.label_encoder = LabelEncoder()
+        self.label_encoder.classes_ = checkpoint['preprocessing']['label_encoder']['classes_'].numpy()
+
+        # 7. Restore Training State
+        self.best_round = checkpoint['training_state']['best_round'].item() if checkpoint['training_state']['best_round'] is not None else None
+        self.learning_rate = checkpoint['training_state']['learning_rate'].item()
+        self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy'].item()
 
 
     def _update_training_log(self, round_num: int, metrics: Dict):
