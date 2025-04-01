@@ -2726,9 +2726,6 @@ class DBNN(GPUDBNN):
         else:
             results = self.fit_predict()
 
-        print(f"{Colors.YELLOW}The training is over. The full model state is being saved for next round. Please wait...{Colors.ENDC}")
-        self._save_full_state()  # Save complete state
-        print("Model state fully saved including training metadata")
         # Preprocess features and convert to tensors
         X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
         y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
@@ -6836,7 +6833,10 @@ def main():
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 predictor = DBNNPredictor()
-                dataset_name = get_dataset_name_from_path(args.file_path)
+                if not dataset_name:
+                    dataset_name = get_dataset_name_from_path(args.file_path)
+                else:
+                    print(f"{Colors.YELLOW}The data set name used is {dataset_name}{Colors.ENDC}")
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
