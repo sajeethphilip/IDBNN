@@ -372,9 +372,11 @@ class DBNNPredictor:
         self.global_mean = None
         self.global_std = None
         self.data = None
+        self.dataset_name=None
         self._load_full_state()
 
     def _load_full_state(self):
+        self.dataset_name = get_dataset_name_from_path(csv_path)
         path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         if os.path.exists(path):
             checkpoint = torch.load(path, map_location=self.device)
