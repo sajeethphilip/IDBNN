@@ -2861,6 +2861,8 @@ class DBNN(GPUDBNN):
 
     def _save_full_state(self):
         """Save complete model state including all components and parameters"""
+        import datetime  # Add this import at the top of the file
+
         checkpoint = {
             # Core model parameters
             'model_type': self.model_type,
