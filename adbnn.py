@@ -355,6 +355,7 @@ class DBNNPredictor:
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
         self.model_type = None  # Will be set during load
+        self.dataset_name=None
         self._is_initialized = False
         self.n_bins_per_dim = 128  # Default value
         # Initialize weight_updater as None but with type hint
@@ -1117,6 +1118,7 @@ class DBNNPredictor:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
         dataset_name = get_dataset_name_from_path(csv_path)
+        self.dataset_name=dataset_name
         print(f"\033[KUsing model for dataset: {dataset_name}")
 
         # Verify model files exist
