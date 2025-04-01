@@ -3164,19 +3164,14 @@ class DBNN(GPUDBNN):
                 }
 
     def _clean_existing_model(self):
-        """Remove existing model files for a fresh start"""
+        """Remove existing model files - now just removes the single checkpoint"""
         try:
-            files_to_remove = [
-                self._get_weights_filename(),
-                self._get_encoders_filename(),
-                self._get_model_components_filename()
-            ]
-            for file in files_to_remove:
-                if os.path.exists(file):
-                    os.remove(file)
-                    print("\033[K" +f"Removed existing model file: {file}")
+            model_file = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+            if os.path.exists(model_file):
+                os.remove(model_file)
+                print(f"Removed existing model file: {model_file}")
         except Exception as e:
-            print("\033[K" +f"Warning: Error cleaning model files: {str(e)}")
+            print(f"Warning: Error cleaning model files: {str(e)}")
 
 
     #------------------------------------------Adaptive Learning--------------------------------------
