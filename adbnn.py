@@ -5532,6 +5532,7 @@ class DBNNPredictor:
         """
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_dir = model_dir
+        self.dataset_name = dataset_name
         self._is_initialized = False
 
         # Core model components
@@ -5547,6 +5548,41 @@ class DBNNPredictor:
         self.categorical_encoders = None
         self.global_mean = None
         self.global_std = None
+
+    def load_full_state(self, state_path=None):
+        """Single-point model loading"""
+        if state_path is None:
+            state_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+
+        checkpoint = torch.load(state_path, map_location=self.device)
+
+        # Load critical components
+        self.model_type = checkpoint['model_type']
+        self.current_W = checkpoint['weights'].to(self.device)
+        self.feature_columns = checkpoint['feature_columns']
+        self.target_column = checkpoint['target_column']
+
+        # Label encoder
+        self.label_encoder = LabelEncoder()
+        self.label_encoder.classes_ = np.array(checkpoint['label_encoder']['classes_'])
+
+        # Likelihood params (device-aware)
+        self.likelihood_params = {
+            k: v.to(self.device) if torch.is_tensor(v) else v
+            for k, v in checkpoint['likelihood_params'].items()
+        }
+
+        # Feature pairs (ensure tensor)
+        self.feature_pairs = (
+            checkpoint['feature_pairs'].to(self.device)
+            if torch.is_tensor(checkpoint['feature_pairs'])
+            else torch.tensor(checkpoint['feature_pairs'], device=self.device)
+        )
+
+        # Weight updater initialization
+        self._initialize_weight_updater_from_checkpoint(checkpoint)
+
+        self._is_initialized = True
 
     def load_model(self, dataset_name: str) -> bool:
         """Load all model components for a specific dataset"""
@@ -5585,12 +5621,7 @@ class DBNNPredictor:
                 )
 
             # 3. Load components
-            self._load_label_encoder()
-            self._load_feature_pairs()
-            self._load_likelihood_params()
-            self._load_weights()
-            self._load_preprocessing_params()
-
+            self.load_full_state
             # 4. Initialize weight updater
             self._initialize_weight_updater()
 
@@ -5604,99 +5635,6 @@ class DBNNPredictor:
             print(f"\033[KError loading model: {str(e)}")
             traceback.print_exc()
             return False
-
-    def _load_label_encoder(self):
-        """Load label encoder from file"""
-        encoder_path = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_label_encoder.pkl'
-        )
-
-        with open(encoder_path, 'rb') as f:
-            encoder_data = pickle.load(f)
-
-        if isinstance(encoder_data, dict):
-            self.label_encoder.classes_ = np.array(encoder_data['classes_'])
-        else:
-            self.label_encoder = encoder_data
-
-    def _load_feature_pairs(self):
-        """Load feature combinations from saved file"""
-        components_path = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
-        )
-
-        with open(components_path, 'rb') as f:
-            components = pickle.load(f)
-
-        self.feature_pairs = components['feature_pairs']
-        self.feature_columns = components['feature_columns']
-
-        if isinstance(self.feature_pairs, list):
-            self.feature_pairs = torch.tensor(
-                self.feature_pairs,
-                device=self.device,
-                dtype=torch.long
-            )
-
-    def _load_likelihood_params(self):
-        """Load likelihood parameters"""
-        components_path = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
-        )
-
-        with open(components_path, 'rb') as f:
-            components = pickle.load(f)
-
-        self.likelihood_params = components['likelihood_params']
-
-        # Move tensors to device
-        for key, value in self.likelihood_params.items():
-            if torch.is_tensor(value):
-                self.likelihood_params[key] = value.to(self.device)
-
-    def _load_weights(self):
-        """Load model weights"""
-        weights_path = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_weights.json'
-        )
-
-        with open(weights_path, 'r') as f:
-            weights_data = json.load(f)
-
-        if weights_data.get('version', 1) == 2:
-            # New format
-            weights_array = np.array(weights_data['weights'])
-            self.current_W = torch.tensor(weights_array, device=self.device)
-        else:
-            # Old format
-            n_classes = len(self.label_encoder.classes_)
-            n_pairs = len(self.feature_pairs)
-            weights_array = np.zeros((n_classes, n_pairs))
-
-            for class_id, class_weights in weights_data.items():
-                for pair_idx, weight in enumerate(class_weights.values()):
-                    weights_array[int(class_id), pair_idx] = weight
-
-            self.current_W = torch.tensor(weights_array, device=self.device)
-
-    def _load_preprocessing_params(self):
-        """Load preprocessing parameters"""
-        components_path = os.path.join(
-            self.model_dir,
-            f'Best_{self.model_type}_{self.dataset_name}_components.pkl'
-        )
-
-        with open(components_path, 'rb') as f:
-            components = pickle.load(f)
-
-        self.scaler = components.get('scaler')
-        self.categorical_encoders = components.get('categorical_encoders', {})
-        self.global_mean = components.get('global_mean')
-        self.global_std = components.get('global_std')
 
     def _initialize_weight_updater(self):
         """Initialize weight updater with verified dimensions"""
