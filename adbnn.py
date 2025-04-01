@@ -406,46 +406,39 @@ class DBNNPredictor:
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
 
     def load_model(self, dataset_name: str) -> bool:
-        """Load all model components with strict initialization order"""
+        """Load all model components from unified checkpoint"""
         try:
-            # 1. Load basic config first
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found: {config_path}")
+            checkpoint_path = os.path.join(self.model_dir, f'Best_{self.model_type}_{dataset_name}_full.pt')
 
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
 
-            # 2. Set model type
-            self.model_type = self.config.get('modelType', 'Histogram')
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-            # 3. Load the dataset
-            self._load_dataset(dataset_name)
+            # Load basic config
+            self.model_type = checkpoint.get('model_type', 'Histogram')
 
-            # Rest of the loading logic...
+            # Load label encoder
             self._load_label_encoder(dataset_name)
-            self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
 
-            # 4. Initialize weight updater after all params are loaded
+            # Load other components
+            self.feature_pairs = checkpoint.get('feature_pairs', [])
+            self.likelihood_params = checkpoint.get('likelihood_params', {})
+
+            # Initialize weight updater
             self._initialize_weight_updater()
 
-            # 5. Load weights
-            self._load_weights(dataset_name)
+            # Load weights
+            if 'weights' in checkpoint:
+                weights = checkpoint['weights']
+                if isinstance(weights, dict):
+                    self.current_W = torch.tensor(weights['current'], device=self.device)
+                    self.best_W = torch.tensor(weights['best'], device=self.device)
 
-            # 6. Load optional preprocessing params
-            if hasattr(self, '_load_preprocessing_params'):
-                self._load_preprocessing_params(dataset_name)
-
-            # Final validation
-            required_attrs = [
-                'likelihood_params', 'feature_pairs',
-                'current_W', 'label_encoder',
-                'weight_updater'  # Now explicitly required
-            ]
-            missing = [attr for attr in required_attrs if not hasattr(self, attr)]
-            if missing:
-                raise RuntimeError(f"Missing required model components: {missing}")
+            # Load preprocessing params
+            self.global_mean = checkpoint.get('global_mean')
+            self.global_std = checkpoint.get('global_std')
+            self.feature_columns = checkpoint.get('feature_columns', [])
 
             self._is_initialized = True
             return True
