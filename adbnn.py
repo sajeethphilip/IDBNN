@@ -5392,7 +5392,9 @@ class DBNN(GPUDBNN):
 
 class DBNNPredictor(DBNN):
     """Optimized standalone predictor for DBNN models"""
-
+    super().__init__(
+    _load_full_state=_load_full_state
+    )
     def __init__(self, model_dir: str = 'Model', device: str = None):
         """
         Initialize predictor with model components.
@@ -5421,10 +5423,8 @@ class DBNNPredictor(DBNN):
         self.global_mean = None
         self.global_std = None
         self.data = None
-        self.load_full_state()
-    super().__init__(
-    _load_full_state=_load_full_state
-    )
+        _load_full_state()
+
     def _load_dataset(self, dataset_name: str) -> None:
         """Load the dataset for the predictor"""
         try:
