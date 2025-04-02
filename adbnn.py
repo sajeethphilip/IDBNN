@@ -4139,59 +4139,7 @@ class DBNN(GPUDBNN):
             print(f"\033[KError saving best weights: {str(e)}")
             traceback.print_exc()
 
-    def _load_full_state(self):
-        """Loads complete model state with proper initialization"""
-        load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
 
-        if not os.path.exists(load_path):
-            raise FileNotFoundError(f"No saved state found at {load_path}")
-
-        checkpoint = torch.load(load_path, map_location=self.device)
-
-        # 1. Restore Core Parameters
-        self.model_type = checkpoint['model_parameters']['model_type']
-        self.n_bins_per_dim = checkpoint['model_parameters']['n_bins_per_dim']
-        self.current_W = checkpoint['model_parameters']['weights']['current'].to(self.device)
-        self.best_W = checkpoint['model_parameters']['weights']['best'].to(self.device)
-
-        # 2. Restore Feature Processing
-        self.feature_columns = checkpoint['feature_config']['columns']
-        self.feature_pairs = checkpoint['feature_config']['pairs']
-        self.target_column = checkpoint['feature_config']['target_column']
-        if checkpoint['feature_config']['bin_edges']:
-            self.bin_edges = [edges.to(self.device) for edges in checkpoint['feature_config']['bin_edges']]
-
-        # 3. Initialize Weight Updater
-        self.weight_updater = BinWeightUpdater(
-            n_classes=len(checkpoint['preprocessing']['label_encoder']['classes_']),
-            feature_pairs=self.feature_pairs,
-            n_bins_per_dim=self.n_bins_per_dim,
-            batch_size=checkpoint['weight_updater'].get('batch_size', 128)
-        )
-
-        # 4. Restore Weight Updater State
-        for class_id, class_weights in checkpoint['weight_updater']['histogram'].items():
-            for pair_idx, weights in class_weights.items():
-                self.weight_updater.histogram_weights[int(class_id)][int(pair_idx)] = weights.to(self.device)
-
-        # 5. Restore Likelihood Parameters
-        self.likelihood_params = {
-            'bin_probs': [probs.to(self.device) for probs in checkpoint['likelihood_params']['histogram']['bin_probs']],
-            'bin_edges': self.bin_edges,
-            'classes': checkpoint['likelihood_params']['classes'].to(self.device),
-            'feature_pairs': self.feature_pairs
-        }
-
-        # 6. Restore Preprocessing
-        self.global_mean = checkpoint['preprocessing']['global_mean']
-        self.global_std = checkpoint['preprocessing']['global_std']
-        self.label_encoder = LabelEncoder()
-        self.label_encoder.classes_ = np.array(checkpoint['preprocessing']['label_encoder']['classes_'])
-
-        # 7. Restore Training State
-        self.best_round = checkpoint['training_state']['best_round']
-        self.learning_rate = checkpoint['training_state']['learning_rate']
-        self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy']
 
     def _load_best_weights(self):
         """Load weights from consolidated checkpoint"""
@@ -5566,57 +5514,184 @@ class DBNN(GPUDBNN):
             print(f"\033[KError loading model: {str(e)}")
             traceback.print_exc()
             return False
-    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
-        """Make predictions using model from the same directory as the input file"""
-        # Get dataset name from path structure
-        dataset_name = get_dataset_name_from_path(csv_path)
-        print(f"\033[KUsing model for dataset: {dataset_name}")
 
-        # Verify model files exist
-        model_files = [
-            f"Model/Best_Histogram_{dataset_name}_components.pkl",
-            f"Model/Best_Histogram_{dataset_name}_weights.json",
-            f"Model/Best_Histogram_{dataset_name}_label_encoder.pkl"
+    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+        """
+        Make predictions from a CSV file with full model state validation.
+        Handles all necessary preprocessing and postprocessing with proper error checking.
+
+        Args:
+            csv_path: Path to input CSV file
+            output_path: Optional path to save predictions (default: {input_path}_predictions.csv)
+
+        Returns:
+            DataFrame with original data and predictions
+        """
+        # 1. Model State Validation
+        self._validate_model_state()
+
+        # 2. Input Validation
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Input file not found: {csv_path}")
+
+        # 3. Load and Preprocess Data
+        try:
+            input_df = pd.read_csv(csv_path)
+            print(f"Loaded input data with shape: {input_df.shape}")
+
+            # Verify required features exist
+            missing_features = set(self.feature_columns) - set(input_df.columns)
+            if missing_features:
+                raise ValueError(f"Input missing required features: {missing_features}")
+
+            # Filter to only required columns in correct order
+            input_df = input_df[self.feature_columns]
+
+            # Handle NaN values consistently with training
+            nan_count = input_df.isna().sum().sum()
+            if nan_count > 0:
+                print(f"Found {nan_count} NaN values - replacing with -99999")
+                input_df = input_df.fillna(-99999)
+
+            # Apply same preprocessing as training
+            X_processed = self._preprocess_data(input_df, is_training=False)
+
+        except Exception as e:
+            raise ValueError(f"Error loading/preprocessing data: {str(e)}")
+
+        # 4. Make Predictions
+        try:
+            print("Generating predictions...")
+            predictions = self.predict(X_processed)
+            pred_probs = self.predict_proba(X_processed)
+
+        except Exception as e:
+            raise RuntimeError(f"Prediction failed: {str(e)}")
+
+        # 5. Format Output
+        try:
+            # Decode predictions to original labels
+            pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+
+            # Create output DataFrame
+            output_df = input_df.copy()
+            output_df['predicted_class'] = pred_labels
+
+            # Add probabilities for each class
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                output_df[f'prob_{class_name}'] = pred_probs[:, i].cpu().numpy()
+
+            # Add confidence score (max probability)
+            output_df['confidence'] = pred_probs.max(dim=1)[0].cpu().numpy()
+
+        except Exception as e:
+            raise RuntimeError(f"Error formatting results: {str(e)}")
+
+        # 6. Save Results
+        if output_path is None:
+            output_path = os.path.splitext(csv_path)[0] + '_predictions.csv'
+
+        try:
+            output_df.to_csv(output_path, index=False)
+            print(f"Predictions saved to {output_path}")
+        except Exception as e:
+            print(f"Warning: Could not save predictions - {str(e)}")
+
+        return output_df
+
+    def predict_proba(self, X: Union[pd.DataFrame, torch.Tensor]) -> torch.Tensor:
+        """
+        Get class probabilities with full model state validation.
+
+        Args:
+            X: Input data (DataFrame or Tensor)
+
+        Returns:
+            Tensor of class probabilities [n_samples, n_classes]
+        """
+        # Validate model state first
+        self._validate_model_state()
+
+        # Convert DataFrame to tensor if needed
+        if isinstance(X, pd.DataFrame):
+            X = self._preprocess_data(X, is_training=False)
+
+        # Ensure proper device
+        X = X.to(self.device)
+
+        # Compute probabilities using the appropriate model type
+        if self.model_type == "Histogram":
+            probs, _ = self._compute_batch_posterior(X)
+        elif self.model_type == "Gaussian":
+            probs, _ = self._compute_batch_posterior_std(X)
+        else:
+            raise ValueError(f"Unknown model type: {self.model_type}")
+
+        return probs
+
+    def _validate_model_state(self) -> None:
+        """
+        Comprehensive validation of all required model components.
+        Raises exceptions if any critical component is missing or invalid.
+        """
+        # 1. Check core components exist
+        required_attrs = [
+            ('feature_columns', "Feature columns not loaded"),
+            ('label_encoder', "Label encoder not loaded"),
+            ('likelihood_params', "Likelihood parameters not loaded"),
+            ('current_W', "Model weights not loaded"),
+            ('model_type', "Model type not specified"),
+            ('device', "Compute device not set")
         ]
 
-        if not all(os.path.exists(f) for f in model_files):
-            raise FileNotFoundError(
-                f"Missing model files for {dataset_name}. Required files:\n" +
-                "\n".join(model_files))
+        missing = [msg for attr, msg in required_attrs if not hasattr(self, attr)]
+        if missing:
+            raise RuntimeError(f"Model not properly initialized. Missing: {', '.join(missing)}")
 
-        # Load the model
-        if not self.load_model(dataset_name):
-            raise ValueError(f"Failed to load model for {dataset_name}")
+        # 2. Validate label encoder
+        if not hasattr(self.label_encoder, 'classes_'):
+            raise RuntimeError("Label encoder has no classes - was it properly trained?")
 
-        # Load data
-        df = pd.read_csv(csv_path)
-        # Rest of the prediction logic remains the same...
-        target_column = self.config.get('target_column') if hasattr(self, 'config') else None
-        target_in_data = target_column is not None and target_column in df.columns
+        # 3. Validate feature pairs
+        if not hasattr(self, 'feature_pairs') or len(self.feature_pairs) == 0:
+            raise RuntimeError("No feature pairs loaded - model cannot make predictions")
 
-        results = self.predict(df)
+        # 4. Validate weights
+        n_classes = len(self.label_encoder.classes_)
+        if self.current_W.shape[0] != n_classes:
+            raise ValueError(
+                f"Weight matrix shape mismatch. Expected {n_classes} classes, "
+                f"got {self.current_W.shape[0]}"
+            )
 
-        if target_in_data:
-            try:
-                y_true = df[target_column]
-                y_pred = results['predicted_class']
+        if self.current_W.shape[1] != len(self.feature_pairs):
+            raise ValueError(
+                f"Weight matrix doesn't match feature pairs. Expected {len(self.feature_pairs)} pairs, "
+                f"got {self.current_W.shape[1]}"
+            )
 
-                if not np.issubdtype(y_true.dtype, np.number):
-                    y_true = self.label_encoder.transform(y_true)
+        # 5. Validate likelihood parameters based on model type
+        if self.model_type == "Histogram":
+            required_likelihood = ['bin_probs', 'bin_edges']
+        elif self.model_type == "Gaussian":
+            required_likelihood = ['means', 'covs']
+        else:
+            raise ValueError(f"Invalid model type: {self.model_type}")
 
-                if not np.issubdtype(y_pred.dtype, np.number):
-                    y_pred = self.label_encoder.transform(y_pred)
+        for param in required_likelihood:
+            if param not in self.likelihood_params:
+                raise ValueError(f"Missing required likelihood parameter: {param}")
 
-                self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
-            except Exception as e:
-                print(f"\033[KError generating confusion matrix: {str(e)}")
-                traceback.print_exc()
+            # Check parameter shapes match feature pairs
+            param_tensor = self.likelihood_params[param]
+            if len(param_tensor) != len(self.feature_pairs):
+                raise ValueError(
+                    f"Likelihood parameter {param} has {len(param_tensor)} entries, "
+                    f"expected {len(self.feature_pairs)} to match feature pairs"
+                )
 
-        if output_path:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            results.to_csv(output_path, index=False)
+        print("Model state validation passed - all components loaded correctly")
 
-        return results
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
 
