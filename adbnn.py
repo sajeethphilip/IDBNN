@@ -2018,37 +2018,6 @@ class DBNN(GPUDBNN):
         return results_df
 
     def _save_full_state(self):
-        """Saves complete training state including hidden parameters"""
-        checkpoint = {
-            # Core weights (matches _save_best_weights)
-            'weights': self.best_W.cpu(),
-            'model_type': self.model_type,
-            'feature_columns': self.feature_columns,
-
-            # Extended state
-            'weight_updater_state': {
-                'histogram': {
-                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
-                    for k1,v1 in self.weight_updater.histogram_weights.items()
-                },
-                'gaussian': {
-                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
-                    for k1,v1 in self.weight_updater.gaussian_weights.items()
-                }
-            },
-            'training_state': {
-                'best_round_initial_conditions': self.best_round_initial_conditions,
-                'learning_rate': self.learning_rate,
-                'cardinality_threshold': self.cardinality_threshold
-            },
-            'preprocessing': {
-                'global_mean': self.global_mean,
-                'global_std': self.global_std,
-                'label_encoder': self.label_encoder.classes_
-            }
-        }
-        torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
-    def _save_full_state_old(self):
         """Saves complete model state with proper handling of all data types.
         Includes additional validation and more comprehensive state capture."""
 
@@ -2199,37 +2168,6 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to save model state: {str(e)}")
 
     def _load_full_state(self):
-        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-        if os.path.exists(path):
-            checkpoint = torch.load(path, map_location=self.device)
-
-            # Restore core weights
-            self.best_W = checkpoint['weights'].to(self.device)
-            self.current_W = self.best_W.clone()
-
-            # Restore weight updater (with proper type conversion)
-            self.weight_updater.histogram_weights = {
-                int(class_id): {
-                    int(pair_idx): weight.to(self.device)
-                    for pair_idx, weight in class_weights.items()
-                }
-                for class_id, class_weights in checkpoint['histogram_weights'].items()
-            }
-
-            # Restore weight updater
-            for class_id in checkpoint['histogram_weights']:
-                for pair_idx in checkpoint['histogram_weights'][class_id]:
-                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
-                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
-
-            # Restore preprocessing
-            self.global_mean = checkpoint['global_mean']
-            self.global_std = checkpoint['global_std']
-            self.feature_columns = checkpoint['feature_columns']
-
-            # Restore training state
-            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
-    def _load_full_state_old(self):
         """Loads complete model state with proper restoration"""
         def _restore(obj):
             """Restore objects from serialized format"""
