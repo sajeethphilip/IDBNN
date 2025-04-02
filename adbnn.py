@@ -4343,7 +4343,6 @@ class DBNN(GPUDBNN):
                 improvement = self.best_error - train_error_rate
                 self.best_error = train_error_rate
                 self.best_W = self.current_W.clone()  # Save current weights as best
-                #self._save_best_weights()   # move it to train_fit
 
                 if improvement <= 0.001:
                     patience_counter += 1
@@ -6228,9 +6227,6 @@ def main():
                 if 'log_path' in results:
                     print("\033[K" + f"Training log saved to: {results['log_path']}")
 
-                # Save model components
-                model._save_model_components()
-                model._save_best_weights()
                 #save_label_encoder(model.label_encoder, dataset_name)
 
             if mode in ['predict', 'train_predict']:
