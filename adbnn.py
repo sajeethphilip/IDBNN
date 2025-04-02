@@ -6127,15 +6127,15 @@ def main():
                 predictor = DBNN(dataset_name=dataset_name)
                 dataset_name = get_dataset_name_from_path(args.file_path)
                 print(f"Processing {dataset_name} in predict mode")
-                if predictor.load_model(dataset_name):
-                    # Use either the provided CSV or default dataset CSV
-                    input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
-                    output_dir = os.path.join('data', dataset_name, 'Predictions')
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-                    safe_predict(predictor, input_csv)
-                    results = predictor.predict_from_csv(input_csv, output_path)
-                    print("\033[K" + f"Predictions saved to: {output_path}")
+                #if predictor.load_model(dataset_name):
+                # Use either the provided CSV or default dataset CSV
+                input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
+                output_dir = os.path.join('data', dataset_name, 'Predictions')
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
+                safe_predict(predictor, input_csv)
+                results = predictor.predict_from_csv(input_csv, output_path)
+                print("\033[K" + f"Predictions saved to: {output_path}")
 
             if mode == 'invertDBNN':
                 # Invert DBNN mode
