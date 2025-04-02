@@ -4000,35 +4000,6 @@ class DBNN(GPUDBNN):
                 return None, None
 
         return None, None
-    def load_model(self, dataset_name: str = None) -> bool:
-        """Load model state with all components"""
-        if dataset_name is None:
-            dataset_name = self.dataset_name
-
-        try:
-            checkpoint_path = f"Model/Best_{self.model_type}_{dataset_name}_full.pt"
-            if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"No model found at {checkpoint_path}")
-
-            # Load checkpoint with safety checks
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            #self._validate_checkpoint(checkpoint)
-
-            # Restore model state
-            self._load_model_config(checkpoint['model_config'])
-            self._load_label_encoder(checkpoint['labels'])
-            self._load_features(checkpoint['features'])
-            self._load_likelihood(checkpoint['likelihood'])
-            self._load_weights(checkpoint['weights'])
-            self._load_training_state(checkpoint['training'])
-
-            self._is_initialized = True
-            return True
-
-        except Exception as e:
-            print(f"Error loading model: {str(e)}")
-            traceback.print_exc()
-            return False
 
     def predict_new(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
             """
