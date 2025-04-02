@@ -1675,7 +1675,7 @@ class DBNN(GPUDBNN):
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
-            learning_rate=config.learning_rate,
+            learning_rate=self.config.get('training_params', {}).get('learning_rate', LearningRate),
             max_epochs=config.epochs,
             test_size=config.test_fraction,
             random_state=config.random_seed,
