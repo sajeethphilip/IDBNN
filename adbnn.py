@@ -4001,7 +4001,7 @@ class DBNN(GPUDBNN):
 
         return None, None
 
-    def predict_new(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
             """
             Make predictions on input data with proper feature validation.
             Handles feature selection and ordering according to config.
@@ -4081,7 +4081,7 @@ class DBNN(GPUDBNN):
 
             return results_df
 
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
+    def predict_old(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
         """
         Make predictions in batches with consistent NaN handling.
         Handles both DataFrame and Tensor inputs.
