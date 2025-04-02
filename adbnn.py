@@ -2186,7 +2186,7 @@ class DBNN(GPUDBNN):
             raise FileNotFoundError(f"No saved state found at {load_path}")
 
         checkpoint = torch.load(load_path, map_location='cpu')
-        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint['model_type']} {Colors.ENDC}')
+        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint['weights']['current']} {Colors.ENDC}')
         # Restore core parameters
         self.model_type = checkpoint['model_type']
         self.n_bins_per_dim = checkpoint['n_bins_per_dim']
