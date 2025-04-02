@@ -1647,14 +1647,11 @@ class DBNN(GPUDBNN):
             config: DBNNConfig object or dictionary of parameters
             dataset_name: Name of the dataset (optional)
         """
+        # Initialize configuration
         if config is None:
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
-        elif isinstance(config, str):
-            # Handle case where dataset_name is passed as first argument
-            dataset_name = config
-            config = DBNNConfig()
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
@@ -1675,7 +1672,7 @@ class DBNN(GPUDBNN):
         # Map DBNNConfig to GPUDBNN parameters
         super().__init__(
             dataset_name=dataset_name,
-            learning_rate=self.config.get('training_params', {}).get('learning_rate', LearningRate),
+            learning_rate=config.learning_rate,
             max_epochs=config.epochs,
             test_size=config.test_fraction,
             random_state=config.random_seed,
