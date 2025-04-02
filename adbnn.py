@@ -2184,7 +2184,7 @@ class DBNN(GPUDBNN):
         load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"No saved state found at {load_path}")
-
+        print(load_path)
         checkpoint = torch.load(load_path, map_location='cpu')
 
         # Restore core parameters
