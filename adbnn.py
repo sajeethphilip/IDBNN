@@ -1713,7 +1713,7 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
-    self._is_initialized = False
+        self._is_initialized = False
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
