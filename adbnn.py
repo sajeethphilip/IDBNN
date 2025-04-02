@@ -4001,7 +4001,7 @@ class DBNN(GPUDBNN):
 
         return None, None
 
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
+    def predict_new(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
             """
             Make predictions on input data with proper feature validation.
             Handles feature selection and ordering according to config.
@@ -4081,7 +4081,7 @@ class DBNN(GPUDBNN):
 
             return results_df
 
-    def predict_old(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
         """
         Make predictions in batches with consistent NaN handling.
         Handles both DataFrame and Tensor inputs.
@@ -4225,7 +4225,7 @@ class DBNN(GPUDBNN):
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"No saved state found at {load_path}")
 
-        checkpoint = torch.load(load_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(load_path, map_location=self.device)
 
         # 1. Restore Core Parameters
         self.model_type = checkpoint['model_parameters']['model_type']
@@ -6203,9 +6203,9 @@ def main():
                     )
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name)
+                predictor = DBNN(dataset_name="my_dataset")
                 predictor.load_model()
+                dataset_name = get_dataset_name_from_path(args.file_path)
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
