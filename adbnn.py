@@ -6612,6 +6612,7 @@ def main():
 
     else:
         parser.print_help()
+
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
     print("\033[K" +"=" * 40)
