@@ -2166,8 +2166,38 @@ class DBNN(GPUDBNN):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             raise RuntimeError(f"Failed to save model state: {str(e)}")
-
     def _load_full_state(self):
+        path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
+        if os.path.exists(path):
+            checkpoint = torch.load(path, map_location=self.device)
+
+            # Restore core weights
+            self.best_W = checkpoint['weights'].to(self.device)
+            self.current_W = self.best_W.clone()
+
+            # Restore weight updater (with proper type conversion)
+            self.weight_updater.histogram_weights = {
+                int(class_id): {
+                    int(pair_idx): weight.to(self.device)
+                    for pair_idx, weight in class_weights.items()
+                }
+                for class_id, class_weights in checkpoint['histogram_weights'].items()
+            }
+
+            # Restore weight updater
+            for class_id in checkpoint['histogram_weights']:
+                for pair_idx in checkpoint['histogram_weights'][class_id]:
+                    self.weight_updater.histogram_weights[class_id][pair_idx] = \
+                        checkpoint['histogram_weights'][class_id][pair_idx].to(self.device)
+
+            # Restore preprocessing
+            self.global_mean = checkpoint['global_mean']
+            self.global_std = checkpoint['global_std']
+            self.feature_columns = checkpoint['feature_columns']
+
+            # Restore training state
+            self.best_round_initial_conditions = checkpoint['best_round_initial_conditions']
+    def _load_full_state_old(self):
         """Loads complete model state with proper restoration"""
         def _restore(obj):
             """Restore objects from serialized format"""
@@ -2186,7 +2216,7 @@ class DBNN(GPUDBNN):
             raise FileNotFoundError(f"No saved state found at {load_path}")
 
         checkpoint = torch.load(load_path, map_location='cpu')
-        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint['weights']['current']} {Colors.ENDC}')
+        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint} {Colors.ENDC}')
         # Restore core parameters
         self.model_type = checkpoint['model_type']
         self.n_bins_per_dim = checkpoint['n_bins_per_dim']
