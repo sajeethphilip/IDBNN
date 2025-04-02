@@ -6205,7 +6205,7 @@ def main():
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 dataset_name = get_dataset_name_from_path(args.file_path)
                 predictor = DBNN(dataset_name=dataset_name)
-                predictor.load_model()
+                #predictor.load_model()
 
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
