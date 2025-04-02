@@ -2019,6 +2019,11 @@ class DBNN(GPUDBNN):
 
     def _save_full_state(self):
         """Saves complete model state with proper handling of all data types."""
+        # Add safe globals at module level (only needed once)
+        if not hasattr(torch.serialization, '_safe_globals_added'):
+            torch.serialization.add_safe_globals([np.ndarray])
+            torch.serialization._safe_globals_added = True
+
         # Validate critical components before saving
         required_attrs = [
             ('model_type', "Model type not specified"),
@@ -2031,7 +2036,7 @@ class DBNN(GPUDBNN):
         if missing:
             raise RuntimeError(f"Cannot save model state. Missing: {', '.join(missing)}")
 
-        # Build checkpoint dictionary with direct tensor storage (no _safe_convert)
+        # Build checkpoint dictionary
         checkpoint = {
             'model_type': self.model_type,
             'model_config': {
@@ -2077,7 +2082,8 @@ class DBNN(GPUDBNN):
             },
             'metadata': {
                 'pytorch_version': torch.__version__,
-                'save_time': datetime.datetime.now().isoformat()
+                'save_time': datetime.datetime.now().isoformat(),
+                'checksum': hashlib.md5(str(datetime.datetime.now()).encode()).hexdigest()
             }
         }
 
@@ -2090,9 +2096,9 @@ class DBNN(GPUDBNN):
             temp_path = save_path + '.tmp'
             torch.save(checkpoint, temp_path, _use_new_zipfile_serialization=True)
 
-            # Verify the saved file
+            # Verify the saved file - use weights_only=False for verification since we trust our own file
             with open(temp_path, 'rb') as f:
-                saved_data = torch.load(f, map_location='cpu', weights_only=True)
+                saved_data = torch.load(f, map_location='cpu', weights_only=False)
                 if saved_data.get('model_type') != self.model_type:
                     raise RuntimeError("Saved file verification failed")
 
@@ -2112,7 +2118,13 @@ class DBNN(GPUDBNN):
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"No saved state found at {load_path}")
 
+        # Add safe globals at module level (only needed once)
+        if not hasattr(torch.serialization, '_safe_globals_added'):
+            torch.serialization.add_safe_globals([np.ndarray])
+            torch.serialization._safe_globals_added = True
+
         try:
+            # Load with weights_only=True for security since we added safe globals
             checkpoint = torch.load(load_path, map_location='cpu', weights_only=True)
 
             # Validate checkpoint structure
@@ -2169,7 +2181,6 @@ class DBNN(GPUDBNN):
 
         except Exception as e:
             raise RuntimeError(f"Failed to load model state: {str(e)}")
-
     def _update_training_log(self, round_num: int, metrics: Dict):
         """Update training log with current metrics"""
         self.training_log = self.training_log.append({
