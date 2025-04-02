@@ -2018,6 +2018,37 @@ class DBNN(GPUDBNN):
         return results_df
 
     def _save_full_state(self):
+        """Saves complete training state including hidden parameters"""
+        checkpoint = {
+            # Core weights (matches _save_best_weights)
+            'weights': self.best_W.cpu(),
+            'model_type': self.model_type,
+            'feature_columns': self.feature_columns,
+
+            # Extended state
+            'weight_updater_state': {
+                'histogram': {
+                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
+                    for k1,v1 in self.weight_updater.histogram_weights.items()
+                },
+                'gaussian': {
+                    str(k1): {str(k2): v.cpu() for k2,v in v1.items()}
+                    for k1,v1 in self.weight_updater.gaussian_weights.items()
+                }
+            },
+            'training_state': {
+                'best_round_initial_conditions': self.best_round_initial_conditions,
+                'learning_rate': self.learning_rate,
+                'cardinality_threshold': self.cardinality_threshold
+            },
+            'preprocessing': {
+                'global_mean': self.global_mean,
+                'global_std': self.global_std,
+                'label_encoder': self.label_encoder.classes_
+            }
+        }
+        torch.save(checkpoint, f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt")
+    def _save_full_state_old(self):
         """Saves complete model state with proper handling of all data types.
         Includes additional validation and more comprehensive state capture."""
 
@@ -2166,6 +2197,7 @@ class DBNN(GPUDBNN):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             raise RuntimeError(f"Failed to save model state: {str(e)}")
+
     def _load_full_state(self):
         path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         if os.path.exists(path):
