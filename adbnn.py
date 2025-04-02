@@ -2120,7 +2120,12 @@ class DBNN(GPUDBNN):
 
         # Add safe globals at module level (only needed once)
         if not hasattr(torch.serialization, '_safe_globals_added'):
-            torch.serialization.add_safe_globals([np.ndarray])
+            torch.serialization.add_safe_globals([
+                np.ndarray,
+                np.core.multiarray._reconstruct,
+                # Add any other required globals here
+                _codecs.encode  # Add this line to allow the codecs.encode global
+            ])
             torch.serialization._safe_globals_added = True
 
         try:
