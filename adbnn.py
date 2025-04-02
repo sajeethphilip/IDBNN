@@ -6203,9 +6203,10 @@ def main():
                     )
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                predictor = DBNN(dataset_name="my_dataset")
-                predictor.load_model()
                 dataset_name = get_dataset_name_from_path(args.file_path)
+                predictor = DBNN(dataset_name=dataset_name)
+                predictor.load_model()
+
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
