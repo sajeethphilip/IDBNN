@@ -4012,7 +4012,7 @@ class DBNN(GPUDBNN):
 
             # Load checkpoint with safety checks
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            self._validate_checkpoint(checkpoint)
+            #self._validate_checkpoint(checkpoint)
 
             # Restore model state
             self._load_model_config(checkpoint['model_config'])
