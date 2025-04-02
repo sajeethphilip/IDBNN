@@ -2167,7 +2167,7 @@ class DBNN(GPUDBNN):
                 os.remove(temp_path)
             raise RuntimeError(f"Failed to save model state: {str(e)}")
 
-    def _load_full_state_old(self):
+    def _load_full_state(self):
         """Loads complete model state with proper restoration"""
         def _restore(obj):
             """Restore objects from serialized format"""
@@ -4140,7 +4140,6 @@ class DBNN(GPUDBNN):
             traceback.print_exc()
 
 
-
     def _load_best_weights(self):
         """Load weights from consolidated checkpoint"""
         try:
@@ -5025,8 +5024,6 @@ class DBNN(GPUDBNN):
                 print("\033[K" +  f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
                 print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
-                self._save_model_components()
-                self._save_best_weights()
                 print("\033[K" +f"{Colors.GREEN}Model state fully saved including training metadata{Colors.ENDC}", end='\r', flush=True)
                 self._save_full_state()  # Save complete state
 
@@ -5515,89 +5512,110 @@ class DBNN(GPUDBNN):
             traceback.print_exc()
             return False
 
-    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+    def predict_from_csv(self, input_csv_path: str, output_dir: str = None) -> pd.DataFrame:
         """
-        Make predictions from a CSV file with full model state validation.
-        Handles all necessary preprocessing and postprocessing with proper error checking.
+        Load model state and make predictions on CSV data that match original training behavior.
+        Returns DataFrame with original data + predictions, and saves confusion matrix if targets available.
 
         Args:
-            csv_path: Path to input CSV file
-            output_path: Optional path to save predictions (default: {input_path}_predictions.csv)
+            input_csv_path: Path to input CSV file
+            output_dir: Directory to save outputs (defaults to dataset directory)
 
         Returns:
             DataFrame with original data and predictions
         """
-        # 1. Model State Validation
-        self._validate_model_state()
+        # Initialize paths and directories
+        if output_dir is None:
+            output_dir = os.path.join('data', self.dataset_name)
+        os.makedirs(output_dir, exist_ok=True)
 
-        # 2. Input Validation
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"Input file not found: {csv_path}")
-
-        # 3. Load and Preprocess Data
+        # 1. Load full model state with validation
         try:
-            input_df = pd.read_csv(csv_path)
-            print(f"Loaded input data with shape: {input_df.shape}")
-
-            # Verify required features exist
-            missing_features = set(self.feature_columns) - set(input_df.columns)
-            if missing_features:
-                raise ValueError(f"Input missing required features: {missing_features}")
-
-            # Filter to only required columns in correct order
-            input_df = input_df[self.feature_columns]
-
-            # Handle NaN values consistently with training
-            nan_count = input_df.isna().sum().sum()
-            if nan_count > 0:
-                print(f"Found {nan_count} NaN values - replacing with -99999")
-                input_df = input_df.fillna(-99999)
-
-            # Apply same preprocessing as training
-            X_processed = self._preprocess_data(input_df, is_training=False)
-
+            self._load_full_state()
+            print(f"{Colors.GREEN}✓ Model state loaded successfully{Colors.ENDC}")
         except Exception as e:
-            raise ValueError(f"Error loading/preprocessing data: {str(e)}")
+            raise RuntimeError(f"Failed to load model state: {str(e)}")
 
-        # 4. Make Predictions
+        # 2. Load and validate input data
         try:
-            print("Generating predictions...")
+            input_data = pd.read_csv(input_csv_path)
+            print(f"{Colors.GREEN}✓ Input data loaded ({len(input_data)} rows){Colors.ENDC}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load input data: {str(e)}")
+
+        # 3. Verify required features exist
+        missing_features = set(self.feature_columns) - set(input_data.columns)
+        if missing_features:
+            raise ValueError(
+                f"Input missing required features: {sorted(missing_features)}\n"
+                f"Expected: {self.feature_columns}\n"
+                f"Found: {list(input_data.columns)}"
+            )
+
+        # 4. Preprocess data exactly like training
+        try:
+            X_processed = self._preprocess_data(input_data, is_training=False)
+            print(f"{Colors.GREEN}✓ Data preprocessed{Colors.ENDC}")
+        except Exception as e:
+            raise RuntimeError(f"Data preprocessing failed: {str(e)}")
+
+        # 5. Make predictions using best weights
+        with torch.no_grad():
+            self.current_W = self.best_W.clone()  # Use best weights from training
             predictions = self.predict(X_processed)
-            pred_probs = self.predict_proba(X_processed)
-
-        except Exception as e:
-            raise RuntimeError(f"Prediction failed: {str(e)}")
-
-        # 5. Format Output
-        try:
-            # Decode predictions to original labels
             pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+            print(f"{Colors.GREEN}✓ Predictions generated{Colors.ENDC}")
 
-            # Create output DataFrame
-            output_df = input_df.copy()
-            output_df['predicted_class'] = pred_labels
+        # 6. Create output DataFrame
+        output_data = input_data.copy()
+        output_data['predicted_class'] = pred_labels
 
-            # Add probabilities for each class
+        # 7. Add probabilities if requested
+        if self.config.get('save_probabilities', True):
+            posteriors, _ = self._compute_batch_posterior(X_processed)
             for i, class_name in enumerate(self.label_encoder.classes_):
-                output_df[f'prob_{class_name}'] = pred_probs[:, i].cpu().numpy()
+                output_data[f'prob_{class_name}'] = posteriors[:, i].cpu().numpy()
+            output_data['max_probability'] = posteriors.max(dim=1)[0].cpu().numpy()
 
-            # Add confidence score (max probability)
-            output_df['confidence'] = pred_probs.max(dim=1)[0].cpu().numpy()
+        # 8. Save results
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(output_dir, f'predictions_{timestamp}.csv')
+        output_data.to_csv(output_path, index=False)
+        print(f"{Colors.GREEN}✓ Predictions saved to {output_path}{Colors.ENDC}")
 
-        except Exception as e:
-            raise RuntimeError(f"Error formatting results: {str(e)}")
+        # 9. Generate validation metrics if targets available
+        if self.target_column in input_data.columns:
+            try:
+                # Encode true labels
+                y_true = self.label_encoder.transform(input_data[self.target_column])
 
-        # 6. Save Results
-        if output_path is None:
-            output_path = os.path.splitext(csv_path)[0] + '_predictions.csv'
+                # Calculate and print metrics
+                accuracy = (predictions.cpu().numpy() == y_true).mean()
+                print(f"\n{Colors.BOLD}Validation Results:{Colors.ENDC}")
+                print(f"Accuracy: {Colors.GREEN}{accuracy:.4%}{Colors.ENDC}")
 
-        try:
-            output_df.to_csv(output_path, index=False)
-            print(f"Predictions saved to {output_path}")
-        except Exception as e:
-            print(f"Warning: Could not save predictions - {str(e)}")
+                # Generate and save confusion matrix
+                cm_path = os.path.join(output_dir, f'confusion_matrix_{timestamp}.png')
+                self.print_colored_confusion_matrix(y_true, predictions.cpu().numpy())
 
-        return output_df
+                # Save metrics to file
+                metrics = {
+                    'accuracy': accuracy,
+                    'precision_recall_fscore': precision_recall_fscore_support(
+                        y_true, predictions.cpu().numpy(), average='weighted'
+                    ),
+                    'timestamp': timestamp,
+                    'model_type': self.model_type,
+                    'dataset': self.dataset_name
+                }
+                with open(os.path.join(output_dir, f'metrics_{timestamp}.json'), 'w') as f:
+                    json.dump(metrics, f, indent=2)
+
+                print(f"{Colors.GREEN}✓ Validation metrics saved{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠ Could not generate validation metrics: {str(e)}{Colors.ENDC}")
+
+        return output_data
 
     def predict_proba(self, X: Union[pd.DataFrame, torch.Tensor]) -> torch.Tensor:
         """
@@ -5692,65 +5710,7 @@ class DBNN(GPUDBNN):
 
         print("Model state validation passed - all components loaded correctly")
 
-    def _load_full_state(self) -> bool:
-        """
-        Load complete model state from checkpoint with validation.
-        Returns True if successful, False otherwise.
-        """
-        checkpoint_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
 
-        if not os.path.exists(checkpoint_path):
-            print(f"No saved state found at {checkpoint_path}")
-            return False
-
-        try:
-            # Load with strict device placement
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-
-            # 1. Restore Core Parameters
-            self.model_type = checkpoint.get('model_type')
-            self.n_bins_per_dim = checkpoint.get('n_bins_per_dim', 128)
-
-            # 2. Restore Weights with validation
-            self.current_W = checkpoint['weights']['current']
-            self.best_W = checkpoint['weights']['best']
-
-            if self.current_W.shape != self.best_W.shape:
-                raise ValueError("Current and best weight shape mismatch")
-
-            # 3. Restore Feature Processing
-            self.feature_columns = checkpoint['features']['columns']
-            self.feature_pairs = checkpoint['features']['pairs']
-            self.bin_edges = checkpoint['features']['bin_edges']
-            self.global_mean = checkpoint['features']['global_stats']['mean']
-            self.global_std = checkpoint['features']['global_stats']['std']
-
-            # 4. Restore Likelihood Parameters
-            self.likelihood_params = {
-                'bin_probs': checkpoint['likelihood']['params']['bin_probs'],
-                'bin_edges': self.bin_edges,
-                'classes': checkpoint['likelihood']['params']['classes'],
-                'feature_pairs': self.feature_pairs
-            }
-
-            # 5. Restore Label Encoder
-            self.label_encoder = LabelEncoder()
-            self.label_encoder.classes_ = checkpoint['labels']['encoder']['classes']
-
-            # 6. Initialize Weight Updater
-            self._initialize_bin_weights()
-
-            # 7. Restore Training State
-            self.best_round = checkpoint['training']['state']['best_round']
-            self.best_combined_accuracy = checkpoint['training']['state']['best_accuracy']
-
-            print(f"Successfully loaded model state from {checkpoint_path}")
-            return True
-
-        except Exception as e:
-            print(f"Error loading model state: {str(e)}")
-            traceback.print_exc()
-            return False
 #--------------------------------------------------Class Ends ----------------------------------------------------------
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
@@ -6356,8 +6316,8 @@ def main():
                     )
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
-                predictor = DBNN(dataset_name=dataset_name)
                 dataset_name = get_dataset_name_from_path(args.file_path)
+                predictor = DBNN(dataset_name=dataset_name)
                 print(f"Processing {dataset_name} in predict mode")
                 #if predictor.load_model(dataset_name):
                 # Use either the provided CSV or default dataset CSV
