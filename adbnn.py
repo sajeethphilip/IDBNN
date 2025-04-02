@@ -2168,68 +2168,122 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to save model state: {str(e)}")
 
     def _load_full_state(self):
-        """Loads complete model state with proper restoration"""
-        def _restore(obj):
-            """Restore objects from serialized format"""
+        """Loads complete model state with proper restoration and validation"""
+        def _restore(obj, target_device=None):
+            """Restore objects from serialized format with device handling"""
             if isinstance(obj, dict):
                 if '__tensor__' in obj:
-                    return torch.from_numpy(np.array(obj['data'])).to(self.device)
+                    tensor = torch.from_numpy(np.array(obj['data']))
+                    if target_device:
+                        tensor = tensor.to(target_device)
+                    return tensor
                 if '__ndarray__' in obj:
                     return np.array(obj['data'])
-                return {k: _restore(v) for k, v in obj.items()}
+                return {k: _restore(v, target_device) for k, v in obj.items()}
             if isinstance(obj, list):
-                return [_restore(x) for x in obj]
+                return [_restore(x, target_device) for x in obj]
             return obj
 
         load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-        if not os.path.exists(load_path):
-            raise FileNotFoundError(f"No saved state found at {load_path}")
 
-        checkpoint = torch.load(load_path, map_location='cpu')
-        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint} {Colors.ENDC}')
-        # Restore core parameters
-        self.model_type = checkpoint['model_type']
-        self.n_bins_per_dim = checkpoint['n_bins_per_dim']
-        self.current_W = _restore(checkpoint['weights']['current'])
-        self.best_W = _restore(checkpoint['weights']['best'])
+        try:
+            if not os.path.exists(load_path):
+                raise FileNotFoundError(f"No saved state found at {load_path}")
 
-        # Restore feature processing
-        self.feature_columns = checkpoint['feature_columns']
-        self.feature_pairs = _restore(checkpoint['feature_pairs'])
-        self.target_column = checkpoint['target_column']
-        self.bin_edges = _restore(checkpoint['bin_edges'])
+            # Load checkpoint with strict device placement control
+            checkpoint = torch.load(load_path, map_location='cpu')
 
-        # Initialize weight updater
-        n_classes = len(_restore(checkpoint['likelihood_params']['classes']))
-        self.weight_updater = BinWeightUpdater(
-            n_classes=n_classes,
-            feature_pairs=self.feature_pairs,
-            n_bins_per_dim=self.n_bins_per_dim,
-            batch_size=checkpoint['weight_updater']['batch_size']
-        )
+            # Validate checkpoint structure
+            required_keys = {
+                'model_config': ['model_type', 'n_bins_per_dim', 'device', 'dataset_name'],
+                'weights': ['current', 'best'],
+                'features': ['columns', 'pairs', 'bin_edges'],
+                'likelihood': ['params'],
+                'training': ['weight_updater'],
+                'labels': ['encoder']
+            }
 
-        # Restore weight updater state
-        self.weight_updater.histogram_weights = _restore(checkpoint['weight_updater']['histogram'])
-        self.weight_updater.gaussian_weights = _restore(checkpoint['weight_updater']['gaussian'])
+            for section, keys in required_keys.items():
+                if section not in checkpoint:
+                    raise ValueError(f"Checkpoint missing required section: {section}")
+                for key in keys:
+                    if key not in checkpoint[section]:
+                        raise ValueError(f"Checkpoint missing required key: {section}.{key}")
 
-        # Restore likelihood parameters
-        self.likelihood_params = {
-            'bin_probs': _restore(checkpoint['likelihood_params']['bin_probs']),
-            'bin_edges': self.bin_edges,
-            'classes': _restore(checkpoint['likelihood_params']['classes']),
-            'feature_pairs': self.feature_pairs
-        }
+            # Restore core configuration first
+            self.model_type = checkpoint['model_config']['model_type']
+            self.n_bins_per_dim = checkpoint['model_config']['n_bins_per_dim']
+            self.device = checkpoint['model_config']['device']
 
-        # Restore preprocessing
-        self.global_mean = _restore(checkpoint['global_mean'])
-        self.global_std = _restore(checkpoint['global_std'])
-        self.label_encoder = LabelEncoder()
-        self.label_encoder.classes_ = _restore(checkpoint['label_encoder']['classes'])
+            # Restore weights with proper device placement
+            self.current_W = _restore(checkpoint['weights']['current'], self.device)
+            self.best_W = _restore(checkpoint['weights']['best'], self.device)
 
-        # Restore training state
-        self.best_round = checkpoint['training_state']['best_round']
-        self.learning_rate = checkpoint['training_state']['learning_rate']
-        self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy']
+            # Restore feature processing
+            self.feature_columns = checkpoint['features']['columns']
+            self.feature_pairs = _restore(checkpoint['features']['pairs'], self.device)
+            self.target_column = checkpoint['model_config']['target_column']
+            self.bin_edges = _restore(checkpoint['features']['bin_edges'], self.device)
+
+            # Initialize weight updater
+            n_classes = len(_restore(checkpoint['likelihood']['params']['classes']))
+            self.weight_updater = BinWeightUpdater(
+                n_classes=n_classes,
+                feature_pairs=self.feature_pairs,
+                n_bins_per_dim=self.n_bins_per_dim,
+                batch_size=checkpoint['training']['weight_updater'].get('batch_size', 128)
+            )
+
+            # Restore weight updater state
+            self.weight_updater.histogram_weights = _restore(
+                checkpoint['training']['weight_updater']['histogram'],
+                self.device
+            )
+            self.weight_updater.gaussian_weights = _restore(
+                checkpoint['training']['weight_updater']['gaussian'],
+                self.device
+            )
+
+            # Restore likelihood parameters
+            self.likelihood_params = {
+                'bin_probs': _restore(checkpoint['likelihood']['params']['bin_probs'], self.device),
+                'bin_edges': self.bin_edges,
+                'classes': _restore(checkpoint['likelihood']['params']['classes'], self.device),
+                'feature_pairs': self.feature_pairs
+            }
+
+            # Restore preprocessing stats
+            self.global_mean = _restore(checkpoint['features']['global_stats']['mean'], self.device)
+            self.global_std = _restore(checkpoint['features']['global_stats']['std'], self.device)
+
+            # Restore label encoder
+            self.label_encoder = LabelEncoder()
+            self.label_encoder.classes_ = _restore(checkpoint['labels']['encoder']['classes'])
+
+            # Restore training state
+            self.best_round = checkpoint['training'].get('state', {}).get('best_round')
+            self.learning_rate = checkpoint['training'].get('state', {}).get('learning_rate', LearningRate)
+            self.best_combined_accuracy = checkpoint['training'].get('state', {}).get('best_combined_accuracy', 0.0)
+
+            print(f"\033[K{Colors.GREEN}Successfully loaded model state from {load_path}{Colors.ENDC}")
+            return True
+
+        except Exception as e:
+            error_msg = (
+                f"\033[K{Colors.RED}Error loading model state:{Colors.ENDC}\n"
+                f"- File: {load_path}\n"
+                f"- Error: {str(e)}\n"
+            )
+            if isinstance(e, (FileNotFoundError, ValueError)):
+                error_msg += (
+                    "Possible solutions:\n"
+                    "1. Verify the file exists and is not corrupted\n"
+                    "2. Check if the model was trained with the same version\n"
+                    "3. Try retraining with fresh_start=True"
+                )
+            print(error_msg)
+            traceback.print_exc()
+            return False
 
     def _update_training_log(self, round_num: int, metrics: Dict):
         """Update training log with current metrics"""
