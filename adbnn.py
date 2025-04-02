@@ -2188,7 +2188,7 @@ class DBNN(GPUDBNN):
         checkpoint = torch.load(load_path, map_location='cpu')
 
         # Restore core parameters
-        self.model_type = checkpoint['model_type']
+        self.model_type = checkpoint[ 'model_config']['model_type']
         self.n_bins_per_dim = checkpoint['n_bins_per_dim']
         self.current_W = _restore(checkpoint['weights']['current'])
         self.best_W = _restore(checkpoint['weights']['best'])
