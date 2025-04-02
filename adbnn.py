@@ -2167,7 +2167,7 @@ class DBNN(GPUDBNN):
                 os.remove(temp_path)
             raise RuntimeError(f"Failed to save model state: {str(e)}")
 
-    def _load_full_state(self):
+    def _load_full_state_old(self):
         """Loads complete model state with proper restoration"""
         def _restore(obj):
             """Restore objects from serialized format"""
@@ -5692,7 +5692,65 @@ class DBNN(GPUDBNN):
 
         print("Model state validation passed - all components loaded correctly")
 
+    def _load_full_state(self) -> bool:
+        """
+        Load complete model state from checkpoint with validation.
+        Returns True if successful, False otherwise.
+        """
+        checkpoint_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
 
+        if not os.path.exists(checkpoint_path):
+            print(f"No saved state found at {checkpoint_path}")
+            return False
+
+        try:
+            # Load with strict device placement
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+            # 1. Restore Core Parameters
+            self.model_type = checkpoint.get('model_type')
+            self.n_bins_per_dim = checkpoint.get('n_bins_per_dim', 128)
+
+            # 2. Restore Weights with validation
+            self.current_W = checkpoint['weights']['current']
+            self.best_W = checkpoint['weights']['best']
+
+            if self.current_W.shape != self.best_W.shape:
+                raise ValueError("Current and best weight shape mismatch")
+
+            # 3. Restore Feature Processing
+            self.feature_columns = checkpoint['features']['columns']
+            self.feature_pairs = checkpoint['features']['pairs']
+            self.bin_edges = checkpoint['features']['bin_edges']
+            self.global_mean = checkpoint['features']['global_stats']['mean']
+            self.global_std = checkpoint['features']['global_stats']['std']
+
+            # 4. Restore Likelihood Parameters
+            self.likelihood_params = {
+                'bin_probs': checkpoint['likelihood']['params']['bin_probs'],
+                'bin_edges': self.bin_edges,
+                'classes': checkpoint['likelihood']['params']['classes'],
+                'feature_pairs': self.feature_pairs
+            }
+
+            # 5. Restore Label Encoder
+            self.label_encoder = LabelEncoder()
+            self.label_encoder.classes_ = checkpoint['labels']['encoder']['classes']
+
+            # 6. Initialize Weight Updater
+            self._initialize_bin_weights()
+
+            # 7. Restore Training State
+            self.best_round = checkpoint['training']['state']['best_round']
+            self.best_combined_accuracy = checkpoint['training']['state']['best_accuracy']
+
+            print(f"Successfully loaded model state from {checkpoint_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error loading model state: {str(e)}")
+            traceback.print_exc()
+            return False
 #--------------------------------------------------Class Ends ----------------------------------------------------------
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
