@@ -1713,7 +1713,7 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
-        self._is_initialized = False
+    self._is_initialized = False
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -4001,85 +4001,6 @@ class DBNN(GPUDBNN):
 
         return None, None
 
-    def predict_new(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> pd.DataFrame:
-            """
-            Make predictions on input data with proper feature validation.
-            Handles feature selection and ordering according to config.
-            """
-            if not self._is_initialized:
-                raise RuntimeError("Model not initialized. Call load_model() first.")
-
-            # Handle input type and feature selection
-            if isinstance(X, pd.DataFrame):
-                # Filter and order columns according to config
-                if hasattr(self, 'feature_columns'):
-                    available_cols = [col for col in self.feature_columns if col in X.columns]
-                    if not available_cols:
-                        raise ValueError("No matching features found between model and input data")
-
-                    # Ensure we maintain the order from feature_columns
-                    X_filtered = X[available_cols].copy()
-                    original_df = X.copy()
-                    X_tensor = self.preprocess_data(X_filtered)
-                else:
-                    raise RuntimeError("Model not properly initialized - missing feature columns")
-            else:
-                X_tensor = X.to(self.device) if not X.is_cuda else X
-                original_df = None
-
-            # Initialize storage for results
-            all_predictions = []
-            all_probabilities = []
-
-            # Process in batches
-            n_batches = (len(X_tensor) + batch_size - 1) // batch_size
-            batch_pbar = tqdm(total=n_batches, desc="Prediction batches")
-
-            for i in range(0, len(X_tensor), batch_size):
-                batch_end = min(i + batch_size, len(X_tensor))
-                batch_X = X_tensor[i:batch_end]
-
-                # Compute posteriors
-                try:
-                    if self.model_type == "Histogram":
-                        posteriors, _ = self._compute_batch_posterior(batch_X)
-                    elif self.model_type == "Gaussian":
-                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                    else:
-                        raise ValueError(f"Unknown model type: {self.model_type}")
-                except Exception as e:
-                    raise RuntimeError(f"Error computing posteriors: {str(e)}")
-
-                # Get predictions
-                batch_pred = torch.argmax(posteriors, dim=1)
-
-                # Store results
-                all_predictions.append(batch_pred.cpu())
-                all_probabilities.append(posteriors.cpu())
-                batch_pbar.update(1)
-
-            batch_pbar.close()
-
-            # Combine results
-            predictions = torch.cat(all_predictions).numpy()
-            probabilities = torch.cat(all_probabilities).numpy()
-
-            # Create results DataFrame
-            if original_df is not None:
-                results_df = original_df.copy()
-            else:
-                results_df = pd.DataFrame(index=range(len(X_tensor)))
-
-            # Add predictions and probabilities
-            pred_labels = self.label_encoder.inverse_transform(predictions)
-            results_df['predicted_class'] = pred_labels
-
-            for i, class_name in enumerate(self.label_encoder.classes_):
-                results_df[f'prob_{class_name}'] = probabilities[:, i]
-
-            results_df['max_probability'] = probabilities.max(axis=1)
-
-            return results_df
 
     def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
         """
@@ -6203,10 +6124,8 @@ def main():
                     )
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
+                predictor = DBNNPredictor()
                 dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name=dataset_name)
-                #predictor.load_model()
-
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model(dataset_name):
                     # Use either the provided CSV or default dataset CSV
@@ -6214,8 +6133,8 @@ def main():
                     output_dir = os.path.join('data', dataset_name, 'Predictions')
                     os.makedirs(output_dir, exist_ok=True)
                     output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-                    results=predictor.predict(input_csv)
-                    #results = predictor.predict_from_csv(input_csv, output_path)
+                    safe_predict(predictor, input_csv)
+                    results = predictor.predict_from_csv(input_csv, output_path)
                     print("\033[K" + f"Predictions saved to: {output_path}")
 
             if mode == 'invertDBNN':
