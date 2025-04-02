@@ -5517,7 +5517,7 @@ class DBNN(GPUDBNN):
             results = self.fit_predict(batch_size=batch_size)
             return results
 
-   def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+    def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
         dataset_name = get_dataset_name_from_path(csv_path)
