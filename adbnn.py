@@ -5532,7 +5532,7 @@ class DBNN(GPUDBNN):
             self.model_type = self.config.get('modelType', 'Histogram')
 
             # 3. Load the dataset
-            self._load_dataset(dataset_name)
+            self._load_dataset()
 
             # Rest of the loading logic...
             self._load_label_encoder(dataset_name)
