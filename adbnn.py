@@ -2357,6 +2357,86 @@ class DBNN(GPUDBNN):
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations"""
+        # Ensure input features are contiguous
+        features = features.contiguous().to(self.device)
+
+        # Safety checks
+        if self.weight_updater is None:
+            DEBUG.log("Weight updater not initialized, initializing now...")
+            self._initialize_bin_weights()
+            if self.weight_updater is None:
+                raise RuntimeError("Failed to initialize weight updater")
+
+        if self.likelihood_params is None:
+            raise RuntimeError("Likelihood parameters not initialized")
+
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+
+        # Pre-allocate tensors on the correct device
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+        # Convert feature pairs to tensor if needed
+        if isinstance(self.feature_pairs, list):
+            feature_pairs_tensor = torch.tensor(self.feature_pairs, device=self.device)
+        else:
+            feature_pairs_tensor = self.feature_pairs.to(self.device)
+
+        # Process all feature pairs at once
+        feature_groups = torch.stack([
+            features[:, pair].contiguous()  # Ensure contiguous memory
+            for pair in feature_pairs_tensor
+        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+
+        # Compute all bin indices at once
+        bin_indices_dict = {}
+        for group_idx in range(len(feature_pairs_tensor)):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous() for edge in bin_edges])
+
+            # Vectorized binning with contiguous tensors
+            indices = torch.stack([
+                torch.bucketize(
+                    feature_groups[:, group_idx, dim].contiguous(),
+                    edges[dim].contiguous()
+                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
+                for dim in range(2)
+            ])  # Shape: (2, batch_size)
+            bin_indices_dict[group_idx] = indices
+
+            # Process all classes simultaneously
+            for group_idx in range(len(self.likelihood_params['feature_pairs'])):
+                bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
+                indices = bin_indices_dict[group_idx]  # [2, batch_size]
+
+                # Get all weights at once
+                weights = torch.stack([
+                    self.weight_updater.get_histogram_weights(c, group_idx)
+                    for c in range(n_classes)
+                ])  # [n_classes, n_bins, n_bins]
+
+                # Ensure weights are contiguous
+                if not weights.is_contiguous():
+                    weights = weights.contiguous()
+
+                # Apply weights to probabilities
+                weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
+
+                # Gather probabilities for all samples and classes at once
+                probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+                log_likelihoods += torch.log(probs.t() + epsilon)
+
+            # Compute posteriors efficiently
+            max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+            posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+            posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+
+            return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
+
+
+
+    def _compute_batch_posterior_old(self, features: torch.Tensor, epsilon: float = 1e-10):
+        """Optimized batch posterior with vectorized operations"""
         # Ensure input features are on the correct device
         features = features.to(self.device)
 
@@ -3410,8 +3490,91 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
 
-
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
+        """Generate and save/load consistent feature combinations with memory-efficient handling."""
+        # Ensure feature_indices is a list (maintaining existing behavior)
+        if isinstance(feature_indices, int):
+            feature_indices = list(range(feature_indices))
+
+        # Get parameters with fallbacks
+        config = self.config
+        group_size = group_size or config.get('likelihood_config', {}).get('feature_group_size', 2)
+        max_combinations = max_combinations or config.get('likelihood_config', {}).get('max_combinations', None)
+        bin_sizes = config.get('likelihood_config', {}).get('bin_sizes', [128])
+
+        # Debug output
+        debug_msg = [
+            f"[DEBUG] Generating feature combinations after filtering:",
+            f"- n_features: {len(feature_indices)}",
+            f"- group_size: {group_size}",
+            f"- max_combinations: {max_combinations}",
+            f"- bin_sizes: {bin_sizes}"
+        ]
+        print("\033[K" + "\n\033[K".join(debug_msg))
+
+        # Create path for storing feature combinations
+        dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        base_path = config.get('training_params', {}).get('training_save_path', 'training_data')
+        combinations_path = os.path.join(base_path, dataset_folder, 'feature_combinations.pkl')
+
+        # Check for cached combinations
+        if os.path.exists(combinations_path):
+            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
+            print("\033[K" + f"[DEBUG] Loading cached feature combinations from {combinations_path}")
+            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
+
+            try:
+                # Load with weights_only=True for security
+                combinations_tensor = torch.load(combinations_path, map_location='cpu', weights_only=True)
+
+                # Ensure the loaded tensor is in the correct format
+                if not isinstance(combinations_tensor, torch.Tensor):
+                    if isinstance(combinations_tensor, list):
+                        combinations_tensor = torch.tensor(combinations_tensor, dtype=torch.long)
+                    else:
+                        raise ValueError("Unexpected format for feature combinations")
+
+                # Convert to contiguous tensor
+                combinations_tensor = combinations_tensor.contiguous()
+
+                print("\033[K" + f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
+                return combinations_tensor.to(self.device)
+            except Exception as e:
+                print("\033[K" + f"Error loading cached feature combinations: {str(e)}")
+                print("\033[K" + "Generating new feature combinations instead")
+                os.remove(combinations_path)  # Remove corrupted file
+
+        # Generate new combinations if no cached version exists
+        print("\033[K" + f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
+
+        # Calculate total possible combinations
+        total_possible = comb(len(feature_indices), group_size)
+        print("\033[K" + f"[DEBUG] Total possible combinations: {total_possible:,}")
+
+        # Generate combinations based on size
+        if max_combinations is None or total_possible <= max_combinations:
+            print("\033[K" + "[DEBUG] Generating all possible combinations")
+            all_combinations = list(combinations(feature_indices, group_size))
+        else:
+            print("\033[K" + f"[DEBUG] Sampling {max_combinations} random combinations")
+            all_combinations = self._sample_combinations(feature_indices, group_size, max_combinations)
+
+        # Remove duplicates and sort
+        unique_combinations = list({tuple(sorted(comb)) for comb in all_combinations})
+        unique_combinations = sorted(unique_combinations)
+
+        # Convert to contiguous tensor (on CPU first)
+        combinations_tensor = torch.tensor(unique_combinations, dtype=torch.long, device='cpu').contiguous()
+        print("\033[K" + f"[DEBUG] Generated {len(unique_combinations)} unique feature combinations")
+
+        # Save the new combinations
+        os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
+        torch.save(combinations_tensor.cpu(), combinations_path)
+        print("\033[K" + f"[DEBUG] Saved combinations to {combinations_path}")
+
+        return combinations_tensor.to(self.device)
+
+    def _generate_feature_combinations_old(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
         """Generate and save/load consistent feature combinations with memory-efficient handling.
 
         Enhanced version that:
