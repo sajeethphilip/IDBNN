@@ -2188,7 +2188,7 @@ class DBNN(GPUDBNN):
         checkpoint = torch.load(load_path, map_location='cpu')
 
         # Restore core parameters
-        self.model_type = checkpoint[ 'model_config']['model_type']
+        self.model_type = checkpoint['model_type']
         self.n_bins_per_dim = checkpoint['n_bins_per_dim']
         self.current_W = _restore(checkpoint['weights']['current'])
         self.best_W = _restore(checkpoint['weights']['best'])
@@ -5514,106 +5514,99 @@ class DBNN(GPUDBNN):
 
     def predict_from_csv(self, input_csv_path: str, output_dir: str = None) -> pd.DataFrame:
         """
-        Load model state and make predictions on CSV data that match original training behavior.
-        Returns DataFrame with original data + predictions, and saves confusion matrix if targets available.
-
-        Args:
-            input_csv_path: Path to input CSV file
-            output_dir: Directory to save outputs (defaults to dataset directory)
-
-        Returns:
-            DataFrame with original data and predictions
+        Load model state and make predictions on CSV data with proper handling of existing files.
         """
-        # Initialize paths and directories
+        # Initialize paths
         if output_dir is None:
-            output_dir = os.path.join('data', self.dataset_name)
-        os.makedirs(output_dir, exist_ok=True)
+            output_dir = os.path.join('data', self.dataset_name, 'Predictions')
 
-        # 1. Load full model state with validation
+        # Create parent directory if needed
+        os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+
+        # Handle existing prediction file
+        output_path = os.path.join(output_dir, f'{self.dataset_name}_predictions.csv')
+        if os.path.exists(output_path):
+            print(f"{Colors.YELLOW}⚠ Prediction file already exists at {output_path}{Colors.ENDC}")
+            choice = input("Choose action: [O]verwrite, [A]ppend, [S]ave with timestamp, [C]ancel: ").upper()
+
+            if choice == 'O':
+                os.remove(output_path)
+                print(f"{Colors.GREEN}✓ Will overwrite existing file{Colors.ENDC}")
+            elif choice == 'A':
+                mode = 'a'
+                header = False
+                print(f"{Colors.GREEN}✓ Will append to existing file{Colors.ENDC}")
+            elif choice == 'S':
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_path = os.path.join(output_dir, f'{self.dataset_name}_predictions_{timestamp}.csv')
+                print(f"{Colors.GREEN}✓ Will create new file with timestamp{Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}✗ Prediction cancelled{Colors.ENDC}")
+                return None
+
+        # Load model state
         try:
             self._load_full_state()
-            print(f"{Colors.GREEN}✓ Model state loaded successfully{Colors.ENDC}")
         except Exception as e:
-            raise RuntimeError(f"Failed to load model state: {str(e)}")
+            print(f"{Colors.RED}✗ Failed to load model state: {str(e)}{Colors.ENDC}")
+            return None
 
-        # 2. Load and validate input data
+        # Load and validate input data
         try:
             input_data = pd.read_csv(input_csv_path)
-            print(f"{Colors.GREEN}✓ Input data loaded ({len(input_data)} rows){Colors.ENDC}")
         except Exception as e:
-            raise RuntimeError(f"Failed to load input data: {str(e)}")
+            print(f"{Colors.RED}✗ Failed to load input data: {str(e)}{Colors.ENDC}")
+            return None
 
-        # 3. Verify required features exist
-        missing_features = set(self.feature_columns) - set(input_data.columns)
-        if missing_features:
-            raise ValueError(
-                f"Input missing required features: {sorted(missing_features)}\n"
-                f"Expected: {self.feature_columns}\n"
-                f"Found: {list(input_data.columns)}"
-            )
+        # Verify features
+        missing = set(self.feature_columns) - set(input_data.columns)
+        if missing:
+            print(f"{Colors.RED}✗ Missing features: {missing}{Colors.ENDC}")
+            return None
 
-        # 4. Preprocess data exactly like training
+        # Preprocess and predict
         try:
             X_processed = self._preprocess_data(input_data, is_training=False)
-            print(f"{Colors.GREEN}✓ Data preprocessed{Colors.ENDC}")
+            with torch.no_grad():
+                predictions = self.predict(X_processed)
+                pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
         except Exception as e:
-            raise RuntimeError(f"Data preprocessing failed: {str(e)}")
+            print(f"{Colors.RED}✗ Prediction failed: {str(e)}{Colors.ENDC}")
+            return None
 
-        # 5. Make predictions using best weights
-        with torch.no_grad():
-            self.current_W = self.best_W.clone()  # Use best weights from training
-            predictions = self.predict(X_processed)
-            pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
-            print(f"{Colors.GREEN}✓ Predictions generated{Colors.ENDC}")
-
-        # 6. Create output DataFrame
+        # Create output
         output_data = input_data.copy()
         output_data['predicted_class'] = pred_labels
 
-        # 7. Add probabilities if requested
+        # Add probabilities if configured
         if self.config.get('save_probabilities', True):
             posteriors, _ = self._compute_batch_posterior(X_processed)
             for i, class_name in enumerate(self.label_encoder.classes_):
                 output_data[f'prob_{class_name}'] = posteriors[:, i].cpu().numpy()
-            output_data['max_probability'] = posteriors.max(dim=1)[0].cpu().numpy()
 
-        # 8. Save results
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(output_dir, f'predictions_{timestamp}.csv')
-        output_data.to_csv(output_path, index=False)
-        print(f"{Colors.GREEN}✓ Predictions saved to {output_path}{Colors.ENDC}")
+        # Save results
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            output_data.to_csv(output_path, index=False, mode=mode if 'mode' in locals() else 'w',
+                              header=header if 'header' in locals() else True)
+            print(f"{Colors.GREEN}✓ Predictions saved to {output_path}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.RED}✗ Failed to save predictions: {str(e)}{Colors.ENDC}")
+            return None
 
-        # 9. Generate validation metrics if targets available
+        # Generate validation if targets available
         if self.target_column in input_data.columns:
-            try:
-                # Encode true labels
-                y_true = self.label_encoder.transform(input_data[self.target_column])
+            y_true = self.label_encoder.transform(input_data[self.target_column])
+            self.print_colored_confusion_matrix(y_true, predictions.cpu().numpy())
 
-                # Calculate and print metrics
-                accuracy = (predictions.cpu().numpy() == y_true).mean()
-                print(f"\n{Colors.BOLD}Validation Results:{Colors.ENDC}")
-                print(f"Accuracy: {Colors.GREEN}{accuracy:.4%}{Colors.ENDC}")
-
-                # Generate and save confusion matrix
-                cm_path = os.path.join(output_dir, f'confusion_matrix_{timestamp}.png')
-                self.print_colored_confusion_matrix(y_true, predictions.cpu().numpy())
-
-                # Save metrics to file
-                metrics = {
-                    'accuracy': accuracy,
-                    'precision_recall_fscore': precision_recall_fscore_support(
-                        y_true, predictions.cpu().numpy(), average='weighted'
-                    ),
-                    'timestamp': timestamp,
-                    'model_type': self.model_type,
-                    'dataset': self.dataset_name
-                }
-                with open(os.path.join(output_dir, f'metrics_{timestamp}.json'), 'w') as f:
-                    json.dump(metrics, f, indent=2)
-
-                print(f"{Colors.GREEN}✓ Validation metrics saved{Colors.ENDC}")
-            except Exception as e:
-                print(f"{Colors.YELLOW}⚠ Could not generate validation metrics: {str(e)}{Colors.ENDC}")
+            # Save metrics
+            metrics_path = os.path.join(output_dir, f'{self.dataset_name}_metrics.json')
+            metrics = {
+                'accuracy': accuracy_score(y_true, predictions.cpu().numpy()),
+                'classification_report': classification_report(y_true, predictions.cpu().numpy(), output_dict=True)
+            }
+            with open(metrics_path, 'w') as f:
+                json.dump(metrics, f, indent=2)
 
         return output_data
 
