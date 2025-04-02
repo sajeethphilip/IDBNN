@@ -5517,6 +5517,55 @@ class DBNN(GPUDBNN):
             results = self.fit_predict(batch_size=batch_size)
             return results
 
+    def load_model(self, dataset_name: str) -> bool:
+        """Load all model components with strict initialization order"""
+        try:
+            # 1. Load basic config first
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config file not found: {config_path}")
+
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+
+            # 2. Set model type
+            self.model_type = self.config.get('modelType', 'Histogram')
+
+            # 3. Load the dataset
+            self._load_dataset(dataset_name)
+
+            # Rest of the loading logic...
+            self._load_label_encoder(dataset_name)
+            self._load_feature_pairs(dataset_name)
+            self._load_likelihood_params(dataset_name)
+
+            # 4. Initialize weight updater after all params are loaded
+            self._initialize_weight_updater()
+
+            # 5. Load weights
+            self._load_weights(dataset_name)
+
+            # 6. Load optional preprocessing params
+            if hasattr(self, '_load_preprocessing_params'):
+                self._load_preprocessing_params(dataset_name)
+
+            # Final validation
+            required_attrs = [
+                'likelihood_params', 'feature_pairs',
+                'current_W', 'label_encoder',
+                'weight_updater'  # Now explicitly required
+            ]
+            missing = [attr for attr in required_attrs if not hasattr(self, attr)]
+            if missing:
+                raise RuntimeError(f"Missing required model components: {missing}")
+
+            self._is_initialized = True
+            return True
+
+        except Exception as e:
+            print(f"\033[KError loading model: {str(e)}")
+            traceback.print_exc()
+            return False
     def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
         """Make predictions using model from the same directory as the input file"""
         # Get dataset name from path structure
