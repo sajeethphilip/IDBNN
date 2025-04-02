@@ -5517,7 +5517,57 @@ class DBNN(GPUDBNN):
             results = self.fit_predict(batch_size=batch_size)
             return results
 
+   def predict_from_csv(self, csv_path: str, output_path: str = None) -> pd.DataFrame:
+        """Make predictions using model from the same directory as the input file"""
+        # Get dataset name from path structure
+        dataset_name = get_dataset_name_from_path(csv_path)
+        print(f"\033[KUsing model for dataset: {dataset_name}")
 
+        # Verify model files exist
+        model_files = [
+            f"Model/Best_Histogram_{dataset_name}_components.pkl",
+            f"Model/Best_Histogram_{dataset_name}_weights.json",
+            f"Model/Best_Histogram_{dataset_name}_label_encoder.pkl"
+        ]
+
+        if not all(os.path.exists(f) for f in model_files):
+            raise FileNotFoundError(
+                f"Missing model files for {dataset_name}. Required files:\n" +
+                "\n".join(model_files))
+
+        # Load the model
+        if not self.load_model(dataset_name):
+            raise ValueError(f"Failed to load model for {dataset_name}")
+
+        # Load data
+        df = pd.read_csv(csv_path)
+        # Rest of the prediction logic remains the same...
+        target_column = self.config.get('target_column') if hasattr(self, 'config') else None
+        target_in_data = target_column is not None and target_column in df.columns
+
+        results = self.predict(df)
+
+        if target_in_data:
+            try:
+                y_true = df[target_column]
+                y_pred = results['predicted_class']
+
+                if not np.issubdtype(y_true.dtype, np.number):
+                    y_true = self.label_encoder.transform(y_true)
+
+                if not np.issubdtype(y_pred.dtype, np.number):
+                    y_pred = self.label_encoder.transform(y_pred)
+
+                self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
+            except Exception as e:
+                print(f"\033[KError generating confusion matrix: {str(e)}")
+                traceback.print_exc()
+
+        if output_path:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            results.to_csv(output_path, index=False)
+
+        return results
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
 
