@@ -2168,120 +2168,83 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to save model state: {str(e)}")
 
     def _load_full_state(self):
-        """Loads complete model state with proper restoration and validation"""
-        def _restore(obj, target_device=None):
-            """Restore objects from serialized format with device handling"""
+        """Robust model state loading with proper validation and device handling"""
+        def _safe_restore(obj, target_device=None):
+            """Recursively restore objects with device handling"""
+            if obj is None:
+                return None
             if isinstance(obj, dict):
                 if '__tensor__' in obj:
                     tensor = torch.from_numpy(np.array(obj['data']))
-                    if target_device:
-                        tensor = tensor.to(target_device)
-                    return tensor
-                if '__ndarray__' in obj:
-                    return np.array(obj['data'])
-                return {k: _restore(v, target_device) for k, v in obj.items()}
+                    return tensor.to(target_device) if target_device else tensor
+                return {k: _safe_restore(v, target_device) for k, v in obj.items()}
             if isinstance(obj, list):
-                return [_restore(x, target_device) for x in obj]
+                return [_safe_restore(x, target_device) for x in obj]
             return obj
 
         load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
 
-        try:
-            if not os.path.exists(load_path):
-                raise FileNotFoundError(f"No saved state found at {load_path}")
+        if not os.path.exists(load_path):
+            print(f"\033[K{Colors.YELLOW}No saved state found at {load_path}{Colors.ENDC}")
+            return False
 
-            # Load checkpoint with strict device placement control
-            checkpoint = torch.load(load_path, map_location='cpu')
+        try:
+            # Load with security restrictions
+            checkpoint = torch.load(load_path, map_location='cpu', weights_only=True)
+
+            # Backward compatibility for older checkpoints
+            if 'model_config' not in checkpoint:
+                print(f"\033[K{Colors.YELLOW}Legacy checkpoint format detected{Colors.ENDC}")
+                return self._load_legacy_state(checkpoint)  # You'll need to implement this
 
             # Validate checkpoint structure
-            required_keys = {
-                'model_config': ['model_type', 'n_bins_per_dim', 'device', 'dataset_name'],
+            required_sections = {
+                'model_config': ['model_type', 'n_bins_per_dim'],
                 'weights': ['current', 'best'],
-                'features': ['columns', 'pairs', 'bin_edges'],
-                'likelihood': ['params'],
-                'training': ['weight_updater'],
-                'labels': ['encoder']
+                'features': ['columns', 'pairs'],
+                'likelihood': ['params']
             }
 
-            for section, keys in required_keys.items():
+            for section, keys in required_sections.items():
                 if section not in checkpoint:
-                    raise ValueError(f"Checkpoint missing required section: {section}")
+                    raise ValueError(f"Missing section: {section}")
                 for key in keys:
                     if key not in checkpoint[section]:
-                        raise ValueError(f"Checkpoint missing required key: {section}.{key}")
+                        raise ValueError(f"Missing key: {section}.{key}")
 
-            # Restore core configuration first
+            # Restore core configuration
             self.model_type = checkpoint['model_config']['model_type']
-            self.n_bins_per_dim = checkpoint['model_config']['n_bins_per_dim']
-            self.device = checkpoint['model_config']['device']
+            self.n_bins_per_dim = checkpoint['model_config'].get('n_bins_per_dim', 128)
 
             # Restore weights with proper device placement
-            self.current_W = _restore(checkpoint['weights']['current'], self.device)
-            self.best_W = _restore(checkpoint['weights']['best'], self.device)
+            self.current_W = _safe_restore(checkpoint['weights']['current'], self.device)
+            self.best_W = _safe_restore(checkpoint['weights']['best'], self.device)
 
             # Restore feature processing
             self.feature_columns = checkpoint['features']['columns']
-            self.feature_pairs = _restore(checkpoint['features']['pairs'], self.device)
-            self.target_column = checkpoint['model_config']['target_column']
-            self.bin_edges = _restore(checkpoint['features']['bin_edges'], self.device)
+            self.feature_pairs = _safe_restore(checkpoint['features']['pairs'], self.device)
 
             # Initialize weight updater
-            n_classes = len(_restore(checkpoint['likelihood']['params']['classes']))
+            n_classes = len(_safe_restore(checkpoint['likelihood']['params']['classes']))
             self.weight_updater = BinWeightUpdater(
                 n_classes=n_classes,
                 feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim,
-                batch_size=checkpoint['training']['weight_updater'].get('batch_size', 128)
-            )
-
-            # Restore weight updater state
-            self.weight_updater.histogram_weights = _restore(
-                checkpoint['training']['weight_updater']['histogram'],
-                self.device
-            )
-            self.weight_updater.gaussian_weights = _restore(
-                checkpoint['training']['weight_updater']['gaussian'],
-                self.device
+                n_bins_per_dim=self.n_bins_per_dim
             )
 
             # Restore likelihood parameters
             self.likelihood_params = {
-                'bin_probs': _restore(checkpoint['likelihood']['params']['bin_probs'], self.device),
-                'bin_edges': self.bin_edges,
-                'classes': _restore(checkpoint['likelihood']['params']['classes'], self.device),
+                'bin_probs': _safe_restore(checkpoint['likelihood']['params']['bin_probs'], self.device),
+                'bin_edges': _safe_restore(checkpoint['features'].get('bin_edges'), self.device),
+                'classes': _safe_restore(checkpoint['likelihood']['params']['classes'], self.device),
                 'feature_pairs': self.feature_pairs
             }
 
-            # Restore preprocessing stats
-            self.global_mean = _restore(checkpoint['features']['global_stats']['mean'], self.device)
-            self.global_std = _restore(checkpoint['features']['global_stats']['std'], self.device)
-
-            # Restore label encoder
-            self.label_encoder = LabelEncoder()
-            self.label_encoder.classes_ = _restore(checkpoint['labels']['encoder']['classes'])
-
-            # Restore training state
-            self.best_round = checkpoint['training'].get('state', {}).get('best_round')
-            self.learning_rate = checkpoint['training'].get('state', {}).get('learning_rate', LearningRate)
-            self.best_combined_accuracy = checkpoint['training'].get('state', {}).get('best_combined_accuracy', 0.0)
-
-            print(f"\033[K{Colors.GREEN}Successfully loaded model state from {load_path}{Colors.ENDC}")
+            print(f"\033[K{Colors.GREEN}Successfully loaded model state{Colors.ENDC}")
             return True
 
         except Exception as e:
-            error_msg = (
-                f"\033[K{Colors.RED}Error loading model state:{Colors.ENDC}\n"
-                f"- File: {load_path}\n"
-                f"- Error: {str(e)}\n"
-            )
-            if isinstance(e, (FileNotFoundError, ValueError)):
-                error_msg += (
-                    "Possible solutions:\n"
-                    "1. Verify the file exists and is not corrupted\n"
-                    "2. Check if the model was trained with the same version\n"
-                    "3. Try retraining with fresh_start=True"
-                )
-            print(error_msg)
+            print(f"\033[K{Colors.RED}Error loading model:{Colors.ENDC} {str(e)}")
             traceback.print_exc()
             return False
 
