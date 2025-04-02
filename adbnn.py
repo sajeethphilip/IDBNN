@@ -98,10 +98,7 @@ from typing import Union, List, Dict, Optional
 from collections import defaultdict
 import torch.serialization
 import numpy as np
-from torch.serialization import add_safe_globals
 
-# Allow necessary globals for safe loading
-add_safe_globals([np.ndarray, np.float32, np.int64])
 # Allowlist necessary globals for safe loading
 torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
 
@@ -1335,17 +1332,16 @@ class GPUDBNN:
         # Handle model state based on flags
         if not fresh and use_previous_model:
             # Load previous model state
-            if not self._load_full_state():
-                print(f"{Colors.YELLOW}Failed to load full state, initializing fresh model{Colors.ENDC}")
-                self._initialize_fresh_model()
-
+            self._load_model_components()
+            self._load_best_weights()
+            self._load_categorical_encoders()
         elif fresh and use_previous_model:
             # Use previous model weights but start with fresh data
-            # Load only weights for transfer learning
-            self._load_full_state(weights_only=True)
+            self._load_best_weights()
+            self._load_categorical_encoders()
         else:
+            # Complete fresh start
             self._clean_existing_model()
-            self._initialize_fresh_model()
 
 
         #------------------------------------------Adaptive Learning--------------------------------------
@@ -2021,263 +2017,220 @@ class DBNN(GPUDBNN):
 
         return results_df
 
-
-    def _tensor_to_dict(self, tensor):
-        """Convert tensor to serializable dict format"""
-        return {
-            'data': tensor.cpu().clone().detach().numpy(),
-            'dtype': str(tensor.dtype),
-            'shape': list(tensor.shape)
-        }
-
-    def _dict_to_tensor(self, data_dict, device=None):
-        """Convert dict back to tensor"""
-        tensor = torch.tensor(
-            data_dict['data'],
-            dtype=getattr(torch, data_dict['dtype'])
-        )
-        if device:
-            tensor = tensor.to(device)
-        return tensor
-
     def _save_full_state(self):
-        """Save complete model state in a single PyTorch checkpoint file"""
+        """Saves complete model state with proper handling of all data types.
+        Includes additional validation and more comprehensive state capture."""
+
+        def _safe_convert(obj):
+            """Enhanced object serialization with better type handling"""
+            if obj is None:
+                return None
+            if isinstance(obj, torch.Tensor):
+                return {
+                    '__tensor__': True,
+                    'data': obj.cpu().numpy(),
+                    'dtype': str(obj.dtype),
+                    'device': str(obj.device),
+                    'requires_grad': obj.requires_grad
+                }
+            if isinstance(obj, (list, tuple)):
+                return [_safe_convert(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _safe_convert(v) for k, v in obj.items()}
+            if isinstance(obj, (int, float, str, bool)):
+                return obj
+            if isinstance(obj, np.ndarray):
+                return {
+                    '__ndarray__': True,
+                    'data': obj.tolist(),
+                    'dtype': str(obj.dtype),
+                    'shape': list(obj.shape)
+                }
+            if hasattr(obj, '__dict__'):  # Handle generic objects
+                return _safe_convert(obj.__dict__)
+            return str(obj)  # Fallback for other types
+
+        # Validate critical components before saving
+        required_attrs = [
+            ('current_W', "Model weights not initialized"),
+            ('feature_pairs', "Feature pairs not computed"),
+            ('label_encoder', "Label encoder not initialized"),
+            ('model_type', "Model type not specified")
+        ]
+
+        missing = [msg for attr, msg in required_attrs if not hasattr(self, attr)]
+        if missing:
+            raise RuntimeError(f"Cannot save model state. Missing: {', '.join(missing)}")
+
+        # Build comprehensive checkpoint dictionary
         checkpoint = {
-            # Version and metadata
-            'version': 5,  # Increment version when format changes
-            'model_type': self.model_type,
-            'dataset_name': self.dataset_name,
-            'timestamp': datetime.datetime.now().isoformat(),
+            # Core model configuration
+            'model_config': {
+                'model_type': self.model_type,
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'device': str(self.device),
+                'dataset_name': self.dataset_name,
+                'target_column': self.target_column
+            },
 
-            # Core model parameters
+            # Model parameters and weights
             'weights': {
-                'current': self.current_W,
-                'best': self.best_W if self.best_W is not None else self.current_W,
-                'best_error': self.best_error,
+                'current': _safe_convert(self.current_W),
+                'best': _safe_convert(self.best_W),
+                'learning_rate': self.learning_rate
             },
 
-            # Feature processing
-            'feature_columns': self.feature_columns,
-            'feature_pairs': torch.tensor(self.feature_pairs, dtype=torch.long),
-            'bin_edges': [torch.stack(edges) for edges in self.bin_edges],
-            'global_stats': {
-                'mean': torch.tensor(self.global_mean),
-                'std': torch.tensor(self.global_std)
+            # Feature processing state
+            'features': {
+                'columns': self.feature_columns,
+                'pairs': _safe_convert(self.feature_pairs),
+                'bin_edges': _safe_convert(getattr(self, 'bin_edges', None)),
+                'global_stats': {
+                    'mean': _safe_convert(self.global_mean),
+                    'std': _safe_convert(self.global_std)
+                }
             },
 
-            # Likelihood parameters
-            'likelihood_params': {
-                'bin_probs': torch.stack(self.likelihood_params['bin_probs']),
-                'classes': torch.tensor(self.likelihood_params['classes']),
-                'feature_pairs': torch.tensor(self.likelihood_params['feature_pairs'])
-            } if self.model_type == "Histogram" else None,
-
-            # Gaussian parameters
-            'gaussian_params': {
-                'means': self.gaussian_params['means'],
-                'covs': self.gaussian_params['covs'],
-                'classes': self.gaussian_params['classes'],
-                'feature_pairs': torch.tensor(self.gaussian_params['feature_pairs'])
-            } if self.model_type == "Gaussian" else None,
+            # Likelihood parameters (model-specific)
+            'likelihood': {
+                'params': {
+                    'bin_probs': _safe_convert(getattr(self.likelihood_params, 'bin_probs', None)),
+                    'bin_edges': _safe_convert(getattr(self.likelihood_params, 'bin_edges', None)),
+                    'classes': _safe_convert(getattr(self.likelihood_params, 'classes', None)),
+                    'feature_pairs': _safe_convert(getattr(self.likelihood_params, 'feature_pairs', None))
+                },
+                'model_type': self.model_type
+            },
 
             # Weight updater state
-            'weight_updater': {
-                'histogram_weights': {
-                    str(k): {str(k2): v2 for k2, v2 in v.items()}
-                    for k, v in self.weight_updater.histogram_weights.items()
+            'training': {
+                'weight_updater': {
+                    'histogram': _safe_convert(getattr(self.weight_updater, 'histogram_weights', None)),
+                    'gaussian': _safe_convert(getattr(self.weight_updater, 'gaussian_weights', None)),
+                    'batch_size': self.weight_updater.batch_size
                 },
-                'gaussian_weights': {
-                    str(k): {str(k2): v2 for k2, v2 in v.items()}
-                    for k, v in self.weight_updater.gaussian_weights.items()
-                } if hasattr(self.weight_updater, 'gaussian_weights') else None,
-                'batch_size': self.weight_updater.batch_size
+                'state': {
+                    'best_round': self.best_round,
+                    'best_accuracy': self.best_combined_accuracy,
+                    'consecutive_successes': getattr(self, 'consecutive_successes', 0),
+                    'trials': getattr(self, 'trials', Trials)
+                }
             },
 
-            # Label encoder
-            'label_encoder': {
-                'classes': torch.tensor(self.label_encoder.classes_)
+            # Label processing
+            'labels': {
+                'encoder': {
+                    'classes': _safe_convert(self.label_encoder.classes_),
+                    'dtype': str(self.label_encoder.classes_.dtype)
+                }
             },
 
-            # Training state
-            'training_state': {
-                'best_round': self.best_round,
-                'best_combined_accuracy': self.best_combined_accuracy,
-                'best_round_initial_conditions': {
-                    'weights': self.best_round_initial_conditions['weights'],
-                    'likelihood_params': {
-                        'bin_probs': torch.stack(
-                            self.best_round_initial_conditions['likelihood_params']['bin_probs']
-                        ),
-                        'classes': torch.tensor(
-                            self.best_round_initial_conditions['likelihood_params']['classes']
-                        )
-                    },
-                    'feature_pairs': torch.tensor(
-                        self.best_round_initial_conditions['feature_pairs']
-                    ),
-                    'bin_edges': [
-                        torch.stack(edges) for edges in
-                        self.best_round_initial_conditions['bin_edges']
-                    ]
-                } if self.best_round_initial_conditions else None
-            },
-
-            # Configuration
-            'config': {
-                'n_bins_per_dim': self.n_bins_per_dim,
-                'learning_rate': self.learning_rate,
-                'cardinality_threshold': self.cardinality_threshold,
-                'batch_size': self.batch_size
+            # Version and metadata
+            'metadata': {
+                'save_time': datetime.datetime.now().isoformat(),
+                'pytorch_version': torch.__version__,
+                'model_version': 3,  # Incremented version
+                'checksum': hashlib.md5(str(datetime.datetime.now()).encode()).hexdigest()
             }
         }
 
-        # Create save path
+        # Add configuration if available
+        if hasattr(self, 'config'):
+            checkpoint['config'] = _safe_convert(self.config)
+
+        # Add data statistics if available
+        if hasattr(self, 'data_stats'):
+            checkpoint['data_stats'] = _safe_convert(self.data_stats)
+
+        # Atomic save with checksum validation
         save_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
         try:
-            # Save with proper serialization
-            torch.save(checkpoint, save_path, _use_new_zipfile_serialization=True)
-            print(f"{Colors.GREEN}Successfully saved complete model state to {save_path}{Colors.ENDC}")
-            return True
+            # Save to temporary file first
+            temp_path = save_path + '.tmp'
+            torch.save(checkpoint, temp_path)
+
+            # Verify the saved file
+            with open(temp_path, 'rb') as f:
+                saved_data = torch.load(f)
+                if not isinstance(saved_data, dict):
+                    raise RuntimeError("Saved file verification failed")
+
+            # Only replace existing file after successful verification
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            os.rename(temp_path, save_path)
+
         except Exception as e:
-            print(f"{Colors.RED}Failed to save model state: {str(e)}{Colors.ENDC}")
-            return False
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise RuntimeError(f"Failed to save model state: {str(e)}")
 
     def _load_full_state(self):
-        """Load complete model state from a single checkpoint file"""
+        """Loads complete model state with proper restoration"""
+        def _restore(obj):
+            """Restore objects from serialized format"""
+            if isinstance(obj, dict):
+                if '__tensor__' in obj:
+                    return torch.from_numpy(np.array(obj['data'])).to(self.device)
+                if '__ndarray__' in obj:
+                    return np.array(obj['data'])
+                return {k: _restore(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_restore(x) for x in obj]
+            return obj
+
         load_path = f"Model/Best_{self.model_type}_{self.dataset_name}_full.pt"
-
         if not os.path.exists(load_path):
-            print(f"{Colors.YELLOW}No saved state found at {load_path}{Colors.ENDC}")
-            return False
+            raise FileNotFoundError(f"No saved state found at {load_path}")
 
-        try:
-            # First try secure loading
-            try:
-                checkpoint = torch.load(load_path, map_location='cpu', weights_only=True)
-            except:
-                # Fallback to unsafe loading only if necessary
-                checkpoint = torch.load(load_path, map_location='cpu')
+        checkpoint = torch.load(load_path, map_location='cpu')
+        print(f'{Colors.YELLOW}The check point outputs are:{checkpoint} {Colors.ENDC}')
+        # Restore core parameters
+        self.model_type = checkpoint['model_type']
+        self.n_bins_per_dim = checkpoint['n_bins_per_dim']
+        self.current_W = _restore(checkpoint['weights']['current'])
+        self.best_W = _restore(checkpoint['weights']['best'])
 
-            # Version compatibility handling
-            version = checkpoint.get('version', 1)
-            if version < 4:
-                print(f"{Colors.YELLOW}Legacy checkpoint version {version} - converting to new format{Colors.ENDC}")
-                return self._convert_legacy_checkpoint(checkpoint)
+        # Restore feature processing
+        self.feature_columns = checkpoint['feature_columns']
+        self.feature_pairs = _restore(checkpoint['feature_pairs'])
+        self.target_column = checkpoint['target_column']
+        self.bin_edges = _restore(checkpoint['bin_edges'])
 
-            # Validate basic structure
-            required_keys = ['weights', 'feature_columns', 'feature_pairs', 'label_encoder']
-            for key in required_keys:
-                if key not in checkpoint:
-                    raise ValueError(f"Invalid checkpoint: missing {key}")
+        # Initialize weight updater
+        n_classes = len(_restore(checkpoint['likelihood_params']['classes']))
+        self.weight_updater = BinWeightUpdater(
+            n_classes=n_classes,
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=self.n_bins_per_dim,
+            batch_size=checkpoint['weight_updater']['batch_size']
+        )
 
-            # Restore core weights
-            self.current_W = checkpoint['weights']['current'].to(self.device)
-            self.best_W = checkpoint['weights']['best'].to(self.device)
-            self.best_error = checkpoint['weights'].get('best_error', float('inf'))
+        # Restore weight updater state
+        self.weight_updater.histogram_weights = _restore(checkpoint['weight_updater']['histogram'])
+        self.weight_updater.gaussian_weights = _restore(checkpoint['weight_updater']['gaussian'])
 
-            # Restore feature processing
-            self.feature_columns = checkpoint['feature_columns']
-            self.feature_pairs = checkpoint['feature_pairs'].tolist()
-            self.bin_edges = [edges.tolist() for edges in checkpoint['bin_edges']]
+        # Restore likelihood parameters
+        self.likelihood_params = {
+            'bin_probs': _restore(checkpoint['likelihood_params']['bin_probs']),
+            'bin_edges': self.bin_edges,
+            'classes': _restore(checkpoint['likelihood_params']['classes']),
+            'feature_pairs': self.feature_pairs
+        }
 
-            # Restore global stats
-            self.global_mean = checkpoint['global_stats']['mean'].numpy()
-            self.global_std = checkpoint['global_stats']['std'].numpy()
+        # Restore preprocessing
+        self.global_mean = _restore(checkpoint['global_mean'])
+        self.global_std = _restore(checkpoint['global_std'])
+        self.label_encoder = LabelEncoder()
+        self.label_encoder.classes_ = _restore(checkpoint['label_encoder']['classes'])
 
-            # Initialize weight updater
-            n_classes = len(checkpoint['label_encoder']['classes'])
-            self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
-                feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim,
-                batch_size=checkpoint['weight_updater'].get('batch_size', 128)
-            )
+        # Restore training state
+        self.best_round = checkpoint['training_state']['best_round']
+        self.learning_rate = checkpoint['training_state']['learning_rate']
+        self.best_combined_accuracy = checkpoint['training_state']['best_combined_accuracy']
 
-            # Restore likelihood parameters
-            if self.model_type == "Histogram":
-                self.likelihood_params = {
-                    'bin_probs': [p.to(self.device) for p in checkpoint['likelihood_params']['bin_probs']],
-                    'bin_edges': self.bin_edges,
-                    'classes': checkpoint['likelihood_params']['classes'].numpy(),
-                    'feature_pairs': checkpoint['likelihood_params']['feature_pairs'].tolist()
-                }
-            elif self.model_type == "Gaussian":
-                self.gaussian_params = {
-                    'means': checkpoint['gaussian_params']['means'].to(self.device),
-                    'covs': checkpoint['gaussian_params']['covs'].to(self.device),
-                    'classes': checkpoint['gaussian_params']['classes'].to(self.device),
-                    'feature_pairs': checkpoint['gaussian_params']['feature_pairs'].tolist()
-                }
-
-            # Restore label encoder
-            self.label_encoder = LabelEncoder()
-            self.label_encoder.classes_ = checkpoint['label_encoder']['classes'].numpy()
-
-            # Restore training state
-            self.best_round = checkpoint['training_state'].get('best_round')
-            self.best_combined_accuracy = checkpoint['training_state'].get('best_combined_accuracy', 0.0)
-
-            # Restore best round initial conditions if available
-            if checkpoint['training_state'].get('best_round_initial_conditions'):
-                self.best_round_initial_conditions = {
-                    'weights': checkpoint['training_state']['best_round_initial_conditions']['weights'].to(self.device),
-                    'likelihood_params': {
-                        'bin_probs': [p.to(self.device) for p in checkpoint['training_state']['best_round_initial_conditions']['likelihood_params']['bin_probs']],
-                        'classes': checkpoint['training_state']['best_round_initial_conditions']['likelihood_params']['classes'].numpy()
-                    },
-                    'feature_pairs': checkpoint['training_state']['best_round_initial_conditions']['feature_pairs'].tolist(),
-                    'bin_edges': [edges.tolist() for edges in checkpoint['training_state']['best_round_initial_conditions']['bin_edges']]
-                }
-
-            # Restore weight updater state
-            if 'weight_updater' in checkpoint:
-                for class_id, class_weights in checkpoint['weight_updater']['histogram_weights'].items():
-                    for pair_idx, weights in class_weights.items():
-                        self.weight_updater.histogram_weights[int(class_id)][int(pair_idx)] = weights.to(self.device)
-
-                if checkpoint['weight_updater'].get('gaussian_weights'):
-                    for class_id, class_weights in checkpoint['weight_updater']['gaussian_weights'].items():
-                        for pair_idx, weights in class_weights.items():
-                            self.weight_updater.gaussian_weights[int(class_id)][int(pair_idx)] = weights.to(self.device)
-
-            print(f"{Colors.GREEN}Successfully loaded complete model state from {load_path}{Colors.ENDC}")
-            return True
-
-        except Exception as e:
-            print(f"{Colors.RED}Error loading model state: {str(e)}{Colors.ENDC}")
-            traceback.print_exc()
-            return False
-
-    def _convert_legacy_checkpoint(self, checkpoint):
-        """Convert older checkpoint versions to current format"""
-        # Implementation for backward compatibility
-        # ... (detailed conversion logic for each version)
-        pass
-
-        def _initialize_missing_components(self):
-            """Initialize any missing components after loading"""
-            if not hasattr(self, 'likelihood_params') or self.likelihood_params is None:
-                print(f"{Colors.YELLOW}Initializing likelihood parameters{Colors.ENDC}")
-                if self.model_type == "Histogram":
-                    self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-                    )
-                elif self.model_type == "Gaussian":
-                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-                    )
-
-            if not hasattr(self, 'weight_updater') or self.weight_updater is None:
-                print(f"{Colors.YELLOW}Initializing weight updater{Colors.ENDC}")
-                n_classes = len(self.label_encoder.classes_)
-                self.weight_updater = BinWeightUpdater(
-                    n_classes=n_classes,
-                    feature_pairs=self.feature_pairs,
-                    n_bins_per_dim=self.n_bins_per_dim
-                )
-#------------------------------------------------------------------------------
     def _update_training_log(self, round_num: int, metrics: Dict):
         """Update training log with current metrics"""
         self.training_log = self.training_log.append({
@@ -6357,9 +6310,7 @@ def main():
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
                 dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name=dataset_name, use_previous_model=True)
-                if not model._load_full_state():
-                        raise RuntimeError("Failed to load model state")
+                predictor = DBNN(dataset_name=dataset_name)
                 print(f"Processing {dataset_name} in predict mode")
                 #if predictor.load_model(dataset_name):
                 # Use either the provided CSV or default dataset CSV
