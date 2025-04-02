@@ -1647,11 +1647,14 @@ class DBNN(GPUDBNN):
             config: DBNNConfig object or dictionary of parameters
             dataset_name: Name of the dataset (optional)
         """
-        # Initialize configuration
         if config is None:
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
+        elif isinstance(config, str):
+            # Handle case where dataset_name is passed as first argument
+            dataset_name = config
+            config = DBNNConfig()
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
@@ -4225,7 +4228,7 @@ class DBNN(GPUDBNN):
         if not os.path.exists(load_path):
             raise FileNotFoundError(f"No saved state found at {load_path}")
 
-        checkpoint = torch.load(load_path, map_location=self.device)
+        checkpoint = torch.load(load_path, map_location=self.device, weights_only=True)
 
         # 1. Restore Core Parameters
         self.model_type = checkpoint['model_parameters']['model_type']
