@@ -2225,7 +2225,28 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"{Colors.RED}Error loading model state: {str(e)}{Colors.ENDC}")
             traceback.print_exc()
+            _initialize_fresh_model()
             return False
+    def _initialize_fresh_model(self):
+        """Initialize all components for fresh start"""
+        self.current_W = None
+        self.best_W = None
+        self.feature_pairs = self._generate_feature_combinations(
+            self.X_tensor.shape[1],
+            self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+            self.config.get('likelihood_config', {}).get('max_combinations', None)
+        )
+
+        if self.model_type == "Histogram":
+            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+            )
+        else:
+            self.gaussian_params = self._compute_gaussian_params(
+                self.X_tensor, self.y_tensor
+            )
+
+        self._initialize_bin_weights()
 
     def _convert_legacy_checkpoint(self, checkpoint):
         """Convert older checkpoint versions to current format"""
