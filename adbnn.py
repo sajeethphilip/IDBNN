@@ -5279,41 +5279,6 @@ class DBNN(GPUDBNN):
                 W[class_id][feature_pair] = torch.tensor(0.1, dtype=torch.float32)
         return W
 
-    def compute_posterior(self, feature_data, class_id=None, epsilon=1e-10):
-        """Compute posterior probabilities"""
-        classes = list(self.likelihood_pdfs.keys())
-        n_classes = len(classes)
-        feature_pairs = list(self.likelihood_pdfs[classes[0]].keys())
-        log_likelihoods = torch.zeros(n_classes, dtype=torch.float32)
-
-        for idx, c_id in enumerate(classes):
-            class_log_likelihood = 0.0
-
-            for feat_i, feat_j in feature_pairs:
-                pair_data = torch.tensor([
-                    feature_data[feat_i].item(),
-                    feature_data[feat_j].item()
-                ], dtype=torch.float32).reshape(1, 2)
-
-                pdf_params = self.likelihood_pdfs[c_id][(feat_i, feat_j)]
-                pair_likelihood = self._multivariate_normal_pdf(
-                    pair_data,
-                    pdf_params['mean'],
-                    pdf_params['cov']
-                ).squeeze()
-
-                prior = self.current_W[c_id][(feat_i, feat_j)].item()
-                likelihood_term = (pair_likelihood * prior + epsilon).item()
-                class_log_likelihood += torch.log(torch.tensor(likelihood_term))
-
-            log_likelihoods[idx] = class_log_likelihood
-
-        max_log_likelihood = torch.max(log_likelihoods)
-        likelihoods = torch.exp(log_likelihoods - max_log_likelihood)
-        posteriors = likelihoods / (likelihoods.sum() + epsilon)
-
-        return {c_id: posteriors[idx].item() for idx, c_id in enumerate(classes)}
-
 
     def fit_predict(self, batch_size: int = 128, save_path: str = None):
         """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
