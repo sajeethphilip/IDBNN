@@ -114,7 +114,7 @@ class DBNNPredictor:
         self.label_encoder = LabelEncoder()
         self.feature_pairs = None
         self.likelihood_params = None
-        self.weight_updater = None
+        #self.weight_updater = None
         self.current_W = None
         self.scaler = None
         self.categorical_encoders = None
