@@ -1773,7 +1773,16 @@ class DBNN(GPUDBNN):
 
              # Store original data (CPU only)
             self.Original_data = df.copy()  # This is the line that was missing
-            self.X_Orig = df.drop(columns=[self.target_column]).copy()  # Add this line
+
+            # Handle prediction mode (target column may not exist)
+            if Predict and self.target_column not in df.columns:
+                DEBUG.log(f"Prediction mode - target column '{self.target_column}' not found")
+                self.X_Orig = df.copy()  # Use all columns for prediction
+            else:
+                # Training mode - ensure target column exists
+                if self.target_column not in df.columns:
+                    raise ValueError(f"Target column '{self.target_column}' not found in dataset")
+                self.X_Orig = df.drop(columns=[self.target_column]).copy()
 
             # Filter features if specified
             if 'column_names' in self.config:
@@ -5090,9 +5099,12 @@ class DBNN(GPUDBNN):
                 y_true = None
 
             # Get features (drop target column if exists)
-            X = df.drop(columns=[self.target_column]
-                       if hasattr(self, 'target_column') and self.target_column in df.columns
-                       else [])
+            # Store original data (without target column if it exists)
+            if self.target_column in df.columns:
+                X = df.drop(columns=[self.target_column])
+            else:
+                X = df.copy()
+                DEBUG.log("No target column found - running in pure prediction mode")
 
             # Generate predictions
             print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
