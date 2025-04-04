@@ -3673,50 +3673,47 @@ class DBNN(GPUDBNN):
             print("\033[KWarning: No best weights to save")
             return
 
-        try:
-            # Create directory for model components
-            model_dir = os.path.join('Model')
-            os.makedirs(model_dir, exist_ok=True)
-            print(f"\033[KCreated model directory at {model_dir}")
 
-            # Convert weights to numpy and then to list for JSON serialization
-            #weights_np = self.best_W.cpu().numpy()
-            weights_np = self.current_W.cpu().numpy()
+        # Create directory for model components
+        model_dir = os.path.join('Model')
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"\033[KCreated model directory at {model_dir}")
 
-            # Save weights
-            weights_dict = {
-                'version': 2,
-                'weights': weights_np.tolist(),
-                'shape': list(weights_np.shape),
-                'dtype': str(weights_np.dtype)
-            }
+        # Convert weights to numpy and then to list for JSON serialization
+        #weights_np = self.best_W.cpu().numpy()
+        weights_np = self.current_W.cpu().numpy()
 
-            weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
-            print(f"\033[KAttempting to save weights to {weights_file}")
+        # Save weights
+        weights_dict = {
+            'version': 2,
+            'weights': weights_np.tolist(),
+            'shape': list(weights_np.shape),
+            'dtype': str(weights_np.dtype)
+        }
 
-            # Use atomic write to prevent corruption
-            temp_file = weights_file + '.tmp'
-            with open(temp_file, 'w') as f:
-                json.dump(weights_dict, f, indent=2)
-                f.flush()  # Ensure the buffer is flushed to disk
-                os.fsync(f.fileno())  # Force write to disk
+        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
+        print(f"\033[KAttempting to save weights to {weights_file}")
 
-            # Atomic rename
-            os.replace(temp_file, weights_file)
-            print(f"\033[KSaved weights to {weights_file}")
+        # Use atomic write to prevent corruption
+        temp_file = weights_file + '.tmp'
+        with open(temp_file, 'w') as f:
+            json.dump(weights_dict, f, indent=2)
+            f.flush()  # Ensure the buffer is flushed to disk
+            os.fsync(f.fileno())  # Force write to disk
 
-            # Save training data if available
-            if hasattr(self, 'train_indices') and hasattr(self, 'data'):
-                train_data = self.data.iloc[self.train_indices]
-                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
+        # Atomic rename
+        os.replace(temp_file, weights_file)
+        print(f"\033[KSaved weights to {weights_file}")
 
-                print(f"\033[KAttempting to save training data to {train_data_file}")
-                train_data.to_csv(train_data_file, index=False)
-                print(f"\033[KSaved training data to {train_data_file}")
+        # Save training data if available
+        if hasattr(self, 'train_indices') and hasattr(self, 'data'):
+            train_data = self.data.iloc[self.train_indices]
+            train_data_file = os.path.join(model_dir, 'best_training_data.csv')
 
-        except Exception as e:
-            print(f"\033[KError saving best weights: {str(e)}")
-            traceback.print_exc()
+            print(f"\033[KAttempting to save training data to {train_data_file}")
+            train_data.to_csv(train_data_file, index=False)
+            print(f"\033[KSaved training data to {train_data_file}")
+
 
 
     def _load_best_weights(self):
