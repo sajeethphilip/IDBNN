@@ -1493,6 +1493,7 @@ class DBNN(GPUDBNN):
         self.data = self._load_dataset()
 
         # Preprocess features and target
+        predict_mode = self.config.get('execution_flags', {}).get('predict', False)
         if not predict_mode:
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
