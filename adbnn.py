@@ -4995,15 +4995,78 @@ class DBNN(GPUDBNN):
             except Exception as e:
                 print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
-    def predict_from_file(self, input_csv: str, output_path: str = None) -> Dict:
-        """Make predictions from CSV file with robust feature handling"""
+    def predict_from_file(self, input_csv: str, output_path: str = None,
+                         image_dir: str = None, batch_size: int = 128) -> Dict:
+        """
+        Make predictions from CSV file with comprehensive output handling.
+
+        Args:
+            input_csv: Path to input CSV file
+            output_path: Directory to save prediction results
+            image_dir: Optional directory containing images for mosaics
+            batch_size: Batch size for prediction
+
+        Returns:
+            Dictionary containing prediction results and metrics
+        """
         try:
             # Load data
             df = pd.read_csv(input_csv)
-            print(f"\nProcessing predictions for: {input_csv}")
+            print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
 
             # Store original data
             self.X_orig = df.copy()
+
+            # Handle output directory
+            if output_path:
+                # Handle existing output path
+                if os.path.exists(output_path):
+                    print(f"{Colors.BLUE}Output directory exists: {output_path}{Colors.ENDC}")
+                    print(f"{Colors.BOLD}Choose an action:{Colors.ENDC}")
+                    print("1. Overwrite existing content")
+                    print("2. Create new version (append timestamp)")
+                    print("3. Specify different output directory")
+                    print("q. Quit")
+
+                    while True:
+                        choice = input(f"{Colors.YELLOW}Your choice (1-3/q): {Colors.ENDC}").strip().lower()
+
+                        if choice == '1':  # Overwrite
+                            print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
+                            # Clear existing predictions file if it exists
+                            predictions_path = os.path.join(output_path, 'predictions.csv')
+                            if os.path.exists(predictions_path):
+                                os.remove(predictions_path)
+                            # Clear mosaics directory if exists
+                            mosaic_dir = os.path.join(output_path, 'mosaics')
+                            if os.path.exists(mosaic_dir):
+                                shutil.rmtree(mosaic_dir)
+                            break
+
+                        elif choice == '2':  # New version
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            output_path = f"{output_path}_{timestamp}"
+                            os.makedirs(output_path, exist_ok=True)
+                            print(f"{Colors.GREEN}Creating new version at: {output_path}{Colors.ENDC}")
+                            break
+
+                        elif choice == '3':  # Different directory
+                            new_dir = input(f"{Colors.YELLOW}Enter new directory path: {Colors.ENDC}").strip()
+                            if new_dir:
+                                output_path = new_dir
+                                os.makedirs(output_path, exist_ok=True)
+                                print(f"{Colors.GREEN}Using new directory: {output_path}{Colors.ENDC}")
+                                break
+                            else:
+                                print(f"{Colors.RED}Invalid path. Please try again.{Colors.ENDC}")
+
+                        elif choice == 'q':  # Quit
+                            return None
+
+                        else:
+                            print(f"{Colors.RED}Invalid option. Please choose 1-3 or q.{Colors.ENDC}")
+                else:
+                    os.makedirs(output_path, exist_ok=True)
 
             # Handle true labels if target column exists
             if hasattr(self, 'target_column') and self.target_column in df.columns:
@@ -5012,10 +5075,10 @@ class DBNN(GPUDBNN):
                     if hasattr(self.label_encoder, 'classes_'):
                         y_true = self.label_encoder.transform(y_true_str)
                     else:
-                        print("Warning: Label encoder not fitted, using raw labels")
+                        print(f"{Colors.YELLOW}Warning: Label encoder not fitted, using raw labels{Colors.ENDC}")
                         y_true = y_true_str
                 except ValueError as e:
-                    print(f"Error encoding true labels: {str(e)}")
+                    print(f"{Colors.RED}Error encoding true labels: {str(e)}{Colors.ENDC}")
                     print(f"Encoder knows: {self.label_encoder.classes_}")
                     print(f"Data contains: {np.unique(y_true_str)}")
                     raise
@@ -5029,47 +5092,26 @@ class DBNN(GPUDBNN):
                        else [])
 
             # Generate predictions
-            print("Generating predictions...")
-            y_pred = self.predict(X)
+            print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
+            y_pred = self.predict(X, batch_size=batch_size)
 
-            # Generate detailed results using ORIGINAL features (X_orig)
-            print("Generating detailed predictions...")
+            # Generate detailed results
+            print(f"{Colors.BLUE}Generating detailed predictions...{Colors.ENDC}")
             results = self._generate_detailed_predictions(
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
                 true_labels=y_true_str if y_true_str is not None else None
             )
 
-
-            # Calculate probabilities if requested
-            if self.config.get('training_params', {}).get('save_probabilities', False):
-                print("Computing class probabilities...")
-                batch_size = self.batch_size
-                all_probabilities = []
-
-                for i in range(0, len(X_tensor), batch_size):
-                    batch_X = X_tensor[i:i+batch_size]
-                    if self.model_type == "Histogram":
-                        batch_probs, _ = self._compute_batch_posterior(batch_X)
-                    else:
-                        batch_probs, _ = self._compute_batch_posterior_std(batch_X)
-                    all_probabilities.append(batch_probs.cpu().numpy())
-
-                if all_probabilities:
-                    all_probabilities = np.vstack(all_probabilities)
-                    if hasattr(self.label_encoder, 'classes_'):
-                        for i, class_name in enumerate(self.label_encoder.classes_):
-                            if i < all_probabilities.shape[1]:
-                                results[f'prob_{class_name}'] = all_probabilities[:, i]
-                    results['max_probability'] = all_probabilities.max(axis=1)
-
             # Save results if output path specified
             if output_path:
-                os.makedirs(output_path, exist_ok=True)
-                print(f"Saving results to {output_path}")
+                # Standard paths
+                predictions_path = os.path.join(output_path, 'predictions.csv')
+                metrics_path = os.path.join(output_path, 'metrics.txt')
 
                 # Save predictions
-                results.to_csv(os.path.join(output_path, 'predictions.csv'), index=False)
+                results.to_csv(predictions_path, index=False)
+                print(f"{Colors.GREEN}Predictions saved to {predictions_path}{Colors.ENDC}")
 
                 # Save metadata
                 metadata = {
@@ -5077,7 +5119,7 @@ class DBNN(GPUDBNN):
                     'model_type': self.model_type,
                     'timestamp': pd.Timestamp.now().isoformat(),
                     'feature_columns': list(X.columns),
-                    'target_column': self.target_column if has  (self, 'target_column') else None,
+                    'target_column': self.target_column if hasattr(self, 'target_column') else None,
                     'label_encoder_classes': (self.label_encoder.classes_.tolist()
                                             if hasattr(self.label_encoder, 'classes_')
                                             else None)
@@ -5085,22 +5127,55 @@ class DBNN(GPUDBNN):
                 with open(os.path.join(output_path, 'metadata.json'), 'w') as f:
                     json.dump(metadata, f, indent=2)
 
-            # Compute and print metrics if we have true labels
+                # --- Mosaic Generation (if image directory specified) ---
+                if image_dir and 'image_name' in results.columns:
+                    mosaic_dir = os.path.join(output_path, 'mosaics')
+                    os.makedirs(mosaic_dir, exist_ok=True)
+
+                    for class_name, group in results.groupby('predicted_class'):
+                        valid_images = []
+                        for _, row in group.iterrows():
+                            img_path = os.path.join(image_dir, row['image_name'])
+                            if os.path.exists(img_path):
+                                valid_images.append(row)
+
+                        if valid_images:
+                            class_df = pd.DataFrame(valid_images)
+                            safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+                            mosaic_path = os.path.join(mosaic_dir, f"mosaic_{safe_class_name}.jpg")
+
+                            try:
+                                create_prediction_mosaic(
+                                    image_dir=image_dir,
+                                    csv_path=None,
+                                    output_path=mosaic_path,
+                                    mosaic_size=(2000, 2000),
+                                    tile_size=(200, 200),
+                                    max_images=100
+                                )
+                                print(f"{Colors.GREEN}Created mosaic for class {class_name}{Colors.ENDC}")
+                            except Exception as e:
+                                print(f"{Colors.RED}Error creating mosaic: {str(e)}{Colors.ENDC}")
+
+            # Compute and return metrics if we have true labels
             metrics = {}
             if y_true is not None and y_pred is not None:
-                print("\nComputing evaluation metrics...")
+                print(f"\n{Colors.BLUE}Computing evaluation metrics...{Colors.ENDC}")
 
                 # Ensure we have numpy arrays for sklearn metrics
                 y_true_np = y_true if isinstance(y_true, (np.ndarray, list)) else y_true.cpu().numpy()
                 y_pred_np = y_pred if isinstance(y_pred, (np.ndarray, list)) else y_pred.cpu().numpy()
 
                 # Calculate metrics
-                metrics['accuracy'] = accuracy  (y_true_np, y_pred_np)
-                metrics['classification_report'] = classification_report  (y_true_np, y_pred_np,
-                                                                         target_names=self.label_encoder.classes_
-                                                                         if hasattr(self.label_encoder, 'classes_')
-                                                                         else None)
-                metrics['confusion_matrix'] = confusion_matrix(y_true_n  , y_pred_np).tolist()
+                metrics['accuracy'] = accuracy_score(y_true_np, y_pred_np)
+                metrics['classification_report'] = classification_report(
+                    y_true_np,
+                    y_pred_np,
+                    target_names=self.label_encoder.classes_
+                    if hasattr(self.label_encoder, 'classes_')
+                    else None
+                )
+                metrics['confusion_matrix'] = confusion_matrix(y_true_np, y_pred_np).tolist()
 
                 # Print colored confusion matrix
                 if hasattr(self.label_encoder, 'classes_'):
@@ -5111,16 +5186,22 @@ class DBNN(GPUDBNN):
                         header="Prediction Results"
                     )
                 else:
-                    print("Warning: No class labels available for confusion matrix")
+                    print(f"{Colors.YELLOW}Warning: No class labels available for confusion matrix{Colors.ENDC}")
+
+                # Save metrics if output path exists
+                if output_path:
+                    with open(metrics_path, 'w') as f:
+                        f.write(metrics['classification_report'])
+                    print(f"{Colors.GREEN}Metrics saved to {metrics_path}{Colors.ENDC}")
 
             return {
                 'predictions': results,
-                'metrics': metrics,
+                'metrics': metrics if metrics else None,
                 'metadata': metadata if output_path else None
             }
 
         except Exception as e:
-            print(f"Prediction failed: {str(e)}")
+            print(f"{Colors.RED}Prediction failed: {str(e)}{Colors.ENDC}")
             traceback.print_exc()
             raise
 
