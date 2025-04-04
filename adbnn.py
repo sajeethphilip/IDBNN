@@ -3612,7 +3612,7 @@ class DBNN(GPUDBNN):
 
                 # Store original for results
                 original_df = X.copy()
-                X_tensor = self.preprocess_data(X_filtered)
+                X_tensor = self._preprocess_data(X_filtered)
             else:
                 raise RuntimeError("Model not properly initialized - missing feature columns")
         else:
