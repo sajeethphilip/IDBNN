@@ -2903,81 +2903,48 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 
-    def _generate_feature_combinations(self, feature_indices: Union[List[int], int], group_size: int = None, max_combinations: int = None) -> torch.Tensor:
-        """Generate and save/load consistent feature combinations with memory-efficient handling.
-
-        Enhanced version that:
-        1. Maintains all existing functionality
-        2. Adds memory optimization for large feature spaces
-        3. Preserves the same interface and behavior
-        4. Adds better progress tracking
+    def _generate_feature_combinations(self, feature_indices: Union[List[int], int],
+                                     group_size: int = 2,
+                                     max_combinations: int = None) -> torch.Tensor:
         """
-        # Ensure feature_indices is a list (maintaining existing behavior)
+        Generate feature combinations in-memory without file I/O.
+        Only generates if feature_pairs doesn't already exist.
+        """
+        # If we already have feature pairs, return them
+        if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
+            return self.feature_pairs
+
+        # Convert feature_indices to list if it's an integer
         if isinstance(feature_indices, int):
             feature_indices = list(range(feature_indices))
 
-        # Get parameters with fallbacks (maintaining existing config access pattern)
-        config = self.config
+        # Get parameters from config with defaults
+        config = self.config.get('likelihood_config', {})
         group_size = group_size or config.get('feature_group_size', 2)
-        max_combinations = max_combinations or config.get('max_combinations', None)
-        bin_sizes = config.get('bin_sizes', [128])
+        max_combinations = max_combinations or config.get('max_combinations')
 
-        # Debug output (preserving existing format)
-        debug_msg = [
-            f"[DEBUG] Generating feature combinations after filtering:",
-            f"- n_features: {len(feature_indices)}",
-            f"- group_size: {group_size}",
-            f"- max_combinations: {max_combinations}",
-            f"- bin_sizes: {bin_sizes}"
-        ]
-        print("\033[K" + "\n\033[K".join(debug_msg))
+        print("\033[K" + f"[DEBUG] Generating feature combinations in-memory:")
+        print("\033[K" + f"- n_features: {len(feature_indices)}")
+        print("\033[K" + f"- group_size: {group_size}")
+        print("\033[K" + f"- max_combinations: {max_combinations}")
 
-        # Create path for storing feature combinations (same as original)
-        dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
-        base_path = config.get('training_params', {}).get('training_save_path', 'training_data')
-        combinations_path = os.path.join(base_path, dataset_folder, 'feature_combinations.pkl')
-
-        # Check for cached combinations (same behavior)
-        if os.path.exists(combinations_path):
-            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
-            print("\033[K" + f"[DEBUG] Loading cached feature combinations from {combinations_path}")
-            print("\033[K" + "---------------------BEWARE!! Remove if you get Error on retraining------------------------")
-            with open(combinations_path, 'rb') as f:
-                combinations_tensor = pickle.load(f)
-            print("\033[K" + f"[DEBUG] Loaded feature combinations: {combinations_tensor.shape}")
-            return combinations_tensor.to(self.device)
-
-        # New memory-efficient generation logic
-        print("\033[K" + f"[DEBUG] Generating new feature combinations for {self.dataset_name}")
-
-        # Calculate total possible combinations
+        # Generate all possible combinations if under limit
         total_possible = comb(len(feature_indices), group_size)
-        print("\033[K" + f"[DEBUG] Total possible combinations: {total_possible:,}")
-
-        # Case 1: Fewer combinations than max - generate all
         if max_combinations is None or total_possible <= max_combinations:
             print("\033[K" + "[DEBUG] Generating all possible combinations")
             all_combinations = list(combinations(feature_indices, group_size))
-        # Case 2: Too many combinations - use random sampling
         else:
             print("\033[K" + f"[DEBUG] Sampling {max_combinations} random combinations")
             all_combinations = self._sample_combinations(feature_indices, group_size, max_combinations)
 
-        # Remove duplicates and sort (maintaining original behavior)
+        # Remove duplicates and sort
         unique_combinations = list({tuple(sorted(comb)) for comb in all_combinations})
         unique_combinations = sorted(unique_combinations)
-
-        # Convert to tensor (on CPU first to save GPU memory)
-        combinations_tensor = torch.tensor(unique_combinations, device='cpu')
         print("\033[K" + f"[DEBUG] Generated {len(unique_combinations)} unique feature combinations")
 
-        # Save the new combinations (same as original)
-        os.makedirs(os.path.dirname(combinations_path), exist_ok=True)
-        with open(combinations_path, 'wb') as f:
-            pickle.dump(combinations_tensor.cpu(), f)
-        print("\033[K" + f"[DEBUG] Saved combinations to {combinations_path}")
-
-        return combinations_tensor.to(self.device)
+        # Convert to tensor and store in the model
+        self.feature_pairs = torch.tensor(unique_combinations, device=self.device)
+        return self.feature_pairs
 
     def _sample_combinations(self, features: List[int], group_size: int, max_samples: int) -> List[Tuple[int]]:
         """Memory-efficient combination sampling for large feature spaces."""
@@ -3005,6 +2972,10 @@ class DBNN(GPUDBNN):
         """Memory-optimized pairwise likelihood computation with dynamic allocation"""
         DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
         print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
+
+        # Generate feature pairs if they don't exist
+        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
+            self._generate_feature_combinations(feature_dims)
 
         # Move inputs to CPU first to save GPU memory
         dataset_cpu = dataset.cpu()
@@ -3209,7 +3180,9 @@ class DBNN(GPUDBNN):
         """Optimized Gaussian likelihood computation with precomputed feature pairs and Gaussian parameters"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel_std")
         print("\033[K" +"Computing Gaussian likelihoods...")
-
+        # Generate feature pairs if they don't exist
+        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
+            self._generate_feature_combinations(feature_dims)
         # Input validation and preparation
         dataset = torch.as_tensor(dataset, device=self.device).contiguous()
         labels = torch.as_tensor(labels, device=self.device).contiguous()
