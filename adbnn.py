@@ -1081,15 +1081,12 @@ class GPUDBNN:
 
         # Handle fresh start after configuration is loaded
         # Handle model state based on flags
-        if not fresh and use_previous_model:
+        if  use_previous_model:
             # Load previous model state
+            self.label_encoder =load_label_encoder(dataset_name)
             self._load_model_components()
-            self._load_best_weights()
-            self._load_categorical_encoders()
-        elif fresh and use_previous_model:
-            # Use previous model weights but start with fresh data
-            self._load_best_weights()
-            self._load_categorical_encoders()
+            #self._load_best_weights()
+            #self._load_categorical_encoders()
         else:
             # Complete fresh start
             self._clean_existing_model()
@@ -2454,8 +2451,9 @@ class DBNN(GPUDBNN):
             if self.use_previous_model:
                 print("\033[K" +"Loading previous model state")
                 if self._load_model_components():
-                    self._load_best_weights()
-                    self._load_categorical_encoders()
+                    self.label_encoder =load_label_encoder(dataset_name)
+                    #self._load_best_weights()
+                    #self._load_categorical_encoders()
                     model_loaded = True
 
                     if not self.fresh_start:
@@ -4532,7 +4530,7 @@ class DBNN(GPUDBNN):
                 print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
                 self.best_combined_accuracy = combined_accuracy
                 self._save_model_components()
-                self._save_best_weights()
+                #self._save_best_weights()
 
             self.reset_to_initial_state() #After saving the weights, reset to inital state for next round.
 
