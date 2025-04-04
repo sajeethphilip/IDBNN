@@ -5135,7 +5135,7 @@ class DBNN(GPUDBNN):
                     json.dump(metadata, f, indent=2)
 
                 # --- Mosaic Generation (if image directory specified) ---
-                if image_dir and 'image_name' in results.columns:
+                if 'original_filename' and 'filepath' in results.columns:
                     mosaic_dir = os.path.join(output_path, 'mosaics')
                     os.makedirs(mosaic_dir, exist_ok=True)
 
