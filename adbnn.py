@@ -5902,7 +5902,7 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
 
 
 
-def load_label_encoder_old(dataset_name):
+def load_label_encoder(dataset_name):
     encoder_path = f'Model/Best_Histogram _{dataset_name}_label_encoder.pkl'
     if os.path.exists(encoder_path):
         with open(encoder_path, 'rb') as f:
