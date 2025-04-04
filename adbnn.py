@@ -5902,8 +5902,8 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
 
 
 
-def load_label_encoder(dataset_name):
-    encoder_path = os.path.join('Model',  f'Best_{model_type}_{dataset_name}_label_encoder.pkl')
+def load_label_encoder_old(dataset_name):
+    encoder_path = f'Model/Best_Histogram _{dataset_name}_label_encoder.pkl'
     if os.path.exists(encoder_path):
         with open(encoder_path, 'rb') as f:
             label_encoder = pickle.load(f)
@@ -6432,7 +6432,7 @@ def main():
                 #model._save_best_weights()
                 #save_label_encoder(model.label_encoder, dataset_name)
                 model._load_model_components()
-                model.label_encoder = self.load_label_encoder(dataset_name)
+                model.label_encoder = load_label_encoder(dataset_name)
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
