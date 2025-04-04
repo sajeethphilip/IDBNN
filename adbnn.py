@@ -2451,7 +2451,7 @@ class DBNN(GPUDBNN):
             if self.use_previous_model:
                 print("\033[K" +"Loading previous model state")
                 if self._load_model_components():
-                    self.label_encoder =load_label_encoder(dataset_name)
+                    self.label_encoder =load_label_encoder(self.dataset_name)
                     #self._load_best_weights()
                     #self._load_categorical_encoders()
                     model_loaded = True
