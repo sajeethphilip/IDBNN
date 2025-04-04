@@ -6432,7 +6432,7 @@ def main():
                 #model._save_best_weights()
                 #save_label_encoder(model.label_encoder, dataset_name)
                 model._load_model_components()
-                model.label_encoder = load_label_encoder(dataset_name)
+                model.label_encoder = self.load_label_encoder(dataset_name)
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
