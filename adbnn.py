@@ -5050,14 +5050,15 @@ class DBNN(GPUDBNN):
         try:
             # Load data
             df = pd.read_csv(input_csv)
+            has_true_labels = hasattr(self, 'target_column') and self.target_column in df.columns
 
             # Separate features and target
             if hasattr(self, 'target_column') and self.target_column in df.columns:
                 X = df.drop(columns=[self.target_column])
-                y = df[self.target_column]
+                y_true = df[self.target_column]
             else:
                 X = df
-                y = None
+                y_true = None
 
             # Preprocess features
             X_processed = self._preprocess_data(X, is_training=False)
@@ -5071,10 +5072,11 @@ class DBNN(GPUDBNN):
                                          device=self.device)
 
             # Make predictions
-            predictions = self.predict(X_tensor)
+            y_pred = self.predict(X_tensor)
 
             # Generate detailed results
-            results = self._generate_detailed_predictions(X, predictions, y)
+            results = self._generate_detailed_predictions(X, y_pred, y_true)
+            self.print_colored_confusion_matrix(y_true, y_pred,header="Prediction data")
 
             # Handle output directory
             if output_path:
@@ -5393,7 +5395,7 @@ class DBNN(GPUDBNN):
             print(f"Error loading model: {str(e)}")
             traceback.print_exc()
             return False
-#---------------------------------------------------DBNN Predcition Functions --------------------------------
+#---------------------------------------------------DBNN Prediction Functions --------------------------------
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
     """Run benchmark using GPU-optimized implementation"""
