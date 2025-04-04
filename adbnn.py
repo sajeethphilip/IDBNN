@@ -1796,7 +1796,7 @@ class DBNN(GPUDBNN):
                 target_col = df.columns[target_col]
                 self.config['target_column'] = target_col
 
-            if target_col not in df.columns:
+            if not predict_mode and target_col not in df.columns:
                 raise ValueError(f"Target column '{target_col}' not found")
 
             # Shuffling logic (CPU only)
