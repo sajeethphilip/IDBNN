@@ -5012,103 +5012,154 @@ class DBNN(GPUDBNN):
             except Exception as e:
                 print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
-    def predict_from_file(self, input_csv: str, output_path: str = None, overwrite_policy: str = 'ask') -> Dict:
+    def predict_from_file(self, input_csv: str, output_path: str = None) -> Dict:
         """
-        Make predictions from CSV file with comprehensive error handling and user options.
+        Make predictions from a CSV file and save results, with robust label handling.
 
-        Parameters:
+        Args:
             input_csv: Path to input CSV file
-            output_path: Directory to save predictions (None to skip saving)
-            overwrite_policy:
-                'ask' - prompt user (default)
-                'overwrite' - overwrite without asking
-                'version' - create new version
-                'skip' - skip if exists
+            output_path: Directory to save prediction results (optional)
+
+        Returns:
+            Dictionary containing prediction results and metrics
         """
         try:
             # Load data
             df = pd.read_csv(input_csv)
-            # Ensure we have a properly initialized label encoder
-            if not hasattr(self.label_encoder, 'classes_'):
-                if hasattr(self, 'data'):
-                    # If we have data, fit the encoder (shouldn't happen in prediction)
-                    self.label_encoder.fit(self.data[self.target_column])
-                else:
-                    raise RuntimeError("Label encoder not initialized and no data available to fit it")
-            has_true_labels = hasattr(self, 'target_column') and self.target_column in df.columns
+            print(f"\nProcessing predictions for: {input_csv}")
 
-            # Separate features and target
+            # Store original data
+            self.X_orig = df.copy()
+
+            # Handle true labels if target column exists
             if hasattr(self, 'target_column') and self.target_column in df.columns:
-                X = df.drop(columns=[self.target_column])
-                y_true = df[self.target_column]
+                y_true_str = df[self.target_column]
+                try:
+                    # Transform true labels to numeric if encoder is fitted
+                    if hasattr(self.label_encoder, 'classes_'):
+                        y_true = self.label_encoder.transform(y_true_str)
+                    else:
+                        print("Warning: Label encoder not fitted, using raw labels")
+                        y_true = y_true_str
+                except ValueError as e:
+                    print(f"Error encoding true labels: {str(e)}")
+                    print(f"Encoder knows: {self.label_encoder.classes_}")
+                    print(f"Data contains: {np.unique(y_true_str)}")
+                    raise
             else:
-                X = df
+                y_true_str = None
                 y_true = None
+
+            # Get features (drop target column if it exists)
+            X = df.drop(columns=[self.target_column]
+                    if hasattr(self, 'target_column') and self.target_column in df.columns
+                    else [])
 
             # Preprocess features
             X_processed = self._preprocess_data(X, is_training=False)
-
-            # Convert to tensor properly
-            if isinstance(X_processed, torch.Tensor):
-                X_tensor = X_processed
-            else:
-                X_tensor = torch.as_tensor(X_processed.values if isinstance(X_processed, pd.DataFrame) else X_processed,
-                                         dtype=torch.float32,
-                                         device=self.device)
+            X_tensor = X_processed if isinstance(X_processed, torch.Tensor) \
+                      else torch.tensor(X_processed, dtype=torch.float32, device=self.device)
 
             # Make predictions
+            print("Generating predictions...")
             y_pred = self.predict(X_tensor)
 
-            # Generate detailed results
-            results = self._generate_detailed_predictions(X, y_pred, y_true)
-            self.print_colored_confusion_matrix(y_true, y_pred,header="Prediction data")
+            # Convert predictions to string labels if encoder is available
+            if hasattr(self.label_encoder, 'classes_'):
+                y_pred_str = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+            else:
+                y_pred_str = y_pred.cpu().numpy()
 
-            # Handle output directory
+            # Generate detailed predictions dataframe
+            print("Generating detailed predictions...")
+            results = self._generate_detailed_predictions(
+                X_orig=X,
+                predictions=y_pred,
+                true_labels=y_true_str if y_true_str is not None else None
+            )
+
+            # Calculate probabilities if requested
+            if self.config.get('training_params', {}).get('save_probabilities', False):
+                print("Computing class probabilities...")
+                batch_size = self.batch_size
+                all_probabilities = []
+
+                for i in range(0, len(X_tensor), batch_size):
+                    batch_X = X_tensor[i:i+batch_size]
+                    if self.model_type == "Histogram":
+                        batch_probs, _ = self._compute_batch_posterior(batch_X)
+                    else:
+                        batch_probs, _ = self._compute_batch_posterior_std(batch_X)
+                    all_probabilities.append(batch_probs.cpu().numpy())
+
+                if all_probabilities:
+                    all_probabilities = np.vstack(all_probabilities)
+                    if hasattr(self.label_encoder, 'classes_'):
+                        for i, class_name in enumerate(self.label_encoder.classes_):
+                            if i < all_probabilities.shape[1]:
+                                results[f'prob_{class_name}'] = all_probabilities[:, i]
+                    results['max_probability'] = all_probabilities.max(axis=1)
+
+            # Save results if output path specified
             if output_path:
-                output_file = os.path.join(output_path, 'predictions.csv')
+                os.makedirs(output_path, exist_ok=True)
+                print(f"Saving results to {output_path}")
 
-                # Check if file exists and handle according to policy
-                if os.path.exists(output_file):
-                    if overwrite_policy == 'ask':
-                        print(f"Output file exists: {output_file}")
-                        choice = input("Choose action:\n1. Overwrite\n2. Create new version\n3. Skip saving\n> ").strip()
-                        if choice == '1':
-                            overwrite_policy = 'overwrite'
-                        elif choice == '2':
-                            overwrite_policy = 'version'
-                        else:
-                            overwrite_policy = 'skip'
+                # Save predictions
+                results.to_csv(os.path.join(output_path, 'predictions.csv'), index=False)
 
-                    if overwrite_policy == 'version':
-                        base, ext = os.path.splitext(output_file)
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        output_file = f"{base}_{timestamp}{ext}"
-                    elif overwrite_policy == 'skip':
-                        print(f"Skipping save - file exists: {output_file}")
-                        return {
-                            'predictions': results,
-                            'output_file': None,
-                            'message': 'Skipped saving - file exists'
-                        }
+                # Save metadata
+                metadata = {
+                    'dataset': os.path.basename(input_csv),
+                    'model_type': self.model_type,
+                    'timestamp': pd.Timestamp.now().isoformat(),
+                    'feature_columns': list(X.columns),
+                    'target_column': self.target_column if has  (self, 'target_column') else None,
+                    'label_encoder_classes': (self.label_encoder.classes_.tolist()
+                                            if hasattr(self.label_encoder, 'classes_')
+                                            else None)
+                }
+                with open(os.path.join(output_path, 'metadata.json'), 'w') as f:
+                    json.dump(metadata, f, indent=2)
 
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            # Compute and print metrics if we have true labels
+            metrics = {}
+            if y_true is not None and y_pred is not None:
+                print("\nComputing evaluation metrics...")
 
-                # Save results
-                results.to_csv(output_file, index=False)
-                print(f"Predictions saved to {output_file}")
+                # Ensure we have numpy arrays for sklearn metrics
+                y_true_np = y_true if isinstance(y_true, (np.ndarray, list)) else y_true.cpu().numpy()
+                y_pred_np = y_pred if isinstance(y_pred, (np.ndarray, list)) else y_pred.cpu().numpy()
+
+                # Calculate metrics
+                metrics['accuracy'] = accuracy  (y_true_np, y_pred_np)
+                metrics['classification_report'] = classification_report  (y_true_np, y_pred_np,
+                                                                         target_names=self.label_encoder.classes_
+                                                                         if hasattr(self.label_encoder, 'classes_')
+                                                                         else None)
+                metrics['confusion_matrix'] = confusion_matrix(y_true_n  , y_pred_np).tolist()
+
+                # Print colored confusion matrix
+                if hasattr(self.label_encoder, 'classes_'):
+                    self.print_colored_confusion_matrix(
+                        y_true_np,
+                        y_pred_np,
+                        class_labels=self.label_encoder.classes_,
+                        header="Prediction Results"
+                    )
+                else:
+                    print("Warning: No class labels available for confusion matrix")
 
             return {
                 'predictions': results,
-                'input_file': input_csv,
-                'output_file': output_file if output_path else None
+                'metrics': metrics,
+                'metadata': metadata if output_path else None
             }
 
         except Exception as e:
             print(f"Prediction failed: {str(e)}")
             traceback.print_exc()
             raise
-
 
     def predict_from_file_old(self, input_csv_path, output_dir, image_dir=None, batch_size=128):
         """
