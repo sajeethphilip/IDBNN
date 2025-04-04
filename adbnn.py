@@ -5176,7 +5176,7 @@ class DBNN(GPUDBNN):
 
             # Load model components
             self.label_encoder =load_label_encoder(dataset_name)
-             self._load_model_components()
+            self._load_model_components()
 
             # Initialize weight updater
             self._initialize_weight_updater()
