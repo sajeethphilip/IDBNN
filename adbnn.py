@@ -1494,12 +1494,9 @@ class DBNN(GPUDBNN):
 
         # Preprocess features and target
         predict_mode = self.config.get('execution_flags', {}).get('predict', False)
-        if not predict_mode:
-            X = self.data.drop(columns=[self.target_column])
-            y = self.data[self.target_column]
-        else:
-            X=self.data.copy()
-            y=None
+        # Load and preprocess data
+        X = self.data.drop(columns=[self.target_column]) if not predict_mode else self.data.copy()
+        y = self.data[self.target_column] if not predict_mode else pd.Series([-99999]*len(self.data))
 
         # Compute global statistics for normalization
         self.compute_global_statistics(X)
