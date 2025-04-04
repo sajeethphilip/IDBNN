@@ -3495,6 +3495,14 @@ class DBNN(GPUDBNN):
         Make predictions in batches with consistent NaN handling.
         Handles both DataFrame and Tensor inputs.
         """
+        # Ensure we have a properly initialized label encoder
+        if not hasattr(self.label_encoder, 'classes_'):
+            if hasattr(self, 'data'):
+                # If we have data, fit the encoder (shouldn't happen in prediction)
+                self.label_encoder.fit(self.data[self.target_column])
+            else:
+                raise RuntimeError("Label encoder not initialized and no data available to fit it")
+
         # Store current weights temporarily
         temp_W = self.current_W
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
@@ -4784,8 +4792,8 @@ class DBNN(GPUDBNN):
             'scaler': self.scaler,
             'label_encoder': {
                 'classes_': self.label_encoder.classes_.tolist(),
-                'mapping': {k: v for k, v in self.label_encoder.__dict__.items()
-                           if not k.startswith('_')}
+                'mapping': {k: v for k, v in zip(self.label_encoder.classes_,
+                                                range(len(self.label_encoder.classes_)))}
             },
             'likelihood_params': self.likelihood_params,
             'model_type': self.model_type,
@@ -4856,12 +4864,11 @@ class DBNN(GPUDBNN):
                 self.label_encoder = LabelEncoder()
                 # If we have saved classes, set them
                 # Restore label encoder
+                # Restore label encoder
                 if 'label_encoder' in components:
-                    le_data = components['label_encoder']
                     self.label_encoder = LabelEncoder()
-                    self.label_encoder.classes_ = np.array(le_data['classes_'])
-                    for k, v in le_data['mapping'].items():
-                        setattr(self.label_encoder, k, v)
+                    # Reconstruct the encoder state
+                    self.label_encoder.classes_ = np.array(components['label_encoder']['classes_'])
                 self.scaler = components['scaler']
                 self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
@@ -5021,6 +5028,13 @@ class DBNN(GPUDBNN):
         try:
             # Load data
             df = pd.read_csv(input_csv)
+            # Ensure we have a properly initialized label encoder
+            if not hasattr(self.label_encoder, 'classes_'):
+                if hasattr(self, 'data'):
+                    # If we have data, fit the encoder (shouldn't happen in prediction)
+                    self.label_encoder.fit(self.data[self.target_column])
+                else:
+                    raise RuntimeError("Label encoder not initialized and no data available to fit it")
             has_true_labels = hasattr(self, 'target_column') and self.target_column in df.columns
 
             # Separate features and target
