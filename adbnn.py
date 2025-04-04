@@ -1773,9 +1773,11 @@ class DBNN(GPUDBNN):
 
              # Store original data (CPU only)
             self.Original_data = df.copy()  # This is the line that was missing
+            # Get prediction mode from config (not global variable)
+            predict_mode = self.config.get('execution_flags', {}).get('predict', False)
 
             # Handle prediction mode (target column may not exist)
-            if Predict and self.target_column not in df.columns:
+            if predict_mode and self.target_column not in df.columns:
                 DEBUG.log(f"Prediction mode - target column '{self.target_column}' not found")
                 self.X_Orig = df.copy()  # Use all columns for prediction
             else:
