@@ -5299,7 +5299,7 @@ class DBNN(GPUDBNN):
             # Generate and save results
             results = self._generate_detailed_predictions(X, predictions,
                                                        y.to_numpy() if y is not None and hasattr(y, 'to_numpy') else (y.cpu().numpy() if hasattr(y, 'cpu') else y))
-            results.to_csv(predictions_path, index=False)
+            results.to_csv(predictions_dir, index=False)
             print(f"{Colors.GREEN}Predictions saved to {predictions_path}{Colors.ENDC}")
 
             # --- Mosaic Generation ---
