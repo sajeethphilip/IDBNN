@@ -5108,7 +5108,11 @@ class DBNN(GPUDBNN):
                 # Standard paths
                 predictions_path = os.path.join(output_path, 'predictions.csv')
                 metrics_path = os.path.join(output_path, 'metrics.txt')
-
+                # Ensure the predictions directory exists
+                predictions_dir = os.path.dirname(predictions_path)
+                os.makedirs(predictions_dir, exist_ok=True)
+                metrics_dir = os.path.dirname(metrics_path)
+                os.makedirs(metrics_dir, exist_ok=True)
                 # Save predictions
                 results.to_csv(predictions_path, index=False)
                 print(f"{Colors.GREEN}Predictions saved to {predictions_path}{Colors.ENDC}")
