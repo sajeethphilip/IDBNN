@@ -1515,8 +1515,14 @@ class DBNN(GPUDBNN):
         self.y_tensor = torch.tensor(y_encoded, dtype=torch.long).to(self.device)
 
         # Split data into training and testing sets
-        self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
-            self.X_tensor, self.y_tensor)
+        # Split data (use all data as "test" in prediction mode)
+        if predict_mode:
+            self.X_train, self.X_test = None, self.X_tensor
+            self.y_train, self.y_test = None, self.y_tensor
+            self.train_indices, self.test_indices = [], list(range(len(self.data)))
+        else:
+            self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
+                self.X_tensor, self.y_tensor)
 
         self._is_preprocessed = True  # Mark preprocessing as complete
 
@@ -2672,6 +2678,12 @@ class DBNN(GPUDBNN):
     def _calculate_cardinality_threshold(self):
         """Calculate appropriate cardinality threshold based on dataset characteristics"""
         n_samples = len(self.data)
+        DEFAULT_THRESHOLD = 0.9
+        predict_mode = self.config.get('execution_flags', {}).get('predict', False)
+        if predict_mode or self.target_column not in self.data.columns:
+            DEBUG.log("Using default cardinality threshold (prediction mode or no target)")
+            return DEFAULT_THRESHOLD
+
         n_classes = len(self.data[self.target_column].unique())
 
         # Base threshold from config
