@@ -1663,78 +1663,104 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-    def _generate_detailed_predictions(
-        self,
-        X: Union[pd.DataFrame, torch.Tensor],
-        predictions: Union[torch.Tensor, np.ndarray],
-        true_labels: Union[torch.Tensor, np.ndarray, pd.Series, List, None] = None
-    ) -> pd.DataFrame:
+    def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
         """
-        Robust predictions generator that handles both training and prediction phases.
-        """
-        # Convert predictions to numpy
-        predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
+        Generate detailed predictions with confidence metrics and metadata.
 
-        # Create results DataFrame
-        if isinstance(X, pd.DataFrame):
+        Args:
+            X: Input data (can be a Pandas DataFrame or PyTorch tensor).
+            predictions: Tensor containing the predicted class labels.
+            true_labels: Tensor or NumPy array containing the true labels (optional).
+
+        Returns:
+            DataFrame containing the complete input data, predictions, and posterior probabilities.
+        """
+        # Convert predictions to original class labels
+        pred_labels = self.label_encoder.inverse_transform(predictions)
+
+        # Handle input data (X) based on its type
+        if isinstance(X, torch.Tensor):
+            # Convert tensor to NumPy array, copy it, and then back to a DataFrame
+            X_np = X.cpu().numpy()  # Move tensor to CPU and convert to NumPy
+            results_df = pd.DataFrame(X_np, columns=[f'feature_{i}' for i in range(X_np.shape[1])])
+        elif isinstance(X, pd.DataFrame):
+            # If X is already a DataFrame, just copy it
             results_df = X.copy()
         else:
-            X_np = X.cpu().numpy() if torch.is_tensor(X) else np.array(X)
-            results_df = pd.DataFrame(X_np,
-                                    columns=getattr(self, 'feature_columns',
-                                                  [f'feature_{i}' for i in range(X_np.shape[1])]))
+            raise TypeError(f"Unsupported input type for X: {type(X)}. Expected Pandas DataFrame or PyTorch tensor.")
 
-        # Add predictions with label decoding if possible
-        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-            try:
-                results_df['predicted_class'] = self.label_encoder.inverse_transform(predictions_np)
-            except ValueError as e:
-                print(f"Note: Using raw predictions - {str(e)}")
-                results_df['predicted_class'] = predictions_np
-        else:
-            results_df['predicted_class'] = predictions_np
+        # Add predictions
+        results_df['predicted_class'] = pred_labels
 
-        # Handle true labels if provided
+        # Add true labels if provided
         if true_labels is not None:
-            true_labels_np = true_labels.cpu().numpy() if torch.is_tensor(true_labels) \
-                            else true_labels.to_numpy() if isinstance(true_labels, (pd.Series, pd.DataFrame)) \
-                            else np.array(true_labels)
-
-            if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-                try:
-                    results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
-                except ValueError as e:
-                    print(f"Note: Storing raw labels - {str(e)}")
-                    results_df['true_class'] = true_labels_np
+            # Handle true_labels based on its type
+            if isinstance(true_labels, torch.Tensor):
+                true_labels_np = true_labels.cpu().numpy()  # Convert tensor to NumPy array
+            elif isinstance(true_labels, np.ndarray):
+                true_labels_np = true_labels  # Use as-is
             else:
-                results_df['true_class'] = true_labels_np
+                raise TypeError(f"Unsupported type for true_labels: {type(true_labels)}. Expected PyTorch tensor or NumPy array.")
 
-        # Compute probabilities if possible
-        try:
-            X_processed = X if isinstance(X, torch.Tensor) else self._preprocess_data(X, is_training=False)
-            X_tensor = X_processed if isinstance(X_processed, torch.Tensor) \
-                      else torch.as_tensor(X_processed, dtype=torch.float32, device=self.device)
+            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
 
-            batch_size = 128
-            all_probabilities = []
-            for i in range(0, len(X_tensor), batch_size):
-                batch_X = X_tensor[i:i+batch_size]
+        # Preprocess features for probability computation
+        X_processed = self._preprocess_data(X, is_training=False)
+        if isinstance(X_processed, torch.Tensor):
+            X_tensor = X_processed.clone().detach().to(self.device)
+        else:
+            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+
+        # Compute probabilities in batches
+        batch_size = 128
+        all_probabilities = []
+
+        for i in range(0, len(X_tensor), batch_size):
+            batch_end = min(i + batch_size, len(X_tensor))
+            batch_X = X_tensor[i:batch_end]
+
+            try:
                 if self.model_type == "Histogram":
                     batch_probs, _ = self._compute_batch_posterior(batch_X)
-                else:
+                elif self.model_type == "Gaussian":
                     batch_probs, _ = self._compute_batch_posterior_std(batch_X)
+                else:
+                    raise ValueError(f"{self.model_type} is invalid")
+
                 all_probabilities.append(batch_probs.cpu().numpy())
 
-            if all_probabilities:
-                all_probabilities = np.vstack(all_probabilities)
-                if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-                    for i, class_name in enumerate(self.label_encoder.classes_):
-                        if i < all_probabilities.shape[1]:
-                            results_df[f'prob_{class_name}'] = all_probabilities[:, i]
-                results_df['max_probability'] = all_probabilities.max(axis=1)
+            except Exception as e:
+                print("\033[K" +f"Error computing probabilities for batch {i}: {str(e)}")
+                return None
 
-        except Exception as e:
-            print(f"Note: Skipped probability calculation - {str(e)}")
+        if all_probabilities:
+            all_probabilities = np.vstack(all_probabilities)
+        else:
+            print("\033[K" +"No probabilities were computed successfully", end="\r", flush=True)
+            return None
+
+        # Ensure we're only using valid class indices
+        valid_classes = self.label_encoder.classes_
+        n_classes = len(valid_classes)
+
+        # Verify probability array shape matches number of classes
+        if all_probabilities.shape[1] != n_classes:
+            print("\033[K" +f"Warning: Probability array shape ({all_probabilities.shape}) doesn't match number of classes ({n_classes})")
+            # Adjust probabilities array if necessary
+            if all_probabilities.shape[1] > n_classes:
+                all_probabilities = all_probabilities[:, :n_classes]
+            else:
+                # Pad with zeros if needed
+                pad_width = ((0, 0), (0, n_classes - all_probabilities.shape[1]))
+                all_probabilities = np.pad(all_probabilities, pad_width, mode='constant')
+
+        # Add probability columns for each valid class
+        for i, class_name in enumerate(valid_classes):
+            if i < all_probabilities.shape[1]:  # Safety check
+                results_df[f'prob_{class_name}'] = all_probabilities[:, i]
+
+        # Add maximum probability
+        results_df['max_probability'] = all_probabilities.max(axis=1)
 
         return results_df
 
