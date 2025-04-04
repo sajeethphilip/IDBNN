@@ -5036,7 +5036,6 @@ class DBNN(GPUDBNN):
                             # Clear existing predictions file if it exists
 
                             predictions_path = os.path.join(output_path, 'predictions.csv')
-                            print(f"Removing file {predictions_path}")
                             if os.path.exists(predictions_path):
 
                                 os.remove(predictions_path)
@@ -6091,7 +6090,7 @@ def main():
                     input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
                     output_dir = os.path.join('data', dataset_name, 'Predictions')
                     os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
+                    output_path = os.path.join(output_dir, f'{dataset_name}')
 
                     results = predictor.predict_from_file(input_csv, output_path)
                     print("\033[K" + f"Predictions saved to: {output_path}")
