@@ -5203,61 +5203,6 @@ class DBNN(GPUDBNN):
             traceback.print_exc()
             raise
 
-    def predict_from_file_old(self, input_file: str, output_file: str = None) -> pd.DataFrame:
-        """
-        Make predictions directly from an input file (CSV) and optionally save results.
-        Handles target column if present in input data.
-
-        Args:
-            input_file: Path to input CSV file
-            output_file: Optional path to save predictions
-
-        Returns:
-            DataFrame with predictions and probabilities
-        """
-        # Load the input data
-        df = pd.read_csv(input_file)
-
-        # Check if target column exists in input data
-        target_in_data = self.target_column in df.columns
-
-        # Make predictions
-        results = self.predict_new_data(df)
-
-        # If target column exists, compute and display metrics
-        if target_in_data:
-            try:
-                y_true = df[self.target_column]
-                y_pred = results['predicted_class']
-
-                # Convert to encoded values if needed
-                if not np.issubdtype(y_true.dtype, np.number):
-                    y_true = self.label_encoder.transform(y_true)
-
-                if not np.issubdtype(y_pred.dtype, np.number):
-                    y_pred = self.label_encoder.transform(y_pred)
-
-                # Display colored confusion matrix
-                self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
-
-                # Print classification report
-                print("\n" + classification_report(
-                    y_true,
-                    y_pred,
-                    target_names=self.label_encoder.classes_
-                ))
-            except Exception as e:
-                print(f"Error generating evaluation metrics: {str(e)}")
-                traceback.print_exc()
-
-        # Save results if output path specified
-        if output_file:
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-            results.to_csv(output_file, index=False)
-            print(f"Predictions saved to {output_file}")
-
-        return results
-
     def predict_new_data(self, new_data: pd.DataFrame) -> pd.DataFrame:
         """
         Make predictions on new data using the trained model.
