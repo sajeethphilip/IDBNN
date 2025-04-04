@@ -1670,74 +1670,51 @@ class DBNN(GPUDBNN):
         true_labels: Union[torch.Tensor, np.ndarray, pd.Series, List, None] = None
     ) -> pd.DataFrame:
         """
-        Generate detailed predictions DataFrame that works for both training and prediction phases.
-
-        Parameters:
-            X: Input features (DataFrame, tensor, or array)
-            predictions: Model predictions (tensor or array)
-            true_labels: Optional ground truth labels (tensor, array, Series, or list)
-
-        Returns:
-            DataFrame containing predictions, probabilities, and (if available) true labels
+        Robust predictions generator that handles both training and prediction phases.
         """
-        # Convert predictions to numpy array
+        # Convert predictions to numpy
         predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
 
-        # Create results DataFrame from input features
+        # Create results DataFrame
         if isinstance(X, pd.DataFrame):
             results_df = X.copy()
-        elif isinstance(X, torch.Tensor):
-            results_df = pd.DataFrame(X.cpu().numpy(),
-                                    columns=[f'feature_{i}' for i in range(X.shape[1])])
         else:
-            results_df = pd.DataFrame(X,
-                                    columns=[f'feature_{i}' for i in range(X.shape[1])])
+            X_np = X.cpu().numpy() if torch.is_tensor(X) else np.array(X)
+            results_df = pd.DataFrame(X_np,
+                                    columns=getattr(self, 'feature_columns',
+                                                  [f'feature_{i}' for i in range(X_np.shape[1])]))
 
-        # Add predictions (handle both training and prediction scenarios)
+        # Add predictions with label decoding if possible
         if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
             try:
                 results_df['predicted_class'] = self.label_encoder.inverse_transform(predictions_np)
             except ValueError as e:
-                print(f"Warning: Prediction decoding failed - {str(e)}")
+                print(f"Note: Using raw predictions - {str(e)}")
                 results_df['predicted_class'] = predictions_np
         else:
             results_df['predicted_class'] = predictions_np
 
-        # Handle true labels if provided (training/validation scenario)
+        # Handle true labels if provided
         if true_labels is not None:
-            # Convert to numpy array
-            if torch.is_tensor(true_labels):
-                true_labels_np = true_labels.cpu().numpy()
-            elif isinstance(true_labels, (pd.Series, pd.DataFrame)):
-                true_labels_np = true_labels.to_numpy()
-            else:
-                true_labels_np = np.array(true_labels)
+            true_labels_np = true_labels.cpu().numpy() if torch.is_tensor(true_labels) \
+                            else true_labels.to_numpy() if isinstance(true_labels, (pd.Series, pd.DataFrame)) \
+                            else np.array(true_labels)
 
-            # Only try to decode if we have a label encoder
             if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
                 try:
-                    # For training data, we expect all labels to be known
                     results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
                 except ValueError as e:
-                    if "previously unseen labels" in str(e):
-                        # In prediction phase, store raw labels if they don't match training
-                        print("Note: Some labels not seen in training - storing raw values")
-                        results_df['true_class'] = true_labels_np
-                    else:
-                        raise
+                    print(f"Note: Storing raw labels - {str(e)}")
+                    results_df['true_class'] = true_labels_np
             else:
                 results_df['true_class'] = true_labels_np
 
-        # Compute class probabilities (if possible)
+        # Compute probabilities if possible
         try:
-            # For training data, X might already be preprocessed
-            if isinstance(X, torch.Tensor) and X.shape[1] == len(self.feature_columns if has  (self, 'feature_columns') else X.shape[1]):
-                X_tensor = X
-            else:
-                X_processed = self._preprocess_data(X, is_training=False)
-                X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+            X_processed = X if isinstance(X, torch.Tensor) else self._preprocess_data(X, is_training=False)
+            X_tensor = X_processed if isinstance(X_processed, torch.Tensor) \
+                      else torch.as_tensor(X_processed, dtype=torch.float32, device=self.device)
 
-            # Batch processing for memory efficiency
             batch_size = 128
             all_probabilities = []
             for i in range(0, len(X_tensor), batch_size):
@@ -1750,14 +1727,14 @@ class DBNN(GPUDBNN):
 
             if all_probabilities:
                 all_probabilities = np.vstack(all_probabilities)
-                if has  (self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
                     for i, class_name in enumerate(self.label_encoder.classes_):
                         if i < all_probabilities.shape[1]:
                             results_df[f'prob_{class_name}'] = all_probabilities[:, i]
                 results_df['max_probability'] = all_probabilities.max(axis=1)
 
         except Exception as e:
-            print(f"Note: Probability calculation skipped - {str(e)}")
+            print(f"Note: Skipped probability calculation - {str(e)}")
 
         return results_df
 
@@ -5057,16 +5034,27 @@ class DBNN(GPUDBNN):
             except Exception as e:
                 print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
-    def predict_from_file(self, input_csv: str, output_path: str = None) -> Dict:
-        """Make predictions from CSV file with robust label handling"""
+    def predict_from_file(self, input_csv: str, output_path: str = None, overwrite_policy: str = 'ask') -> Dict:
+        """
+        Make predictions from CSV file with comprehensive error handling and user options.
+
+        Parameters:
+            input_csv: Path to input CSV file
+            output_path: Directory to save predictions (None to skip saving)
+            overwrite_policy:
+                'ask' - prompt user (default)
+                'overwrite' - overwrite without asking
+                'version' - create new version
+                'skip' - skip if exists
+        """
         try:
             # Load data
             df = pd.read_csv(input_csv)
 
-            # Separate features and target (if exists)
+            # Separate features and target
             if hasattr(self, 'target_column') and self.target_column in df.columns:
                 X = df.drop(columns=[self.target_column])
-                y = df[self.target_column]  # Might contain new labels
+                y = df[self.target_column]
             else:
                 X = df
                 y = None
@@ -5074,36 +5062,66 @@ class DBNN(GPUDBNN):
             # Preprocess features
             X_processed = self._preprocess_data(X, is_training=False)
 
-            # Convert to tensor
-            if not isinstance(X_processed, torch.Tensor):
-                X_tensor = torch.tensor(X_processed.values if isinstance(X_processed, pd.DataFrame) else X_processed,
-                                      dtype=torch.float32).to(self.device)
-            else:
+            # Convert to tensor properly
+            if isinstance(X_processed, torch.Tensor):
                 X_tensor = X_processed
+            else:
+                X_tensor = torch.as_tensor(X_processed.values if isinstance(X_processed, pd.DataFrame) else X_processed,
+                                         dtype=torch.float32,
+                                         device=self.device)
 
             # Make predictions
             predictions = self.predict(X_tensor)
 
-            # Generate results (handles new labels gracefully)
+            # Generate detailed results
             results = self._generate_detailed_predictions(X, predictions, y)
 
-            # Save if output path provided
+            # Handle output directory
             if output_path:
-                os.makedirs(output_path, exist_ok=True)
                 output_file = os.path.join(output_path, 'predictions.csv')
+
+                # Check if file exists and handle according to policy
+                if os.path.exists(output_file):
+                    if overwrite_policy == 'ask':
+                        print(f"Output file exists: {output_file}")
+                        choice = input("Choose action:\n1. Overwrite\n2. Create new version\n3. Skip saving\n> ").strip()
+                        if choice == '1':
+                            overwrite_policy = 'overwrite'
+                        elif choice == '2':
+                            overwrite_policy = 'version'
+                        else:
+                            overwrite_policy = 'skip'
+
+                    if overwrite_policy == 'version':
+                        base, ext = os.path.splitext(output_file)
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        output_file = f"{base}_{timestamp}{ext}"
+                    elif overwrite_policy == 'skip':
+                        print(f"Skipping save - file exists: {output_file}")
+                        return {
+                            'predictions': results,
+                            'output_file': None,
+                            'message': 'Skipped saving - file exists'
+                        }
+
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+                # Save results
                 results.to_csv(output_file, index=False)
                 print(f"Predictions saved to {output_file}")
 
             return {
                 'predictions': results,
                 'input_file': input_csv,
-                'output_path': output_path
+                'output_file': output_file if output_path else None
             }
 
         except Exception as e:
             print(f"Prediction failed: {str(e)}")
             traceback.print_exc()
             raise
+
 
     def predict_from_file_old(self, input_csv_path, output_dir, image_dir=None, batch_size=128):
         """
