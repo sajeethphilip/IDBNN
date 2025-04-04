@@ -5034,8 +5034,9 @@ class DBNN(GPUDBNN):
                         if choice == '1':  # Overwrite
                             print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
                             # Clear existing predictions file if it exists
-                            print(f"Removing file {predictions_path}")
+
                             predictions_path = os.path.join(output_path, 'predictions.csv')
+                            print(f"Removing file {predictions_path}")
                             if os.path.exists(predictions_path):
 
                                 os.remove(predictions_path)
