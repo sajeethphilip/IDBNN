@@ -5271,6 +5271,12 @@ class DBNN(GPUDBNN):
             # Standard paths (no timestamp for overwrite mode)
             predictions_path = os.path.join(output_dir, 'predictions.csv')
             metrics_path = os.path.join(output_dir, 'metrics.txt')
+            # Ensure the predictions directory exists
+            predictions_dir = os.path.dirname(predictions_path)
+            os.makedirs(predictions_dir, exist_ok=True)
+            metrics_dir = os.path.dirname(metrics_path)
+            os.makedirs(metrics_dir, exist_ok=True)
+
 
             # --- Prediction Logic ---
             input_data = pd.read_csv(input_csv_path)
