@@ -4816,7 +4816,9 @@ class DBNN(GPUDBNN):
         components = {
             'scaler': self.scaler,
             'label_encoder': {
-                'classes': self.label_encoder.classes_.tolist()
+                'classes_': self.label_encoder.classes_.tolist(),
+                'mapping': {k: v for k, v in self.label_encoder.__dict__.items()
+                           if not k.startswith('_')}
             },
             'likelihood_params': self.likelihood_params,
             'model_type': self.model_type,
@@ -4886,11 +4888,13 @@ class DBNN(GPUDBNN):
                 # Initialize a fresh LabelEncoder first
                 self.label_encoder = LabelEncoder()
                 # If we have saved classes, set them
-                if 'target_classes' in components:
-                    self.label_encoder.classes_ = components['target_classes']
-                elif hasattr(components['label_encoder'], 'classes_'):
-                    # If the saved object has classes, use them
-                    self.label_encoder.classes_ = components['label_encoder'].classes_
+                # Restore label encoder
+                if 'label_encoder' in components:
+                    le_data = components['label_encoder']
+                    self.label_encoder = LabelEncoder()
+                    self.label_encoder.classes_ = np.array(le_data['classes_'])
+                    for k, v in le_data['mapping'].items():
+                        setattr(self.label_encoder, k, v)
                 self.scaler = components['scaler']
                 self.likelihood_params = components['likelihood_params']
                 self.feature_pairs = components['feature_pairs']
