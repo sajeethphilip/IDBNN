@@ -3595,77 +3595,76 @@ class DBNN(GPUDBNN):
         # Store current weights temporarily
         self.current_W = self.best_W.clone() if self.best_W is not None else self.current_W
 
-        try:
-            # Handle input type and feature selection
-            if isinstance(X, pd.DataFrame):
-                # Filter and order columns according to config
-                if hasattr(self, 'feature_columns'):
-                    available_cols = [col for col in self.feature_columns if col in X.columns]
-                    if not available_cols:
-                        raise ValueError("No matching features found between model and input data")
+        # Handle input type and feature selection
+        if isinstance(X, pd.DataFrame):
+            # Filter and order columns according to config
+            if hasattr(self, 'feature_columns'):
+                available_cols = [col for col in self.feature_columns if col in X.columns]
+                if not available_cols:
+                    raise ValueError("No matching features found between model and input data")
 
-                    # Ensure we maintain the order from feature_columns
-                    X_filtered = X[available_cols].copy()
+                # Ensure we maintain the order from feature_columns
+                X_filtered = X[available_cols].copy()
 
-                    # Check if we need to drop target column (if present)
-                    if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
-                        X_filtered = X_filtered.drop(columns=[self.target_column])
+                # Check if we need to drop target column (if present)
+                if hasattr(self, 'target_column') and self.target_column in X_filtered.columns:
+                    X_filtered = X_filtered.drop(columns=[self.target_column])
 
-                    # Store original for results
-                    original_df = X.copy()
-                    X_tensor = self.preprocess_data(X_filtered)
+                # Store original for results
+                original_df = X.copy()
+                X_tensor = self.preprocess_data(X_filtered)
+            else:
+                raise RuntimeError("Model not properly initialized - missing feature columns")
+        else:
+            X_tensor = X.to(self.device) if not X.is_cuda else X
+            original_df = None
+
+        # Initialize storage for results
+        all_predictions = []
+        all_probabilities = []
+
+        n_batches = (len(X_tensor) + batch_size - 1) // batch_size
+        predictions = []
+
+        with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
+            for i in range(0, len(X_tensor), batch_size):
+                batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
+
+                # Get posteriors (NaN handling happens inside these methods)
+                if self.model_type == "Histogram":
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                elif self.model_type == "Gaussian":
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
                 else:
-                    raise RuntimeError("Model not properly initialized - missing feature columns")
-            else:
-                X_tensor = X.to(self.device) if not X.is_cuda else X
-                original_df = None
+                    raise ValueError(f"Invalid model type: {self.model_type}")
 
-            # Initialize storage for results
-            all_predictions = []
-            all_probabilities = []
+                # Get predictions
+                batch_predictions = torch.argmax(posteriors, dim=1)
+                predictions.append(batch_predictions)
+                pred_pbar.update(1)
 
-            n_batches = (len(X_tensor) + batch_size - 1) // batch_size
-            predictions = []
+        batch_pbar.close()
 
-            with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
-                for i in range(0, len(X_tensor), batch_size):
-                    batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
+        # Combine results
+        predictions = torch.cat(all_predictions).numpy()
+        probabilities = torch.cat(all_probabilities).numpy()
 
-                    # Get posteriors (NaN handling happens inside these methods)
-                    if self.model_type == "Histogram":
-                        posteriors, _ = self._compute_batch_posterior(batch_X)
-                    elif self.model_type == "Gaussian":
-                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                    else:
-                        raise ValueError(f"Invalid model type: {self.model_type}")
+        # Create results DataFrame
+        if original_df is not None:
+            results_df = original_df.copy()
+        else:
+            results_df = pd.DataFrame(index=range(len(X_tensor)))
 
-                    # Get predictions
-                    batch_predictions = torch.argmax(posteriors, dim=1)
-                    predictions.append(batch_predictions)
-                    pred_pbar.update(1)
+        # Add predictions and probabilities
+        pred_labels = self.label_encoder.inverse_transform(predictions)
+        results_df['predicted_class'] = pred_labels
 
-            batch_pbar.close()
+        for i, class_name in enumerate(self.label_encoder.classes_):
+            results_df[f'prob_{class_name}'] = probabilities[:, i]
 
-            # Combine results
-            predictions = torch.cat(all_predictions).numpy()
-            probabilities = torch.cat(all_probabilities).numpy()
+        results_df['max_probability'] = probabilities.max(axis=1)
 
-            # Create results DataFrame
-            if original_df is not None:
-                results_df = original_df.copy()
-            else:
-                results_df = pd.DataFrame(index=range(len(X_tensor)))
-
-            # Add predictions and probabilities
-            pred_labels = self.label_encoder.inverse_transform(predictions)
-            results_df['predicted_class'] = pred_labels
-
-            for i, class_name in enumerate(self.label_encoder.classes_):
-                results_df[f'prob_{class_name}'] = probabilities[:, i]
-
-            results_df['max_probability'] = probabilities.max(axis=1)
-
-            return results_df
+        return results_df
 
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
@@ -3673,47 +3672,50 @@ class DBNN(GPUDBNN):
             print("\033[KWarning: No best weights to save")
             return
 
+        try:
+            # Create directory for model components
+            model_dir = os.path.join('Model')
+            os.makedirs(model_dir, exist_ok=True)
+            print(f"\033[KCreated model directory at {model_dir}")
 
-        # Create directory for model components
-        model_dir = os.path.join('Model')
-        os.makedirs(model_dir, exist_ok=True)
-        print(f"\033[KCreated model directory at {model_dir}")
+            # Convert weights to numpy and then to list for JSON serialization
+            #weights_np = self.best_W.cpu().numpy()
+            weights_np = self.current_W.cpu().numpy()
 
-        # Convert weights to numpy and then to list for JSON serialization
-        #weights_np = self.best_W.cpu().numpy()
-        weights_np = self.current_W.cpu().numpy()
+            # Save weights
+            weights_dict = {
+                'version': 2,
+                'weights': weights_np.tolist(),
+                'shape': list(weights_np.shape),
+                'dtype': str(weights_np.dtype)
+            }
 
-        # Save weights
-        weights_dict = {
-            'version': 2,
-            'weights': weights_np.tolist(),
-            'shape': list(weights_np.shape),
-            'dtype': str(weights_np.dtype)
-        }
+            weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
+            print(f"\033[KAttempting to save weights to {weights_file}")
 
-        weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
-        print(f"\033[KAttempting to save weights to {weights_file}")
+            # Use atomic write to prevent corruption
+            temp_file = weights_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(weights_dict, f, indent=2)
+                f.flush()  # Ensure the buffer is flushed to disk
+                os.fsync(f.fileno())  # Force write to disk
 
-        # Use atomic write to prevent corruption
-        temp_file = weights_file + '.tmp'
-        with open(temp_file, 'w') as f:
-            json.dump(weights_dict, f, indent=2)
-            f.flush()  # Ensure the buffer is flushed to disk
-            os.fsync(f.fileno())  # Force write to disk
+            # Atomic rename
+            os.replace(temp_file, weights_file)
+            print(f"\033[KSaved weights to {weights_file}")
 
-        # Atomic rename
-        os.replace(temp_file, weights_file)
-        print(f"\033[KSaved weights to {weights_file}")
+            # Save training data if available
+            if hasattr(self, 'train_indices') and hasattr(self, 'data'):
+                train_data = self.data.iloc[self.train_indices]
+                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
 
-        # Save training data if available
-        if hasattr(self, 'train_indices') and hasattr(self, 'data'):
-            train_data = self.data.iloc[self.train_indices]
-            train_data_file = os.path.join(model_dir, 'best_training_data.csv')
+                print(f"\033[KAttempting to save training data to {train_data_file}")
+                train_data.to_csv(train_data_file, index=False)
+                print(f"\033[KSaved training data to {train_data_file}")
 
-            print(f"\033[KAttempting to save training data to {train_data_file}")
-            train_data.to_csv(train_data_file, index=False)
-            print(f"\033[KSaved training data to {train_data_file}")
-
+        except Exception as e:
+            print(f"\033[KError saving best weights: {str(e)}")
+            traceback.print_exc()
 
 
     def _load_best_weights(self):
