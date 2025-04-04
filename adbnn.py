@@ -3667,9 +3667,6 @@ class DBNN(GPUDBNN):
 
             return results_df
 
-
-
-
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
         if self.best_W is None:
