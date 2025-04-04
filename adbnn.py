@@ -1663,104 +1663,101 @@ class DBNN(GPUDBNN):
             'training_results': results
         }
 
-    def _generate_detailed_predictions(self, X: Union[pd.DataFrame, torch.Tensor], predictions: torch.Tensor, true_labels: Union[torch.Tensor, np.ndarray] = None) -> pd.DataFrame:
+    def _generate_detailed_predictions(
+        self,
+        X: Union[pd.DataFrame, torch.Tensor],
+        predictions: Union[torch.Tensor, np.ndarray],
+        true_labels: Union[torch.Tensor, np.ndarray, pd.Series, List, None] = None
+    ) -> pd.DataFrame:
         """
-        Generate detailed predictions with confidence metrics and metadata.
+        Generate detailed predictions DataFrame that works for both training and prediction phases.
 
-        Args:
-            X: Input data (can be a Pandas DataFrame or PyTorch tensor).
-            predictions: Tensor containing the predicted class labels.
-            true_labels: Tensor or NumPy array containing the true labels (optional).
+        Parameters:
+            X: Input features (DataFrame, tensor, or array)
+            predictions: Model predictions (tensor or array)
+            true_labels: Optional ground truth labels (tensor, array, Series, or list)
 
         Returns:
-            DataFrame containing the complete input data, predictions, and posterior probabilities.
+            DataFrame containing predictions, probabilities, and (if available) true labels
         """
-        # Convert predictions to original class labels
-        pred_labels = self.label_encoder.inverse_transform(predictions)
+        # Convert predictions to numpy array
+        predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
 
-        # Handle input data (X) based on its type
-        if isinstance(X, torch.Tensor):
-            # Convert tensor to NumPy array, copy it, and then back to a DataFrame
-            X_np = X.cpu().numpy()  # Move tensor to CPU and convert to NumPy
-            results_df = pd.DataFrame(X_np, columns=[f'feature_{i}' for i in range(X_np.shape[1])])
-        elif isinstance(X, pd.DataFrame):
-            # If X is already a DataFrame, just copy it
+        # Create results DataFrame from input features
+        if isinstance(X, pd.DataFrame):
             results_df = X.copy()
+        elif isinstance(X, torch.Tensor):
+            results_df = pd.DataFrame(X.cpu().numpy(),
+                                    columns=[f'feature_{i}' for i in range(X.shape[1])])
         else:
-            raise TypeError(f"Unsupported input type for X: {type(X)}. Expected Pandas DataFrame or PyTorch tensor.")
+            results_df = pd.DataFrame(X,
+                                    columns=[f'feature_{i}' for i in range(X.shape[1])])
 
-        # Add predictions
-        results_df['predicted_class'] = pred_labels
-
-        # Add true labels if provided
-        if true_labels is not None:
-            # Handle true_labels based on its type
-            if isinstance(true_labels, torch.Tensor):
-                true_labels_np = true_labels.cpu().numpy()  # Convert tensor to NumPy array
-            elif isinstance(true_labels, np.ndarray):
-                true_labels_np = true_labels  # Use as-is
-            else:
-                raise TypeError(f"Unsupported type for true_labels: {type(true_labels)}. Expected PyTorch tensor or NumPy array.")
-
-            results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
-
-        # Preprocess features for probability computation
-        X_processed = self._preprocess_data(X, is_training=False)
-        if isinstance(X_processed, torch.Tensor):
-            X_tensor = X_processed.clone().detach().to(self.device)
-        else:
-            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
-
-        # Compute probabilities in batches
-        batch_size = 128
-        all_probabilities = []
-
-        for i in range(0, len(X_tensor), batch_size):
-            batch_end = min(i + batch_size, len(X_tensor))
-            batch_X = X_tensor[i:batch_end]
-
+        # Add predictions (handle both training and prediction scenarios)
+        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
             try:
+                results_df['predicted_class'] = self.label_encoder.inverse_transform(predictions_np)
+            except ValueError as e:
+                print(f"Warning: Prediction decoding failed - {str(e)}")
+                results_df['predicted_class'] = predictions_np
+        else:
+            results_df['predicted_class'] = predictions_np
+
+        # Handle true labels if provided (training/validation scenario)
+        if true_labels is not None:
+            # Convert to numpy array
+            if torch.is_tensor(true_labels):
+                true_labels_np = true_labels.cpu().numpy()
+            elif isinstance(true_labels, (pd.Series, pd.DataFrame)):
+                true_labels_np = true_labels.to_numpy()
+            else:
+                true_labels_np = np.array(true_labels)
+
+            # Only try to decode if we have a label encoder
+            if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                try:
+                    # For training data, we expect all labels to be known
+                    results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+                except ValueError as e:
+                    if "previously unseen labels" in str(e):
+                        # In prediction phase, store raw labels if they don't match training
+                        print("Note: Some labels not seen in training - storing raw values")
+                        results_df['true_class'] = true_labels_np
+                    else:
+                        raise
+            else:
+                results_df['true_class'] = true_labels_np
+
+        # Compute class probabilities (if possible)
+        try:
+            # For training data, X might already be preprocessed
+            if isinstance(X, torch.Tensor) and X.shape[1] == len(self.feature_columns if has  (self, 'feature_columns') else X.shape[1]):
+                X_tensor = X
+            else:
+                X_processed = self._preprocess_data(X, is_training=False)
+                X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+
+            # Batch processing for memory efficiency
+            batch_size = 128
+            all_probabilities = []
+            for i in range(0, len(X_tensor), batch_size):
+                batch_X = X_tensor[i:i+batch_size]
                 if self.model_type == "Histogram":
                     batch_probs, _ = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    batch_probs, _ = self._compute_batch_posterior_std(batch_X)
                 else:
-                    raise ValueError(f"{self.model_type} is invalid")
-
+                    batch_probs, _ = self._compute_batch_posterior_std(batch_X)
                 all_probabilities.append(batch_probs.cpu().numpy())
 
-            except Exception as e:
-                print("\033[K" +f"Error computing probabilities for batch {i}: {str(e)}")
-                return None
+            if all_probabilities:
+                all_probabilities = np.vstack(all_probabilities)
+                if has  (self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                    for i, class_name in enumerate(self.label_encoder.classes_):
+                        if i < all_probabilities.shape[1]:
+                            results_df[f'prob_{class_name}'] = all_probabilities[:, i]
+                results_df['max_probability'] = all_probabilities.max(axis=1)
 
-        if all_probabilities:
-            all_probabilities = np.vstack(all_probabilities)
-        else:
-            print("\033[K" +"No probabilities were computed successfully", end="\r", flush=True)
-            return None
-
-        # Ensure we're only using valid class indices
-        valid_classes = self.label_encoder.classes_
-        n_classes = len(valid_classes)
-
-        # Verify probability array shape matches number of classes
-        if all_probabilities.shape[1] != n_classes:
-            print("\033[K" +f"Warning: Probability array shape ({all_probabilities.shape}) doesn't match number of classes ({n_classes})")
-            # Adjust probabilities array if necessary
-            if all_probabilities.shape[1] > n_classes:
-                all_probabilities = all_probabilities[:, :n_classes]
-            else:
-                # Pad with zeros if needed
-                pad_width = ((0, 0), (0, n_classes - all_probabilities.shape[1]))
-                all_probabilities = np.pad(all_probabilities, pad_width, mode='constant')
-
-        # Add probability columns for each valid class
-        for i, class_name in enumerate(valid_classes):
-            if i < all_probabilities.shape[1]:  # Safety check
-                results_df[f'prob_{class_name}'] = all_probabilities[:, i]
-
-        # Add maximum probability
-        results_df['max_probability'] = all_probabilities.max(axis=1)
+        except Exception as e:
+            print(f"Note: Probability calculation skipped - {str(e)}")
 
         return results_df
 
@@ -5060,7 +5057,55 @@ class DBNN(GPUDBNN):
             except Exception as e:
                 print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
-    def predict_from_file(self, input_csv_path, output_dir, image_dir=None, batch_size=128):
+    def predict_from_file(self, input_csv: str, output_path: str = None) -> Dict:
+        """Make predictions from CSV file with robust label handling"""
+        try:
+            # Load data
+            df = pd.read_csv(input_csv)
+
+            # Separate features and target (if exists)
+            if hasattr(self, 'target_column') and self.target_column in df.columns:
+                X = df.drop(columns=[self.target_column])
+                y = df[self.target_column]  # Might contain new labels
+            else:
+                X = df
+                y = None
+
+            # Preprocess features
+            X_processed = self._preprocess_data(X, is_training=False)
+
+            # Convert to tensor
+            if not isinstance(X_processed, torch.Tensor):
+                X_tensor = torch.tensor(X_processed.values if isinstance(X_processed, pd.DataFrame) else X_processed,
+                                      dtype=torch.float32).to(self.device)
+            else:
+                X_tensor = X_processed
+
+            # Make predictions
+            predictions = self.predict(X_tensor)
+
+            # Generate results (handles new labels gracefully)
+            results = self._generate_detailed_predictions(X, predictions, y)
+
+            # Save if output path provided
+            if output_path:
+                os.makedirs(output_path, exist_ok=True)
+                output_file = os.path.join(output_path, 'predictions.csv')
+                results.to_csv(output_file, index=False)
+                print(f"Predictions saved to {output_file}")
+
+            return {
+                'predictions': results,
+                'input_file': input_csv,
+                'output_path': output_path
+            }
+
+        except Exception as e:
+            print(f"Prediction failed: {str(e)}")
+            traceback.print_exc()
+            raise
+
+    def predict_from_file_old(self, input_csv_path, output_dir, image_dir=None, batch_size=128):
         """
         Make predictions from an input CSV file with direct options menu
 
