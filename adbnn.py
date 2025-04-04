@@ -1083,7 +1083,7 @@ class GPUDBNN:
         # Handle model state based on flags
         if  use_previous_model:
             # Load previous model state
-            self.label_encoder =load_label_encoder(dataset_name)
+            #self.label_encoder =load_label_encoder(dataset_name)
             self._load_model_components()
             #self._load_best_weights()
             #self._load_categorical_encoders()
@@ -2425,7 +2425,7 @@ class DBNN(GPUDBNN):
             if self.use_previous_model:
                 print("\033[K" +"Loading previous model state")
                 if self._load_model_components():
-                    self.label_encoder =load_label_encoder(self.dataset_name)
+                    #self.label_encoder =load_label_encoder(self.dataset_name)
                     #self._load_best_weights()
                     #self._load_categorical_encoders()
                     model_loaded = True
@@ -4807,12 +4807,6 @@ class DBNN(GPUDBNN):
 
     def _save_model_components(self):
         """Save all model components to a pickle file"""
-        encoder_path = os.path.join('Model',  f'Best_{self.model_type}_{self.dataset_name}_label_encoder.pkl')
-        with open(encoder_path, 'wb') as f:
-            pickle.dump(self.label_encoder, f)
-            f.flush()  # Ensure the buffer is flushed to disk
-            os.fsync(f.fileno())  # Force write to disk
-
         components = {
             'scaler': self.scaler,
             'label_encoder': {
@@ -5389,7 +5383,7 @@ class DBNN(GPUDBNN):
             self.model_type = self.config.get('modelType', 'Histogram')
 
             # Load model components
-            self.label_encoder =load_label_encoder(dataset_name)
+            #self.label_encoder =load_label_encoder(dataset_name)
             self._load_model_components()
 
             print(f"Successfully loaded model for dataset: {dataset_name}")
@@ -5989,7 +5983,7 @@ def main():
                 #model._save_best_weights()
                 #save_label_encoder(model.label_encoder, dataset_name)
                 model._load_model_components()
-                model.label_encoder = load_label_encoder(dataset_name)
+                #model.label_encoder = load_label_encoder(dataset_name)
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
@@ -6010,7 +6004,7 @@ def main():
             if mode == 'invertDBNN':
                 # Invert DBNN mode
                 model._load_model_components()
-                model.label_encoder = load_label_encoder(dataset_name)
+                #model.label_encoder = load_label_encoder(dataset_name)
 
                 print("\033[K" + "DEBUG: Inverse DBNN Settings:")
                 for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
