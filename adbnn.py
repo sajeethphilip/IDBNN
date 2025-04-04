@@ -5178,9 +5178,6 @@ class DBNN(GPUDBNN):
             self.label_encoder =load_label_encoder(dataset_name)
             self._load_model_components()
 
-            # Initialize weight updater
-            self._initialize_weight_updater()
-
             print(f"Successfully loaded model for dataset: {dataset_name}")
             return True
 
