@@ -5036,6 +5036,7 @@ class DBNN(GPUDBNN):
                             # Clear existing predictions file if it exists
                             predictions_path = os.path.join(output_path, 'predictions.csv')
                             if os.path.exists(predictions_path):
+                                print(f"Removing file {predictions_path}")
                                 os.remove(predictions_path)
                             # Clear mosaics directory if exists
                             mosaic_dir = os.path.join(output_path, 'mosaics')
