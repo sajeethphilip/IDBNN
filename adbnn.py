@@ -5062,22 +5062,72 @@ class DBNN(GPUDBNN):
 
     def predict_from_file(self, input_csv_path, output_dir, image_dir=None, batch_size=128):
         """
-        Make predictions from an input CSV file and generate detailed outputs including mosaics
+        Make predictions from an input CSV file with interactive file handling
 
         Args:
             input_csv_path: Path to CSV file containing data to predict
             output_dir: Directory to save prediction outputs
             image_dir: Optional directory containing images for mosaics
             batch_size: Batch size for prediction
+
+        Returns:
+            DataFrame containing prediction results or None if aborted
         """
         try:
-            # Create output directory
-            os.makedirs(output_dir, exist_ok=True)
+            # Handle existing output path
+            if os.path.exists(output_dir):
+                if os.path.isfile(output_dir):
+                    print(f"{Colors.RED}Error: Output path exists as a file: {output_dir}{Colors.ENDC}")
+                    choice = input(f"{Colors.YELLOW}Enter new directory path or 'q' to quit: {Colors.ENDC}").strip()
+                    if choice.lower() == 'q':
+                        return None
+                    output_dir = choice
+                    os.makedirs(output_dir, exist_ok=True)
+                else:
+                    print(f"{Colors.YELLOW}Output directory exists: {output_dir}{Colors.ENDC}")
+                    print(f"{Colors.BLUE}Choose an option:{Colors.ENDC}")
+                    print("1. Overwrite existing files")
+                    print("2. Append with new files (keep existing)")
+                    print("3. Specify new directory")
+                    print("q. Quit")
+
+                    while True:
+                        choice = input(f"{Colors.YELLOW}Enter your choice (1-3/q): {Colors.ENDC}").strip().lower()
+
+                        if choice == '1':
+                            print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
+                            break
+                        elif choice == '2':
+                            print(f"{Colors.YELLOW}New files will be created alongside existing ones{Colors.ENDC}")
+                            break
+                        elif choice == '3':
+                            new_dir = input(f"{Colors.YELLOW}Enter new directory path: {Colors.ENDC}").strip()
+                            if new_dir:
+                                output_dir = new_dir
+                                os.makedirs(output_dir, exist_ok=True)
+                                choice = '1'  # Treat as new directory
+                                break
+                        elif choice == 'q':
+                            return None
+                        else:
+                            print(f"{Colors.RED}Invalid choice. Please try again.{Colors.ENDC}")
+            else:
+                os.makedirs(output_dir, exist_ok=True)
+                choice = '1'  # Treat as new directory
+
+            # Generate output filenames
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if choice == '2':  # Append mode
+                predictions_path = os.path.join(output_dir, f"predictions_{timestamp}.csv")
+                metrics_path = os.path.join(output_dir, f"metrics_{timestamp}.txt")
+            else:
+                predictions_path = os.path.join(output_dir, "predictions.csv")
+                metrics_path = os.path.join(output_dir, "metrics.txt")
 
             # Load input data
             input_data = pd.read_csv(input_csv_path)
 
-            # Check if we have the required columns
+            # Check for required columns
             if self.target_column in input_data.columns:
                 X = input_data.drop(columns=[self.target_column])
                 y = input_data[self.target_column]
@@ -5095,39 +5145,40 @@ class DBNN(GPUDBNN):
             predictions = self.predict(X_tensor, batch_size=batch_size)
 
             # Generate detailed results
-            results = self._generate_detailed_predictions(X, predictions,
-                                                         y.cpu().numpy() if y is not None else None)
+            results = self._generate_detailed_predictions(
+                X,
+                predictions,
+                y.cpu().numpy() if y is not None else None
+            )
 
             # Save predictions
-            predictions_path = os.path.join(output_dir, 'predictions.csv')
             results.to_csv(predictions_path, index=False)
             print(f"{Colors.GREEN}Predictions saved to {predictions_path}{Colors.ENDC}")
 
-            # Generate mosaics if image data is available
+            # Generate mosaics if image data available
             if image_dir and 'image_name' in results.columns:
                 mosaic_dir = os.path.join(output_dir, 'mosaics')
+                if os.path.exists(mosaic_dir) and choice == '1':
+                    shutil.rmtree(mosaic_dir)  # Clear existing mosaics if overwriting
                 os.makedirs(mosaic_dir, exist_ok=True)
 
-                # Create mosaic for each class
                 for class_name, group in results.groupby('predicted_class'):
-                    # Filter to valid images
                     valid_images = []
                     for _, row in group.iterrows():
                         img_path = os.path.join(image_dir, row['image_name'])
                         if os.path.exists(img_path):
                             valid_images.append(row)
-                        else:
-                            print(f"{Colors.YELLOW}Image not found: {img_path}{Colors.ENDC}")
 
                     if valid_images:
                         class_df = pd.DataFrame(valid_images)
                         safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-                        mosaic_path = os.path.join(mosaic_dir, f"mosaic_{safe_class_name}.jpg")
+                        mosaic_filename = f"mosaic_{safe_class_name}_{timestamp}.jpg" if choice == '2' else f"mosaic_{safe_class_name}.jpg"
+                        mosaic_path = os.path.join(mosaic_dir, mosaic_filename)
 
                         try:
                             create_prediction_mosaic(
                                 image_dir=image_dir,
-                                csv_path=None,  # We'll use the DataFrame directly
+                                csv_path=None,
                                 output_path=mosaic_path,
                                 mosaic_size=(2000, 2000),
                                 tile_size=(200, 200),
@@ -5137,18 +5188,19 @@ class DBNN(GPUDBNN):
                         except Exception as e:
                             print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
-            # Generate evaluation metrics if we have ground truth
+            # Generate evaluation metrics if ground truth available
             if has_ground_truth:
                 y_true = results['true_class']
                 y_pred = results['predicted_class']
 
-                print("\n" + classification_report(y_true, y_pred))
+                report = classification_report(y_true, y_pred)
+                print(f"\n{Colors.BLUE}Classification Report:{Colors.ENDC}")
+                print(report)
+
                 self.print_colored_confusion_matrix(y_true, y_pred, header="Prediction Results")
 
-                # Save metrics
-                metrics_path = os.path.join(output_dir, 'prediction_metrics.txt')
                 with open(metrics_path, 'w') as f:
-                    f.write(classification_report(y_true, y_pred))
+                    f.write(report)
                 print(f"{Colors.GREEN}Metrics saved to {metrics_path}{Colors.ENDC}")
 
             return results
