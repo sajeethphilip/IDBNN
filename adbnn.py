@@ -5175,11 +5175,8 @@ class DBNN(GPUDBNN):
             self.model_type = self.config.get('modelType', 'Histogram')
 
             # Load model components
-            self._load_label_encoder(dataset_name)
-            self._load_feature_pairs(dataset_name)
-            self._load_likelihood_params(dataset_name)
-            self._load_preprocessing_params(dataset_name)
-            self._load_best_weights()
+            self.label_encoder =load_label_encoder(dataset_name)
+             self._load_model_components()
 
             # Initialize weight updater
             self._initialize_weight_updater()
