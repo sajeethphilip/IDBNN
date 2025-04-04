@@ -4996,16 +4996,7 @@ class DBNN(GPUDBNN):
                 print(f"{Colors.RED}Error creating mosaic for class {class_name}: {str(e)}{Colors.ENDC}")
 
     def predict_from_file(self, input_csv: str, output_path: str = None) -> Dict:
-        """
-        Make predictions from a CSV file and save results, with robust label handling.
-
-        Args:
-            input_csv: Path to input CSV file
-            output_path: Directory to save prediction results (optional)
-
-        Returns:
-            Dictionary containing prediction results and metrics
-        """
+        """Make predictions from CSV file with robust feature handling"""
         try:
             # Load data
             df = pd.read_csv(input_csv)
@@ -5018,7 +5009,6 @@ class DBNN(GPUDBNN):
             if hasattr(self, 'target_column') and self.target_column in df.columns:
                 y_true_str = df[self.target_column]
                 try:
-                    # Transform true labels to numeric if encoder is fitted
                     if hasattr(self.label_encoder, 'classes_'):
                         y_true = self.label_encoder.transform(y_true_str)
                     else:
@@ -5033,33 +5023,23 @@ class DBNN(GPUDBNN):
                 y_true_str = None
                 y_true = None
 
-            # Get features (drop target column if it exists)
+            # Get features (drop target column if exists)
             X = df.drop(columns=[self.target_column]
-                    if hasattr(self, 'target_column') and self.target_column in df.columns
-                    else [])
+                       if hasattr(self, 'target_column') and self.target_column in df.columns
+                       else [])
 
-            # Preprocess features
-            X_processed = self._preprocess_data(X, is_training=False)
-            X_tensor = X_processed if isinstance(X_processed, torch.Tensor) \
-                      else torch.tensor(X_processed, dtype=torch.float32, device=self.device)
-
-            # Make predictions
+            # Generate predictions
             print("Generating predictions...")
-            y_pred = self.predict(X_tensor)
+            y_pred = self.predict(X)
 
-            # Convert predictions to string labels if encoder is available
-            if hasattr(self.label_encoder, 'classes_'):
-                y_pred_str = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
-            else:
-                y_pred_str = y_pred.cpu().numpy()
-
-            # Generate detailed predictions dataframe
+            # Generate detailed results using ORIGINAL features (X_orig)
             print("Generating detailed predictions...")
             results = self._generate_detailed_predictions(
-                X_orig=X,
+                X_orig=X,  # Pass the original features
                 predictions=y_pred,
                 true_labels=y_true_str if y_true_str is not None else None
             )
+
 
             # Calculate probabilities if requested
             if self.config.get('training_params', {}).get('save_probabilities', False):
