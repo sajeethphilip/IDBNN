@@ -2978,9 +2978,20 @@ class DBNN(GPUDBNN):
 #-----------------------------------------PDF mosaic -----------------------------------------------------
 
 
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir):
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with enhanced tqdm progress bars showing image and class info
+
+        Parameters:
+        -----------
+        predictions_df : pandas.DataFrame
+            DataFrame containing image predictions with columns 'filepath', 'predicted_class', 'prediction_confidence'
+        output_dir : str
+            Directory where PDF mosaics will be saved
+        columns : int, default=4
+            Number of image columns per page
+        rows : int, default=2
+            Number of image rows per page
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -3001,6 +3012,9 @@ class DBNN(GPUDBNN):
 
         # Group by class with tqdm
         class_groups = predictions_df.groupby('predicted_class')
+
+        # Calculate images per page based on rows and columns
+        images_per_page = columns * rows
 
         # Outer progress bar for classes
         with tqdm(class_groups, desc="Processing Classes", unit="class",
@@ -3025,9 +3039,18 @@ class DBNN(GPUDBNN):
                 elements = []
 
                 # Process images with nested progress bar
-                images_per_page = 8
                 n_images = len(sorted_df)
                 n_pages = math.ceil(n_images / images_per_page)
+
+                # Calculate image dimensions based on page size and grid layout
+                # Allow for margins and spacing
+                usable_width = letter[0] - inch  # Total width minus margins
+                usable_height = letter[1] - 2*inch  # Total height minus margins and header space
+
+                # Calculate image width including spacing
+                img_width = usable_width / columns
+                # Calculate image height including spacing and caption
+                img_height = (usable_height / rows) * 0.85  # 85% of cell height for image, rest for caption
 
                 # Inner progress bar for images
                 with tqdm(total=n_images, desc="Processing Images", unit="img",
@@ -3050,10 +3073,12 @@ class DBNN(GPUDBNN):
                             f"Class: {class_name} (Sorted by Confidence)",
                             styles['Heading2']
                         ))
+                        elements.append(Spacer(1, 0.1*inch))
 
-                        # Image grid
-                        img_width = (letter[0] - inch) / 4.5
-                        img_height = img_width * 1.2
+                        # Create a table for the image grid
+                        # This makes the layout more precise and flexible
+                        table_data = []
+                        row_data = []
 
                         for i, (_, row) in enumerate(page_images.iterrows()):
                             img_path = row['filepath']
@@ -3068,31 +3093,53 @@ class DBNN(GPUDBNN):
                                 with PILImage.open(img_path) as img:
                                     img.verify()
 
-                                elements.extend([
-                                    ReportLabImage(img_path, width=img_width, height=img_height-0.3*inch),
+                                # Create a cell with image and caption
+                                cell_content = [
+                                    ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
                                     Paragraph(
                                         f"{img_name}<br/>Confidence: {confidence:.2%}",
                                         styles['Caption']
                                     )
-                                ])
+                                ]
 
-                                # Add spacing
-                                if (i+1) % 4 != 0:
-                                    elements.append(Spacer(img_width*0.1, 0.1*inch))
-                                elif i < len(page_images)-1:
-                                    elements.append(Spacer(1, 0.2*inch))
+                                row_data.append(cell_content)
+
+                                # Start a new row when we've filled the columns
+                                if (i + 1) % columns == 0 or i == len(page_images) - 1:
+                                    # If this is the last row and it's not complete, add empty cells
+                                    while len(row_data) < columns:
+                                        row_data.append("")
+
+                                    table_data.append(row_data)
+                                    row_data = []
 
                             except Exception as e:
                                 img_pbar.write(f"\033[KWarning: Could not process {img_name}: {str(e)}")
+                                # Add an empty cell in case of error
+                                row_data.append("")
                                 continue
+
+                        # Create the table
+                        if table_data:
+                            table_style = [
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                                ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                            ]
+
+                            table = Table(table_data, colWidths=[img_width] * columns)
+                            table.setStyle(TableStyle(table_style))
+                            elements.append(table)
 
                         if page_num < n_pages - 1:
                             elements.append(PageBreak())
 
                 # Build PDF
                 doc.build(elements)
-                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}")
-
+                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}", end='\r',flush=True)
 
 #-------------Option 2 ---------------
 
