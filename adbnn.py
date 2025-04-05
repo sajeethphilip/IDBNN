@@ -1800,9 +1800,9 @@ class DBNN(GPUDBNN):
                 df = pd.read_csv(file_path,
                                sep=self.config.get('separator', ','),
                                header=0 if self.config.get('has_header', True) else None,  low_memory=False)
-
+            predict_mode = self.config.get('execution_flags', {}).get('predict', False)
             # Handle target column validation
-            if self.target_column in df.columns:
+            if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
                     print(f"Warning: Target column '{self.target_column}' contains values not seen during training")
                     if self.config.get('execution_flags', {}).get('predict', False):
@@ -1812,7 +1812,6 @@ class DBNN(GPUDBNN):
              # Store original data (CPU only)
             self.Original_data = df.copy()  # This is the line that was missing
             # Get prediction mode from config (not global variable)
-            predict_mode = self.config.get('execution_flags', {}).get('predict', False)
 
             # Handle prediction mode (target column may not exist)
             if predict_mode and self.target_column not in df.columns:
