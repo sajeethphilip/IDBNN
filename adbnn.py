@@ -15,10 +15,15 @@ import pandas as pd
 import shutil
 import os
 #For pdf mosaic--
+from reportlab.platypus import Image as ReportLabImage
+from PIL import Image as PILImage
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
 from PIL import Image as PILImage
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import SimpleDocTemplate, Image, Paragraph, PageBreak, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
