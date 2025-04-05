@@ -5131,7 +5131,7 @@ class DBNN(GPUDBNN):
             Dictionary containing prediction results and metrics
         """
         # Create output directory if needed
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_path, exist_ok=True)
         try:
             # Load data
             df = pd.read_csv(input_csv)
@@ -6177,7 +6177,7 @@ def main():
                     os.makedirs(output_dir, exist_ok=True)
                     output_path = os.path.join(output_dir, f'{dataset_name}')
 
-                    results = predictor.predict_from_file(input_csv, output_path)
+                    results = predictor.predict_from_file(input_csv, output_dir)
                     print("\033[K" + f"Predictions saved to: {output_path}")
 
             if mode == 'invertDBNN':
