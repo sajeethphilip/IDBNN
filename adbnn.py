@@ -7,6 +7,7 @@ import argparse
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
+import shutil
 import os
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
