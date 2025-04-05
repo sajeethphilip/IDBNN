@@ -5231,7 +5231,7 @@ class DBNN(GPUDBNN):
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
                 true_labels=(y_true_str if y_true_str is not None else None),
-                posteriors
+                posteriors=posteriors
             )
 
             # Save results if output path specified
