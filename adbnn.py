@@ -3114,7 +3114,7 @@ class DBNN(GPUDBNN):
                             row_data.append(cell_content)
 
                             # Start a new row when we've filled the columns
-                            if (len(row_data) % columns == 0) or (len(row_data) == len(page_images):
+                            if (len(row_data) % columns == 0) or (len(row_data) == len(page_images)):
                                 # Pad the row if incomplete
                                 while len(row_data) < columns:
                                     row_data.append("")
