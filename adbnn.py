@@ -3131,7 +3131,7 @@ class DBNN(GPUDBNN):
                 doc.build(elements)
 
             # Clear line and print final status once
-            print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
