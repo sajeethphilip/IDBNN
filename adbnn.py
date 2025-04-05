@@ -15,6 +15,22 @@ import pandas as pd
 import shutil
 import os
 #For pdf mosaic--
+import math
+from tqdm import tqdm
+from PIL import Image as PILImage
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    PageBreak,
+    Image as ReportLabImage,
+    Table,
+    TableStyle
+)
+from reportlab.lib.styles import getSampleStyleSheet
+#--
 from reportlab.platypus import Image as ReportLabImage
 from PIL import Image as PILImage
 from reportlab.lib.pagesizes import letter
