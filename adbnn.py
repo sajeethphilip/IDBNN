@@ -1819,7 +1819,7 @@ class DBNN(GPUDBNN):
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
-                    print(f"\033[K" + f"The predict mode is {predict_mode} and hence will rename target column.")
+                    print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
                     column_names = df.columns.tolist()
                     # Find the index of the target column
@@ -5145,7 +5145,7 @@ class DBNN(GPUDBNN):
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
-                    print(f"\033[K" + f"The predict mode is {predict_mode} and hence will rename target column.")
+                    print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
                     column_names = df.columns.tolist()
                     # Find the index of the target column
