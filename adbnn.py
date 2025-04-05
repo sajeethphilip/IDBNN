@@ -2995,7 +2995,7 @@ class DBNN(GPUDBNN):
 
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        Generate PDF mosaics with a single non-scrolling progress bar per class.
+        Generate PDF mosaics with a single progress bar per class that doesn't scroll.
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -3042,12 +3042,11 @@ class DBNN(GPUDBNN):
             img_width = usable_width / columns
             img_height = (usable_height / rows) * 0.85
 
-            # Single consolidated progress bar for this class
+            # Single progress bar for entire class processing
             with tqdm(total=n_images,
                      desc=f"{str(class_name)[:15]:<15}",
                      unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
-                     leave=False) as pbar:
+                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as pbar:
 
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
@@ -3077,7 +3076,7 @@ class DBNN(GPUDBNN):
                         img_name = os.path.basename(img_path)
                         confidence = row['prediction_confidence']
 
-                        # Update progress bar with all info
+                        # Update progress bar
                         pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
                         pbar.update(1)
 
@@ -3120,13 +3119,16 @@ class DBNN(GPUDBNN):
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
 
-                # Build PDF and update progress bar one last time
+                # Build PDF after all pages processed
                 doc.build(elements)
-                pbar.set_postfix_str(f"Saved to {os.path.basename(pdf_path)}")
+
+                # Final update with completion message
+                pbar.set_postfix_str(f"Saved {n_images} images")
                 pbar.refresh()
 
-            # Print final status on same line and clear
-            print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
+            # Clear the line and print final status once
+            print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
