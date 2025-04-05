@@ -1,4 +1,9 @@
 ```
+
+April 5th 2025
+![image](https://github.com/user-attachments/assets/f1798522-9aa9-46c9-b4e0-38ad4748bd33)
+Fresh training after all modifications on April 5th - ook about 1 hr and 15 mins.
+
 March 31 2025 version Train the CDBNN, predict with it and train the adbnn and finally predcit with it.
 Later you can skip the training process and use the predcit modes on your own images.
 
