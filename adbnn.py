@@ -3155,8 +3155,9 @@ class DBNN(GPUDBNN):
 
                 # Build PDF
                 doc.build(elements)
-                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}", end='\r')
-
+                message = f"\033[K✅ Created PDF for {class_name} at {pdf_path}"
+                sys.stdout.write(message + "\r")
+                sys.stdout.flush()
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
