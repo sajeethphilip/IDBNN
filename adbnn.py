@@ -3005,7 +3005,7 @@ class DBNN(GPUDBNN):
             safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
 
-            print(f"\033[KGenerating PDF mosaic for class: {class_name}")
+            print(f"\033[KGenerating PDF mosaic for class: {class_name}",end='\r',flush=True)
 
             # Sort images by confidence (highest first)
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
@@ -5145,7 +5145,7 @@ class DBNN(GPUDBNN):
         # Save the predictions file in the new directory
         output_path = os.path.join(output_dir, output_file)
         result_df.to_csv(output_path, index=False)
-        print("\033[K" +f"Saved predictions to {output_path}", end="\r", flush=True)
+        print("\033[K" +f"{Colors.GREEN}Saved predictions to {output_path}{Colors.ENDC}", end="\r", flush=True)
 
         if true_labels is not None:
             # Verification analysis
