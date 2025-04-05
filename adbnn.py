@@ -1819,7 +1819,7 @@ class DBNN(GPUDBNN):
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
-                    print(f"\033[K" + f"The predict mode is {predict_mode} and hence will rename target column '{self.target_column}'.")
+                    print(f"\033[K" + f"The predict mode is {predict_mode} and hence will rename target column.")
                     # Get the current column names
                     column_names = df.columns.tolist()
                     # Find the index of the target column
@@ -5141,20 +5141,25 @@ class DBNN(GPUDBNN):
             # Load data
             df = pd.read_csv(input_csv)
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
-            # Check if target column exists but doesn't match training labels
-            true_labels = None
-            if self.target_column in df.columns:
-                try:
-                    # Try to encode the labels to see if they match training
-                    true_labels = self.label_encoder.transform(df[self.target_column])
-                    print(f"\033[KFound valid target column '{self.target_column}'")
-                except ValueError as e:
-                    print(f"\033[KWarning: Target column '{self.target_column}' exists but doesn't match training labels")
-                    print(f"\033[KPreserving original values in column 'original_{self.target_column}'")
-                    # Preserve original values in a new column
-                    df[f'original_{self.target_column}'] = df[self.target_column]
-                    true_labels = None
-
+            predict_mode = True if self.mode=='predict' else False
+            # Handle target column validation
+            if predict_mode and self.target_column in df.columns:
+                if not self._validate_target_column(df[self.target_column]):
+                    print(f"\033[K" + f"The predict mode is {predict_mode} and hence will rename target column.")
+                    # Get the current column names
+                    column_names = df.columns.tolist()
+                    # Find the index of the target column
+                    try:
+                        index = column_names.index(self.target_column)
+                        # Update the name
+                        column_names[index] = 'dummy_target'
+                        # Assign the updated list back to columns
+                        df.columns = column_names
+                        # Update the target_column reference
+                        self.target_column = 'dummy_target'
+                    except ValueError as e:
+                        print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
+                        # If target column isn't found, just proceed without renaming
             # Store original data
             self.X_orig = df.copy()
 
