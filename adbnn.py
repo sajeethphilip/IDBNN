@@ -3045,12 +3045,12 @@ class DBNN(GPUDBNN):
                     confidence = row['prediction_confidence']
 
                     try:
-                        # Verify image exists and is valid
-                        pil_img = PILImage.open(img_path)
-                        pil_img.verify()
+                        # Verify image using PIL
+                        with PILImage.open(img_path) as img:
+                            img.verify()
 
-                        # Create image with caption
-                        img = Image(img_path, width=img_width, height=img_height-0.3*inch)
+                        # Use ReportLab's Image class (renamed)
+                        img = ReportLabImage(img_path, width=img_width, height=img_height-0.3*inch)
                         caption = Paragraph(
                             f"{os.path.basename(img_path)}<br/>Confidence: {confidence:.2%}",
                             styles['Caption']
@@ -3065,7 +3065,6 @@ class DBNN(GPUDBNN):
                             elements.append(Spacer(img_width*0.1, 0.1*inch))
                         elif i < len(page_images)-1:  # Last in row but not last image
                             elements.append(Spacer(1, 0.2*inch))
-
                     except Exception as e:
                         print(f"\033[KWarning: Could not process image {img_path}: {str(e)}")
                         continue
