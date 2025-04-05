@@ -4786,7 +4786,7 @@ class DBNN(GPUDBNN):
             print("\033[K" + f"{Colors.YELLOW}Generating predictions for the entire dataset{Colors.ENDC}", end='\r', flush=True)
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
-            all_predictions = self.predict(X_all, batch_size=batch_size)
+            all_predictions, all_posteriors  = self.predict(X_all, batch_size=batch_size)
             # Ensure all tensors are on the same device (GPU)
             all_pr = all_predictions.to(self.device)  # Move predictions to GPU
             y_all_pr = y_all.to(self.device)  # Ensure y_all is on GPU (though it likely already is)
