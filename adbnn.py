@@ -2995,7 +2995,7 @@ class DBNN(GPUDBNN):
 
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        Generate PDF mosaics with a single progress bar per class that doesn't scroll.
+        Generate PDF mosaics with one progress bar per class showing overall progress.
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -3042,11 +3042,14 @@ class DBNN(GPUDBNN):
             img_width = usable_width / columns
             img_height = (usable_height / rows) * 0.85
 
-            # Single progress bar for entire class processing
+            # Single progress bar for entire class
             with tqdm(total=n_images,
                      desc=f"{str(class_name)[:15]:<15}",
                      unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as pbar:
+                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
+                     leave=False) as pbar:
+
+                processed_images = 0
 
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
@@ -3071,14 +3074,10 @@ class DBNN(GPUDBNN):
                     table_data = []
                     row_data = []
 
-                    for i, (_, row) in enumerate(page_images.iterrows()):
+                    for _, row in page_images.iterrows():
                         img_path = row['filepath']
                         img_name = os.path.basename(img_path)
                         confidence = row['prediction_confidence']
-
-                        # Update progress bar
-                        pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
-                        pbar.update(1)
 
                         try:
                             with PILImage.open(img_path) as img:
@@ -3093,15 +3092,24 @@ class DBNN(GPUDBNN):
                             ]
                             row_data.append(cell_content)
 
-                            if (i + 1) % columns == 0 or i == len(page_images) - 1:
-                                while len(row_data) < columns:
-                                    row_data.append("")
+                            if len(row_data) == columns:
                                 table_data.append(row_data)
                                 row_data = []
 
                         except Exception as e:
                             row_data.append("")
                             continue
+
+                        # Update progress - one increment per image
+                        processed_images += 1
+                        pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
+                        pbar.update(1)
+
+                    # Add any remaining images
+                    if row_data:
+                        while len(row_data) < columns:
+                            row_data.append("")
+                        table_data.append(row_data)
 
                     if table_data:
                         table_style = [
@@ -3122,13 +3130,8 @@ class DBNN(GPUDBNN):
                 # Build PDF after all pages processed
                 doc.build(elements)
 
-                # Final update with completion message
-                pbar.set_postfix_str(f"Saved {n_images} images")
-                pbar.refresh()
-
-            # Clear the line and print final status once
+            # Clear line and print final status once
             print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
-
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
