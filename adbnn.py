@@ -5230,7 +5230,7 @@ class DBNN(GPUDBNN):
             results = self._generate_detailed_predictions(
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
-                true_labels=y_true_str if y_true_str is not None else None,
+                true_labels=(y_true_str if y_true_str is not None else None),
                 posteriors
             )
 
