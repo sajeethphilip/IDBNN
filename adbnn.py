@@ -4653,7 +4653,7 @@ class DBNN(GPUDBNN):
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors,all_posteriors)
+            all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors)
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
