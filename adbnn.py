@@ -2995,18 +2995,7 @@ class DBNN(GPUDBNN):
 
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        Generate PDF mosaics with a single consolidated progress bar per class showing image and class info.
-
-        Parameters:
-        -----------
-        predictions_df : pandas.DataFrame
-            DataFrame containing image predictions with columns 'filepath', 'predicted_class', 'prediction_confidence'
-        output_dir : str
-            Directory where PDF mosaics will be saved
-        columns : int, default=4
-            Number of image columns per page
-        rows : int, default=2
-            Number of image rows per page
+        Generate PDF mosaics with a single non-scrolling progress bar per class.
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -3027,16 +3016,11 @@ class DBNN(GPUDBNN):
 
         # Group by class
         class_groups = predictions_df.groupby('predicted_class')
-
-        # Calculate images per page based on rows and columns
         images_per_page = columns * rows
 
-        # Process each class with a single progress bar
         for class_name, group_df in class_groups:
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-
-            # Sort images by confidence
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
             n_images = len(sorted_df)
             n_pages = math.ceil(n_images / images_per_page)
@@ -3052,11 +3036,18 @@ class DBNN(GPUDBNN):
             )
             elements = []
 
-            # Initialize single progress bar for this class
+            # Calculate image dimensions
+            usable_width = letter[0] - inch
+            usable_height = letter[1] - 2*inch
+            img_width = usable_width / columns
+            img_height = (usable_height / rows) * 0.85
+
+            # Single consolidated progress bar for this class
             with tqdm(total=n_images,
-                     desc=f"Class: {class_name[:20]:<20}",
+                     desc=f"{str(class_name)[:15]:<15}",
                      unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as pbar:
+                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
+                     leave=False) as pbar:
 
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
@@ -3077,56 +3068,42 @@ class DBNN(GPUDBNN):
                     ))
                     elements.append(Spacer(1, 0.1*inch))
 
-                    # Create a table for the image grid
+                    # Create image grid table
                     table_data = []
                     row_data = []
 
-                    for _, row in page_images.iterrows():
+                    for i, (_, row) in enumerate(page_images.iterrows()):
                         img_path = row['filepath']
                         img_name = os.path.basename(img_path)
                         confidence = row['prediction_confidence']
 
-                        # Update progress bar with current image info
-                        pbar.set_postfix_str(f"Img: {img_name[:15]}... Conf: {confidence:.1%}")
+                        # Update progress bar with all info
+                        pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
                         pbar.update(1)
 
                         try:
                             with PILImage.open(img_path) as img:
                                 img.verify()
 
-                            # Calculate image dimensions based on page size and grid layout
-                            usable_width = letter[0] - inch  # Total width minus margins
-                            usable_height = letter[1] - 2*inch  # Total height minus margins and header space
-
-                            # Calculate image width and height including spacing
-                            img_width = usable_width / columns
-                            img_height = (usable_height / rows) * 0.85  # 85% of cell height for image
-
-                            # Create a cell with image and caption
                             cell_content = [
                                 ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
                                 Paragraph(
-                                    f"{img_name}<br/>Confidence: {confidence:.2%}",
+                                    f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
                                     styles['Caption']
                                 )
                             ]
-
                             row_data.append(cell_content)
 
-                            # Start a new row when we've filled the columns
-                            if (len(row_data) % columns == 0) or (len(row_data) == len(page_images)):
-                                # Pad the row if incomplete
+                            if (i + 1) % columns == 0 or i == len(page_images) - 1:
                                 while len(row_data) < columns:
                                     row_data.append("")
-
                                 table_data.append(row_data)
                                 row_data = []
 
                         except Exception as e:
-                            pbar.write(f"\033[KWarning: Could not process {img_name}: {str(e)}")
+                            row_data.append("")
                             continue
 
-                    # Create the table
                     if table_data:
                         table_style = [
                             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -3136,7 +3113,6 @@ class DBNN(GPUDBNN):
                             ('TOPPADDING', (0, 0), (-1, -1), 3),
                             ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
                         ]
-
                         table = Table(table_data, colWidths=[img_width] * columns)
                         table.setStyle(TableStyle(table_style))
                         elements.append(table)
@@ -3144,9 +3120,13 @@ class DBNN(GPUDBNN):
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
 
-                # Build PDF
+                # Build PDF and update progress bar one last time
                 doc.build(elements)
-                pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}")
+                pbar.set_postfix_str(f"Saved to {os.path.basename(pdf_path)}")
+                pbar.refresh()
+
+            # Print final status on same line and clear
+            print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
