@@ -9,6 +9,14 @@ import numpy as np
 import pandas as pd
 import shutil
 import os
+#For pdf mosaic--
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import SimpleDocTemplate, Image, Paragraph, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet
+import tempfile
+import math
+#----
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
@@ -1696,6 +1704,8 @@ class DBNN(GPUDBNN):
         """
         # Convert predictions to numpy if they're tensors
         predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
+        posteriors_np = posteriors.cpu().numpy()
+        pred_classes = predictions.cpu().numpy()
 
         # Create results DataFrame from original features
         if isinstance(X_orig, pd.DataFrame):
@@ -1707,15 +1717,21 @@ class DBNN(GPUDBNN):
                                     columns=getattr(self, 'feature_columns',
                                                   [f'feature_{i}' for i in range(X_orig_np.shape[1])]))
 
+
         # Add predictions with label decoding if possible
         if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
             try:
-                results_df['predicted_class'] = self.label_encoder.inverse_transform(predictions_np)
+                # Add predictions and confidence (max probability)
+                results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
+                results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
+
             except ValueError as e:
                 print(f"Note: Using raw predictions - {str(e)}")
                 results_df['predicted_class'] = predictions_np
+                results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
         else:
             results_df['predicted_class'] = predictions_np
+            results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
 
         # Handle true labels if provided
         if true_labels is not None:
@@ -1784,6 +1800,14 @@ class DBNN(GPUDBNN):
                 df = pd.read_csv(file_path,
                                sep=self.config.get('separator', ','),
                                header=0 if self.config.get('has_header', True) else None,  low_memory=False)
+
+            # Handle target column validation
+            if self.target_column in df.columns:
+                if not self._validate_target_column(df[self.target_column]):
+                    print(f"Warning: Target column '{self.target_column}' contains values not seen during training")
+                    if self.config.get('execution_flags', {}).get('predict', False):
+                        print("Proceeding in prediction mode without target column")
+                        self.target_column = None  # Treat as prediction dataset
 
              # Store original data (CPU only)
             self.Original_data = df.copy()  # This is the line that was missing
@@ -2918,6 +2942,82 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 
+    def generate_class_pdf(self, image_paths: List[str], output_pdf: str):
+        """Generate PDF with images sorted by confidence for each class"""
+        doc = SimpleDocTemplate(output_pdf, pagesize=letter)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        # Group images by predicted class
+        class_groups = {}
+        for img_path in image_paths:
+            # Extract class and confidence from filename or metadata
+            # (Assuming image_paths come with metadata or follow a naming convention)
+            class_name = os.path.basename(img_path).split('_')[0]  # Adjust as needed
+            confidence = float(os.path.basename(img_path).split('_')[1])  # Adjust as needed
+
+            if class_name not in class_groups:
+                class_groups[class_name] = []
+            class_groups[class_name].append((img_path, confidence))
+
+        # Process each class
+        for class_name, images in class_groups.items():
+            # Sort by confidence (highest first)
+            images.sort(key=lambda x: x[1], reverse=True)
+
+            # Add class header
+            elements.append(Paragraph(f"Class: {class_name}", styles['Heading1']))
+
+            # Create pages with 2x4 grids
+            n_images = len(images)
+            n_pages = math.ceil(n_images / 8)
+
+            for page in range(n_pages):
+                # Create a grid for this page
+                start_idx = page * 8
+                end_idx = min(start_idx + 8, n_images)
+                page_images = images[start_idx:end_idx]
+
+                # Create a temporary image with the grid
+                grid_img = self._create_image_grid(page_images)
+
+                # Add to PDF
+                elements.append(Image(grid_img, width=500, height=650))
+                elements.append(PageBreak())
+
+        doc.build(elements)
+
+    def _create_image_grid(self, images: List[tuple]) -> str:
+        """Create a single image with 2x4 grid of images and captions"""
+        from PIL import Image, ImageDraw
+
+        # Create blank canvas
+        canvas = Image.new('RGB', (2000, 2500), 'white')
+        draw = ImageDraw.Draw(canvas)
+
+        # Position images in grid
+        for i, (img_path, confidence) in enumerate(images):
+            row = i // 4
+            col = i % 4
+
+            # Open and resize image
+            img = Image.open(img_path)
+            img = img.resize((400, 400))
+
+            # Paste onto canvas
+            x = col * 500 + 50
+            y = row * 600 + 50
+            canvas.paste(img, (x, y))
+
+            # Add caption
+            caption = f"{os.path.basename(img_path)}\nConfidence: {confidence:.2f}"
+            draw.text((x, y + 420), caption, fill='black')
+
+        # Save temporary file
+        temp_path = os.path.join(tempfile.gettempdir(), f"grid_{os.getpid()}.jpg")
+        canvas.save(temp_path)
+        return temp_path
+
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int],
                                      group_size: int = 2,
                                      max_combinations: int = None) -> torch.Tensor:
@@ -3506,10 +3606,20 @@ class DBNN(GPUDBNN):
         return None, None
 
 
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> torch.Tensor:
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Make predictions in batches with consistent NaN handling.
+        Returns both predicted classes and class probabilities.
         Handles both DataFrame and Tensor inputs.
+
+        Args:
+            X: Input features (DataFrame or Tensor)
+            batch_size: Batch size for prediction
+
+        Returns:
+            Tuple containing:
+            - predictions: Tensor of predicted class indices
+            - posteriors: Tensor of class probabilities for all classes
         """
         # Ensure we have a properly initialized label encoder
         if not hasattr(self.label_encoder, 'classes_'):
@@ -3539,6 +3649,7 @@ class DBNN(GPUDBNN):
 
             n_batches = (len(X_tensor) + batch_size - 1) // batch_size
             predictions = []
+            all_posteriors = []
 
             with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
                 for i in range(0, len(X_tensor), batch_size):
@@ -3552,12 +3663,17 @@ class DBNN(GPUDBNN):
                     else:
                         raise ValueError(f"Invalid model type: {self.model_type}")
 
-                    # Get predictions
+                    # Get predictions and store posteriors
                     batch_predictions = torch.argmax(posteriors, dim=1)
                     predictions.append(batch_predictions)
+                    all_posteriors.append(posteriors)
                     pred_pbar.update(1)
 
-            return torch.cat(predictions).cpu()
+            # Concatenate all batches
+            predictions = torch.cat(predictions).cpu()
+            posteriors = torch.cat(all_posteriors).cpu()
+
+            return predictions, posteriors
 
         finally:
             # Restore original weights
@@ -4968,7 +5084,16 @@ class DBNN(GPUDBNN):
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
     # DBNN class to handle prediction functionality
+    def _validate_target_column(self, y: pd.Series) -> bool:
+        """Check if target column values match label encoder classes"""
+        if not hasattr(self.label_encoder, 'classes_'):
+            return False
 
+        unique_values = set(y.unique())
+        encoder_classes = set(self.label_encoder.classes_)
+
+        # Check if all values in target column are in encoder classes
+        return unique_values.issubset(encoder_classes)
 
     def predict_from_file(self, input_csv: str, output_path: str = None,
                          image_dir: str = None, batch_size: int = 128) -> Dict:
@@ -4984,6 +5109,8 @@ class DBNN(GPUDBNN):
         Returns:
             Dictionary containing prediction results and metrics
         """
+        # Create output directory if needed
+        os.makedirs(output_dir, exist_ok=True)
         try:
             # Load data
             df = pd.read_csv(input_csv)
@@ -5073,10 +5200,12 @@ class DBNN(GPUDBNN):
 
             # Generate predictions
             print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
-            y_pred = self.predict(X, batch_size=batch_size)
-
+            y_pred,posteriors = self.predict(X, batch_size=batch_size)
+            pred_classes = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+            confidences = posteriors[np.arange(len(y_pred)), y_pred].cpu().numpy()
             # Generate detailed results
             print(f"{Colors.BLUE}Generating detailed predictions...{Colors.ENDC}")
+
             results = self._generate_detailed_predictions(
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
@@ -5094,6 +5223,8 @@ class DBNN(GPUDBNN):
                 metrics_dir = os.path.dirname(metrics_path)
                 os.makedirs(metrics_dir, exist_ok=True)
                 # Save predictions
+                results['predicted_class'] = pred_classes
+                results['confidence'] = confidences
                 results.to_csv(predictions_path, index=False)
                 print(f"{Colors.GREEN}Predictions saved to {predictions_path}{Colors.ENDC}")
 
