@@ -5162,7 +5162,7 @@ class DBNN(GPUDBNN):
                         # If target column isn't found, just proceed without renaming
             # Store original data
             self.X_orig = df.copy()
-            print(df.head)
+            #print(df.head)
             # Handle output directory
             if output_path:
                 # Handle existing output path
