@@ -39,10 +39,30 @@ def fetch_dataset_info(dataset_name):
     try:
         dataset = fetch_ucirepo(name=dataset_name)
 
-        # Determine the actual separator by checking the file extension and content
+        # First verify the data URL is accessible
         file_url = dataset.metadata.data_url
-        response = requests.get(file_url)
-        if response.ok:
+        try:
+            response = requests.head(file_url, timeout=10)
+            if not response.ok:
+                # Try alternative URL patterns if the direct one fails
+                base_url = "https://archive.ics.uci.edu/ml/machine-learning-databases/"
+                dataset_id = dataset.metadata.uci_id
+                alternative_url = f"{base_url}{dataset_id}/{dataset_id}.data"
+
+                response = requests.head(alternative_url, timeout=10)
+                if response.ok:
+                    file_url = alternative_url
+                else:
+                    print(f"Data URL not accessible for dataset {dataset_name}")
+                    return None
+        except requests.exceptions.RequestException as e:
+            print(f"Error checking data URL for dataset {dataset_name}: {str(e)}")
+            return None
+
+        # Determine the actual separator by checking the file content
+        try:
+            response = requests.get(file_url, timeout=10)
+            response.raise_for_status()
             first_line = response.text.split('\n')[0]
             if ',' in first_line:
                 separator = ','
@@ -52,7 +72,8 @@ def fetch_dataset_info(dataset_name):
                 separator = '\t'
             else:
                 separator = ' '
-        else:
+        except Exception as e:
+            print(f"Error determining separator for dataset {dataset_name}: {str(e)}")
             separator = ','  # default if unable to determine
 
         # Handle target column - ensure it's a single value
@@ -63,12 +84,13 @@ def fetch_dataset_info(dataset_name):
 
         dataset_info = {
             "name": dataset.metadata.name.lower(),
-            "url": dataset.metadata.data_url,
+            "url": file_url,  # Use the verified URL
             "columns": list(dataset.data.original.columns),
             "target": target,
             "instances": dataset.metadata.num_instances,
             "separator": separator,
-            "has_header": True if dataset.metadata.feature_types else False
+            "has_header": True if dataset.metadata.feature_types else False,
+            "data_available": True  # Flag indicating data is accessible
         }
 
         dataset_info["accuracy"] = 0.0  # placeholder for accuracy
@@ -81,22 +103,22 @@ def fetch_dataset_info(dataset_name):
 def create_config_file(dataset_name, output_dir="data"):
     dataset_info = fetch_dataset_info(dataset_name)
 
-    if dataset_info is None:
-        print(f"Could not fetch information for dataset '{dataset_name}'")
-        return
+    if dataset_info is None or not dataset_info.get("data_available", False):
+        print(f"Skipping dataset '{dataset_name}' - data not available")
+        return None
 
     config = {
-        "file_path":dataset_name.lower().replace('(', '').replace(')', '').replace('[', '').replace(']', '').replace(' ', '_'),
+        "file_path": dataset_name.lower().replace('(', '').replace(')', '').replace('[', '').replace(']', '').replace(' ', '_'),
         "file_url": dataset_info["url"],
         "column_names": dataset_info["columns"],
         "target_column": dataset_info["target"],  # Now a single value
         "separator": dataset_info["separator"],   # Determined from actual file
-	"modelType":"Histogram",        
+        "modelType": "Histogram",
         "has_header": dataset_info["has_header"],
         "likelihood_config": {
-        "feature_group_size": 2,
-        "max_combinations": 1000,
-        "bin_sizes": [20]
+            "feature_group_size": 2,
+            "max_combinations": 1000,
+            "bin_sizes": [20]
         },
         "training_params": {
             "trials": 100,
@@ -109,23 +131,30 @@ def create_config_file(dataset_name, output_dir="data"):
         }
     }
 
-    final_path=f"{output_dir}/{dataset_info['name'].lower().replace('(', '').replace(')', '').replace('[', '').replace(']', '').replace(' ', '_')}"
+    final_path = f"{output_dir}/{dataset_info['name'].lower().replace('(', '').replace(')', '').replace('[', '').replace(']', '').replace(' ', '_')}"
     os.makedirs(final_path, exist_ok=True)
     filename = f"{dataset_info['name'].lower().replace('(', '').replace(')', '').replace('[', '').replace(']', '').replace(' ', '_')}.conf"
+
     with open(os.path.join(final_path, filename), 'w') as f:
-        #f.write(f"# {filename} best_accuracy: {dataset_info['accuracy']}, instances: {dataset_info['instances']}\n")
         json.dump(config, f, indent=4)
         print(f"Created configuration file: {final_path}/{filename}")
+
+    # Immediately download the dataset after creating the config
+    download_uci_dataset(os.path.join(final_path, filename), final_path)
     return final_path
 
+def download_uci_dataset(config_path, destination=None):
+    if destination is None:
+        destination = os.path.dirname(config_path)
 
-def download_uci_dataset(config_path,destination='data/'):
     # Read the configuration file
     print(f"Opening file {config_path}")
-    with open(config_path, 'r') as f:
-        # Skip the first line with accuracy info
-        #next(f)
-        config = json.load(f)
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"Error reading config file: {str(e)}")
+        return False
 
     # Extract file info from config
     file_url = config['file_url']
@@ -135,7 +164,7 @@ def download_uci_dataset(config_path,destination='data/'):
 
     try:
         # Download the data
-        response = requests.get(file_url)
+        response = requests.get(file_url, timeout=30)
         response.raise_for_status()
 
         # Read the data into a pandas DataFrame
@@ -146,30 +175,35 @@ def download_uci_dataset(config_path,destination='data/'):
                            names=config['column_names'])
 
         # Save to local CSV file
-        pth_name = os.path.basename(config_path).replace('.conf', '')
-        dest_path= os.path.join(destination, pth_name,dataset_name)
+        dest_path = os.path.join(destination, dataset_name)
         df.to_csv(dest_path, index=False)
         print(f"Successfully downloaded dataset to {dest_path}")
-
+        return True
     except requests.exceptions.RequestException as e:
         print(f"Error downloading the dataset: {str(e)}")
+        # Remove the config file if download fails
+        os.remove(config_path)
+        print(f"Removed configuration file {config_path} due to download failure")
+        return False
     except pd.errors.EmptyDataError:
         print("The downloaded file is empty")
+        os.remove(config_path)
+        print(f"Removed configuration file {config_path} due to empty data")
+        return False
     except Exception as e:
         print(f"An error occurred: {str(e)}")
-
+        os.remove(config_path)
+        print(f"Removed configuration file {config_path} due to error")
+        return False
 
 if __name__ == "__main__":
-    import os
-
     def ensure_directory_exists(directory_path):
         if not os.path.exists(directory_path):
             os.makedirs(directory_path)
             print(f"Directory '{directory_path}' created.")
         else:
-            print(f"Exisiting Directory '{directory_path}' will be used to update configure files from UCI data.")
+            print(f"Existing Directory '{directory_path}' will be used to update configure files from UCI data.")
 
-    # Example usage
     directory_path = 'data/'
     ensure_directory_exists(directory_path)
 
@@ -182,35 +216,44 @@ if __name__ == "__main__":
     dataset_name = input("\nEnter dataset name (press Enter to process all datasets): ")
     if dataset_name == '':
         # Process all datasets
-        for dataset_name in available_datasets:
-            print(f"\nProcessing dataset: {dataset_name}")
-            directory_path=create_config_file(dataset_name)
+        successful_datasets = []
+        for dataset in available_datasets:
+            print(f"\nProcessing dataset: {dataset}")
+            result_path = create_config_file(dataset)
+            if result_path is not None:
+                successful_datasets.append(dataset)
+
+        print("\nSuccessfully processed datasets:")
+        for i, dataset in enumerate(successful_datasets, 1):
+            print(f"{i}. {dataset}")
     else:
         # Process single dataset
-        directory_path=create_config_file(dataset_name)
+        result_path = create_config_file(dataset_name)
+        if result_path is None:
+            print(f"Failed to process dataset {dataset_name}")
 
-    # List all configuration files
-    config_files = [f for f in os.listdir(directory_path)
-                   if f.endswith('.conf')]
+    # List all configuration files that have corresponding CSV files
+    config_files = []
+    for root, dirs, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith('.conf'):
+                csv_file = file.replace('.conf', '.csv')
+                if os.path.exists(os.path.join(root, csv_file)):
+                    config_files.append(os.path.join(root, file))
 
-    print("Available configuration files:")
+    print("\nAvailable configuration files with data:")
     for i, conf in enumerate(config_files, 1):
-        print(f"{i}. {conf}")
+        print(f"{i}. {os.path.basename(conf)}")
 
-    choice = input("\nEnter config file name (press Enter for all): ")
-
-    print(f"Your choice is {choice} for conf in {config_files}")
-    if choice == '':
-        # Process all configuration files
-        for conf in config_files:
-            print(f"Processsing {conf}")
-            config_path = os.path.join(directory_path, conf)
-            print(f"\nProcessing: {conf}")
-            download_uci_dataset(config_path)
+    if config_files:
+        choice = input("\nEnter config file number to verify download (press Enter to skip): ")
+        if choice and choice.isdigit():
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(config_files):
+                config_path = config_files[choice_idx]
+                print(f"\nVerifying: {os.path.basename(config_path)}")
+                download_uci_dataset(config_path)
+            else:
+                print("Invalid selection")
     else:
-        # Process single configuration file
-        config_path = os.path.join(directory_path, choice)
-        if os.path.exists(config_path):
-            download_uci_dataset(config_path)
-        else:
-            print("Configuration file not found")
+        print("No valid configuration files with data available")
