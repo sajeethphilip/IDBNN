@@ -2970,7 +2970,101 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
+    def create_class_pdf_mosaic(class_df, output_dir, class_name):
+        """
+        Create a PDF mosaic for a single class with 2x4 images per page, sorted by confidence.
 
+        Args:
+            class_df: DataFrame containing image paths and metadata for one class
+            output_dir: Directory to save the PDF
+            class_name: Name of the class (used for filename)
+        """
+        # Clean class name for filename
+        safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+        pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
+
+        # Sort images by confidence (highest first)
+        class_df = class_df.sort_values('prediction_confidence', ascending=False)
+
+        # Create PDF document
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=letter,
+            rightMargin=0.5*inch,
+            leftMargin=0.5*inch,
+            topMargin=0.5*inch,
+            bottomMargin=0.5*inch
+        )
+
+        styles = getSampleStyleSheet()
+        elements = []
+
+        # Process images in batches of 8 (2x4 grid)
+        images_per_page = 8
+        n_pages = math.ceil(len(class_df) / images_per_page)
+
+        for page_num in range(n_pages):
+            # Create a new page
+            if page_num > 0:
+                elements.append(Spacer(1, 0.25*inch))
+                elements.append(Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']))
+                elements.append(Spacer(1, 0.25*inch))
+
+            # Add class header
+            elements.append(Paragraph(
+                f"Class: {class_name} (Sorted by Confidence)",
+                styles['Heading1']
+            ))
+
+            # Get images for this page
+            start_idx = page_num * images_per_page
+            end_idx = min(start_idx + images_per_page, len(class_df))
+            page_images = class_df.iloc[start_idx:end_idx]
+
+            # Calculate image size (2x4 grid with spacing)
+            img_width = (letter[0] - inch) / 4.5  # 4 images wide with spacing
+            img_height = img_width * 1.2  # Slightly taller to accommodate caption
+
+            # Create grid
+            for i, (_, row) in enumerate(page_images.iterrows()):
+                img_path = row['filepath']
+                confidence = row['prediction_confidence']
+
+                try:
+                    # Open image to check if it exists and get dimensions
+                    pil_img = PILImage.open(img_path)
+                    pil_img.verify()
+
+                    # Create image with caption
+                    img = Image(img_path, width=img_width, height=img_height-0.3*inch)
+                    caption = Paragraph(
+                        f"{os.path.basename(img_path)}<br/>Confidence: {confidence:.2%}",
+                        styles['Caption']
+                    )
+
+                    # Add to elements
+                    elements.append(img)
+                    elements.append(caption)
+
+                    # Add spacing between images
+                    if (i+1) % 4 != 0:  # Not last in row
+                        elements.append(Spacer(img_width*0.1, 0.1*inch))
+                    elif i < len(page_images)-1:  # Last in row but not last image
+                        elements.append(Spacer(1, 0.2*inch))
+
+                except Exception as e:
+                    print(f"\033[KWarning: Could not process image {img_path}: {str(e)}")
+                    continue
+
+            # Add page break if not last page
+            if page_num < n_pages - 1:
+                elements.append(PageBreak())
+
+        # Build the PDF
+        doc.build(elements)
+        return pdf_path
+
+#-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
@@ -5391,24 +5485,30 @@ class DBNN(GPUDBNN):
                             if os.path.exists(img_path):
                                 valid_images.append(row)
 
-                        if valid_images:
-                            class_df = pd.DataFrame(valid_images)
-                            safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-                            mosaic_path = os.path.join(mosaic_dir, f"mosaic_{safe_class_name}.jpg")
+                            if valid_images:
+                                class_df = pd.DataFrame(valid_images)
+                                safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
 
-                            try:
-                                create_prediction_mosaic(
-                                    image_dir=valid_images,
-                                    csv_path=None,
-                                    output_path=mosaic_path,
-                                    mosaic_size=(2000, 2000),
-                                    tile_size=(200, 200),
-                                    max_images=100
-                                )
-                                print(f"{Colors.GREEN}Created mosaic for class {class_name}{Colors.ENDC}")
-                            except Exception as e:
-                                print(f"{Colors.RED}Error creating mosaic: {str(e)}{Colors.ENDC}")
+                                # Check required columns exist
+                                if all(col in class_df.columns for col in ['filepath', 'prediction_confidence']):
+                                    # Verify image files exist before processing
+                                    valid_paths = []
+                                    for _, row in class_df.iterrows():
+                                        if os.path.exists(row['filepath']):
+                                            valid_paths.append(row)
 
+                                    if valid_paths:
+                                        valid_df = pd.DataFrame(valid_paths)
+                                        pdf_path = create_class_pdf_mosaic(
+                                            class_df=valid_df,
+                                            output_dir=mosaic_dir,
+                                            class_name=class_name
+                                        )
+                                        print(f"\033[KCreated PDF mosaic for class {class_name} at {pdf_path}")
+                                    else:
+                                        print(f"\033[KNo valid images found for class {class_name}")
+                                else:
+                                    print(f"\033[KRequired columns missing in predictions for class {class_name}")
             # Compute and return metrics if we have true labels
             metrics = {}
             if y_true is not None and y_pred is not None:
