@@ -4638,7 +4638,7 @@ class DBNN(GPUDBNN):
 
             # Extract predictions for training and test data using stored indices
             y_train_pred =  all_pred_classes[:len(y_train)]  # Predictions for training data
-            y_test_pred = all_predictions[len(y_train):]   # Predictions for test data
+            y_test_pred =  all_pred_classes[len(y_train):]   # Predictions for test data
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
