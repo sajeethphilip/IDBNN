@@ -1663,12 +1663,12 @@ class DBNN(GPUDBNN):
         y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
 
         # Generate predictions and true labels
-        predictions = self.predict(X_tensor, batch_size=self.batch_size)
+        predictions,posterior = self.predict(X_tensor, batch_size=self.batch_size)
         true_labels = y_tensor.cpu().numpy()
 
         # Generate detailed predictions
         #predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
-        predictions_df = self._generate_detailed_predictions(self.X_Orig, predictions, true_labels)
+        predictions_df = self._generate_detailed_predictions(self.X_Orig, predictions, true_labels,posterior)
 
         # Save results
         results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
@@ -4648,7 +4648,7 @@ class DBNN(GPUDBNN):
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors)
+            all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors,all_posteriors)
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
@@ -5230,7 +5230,8 @@ class DBNN(GPUDBNN):
             results = self._generate_detailed_predictions(
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
-                true_labels=y_true_str if y_true_str is not None else None
+                true_labels=y_true_str if y_true_str is not None else None,
+                posteriors
             )
 
             # Save results if output path specified
