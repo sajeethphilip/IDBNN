@@ -2980,22 +2980,28 @@ class DBNN(GPUDBNN):
     def generate_class_pdf_mosaics(self, predictions_df, output_dir):
         """
         Generate PDF mosaics for each predicted class, sorted by confidence.
-
-        Args:
-            predictions_df: DataFrame containing prediction results with:
-                - 'predicted_class': The class label
-                - 'filepath': Path to the image file
-                - 'prediction_confidence': Confidence score (0-1)
-            output_dir: Directory to save the PDF files
         """
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
+
+        # Get stylesheet and add custom Caption style if needed
+        styles = getSampleStyleSheet()
+        if 'Caption' not in styles:
+            from reportlab.lib.styles import ParagraphStyle
+            styles.add(ParagraphStyle(
+                name='Caption',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=9,
+                spaceBefore=2,
+                spaceAfter=2,
+                alignment=1  # Center aligned
+            ))
 
         # Group by predicted class
         class_groups = predictions_df.groupby('predicted_class')
 
         for class_name, group_df in class_groups:
-            # Clean class name for filename
             safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
 
@@ -3014,7 +3020,6 @@ class DBNN(GPUDBNN):
                 bottomMargin=0.5*inch
             )
 
-            styles = getSampleStyleSheet()
             elements = []
 
             # Process images in batches of 8 (2x4 grid)
@@ -3023,16 +3028,15 @@ class DBNN(GPUDBNN):
             n_pages = math.ceil(n_images / images_per_page)
 
             for page_num in range(n_pages):
-                # Create a new page
+                # Page header
                 if page_num > 0:
                     elements.append(Spacer(1, 0.25*inch))
                     elements.append(Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']))
                     elements.append(Spacer(1, 0.25*inch))
 
-                # Add class header
                 elements.append(Paragraph(
                     f"Class: {class_name} (Sorted by Confidence)",
-                    styles['Heading1']
+                    styles['Heading2']  # Using Heading2 which exists by default
                 ))
 
                 # Get images for this page
@@ -3041,8 +3045,8 @@ class DBNN(GPUDBNN):
                 page_images = sorted_df.iloc[start_idx:end_idx]
 
                 # Calculate image size (2x4 grid with spacing)
-                img_width = (letter[0] - inch) / 4.5  # 4 images wide with spacing
-                img_height = img_width * 1.2  # Slightly taller for caption
+                img_width = (letter[0] - inch) / 4.5
+                img_height = img_width * 1.2
 
                 # Create grid
                 for i, (_, row) in enumerate(page_images.iterrows()):
@@ -3050,31 +3054,32 @@ class DBNN(GPUDBNN):
                     confidence = row['prediction_confidence']
 
                     try:
-                        # Verify image using PIL
+                        # Verify image
                         with PILImage.open(img_path) as img:
                             img.verify()
 
-                        # Use ReportLab's Image class (renamed)
-                        img = ReportLabImage(img_path, width=img_width, height=img_height-0.3*inch)
-                        caption = Paragraph(
+                        # Add image and caption
+                        elements.append(ReportLabImage(
+                            img_path,
+                            width=img_width,
+                            height=img_height-0.3*inch
+                        ))
+                        elements.append(Paragraph(
                             f"{os.path.basename(img_path)}<br/>Confidence: {confidence:.2%}",
-                            styles['Caption']
-                        )
+                            styles['Caption']  # Now using our custom style
+                        ))
 
-                        # Add to elements
-                        elements.append(img)
-                        elements.append(caption)
-
-                        # Add spacing between images
+                        # Add spacing
                         if (i+1) % 4 != 0:  # Not last in row
                             elements.append(Spacer(img_width*0.1, 0.1*inch))
                         elif i < len(page_images)-1:  # Last in row but not last image
                             elements.append(Spacer(1, 0.2*inch))
+
                     except Exception as e:
                         print(f"\033[KWarning: Could not process image {img_path}: {str(e)}")
                         continue
 
-                # Add page break if not last page
+                # Page break if not last page
                 if page_num < n_pages - 1:
                     elements.append(PageBreak())
 
