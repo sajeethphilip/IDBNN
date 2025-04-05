@@ -1171,8 +1171,8 @@ class GPUDBNN:
             # Vectorized min/max computation for the batch
             with torch.no_grad():
                 # Stack all features needed in this batch
-                feature_indices = torch.unique(torch.cat([torch.tensor(pair, device=self.device)
-                                                        for pair in batch_pairs]))
+                feature_indices = torch.unique(torch.cat([torch.as_tensor(pair, device=self.device)
+                                        for pair in batch_pairs]))
                 batch_data = dataset[:, feature_indices]
 
                 # Compute min/max for all features in batch
