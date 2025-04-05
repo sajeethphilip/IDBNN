@@ -5141,6 +5141,19 @@ class DBNN(GPUDBNN):
             # Load data
             df = pd.read_csv(input_csv)
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
+            # Check if target column exists but doesn't match training labels
+            true_labels = None
+            if self.target_column in df.columns:
+                try:
+                    # Try to encode the labels to see if they match training
+                    true_labels = self.label_encoder.transform(df[self.target_column])
+                    print(f"\033[KFound valid target column '{self.target_column}'")
+                except ValueError as e:
+                    print(f"\033[KWarning: Target column '{self.target_column}' exists but doesn't match training labels")
+                    print(f"\033[KPreserving original values in column 'original_{self.target_column}'")
+                    # Preserve original values in a new column
+                    df[f'original_{self.target_column}'] = df[self.target_column]
+                    true_labels = None
 
             # Store original data
             self.X_orig = df.copy()
