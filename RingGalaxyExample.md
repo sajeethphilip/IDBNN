@@ -1,6 +1,8 @@
 ```
 
 April 5th 2025
+![image](https://github.com/user-attachments/assets/1c9ddbdc-5ee7-4a6d-9ec2-8a894528ce29)
+
 ![image](https://github.com/user-attachments/assets/f1798522-9aa9-46c9-b4e0-38ad4748bd33)
 Fresh training after all modifications on April 5th - ook about 1 hr and 15 mins.
 
