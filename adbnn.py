@@ -3085,7 +3085,7 @@ class DBNN(GPUDBNN):
 
             # Build the PDF
             doc.build(elements)
-            print(f"\033[KCreated PDF mosaic for class {class_name} at {pdf_path}")
+            print(f"\033[KCreated PDF mosaic for class {class_name} at {pdf_path}",end='\r',flush=True)
 
 
 #-------------Option 2 ---------------
