@@ -17,8 +17,10 @@ import os
 #For pdf mosaic--
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import SimpleDocTemplate, Image, Paragraph, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Image, Paragraph, PageBreak, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib import colors
 import tempfile
 import math
 #----
@@ -2967,82 +2969,172 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
         return X_tensor
 
+#-----------------------------------------PDF mosaic -----------------------------------------------------
 
-    def generate_class_pdf(self, image_paths: List[str], output_pdf: str):
-        """Generate PDF with images sorted by confidence for each class"""
-        doc = SimpleDocTemplate(output_pdf, pagesize=letter)
+
+    def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
+        """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
+
+        Args:
+            image_paths: List of image file paths
+            posteriors: Numpy array of posterior probabilities for each image
+            output_pdf: Path to save the output PDF
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
+
+        # Group images by predicted class with their posteriors
+        class_groups = defaultdict(list)
+        for img_path, posterior in zip(image_paths, posteriors):
+            # Extract class name from filename (assuming format: class_imageid.jpg)
+            class_name = os.path.basename(img_path).split('_')[0]
+            class_groups[class_name].append((img_path, posterior))
+
+        # Create PDF document
+        doc = SimpleDocTemplate(output_pdf, pagesize=letter,
+                              rightMargin=36, leftMargin=36,
+                              topMargin=36, bottomMargin=36)
+
+        # Define styles
         styles = getSampleStyleSheet()
+        title_style = styles['Heading1']
+        caption_style = ParagraphStyle(
+            'Caption',
+            parent=styles['Normal'],
+            fontSize=8,
+            leading=10,
+            alignment=1,  # Center aligned
+            spaceBefore=6
+        )
+        footer_style = ParagraphStyle(
+            'Footer',
+            parent=styles['Normal'],
+            fontSize=8,
+            leading=10,
+            alignment=2,  # Right aligned
+            spaceBefore=6
+        )
+
         elements = []
 
-        # Group images by predicted class
-        class_groups = {}
-        for img_path in image_paths:
-            # Extract class and confidence from filename or metadata
-            # (Assuming image_paths come with metadata or follow a naming convention)
-            class_name = os.path.basename(img_path).split('_')[0]  # Adjust as needed
-            confidence = float(os.path.basename(img_path).split('_')[1])  # Adjust as needed
-
-            if class_name not in class_groups:
-                class_groups[class_name] = []
-            class_groups[class_name].append((img_path, confidence))
-
         # Process each class
-        for class_name, images in class_groups.items():
-            # Sort by confidence (highest first)
-            images.sort(key=lambda x: x[1], reverse=True)
+        for class_name, images in sorted(class_groups.items()):
+            # Add class title page
+            elements.append(Paragraph(f"Class: {class_name}", title_style))
+            elements.append(Spacer(1, 0.5*inch))
+            elements.append(PageBreak())
 
-            # Add class header
-            elements.append(Paragraph(f"Class: {class_name}", styles['Heading1']))
+            # Sort images by posterior (highest first)
+            images.sort(key=lambda x: x[1], reverse=True)
 
             # Create pages with 2x4 grids
             n_images = len(images)
             n_pages = math.ceil(n_images / 8)
 
-            for page in range(n_pages):
+            for page_num in range(n_pages):
                 # Create a grid for this page
-                start_idx = page * 8
+                start_idx = page_num * 8
                 end_idx = min(start_idx + 8, n_images)
                 page_images = images[start_idx:end_idx]
 
                 # Create a temporary image with the grid
-                grid_img = self._create_image_grid(page_images)
+                grid_img_path = self._create_image_grid(page_images)
 
-                # Add to PDF
-                elements.append(Image(grid_img, width=500, height=650))
+                # Add to PDF with caption
+                img = Image(grid_img_path, width=6*inch, height=7.5*inch)
+                elements.append(img)
+
+                # Add page footer
+                footer_text = f"Page {page_num+1} of {n_pages} - Class: {class_name}"
+                elements.append(Paragraph(footer_text, footer_style))
+
+                if end_idx < n_images:  # Don't add break after last page
+                    elements.append(PageBreak())
+
+            # Add divider page between classes
+            if class_name != sorted(class_groups.keys())[-1]:
+                elements.append(Paragraph("Class Complete", title_style))
                 elements.append(PageBreak())
 
+        # Build the PDF
         doc.build(elements)
 
+        # Clean up temporary files
+        if hasattr(self, '_temp_files'):
+            for f in self._temp_files:
+                try:
+                    os.remove(f)
+                except:
+                    pass
+
     def _create_image_grid(self, images: List[tuple]) -> str:
-        """Create a single image with 2x4 grid of images and captions"""
-        from PIL import Image, ImageDraw
+        """Create a single image with 2x4 grid of images and captions.
+
+        Args:
+            images: List of (image_path, posterior) tuples
+
+        Returns:
+            Path to temporary image file
+        """
+        from PIL import Image, ImageDraw, ImageFont
+
+        # Grid parameters
+        cols, rows = 4, 2
+        img_size = 400  # Size of each individual image
+        padding = 10
+        caption_height = 30
 
         # Create blank canvas
-        canvas = Image.new('RGB', (2000, 2500), 'white')
+        canvas_width = cols * (img_size + padding) + padding
+        canvas_height = rows * (img_size + padding + caption_height) + padding
+        canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
         draw = ImageDraw.Draw(canvas)
 
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+
         # Position images in grid
-        for i, (img_path, confidence) in enumerate(images):
-            row = i // 4
-            col = i % 4
+        for idx, (img_path, posterior) in enumerate(images):
+            row = idx // cols
+            col = idx % cols
 
-            # Open and resize image
-            img = Image.open(img_path)
-            img = img.resize((400, 400))
+            try:
+                # Open and resize image
+                img = Image.open(img_path)
+                img = img.resize((img_size, img_size))
 
-            # Paste onto canvas
-            x = col * 500 + 50
-            y = row * 600 + 50
-            canvas.paste(img, (x, y))
+                # Calculate position
+                x = col * (img_size + padding) + padding
+                y = row * (img_size + padding + caption_height) + padding
 
-            # Add caption
-            caption = f"{os.path.basename(img_path)}\nConfidence: {confidence:.2f}"
-            draw.text((x, y + 420), caption, fill='black')
+                # Paste image with border
+                canvas.paste(img, (x, y))
+                draw.rectangle([x, y, x+img_size, y+img_size], outline="black", width=1)
+
+                # Add caption
+                caption = f"{os.path.basename(img_path)} (Confidence: {posterior:.2%})"
+                text_width = draw.textlength(caption, font=font)
+                text_x = x + (img_size - text_width) / 2
+                text_y = y + img_size + 5
+                draw.text((text_x, text_y), caption, fill='black', font=font)
+
+            except Exception as e:
+                print(f"Error processing image {img_path}: {str(e)}")
+                continue
 
         # Save temporary file
-        temp_path = os.path.join(tempfile.gettempdir(), f"grid_{os.getpid()}.jpg")
-        canvas.save(temp_path)
+        if not hasattr(self, '_temp_files'):
+            self._temp_files = []
+
+        temp_path = os.path.join(tempfile.gettempdir(), f"grid_{os.getpid()}_{len(self._temp_files)}.jpg")
+        canvas.save(temp_path, quality=90)
+        self._temp_files.append(temp_path)
+
         return temp_path
+
+#-------------------------------------------PDF mosaic Ends ------------------------------
 
     def _generate_feature_combinations(self, feature_indices: Union[List[int], int],
                                      group_size: int = 2,
