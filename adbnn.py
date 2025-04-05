@@ -2,6 +2,9 @@
 # Better Memory management 06:28am
 #Tested an fully functional April 4 2025 3:34 am
 #Tested for more flexibility and added posteriors with class pedictions April 5 4:13 pm
+#----------------------------------------------------------------------------------------------------------------------------
+#---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
+#-----------------------------------------------------------------------------------------------------------------------------
 import torch
 import time
 import argparse
