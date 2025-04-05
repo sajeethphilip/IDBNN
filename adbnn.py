@@ -4723,7 +4723,7 @@ class DBNN(GPUDBNN):
 
             # Confusion matrix for combined data
             y_all_cpu = y_all.cpu().numpy()
-            self.print_colored_confusion_matrix(y_all_cpu, all_predictions.cpu().numpy(), header="Combined Data")
+            self.print_colored_confusion_matrix(y_all_cpu,  all_pred_classes.cpu().numpy(), header="Combined Data")
 
             return results
 
