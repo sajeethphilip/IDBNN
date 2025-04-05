@@ -1779,11 +1779,11 @@ class DBNN(GPUDBNN):
             if file_path.startswith(('http://', 'https://')):
                 df = pd.read_csv(StringIO(requests.get(file_path).text),
                                sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None)
+                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
             else:
                 df = pd.read_csv(file_path,
                                sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None)
+                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
 
              # Store original data (CPU only)
             self.Original_data = df.copy()  # This is the line that was missing
