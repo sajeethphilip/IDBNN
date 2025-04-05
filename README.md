@@ -27,6 +27,9 @@ To train/predcit using adbnn  (For Difference Boosting Neural Network
 ```
 ![image](https://github.com/user-attachments/assets/dfb40806-5bb2-4e19-afea-57c0f39145df)
 
+![image](https://github.com/user-attachments/assets/48ce9afe-bbb8-4736-936c-e2754245437f)
+
+
 # What is Difference Boosting Neural Network?
 
 Information is in the differences and not in the details. That is the key concept behind the Nov 2000 paper on  Boosting the differences: A fast Bayesian classifier neural network (https://doi.org/10.3233/IDA-2000-4602). It is an extension to the basic nonparametric Bayesian Probability estimate for classification.
