@@ -4969,110 +4969,6 @@ class DBNN(GPUDBNN):
     # DBNN class to handle prediction functionality
 
 
-
-    def create_prediction_mosaic(
-            image_dir: list,  # List of dictionary rows (with filepath and original_filename)
-            csv_path: Optional[str] = None,  # Not used but kept for compatibility
-            output_path: str = "mosaic.jpg",
-            mosaic_size: tuple = (2000, 2000),
-            tile_size: tuple = (200, 200),
-            max_images: int = 100,
-            font_path: Optional[str] = None
-        ):
-        """
-        Create a prediction mosaic from a list of image rows (containing filepath and metadata).
-
-        Args:
-            image_dir: List of dictionary rows (must contain 'filepath' and 'original_filename')
-            csv_path: (Deprecated) Kept for compatibility
-            output_path: Path to save the mosaic image
-            mosaic_size: Total size of the output mosaic (width, height)
-            tile_size: Size of each individual tile (width, height)
-            max_images: Maximum number of images to include
-            font_path: Optional path to font file for labels
-        """
-        try:
-            # Validate inputs
-            if not image_dir:
-                raise ValueError("No images provided in image_dir")
-
-            # Convert to DataFrame if needed
-            if not isinstance(image_dir, pd.DataFrame):
-                image_df = pd.DataFrame(image_dir)
-            else:
-                image_df = image_dir.copy()
-
-            # Validate required columns
-            if not all(col in image_df.columns for col in ['filepath', 'original_filename']):
-                raise ValueError("Input must contain 'filepath' and 'original_filename' columns")
-
-            # Limit number of images
-            if len(image_df) > max_images:
-                image_df = image_df.sample(max_images, random_state=42)
-                DEBUG.log(f"Using random sample of {max_images} images for mosaic")
-
-            # Calculate grid dimensions
-            tiles_per_row = mosaic_size[0] // tile_size[0]
-            tiles_per_col = mosaic_size[1] // tile_size[1]
-            max_tiles = tiles_per_row * tiles_per_col
-            image_df = image_df.head(max_tiles)  # Ensure we don't exceed mosaic capacity
-
-            # Create blank mosaic
-            mosaic = Image.new('RGB', mosaic_size, (0, 0, 0))
-            draw = ImageDraw.Draw(mosaic)
-
-            # Try to load font (fallback to default if not specified)
-            try:
-                font = ImageFont.truetype(font_path, 12) if font_path else ImageFont.load_default()
-            except:
-                font = ImageFont.load_default()
-
-            # Process and place each image
-            for i, (_, row) in enumerate(image_df.iterrows()):
-                try:
-                    img_path = row['filepath']
-                    if not os.path.exists(img_path):
-                        DEBUG.log(f"Image not found: {img_path}")
-                        continue
-
-                    with Image.open(img_path) as img:
-                        # Convert to RGB and resize
-                        img = img.convert('RGB')
-                        img.thumbnail(tile_size, Image.ANTIALIAS)
-
-                        # Calculate position
-                        row_pos = i // tiles_per_row
-                        col_pos = i % tiles_per_row
-                        x = col_pos * tile_size[0]
-                        y = row_pos * tile_size[1]
-
-                        # Center the image
-                        offset_x = (tile_size[0] - img.size[0]) // 2
-                        offset_y = (tile_size[1] - img.size[1]) // 2
-                        mosaic.paste(img, (x + offset_x, y + offset_y))
-
-                        # Add filename label (truncated if too long)
-                        label = os.path.splitext(row['original_filename'])[0][:15]
-                        draw.text(
-                            (x + 5, y + tile_size[1] - 20),
-                            label,
-                            font=font,
-                            fill=(255, 255, 255)
-                        )
-
-                except Exception as img_error:
-                    DEBUG.log(f"Error processing {img_path}: {str(img_error)}")
-                    continue
-
-            # Save the mosaic
-            mosaic.save(output_path, quality=95)
-            DEBUG.log(f"Saved prediction mosaic to {output_path} "
-                    f"({len(image_df)} images, {tiles_per_row}x{tiles_per_col} grid)")
-
-        except Exception as e:
-            DEBUG.log(f"Error in create_prediction_mosaic: {str(e)}")
-            raise RuntimeError(f"Prediction mosaic creation failed: {str(e)}")
-
     def predict_from_file(self, input_csv: str, output_path: str = None,
                          image_dir: str = None, batch_size: int = 128) -> Dict:
         """
@@ -5420,7 +5316,110 @@ class DBNN(GPUDBNN):
             print(f"Error loading model: {str(e)}")
             traceback.print_exc()
             return False
-#---------------------------------------------------DBNN Prediction Functions --------------------------------
+#---------------------------------------------------DBNN Prediction Functions  Ends--------------------------------
+
+def create_prediction_mosaic(
+        image_dir: list,  # List of dictionary rows (with filepath and original_filename)
+        csv_path: Optional[str] = None,  # Not used but kept for compatibility
+        output_path: str = "mosaic.jpg",
+        mosaic_size: tuple = (2000, 2000),
+        tile_size: tuple = (200, 200),
+        max_images: int = 100,
+        font_path: Optional[str] = None
+    ):
+    """
+    Create a prediction mosaic from a list of image rows (containing filepath and metadata).
+
+    Args:
+        image_dir: List of dictionary rows (must contain 'filepath' and 'original_filename')
+        csv_path: (Deprecated) Kept for compatibility
+        output_path: Path to save the mosaic image
+        mosaic_size: Total size of the output mosaic (width, height)
+        tile_size: Size of each individual tile (width, height)
+        max_images: Maximum number of images to include
+        font_path: Optional path to font file for labels
+    """
+    try:
+        # Validate inputs
+        if not image_dir:
+            raise ValueError("No images provided in image_dir")
+
+        # Convert to DataFrame if needed
+        if not isinstance(image_dir, pd.DataFrame):
+            image_df = pd.DataFrame(image_dir)
+        else:
+            image_df = image_dir.copy()
+
+        # Validate required columns
+        if not all(col in image_df.columns for col in ['filepath', 'original_filename']):
+            raise ValueError("Input must contain 'filepath' and 'original_filename' columns")
+
+        # Limit number of images
+        if len(image_df) > max_images:
+            image_df = image_df.sample(max_images, random_state=42)
+            DEBUG.log(f"Using random sample of {max_images} images for mosaic")
+
+        # Calculate grid dimensions
+        tiles_per_row = mosaic_size[0] // tile_size[0]
+        tiles_per_col = mosaic_size[1] // tile_size[1]
+        max_tiles = tiles_per_row * tiles_per_col
+        image_df = image_df.head(max_tiles)  # Ensure we don't exceed mosaic capacity
+
+        # Create blank mosaic
+        mosaic = Image.new('RGB', mosaic_size, (0, 0, 0))
+        draw = ImageDraw.Draw(mosaic)
+
+        # Try to load font (fallback to default if not specified)
+        try:
+            font = ImageFont.truetype(font_path, 12) if font_path else ImageFont.load_default()
+        except:
+            font = ImageFont.load_default()
+
+        # Process and place each image
+        for i, (_, row) in enumerate(image_df.iterrows()):
+            try:
+                img_path = row['filepath']
+                if not os.path.exists(img_path):
+                    DEBUG.log(f"Image not found: {img_path}")
+                    continue
+
+                with Image.open(img_path) as img:
+                    # Convert to RGB and resize
+                    img = img.convert('RGB')
+                    img.thumbnail(tile_size, Image.ANTIALIAS)
+
+                    # Calculate position
+                    row_pos = i // tiles_per_row
+                    col_pos = i % tiles_per_row
+                    x = col_pos * tile_size[0]
+                    y = row_pos * tile_size[1]
+
+                    # Center the image
+                    offset_x = (tile_size[0] - img.size[0]) // 2
+                    offset_y = (tile_size[1] - img.size[1]) // 2
+                    mosaic.paste(img, (x + offset_x, y + offset_y))
+
+                    # Add filename label (truncated if too long)
+                    label = os.path.splitext(row['original_filename'])[0][:15]
+                    draw.text(
+                        (x + 5, y + tile_size[1] - 20),
+                        label,
+                        font=font,
+                        fill=(255, 255, 255)
+                    )
+
+            except Exception as img_error:
+                DEBUG.log(f"Error processing {img_path}: {str(img_error)}")
+                continue
+
+        # Save the mosaic
+        mosaic.save(output_path, quality=95)
+        DEBUG.log(f"Saved prediction mosaic to {output_path} "
+                f"({len(image_df)} images, {tiles_per_row}x{tiles_per_col} grid)")
+
+    except Exception as e:
+        DEBUG.log(f"Error in create_prediction_mosaic: {str(e)}")
+        raise RuntimeError(f"Prediction mosaic creation failed: {str(e)}")
 
 def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
     """Run benchmark using GPU-optimized implementation"""
