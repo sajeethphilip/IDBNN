@@ -3670,7 +3670,7 @@ class DBNN(GPUDBNN):
 
             n_batches = (len(X_tensor) + batch_size - 1) // batch_size
             predictions = []
-            all_posteriors = []
+            posteriors = []
 
             with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
                 for i in range(0, len(X_tensor), batch_size):
@@ -3687,7 +3687,7 @@ class DBNN(GPUDBNN):
                     # Get predictions and store posteriors
                     batch_predictions = torch.argmax(posteriors, dim=1)
                     predictions.append(batch_predictions)
-                    all_posteriors.append(posteriors)
+                    posteriors.append(posteriors)
                     pred_pbar.update(1)
 
             # Concatenate all batches
