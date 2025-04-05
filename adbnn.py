@@ -7,6 +7,11 @@ import argparse
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
+import os
+import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import math
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -4962,11 +4967,7 @@ class DBNN(GPUDBNN):
 #--------------------------------------------------Class Ends ----------------------------------------------------------
     # DBNN class to handle prediction functionality
 
-import os
-import pandas as pd
-from PIL import Image, ImageDraw, ImageFont
-import numpy as np
-import math
+
 
     def create_prediction_mosaic(
             image_dir: list,  # List of dictionary rows (with filepath and original_filename)
