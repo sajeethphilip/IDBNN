@@ -1693,7 +1693,8 @@ class DBNN(GPUDBNN):
     def _generate_detailed_predictions(self,
                                      X_orig: Union[pd.DataFrame, torch.Tensor],
                                      predictions: Union[torch.Tensor, np.ndarray],
-                                     true_labels: Union[torch.Tensor, np.ndarray, pd.Series, List, None] = None
+                                     true_labels: Union[torch.Tensor, np.ndarray, pd.Series, List, None] = None,
+                                     posteriors: Union[torch.Tensor, np.ndarray, None] = None
                                      ) -> pd.DataFrame:
         """
         Robust predictions generator that preserves original feature values.
@@ -1708,7 +1709,8 @@ class DBNN(GPUDBNN):
         """
         # Convert predictions to numpy if they're tensors
         predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
-        posteriors_np = posteriors.cpu().numpy()
+        # Convert posteriors if provided
+        posteriors_np = posteriors.cpu().numpy() if torch.is_tensor(posteriors) else np.array(posteriors) if posteriors is not None else None
         pred_classes = predictions.cpu().numpy()
 
         # Create results DataFrame from original features
@@ -1727,6 +1729,10 @@ class DBNN(GPUDBNN):
             try:
                 # Add predictions and confidence (max probability)
                 results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
+                # Add posteriors if available
+                if posteriors_np is not None:
+                    for i, class_name in enumerate(self.label_encoder.classes_):
+                        results_df[f'prob_{class_name}'] = posteriors_np[:, i]
                 results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
 
             except ValueError as e:
@@ -3992,8 +3998,8 @@ class DBNN(GPUDBNN):
 
                 # Training metrics
                 print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
-                train_predictions = self.predict(X_train, batch_size=batch_size)
-                train_accuracy = (train_predictions == y_train.cpu()).float().mean()
+                train_pred_classes, train_posteriors = self.predict(X_train, batch_size=batch_size)
+                train_accuracy = (train_pred_classes == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
 
                 # Restore original weights
@@ -4614,7 +4620,7 @@ class DBNN(GPUDBNN):
             print("\033[K" + f"{Colors.YELLOW}Generating predictions for the entire dataset{Colors.ENDC}", end='\r', flush=True)
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
-            all_predictions = self.predict(X_all, batch_size=batch_size)
+            all_pred_classes, all_posteriors = self.predict(X_all, batch_size=batch_size)
             # Ensure all tensors are on the same device (GPU)
             all_pr = all_predictions.to(self.device)  # Move predictions to GPU
             y_all_pr = y_all.to(self.device)  # Ensure y_all is on GPU (though it likely already is)
@@ -4636,7 +4642,7 @@ class DBNN(GPUDBNN):
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
-            all_results = self._generate_detailed_predictions(self.X_Orig, all_predictions, y_all)
+            all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors)
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
