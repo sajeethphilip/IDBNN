@@ -2926,7 +2926,8 @@ class DBNN(GPUDBNN):
         Only generates if feature_pairs doesn't already exist.
         """
         # If we already have feature pairs, return them
-        if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
+        #if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
+        if self.feature_pairs is not None:
             return self.feature_pairs
 
         # Convert feature_indices to list if it's an integer
