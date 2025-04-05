@@ -1401,7 +1401,7 @@ class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
 
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
-                 dataset_name: Optional[str] = None):
+                 dataset_name: Optional[str] = None,mode=None):
 
         """
         Initialize DBNN with configuration
@@ -1415,6 +1415,10 @@ class DBNN(GPUDBNN):
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
+        if mode is None:
+            self.mode=None
+        else:
+            self.mode=mode
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
@@ -1507,7 +1511,7 @@ class DBNN(GPUDBNN):
         self.data = self._load_dataset()
 
         # Preprocess features and target
-        predict_mode = self.config.get('execution_flags', {}).get('predict', False)
+        predict_mode = True if self.mode=='predict' else False
         # Load and preprocess data
         X = self.data.drop(columns=[self.target_column]) if not predict_mode else self.data.copy()
         y = self.data[self.target_column] if not predict_mode else pd.Series([-99999]*len(self.data))
@@ -1800,7 +1804,7 @@ class DBNN(GPUDBNN):
                 df = pd.read_csv(file_path,
                                sep=self.config.get('separator', ','),
                                header=0 if self.config.get('has_header', True) else None,  low_memory=False)
-            predict_mode = self.config.get('execution_flags', {}).get('predict', False)
+            predict_mode = True if self.mode=='predict' else False
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
@@ -2714,7 +2718,7 @@ class DBNN(GPUDBNN):
         """Calculate appropriate cardinality threshold based on dataset characteristics"""
         n_samples = len(self.data)
         DEFAULT_THRESHOLD = 0.9
-        predict_mode = self.config.get('execution_flags', {}).get('predict', False)
+        predict_mode = True if self.mode=='predict' else False
         if predict_mode or self.target_column not in self.data.columns:
             DEBUG.log("Using default cardinality threshold (prediction mode or no target)")
             return DEFAULT_THRESHOLD
@@ -6119,7 +6123,7 @@ def main():
             print(f"\033[K{Colors.BOLD}Processing {dataset_name} in {mode} mode{Colors.ENDC}")
 
             # Create DBNN instance
-            model = DBNN(dataset_name=dataset_name)
+            model = DBNN(dataset_name=dataset_name,mode='train')
 
             if mode in ['train', 'train_predict']:
                 # Training phase
@@ -6152,7 +6156,7 @@ def main():
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
 
                 dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name=dataset_name)
+                predictor = DBNN(dataset_name=dataset_name,mode='predict')
                 print(f"Processing {dataset_name} in predict mode")
                 if predictor.load_model_for_prediction(dataset_name):
                     # Use either the provided CSV or default dataset CSV
