@@ -1830,7 +1830,7 @@ class DBNN(GPUDBNN):
                         # Assign the updated list back to columns
                         df.columns = column_names
                         # Update the target_column reference
-                        self.target_column = 'dummy_target'
+                        self.target_column = None
                     except ValueError as e:
                         print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
                         # If target column isn't found, just proceed without renaming
@@ -5156,7 +5156,7 @@ class DBNN(GPUDBNN):
                         # Assign the updated list back to columns
                         df.columns = column_names
                         # Update the target_column reference
-                        self.target_column = 'dummy_target'
+                        self.target_column = None
                     except ValueError as e:
                         print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
                         # If target column isn't found, just proceed without renaming
