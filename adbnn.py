@@ -1814,19 +1814,15 @@ class DBNN(GPUDBNN):
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
-                    try:
-
-                        print(f"The predict mode is {predict_mode} and hence will rename traget.")
-                        # Get the current column names
-                        column_names = df.columns.tolist()
-                        # Find the index of the column you want to change
-                        index = column_names.index('target')
-                        # Update the name
-                        column_names[index] = 'dummy_target'
-                        # Assign the updated list back to columns
-                        df.columns = column_names
-                    except:
-                        pass
+                    print(f"The predict mode is {predict_mode} and hence will rename traget.")
+                    # Get the current column names
+                    column_names = df.columns.tolist()
+                    # Find the index of the column you want to change
+                    index = column_names.index('target')
+                    # Update the name
+                    column_names[index] = 'dummy_target'
+                    # Assign the updated list back to columns
+                    df.columns = column_names
 
 
              # Store original data (CPU only)
