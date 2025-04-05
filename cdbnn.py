@@ -149,6 +149,10 @@ class PredictionManager:
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
+
         if archive_path.endswith('.zip'):
             with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
@@ -168,14 +172,14 @@ class PredictionManager:
             raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
         image_files = []
-
+        dataset_name = self.config['dataset']['name']
         if os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                 return [input_path]
             # Compressed archive
             elif input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-                extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+                extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
                 os.makedirs(extract_dir, exist_ok=True)
                 self._extract_archive(input_path, extract_dir)
                 return self._get_image_files(extract_dir)  # Recursively process extracted files
@@ -352,10 +356,10 @@ class PredictionManager:
         image_files = []
         class_labels = []
         original_filenames = []
-
+        dataset_name = self.config['dataset']['name']
         if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
             # Handle compressed archive
-            extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+            extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
             os.makedirs(extract_dir, exist_ok=True)
             self._extract_archive(input_path, extract_dir)
             return self._get_image_files_with_labels(extract_dir)  # Recursively process extracted files
@@ -1254,9 +1258,9 @@ class BaseAutoencoder(nn.Module):
                 data_dict['target'] = features['labels'].cpu().numpy()
             else:
                 logger.warning(f"labels length {len(features['labels'])} doesn't match embeddings length {base_length}")
-                data_dict['target'] = [str(i) for i in range(base_length)]
+                data_dict['predicted_target'] = [str(i) for i in range(base_length)]
         else:
-            data_dict['target'] = [str(i) for i in range(base_length)]
+            data_dict['predicted_target'] = [str(i) for i in range(base_length)]
 
         # Include additional metadata if available and length matches
         optional_fields = ['indices', 'filenames']
