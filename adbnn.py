@@ -2977,14 +2977,15 @@ class DBNN(GPUDBNN):
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
 
+
     def generate_class_pdf_mosaics(self, predictions_df, output_dir):
         """
-        Generate PDF mosaics for each predicted class, sorted by confidence.
+        Generate PDF mosaics with enhanced tqdm progress bars showing image and class info
         """
-        # Create output directory if it doesn't exist
+        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
-        # Get stylesheet and add custom Caption style if needed
+        # Add custom Caption style
         styles = getSampleStyleSheet()
         if 'Caption' not in styles:
             from reportlab.lib.styles import ParagraphStyle
@@ -2995,97 +2996,102 @@ class DBNN(GPUDBNN):
                 leading=9,
                 spaceBefore=2,
                 spaceAfter=2,
-                alignment=1  # Center aligned
+                alignment=1
             ))
 
-        # Group by predicted class
+        # Group by class with tqdm
         class_groups = predictions_df.groupby('predicted_class')
 
-        for class_name, group_df in class_groups:
-            safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-            pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
+        # Outer progress bar for classes
+        with tqdm(class_groups, desc="Processing Classes", unit="class",
+                 bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as class_pbar:
+            for class_name, group_df in class_pbar:
+                class_pbar.set_postfix_str(f"Class: {class_name[:20]}...")
+                safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+                pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
 
-            print(f"\033[KGenerating PDF mosaic for class: {class_name}",end='\r',flush=True)
+                # Sort images by confidence
+                sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
 
-            # Sort images by confidence (highest first)
-            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+                # PDF setup
+                doc = SimpleDocTemplate(
+                    pdf_path,
+                    pagesize=letter,
+                    rightMargin=0.5*inch,
+                    leftMargin=0.5*inch,
+                    topMargin=0.5*inch,
+                    bottomMargin=0.5*inch
+                )
+                elements = []
 
-            # Create PDF document
-            doc = SimpleDocTemplate(
-                pdf_path,
-                pagesize=letter,
-                rightMargin=0.5*inch,
-                leftMargin=0.5*inch,
-                topMargin=0.5*inch,
-                bottomMargin=0.5*inch
-            )
+                # Process images with nested progress bar
+                images_per_page = 8
+                n_images = len(sorted_df)
+                n_pages = math.ceil(n_images / images_per_page)
 
-            elements = []
+                # Inner progress bar for images
+                with tqdm(total=n_images, desc="Processing Images", unit="img",
+                         leave=False, bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as img_pbar:
 
-            # Process images in batches of 8 (2x4 grid)
-            images_per_page = 8
-            n_images = len(sorted_df)
-            n_pages = math.ceil(n_images / images_per_page)
+                    for page_num in range(n_pages):
+                        start_idx = page_num * images_per_page
+                        end_idx = min(start_idx + images_per_page, n_images)
+                        page_images = sorted_df.iloc[start_idx:end_idx]
 
-            for page_num in range(n_pages):
-                # Page header
-                if page_num > 0:
-                    elements.append(Spacer(1, 0.25*inch))
-                    elements.append(Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']))
-                    elements.append(Spacer(1, 0.25*inch))
+                        # Page header
+                        if page_num > 0:
+                            elements.extend([
+                                Spacer(1, 0.25*inch),
+                                Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
+                                Spacer(1, 0.25*inch)
+                            ])
 
-                elements.append(Paragraph(
-                    f"Class: {class_name} (Sorted by Confidence)",
-                    styles['Heading2']  # Using Heading2 which exists by default
-                ))
-
-                # Get images for this page
-                start_idx = page_num * images_per_page
-                end_idx = min(start_idx + images_per_page, n_images)
-                page_images = sorted_df.iloc[start_idx:end_idx]
-
-                # Calculate image size (2x4 grid with spacing)
-                img_width = (letter[0] - inch) / 4.5
-                img_height = img_width * 1.2
-
-                # Create grid
-                for i, (_, row) in enumerate(page_images.iterrows()):
-                    img_path = row['filepath']
-                    confidence = row['prediction_confidence']
-
-                    try:
-                        # Verify image
-                        with PILImage.open(img_path) as img:
-                            img.verify()
-
-                        # Add image and caption
-                        elements.append(ReportLabImage(
-                            img_path,
-                            width=img_width,
-                            height=img_height-0.3*inch
-                        ))
                         elements.append(Paragraph(
-                            f"{os.path.basename(img_path)}<br/>Confidence: {confidence:.2%}",
-                            styles['Caption']  # Now using our custom style
+                            f"Class: {class_name} (Sorted by Confidence)",
+                            styles['Heading2']
                         ))
 
-                        # Add spacing
-                        if (i+1) % 4 != 0:  # Not last in row
-                            elements.append(Spacer(img_width*0.1, 0.1*inch))
-                        elif i < len(page_images)-1:  # Last in row but not last image
-                            elements.append(Spacer(1, 0.2*inch))
+                        # Image grid
+                        img_width = (letter[0] - inch) / 4.5
+                        img_height = img_width * 1.2
 
-                    except Exception as e:
-                        print(f"\033[KWarning: Could not process image {img_path}: {str(e)}")
-                        continue
+                        for i, (_, row) in enumerate(page_images.iterrows()):
+                            img_path = row['filepath']
+                            img_name = os.path.basename(img_path)
+                            confidence = row['prediction_confidence']
 
-                # Page break if not last page
-                if page_num < n_pages - 1:
-                    elements.append(PageBreak())
+                            # Update progress bar with image info
+                            img_pbar.set_postfix_str(f"Img: {img_name[:15]}... Conf: {confidence:.1%}")
+                            img_pbar.update(1)
 
-            # Build the PDF
-            doc.build(elements)
-            print(f"\033[KCreated PDF mosaic for class {class_name} at {pdf_path}",end='\r',flush=True)
+                            try:
+                                with PILImage.open(img_path) as img:
+                                    img.verify()
+
+                                elements.extend([
+                                    ReportLabImage(img_path, width=img_width, height=img_height-0.3*inch),
+                                    Paragraph(
+                                        f"{img_name}<br/>Confidence: {confidence:.2%}",
+                                        styles['Caption']
+                                    )
+                                ])
+
+                                # Add spacing
+                                if (i+1) % 4 != 0:
+                                    elements.append(Spacer(img_width*0.1, 0.1*inch))
+                                elif i < len(page_images)-1:
+                                    elements.append(Spacer(1, 0.2*inch))
+
+                            except Exception as e:
+                                img_pbar.write(f"\033[KWarning: Could not process {img_name}: {str(e)}")
+                                continue
+
+                        if page_num < n_pages - 1:
+                            elements.append(PageBreak())
+
+                # Build PDF
+                doc.build(elements)
+                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}")
 
 
 #-------------Option 2 ---------------
