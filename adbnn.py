@@ -2995,7 +2995,7 @@ class DBNN(GPUDBNN):
 
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        Generate PDF mosaics with a single tqdm progress bar per class showing image and class info
+        Generate PDF mosaics with a single consolidated progress bar per class showing image and class info.
 
         Parameters:
         -----------
@@ -3031,13 +3031,15 @@ class DBNN(GPUDBNN):
         # Calculate images per page based on rows and columns
         images_per_page = columns * rows
 
-        # Process each class
+        # Process each class with a single progress bar
         for class_name, group_df in class_groups:
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
 
             # Sort images by confidence
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            n_images = len(sorted_df)
+            n_pages = math.ceil(n_images / images_per_page)
 
             # PDF setup
             doc = SimpleDocTemplate(
@@ -3050,20 +3052,10 @@ class DBNN(GPUDBNN):
             )
             elements = []
 
-            # Process images with a single progress bar per class
-            n_images = len(sorted_df)
-            n_pages = math.ceil(n_images / images_per_page)
-
-            # Calculate image dimensions based on page size and grid layout
-            usable_width = letter[0] - inch  # Total width minus margins
-            usable_height = letter[1] - 2*inch  # Total height minus margins and header space
-
-            # Calculate image width and height including spacing
-            img_width = usable_width / columns
-            img_height = (usable_height / rows) * 0.85  # 85% of cell height for image, rest for caption
-
-            # Single progress bar for this class
-            with tqdm(total=n_images, desc=f"Processing Class: {class_name[:20]}", unit="img",
+            # Initialize single progress bar for this class
+            with tqdm(total=n_images,
+                     desc=f"Class: {class_name[:20]:<20}",
+                     unit="img",
                      bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}") as pbar:
 
                 for page_num in range(n_pages):
@@ -3089,18 +3081,26 @@ class DBNN(GPUDBNN):
                     table_data = []
                     row_data = []
 
-                    for i, (_, row) in enumerate(page_images.iterrows()):
+                    for _, row in page_images.iterrows():
                         img_path = row['filepath']
                         img_name = os.path.basename(img_path)
                         confidence = row['prediction_confidence']
 
                         # Update progress bar with current image info
-                        pbar.set_postfix_str(f"Page {page_num+1}/{n_pages} | Img: {img_name[:15]}... Conf: {confidence:.1%}")
+                        pbar.set_postfix_str(f"Img: {img_name[:15]}... Conf: {confidence:.1%}")
                         pbar.update(1)
 
                         try:
                             with PILImage.open(img_path) as img:
                                 img.verify()
+
+                            # Calculate image dimensions based on page size and grid layout
+                            usable_width = letter[0] - inch  # Total width minus margins
+                            usable_height = letter[1] - 2*inch  # Total height minus margins and header space
+
+                            # Calculate image width and height including spacing
+                            img_width = usable_width / columns
+                            img_height = (usable_height / rows) * 0.85  # 85% of cell height for image
 
                             # Create a cell with image and caption
                             cell_content = [
@@ -3114,8 +3114,8 @@ class DBNN(GPUDBNN):
                             row_data.append(cell_content)
 
                             # Start a new row when we've filled the columns
-                            if (i + 1) % columns == 0 or i == len(page_images) - 1:
-                                # If this is the last row and it's not complete, add empty cells
+                            if (len(row_data) % columns == 0) or (len(row_data) == len(page_images):
+                                # Pad the row if incomplete
                                 while len(row_data) < columns:
                                     row_data.append("")
 
@@ -3124,8 +3124,6 @@ class DBNN(GPUDBNN):
 
                         except Exception as e:
                             pbar.write(f"\033[KWarning: Could not process {img_name}: {str(e)}")
-                            # Add an empty cell in case of error
-                            row_data.append("")
                             continue
 
                     # Create the table
@@ -3148,9 +3146,7 @@ class DBNN(GPUDBNN):
 
                 # Build PDF
                 doc.build(elements)
-                message = f"\033[K✅ Created PDF for {class_name} at {pdf_path}"
-                sys.stdout.write(message + "\n")  # Changed to newline instead of carriage return
-                sys.stdout.flush()
+                pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}")
 #-------------Option 2 ---------------
 
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
