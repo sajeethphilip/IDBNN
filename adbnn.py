@@ -3155,7 +3155,7 @@ class DBNN(GPUDBNN):
 
                 # Build PDF
                 doc.build(elements)
-                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}", end='\r',flush=True)
+                class_pbar.write(f"\033[K✅ Created PDF for {class_name} at {pdf_path}", end='\r')
 
 #-------------Option 2 ---------------
 
