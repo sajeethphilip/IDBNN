@@ -3274,14 +3274,14 @@ class DBNN(GPUDBNN):
                 if page_num < n_pages - 1:
                     elements.append(PageBreak())
 
-            # Close the progress bar for this class
-            pbar.close()
+        # Close the progress bar for this class
+        pbar.close()
 
-            # Build PDF after all pages processed
-            doc.build(elements)
+        # Build PDF after all pages processed
+        doc.build(elements)
 
-            # Clear the line and print completion message
-            #print(f"\033[K✅ {class_name} - Processed {n_images} images")
+        # Clear the line and print completion message
+        #print(f"\033[K✅ {class_name} - Processed {n_images} images")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
