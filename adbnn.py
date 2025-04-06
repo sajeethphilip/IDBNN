@@ -3266,9 +3266,9 @@ class DBNN(GPUDBNN):
                     # Add page break if not the last page
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
-                pbar.update(1)
-                # Build the PDF ONCE after all elements are ready
-                doc.build(elements)
+                    pbar.update(1)
+                    # Build the PDF ONCE after all elements are ready
+                    doc.build(elements)
                 #print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
