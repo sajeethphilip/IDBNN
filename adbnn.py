@@ -2999,7 +2999,7 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir, cols_per_page=8, rows_per_page=10):
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, cols_per_page=8, rows_per_page=8):
         """
         Robust PDF mosaic generator that:
         - Properly handles all classes in the predictions
@@ -3010,8 +3010,8 @@ class DBNN(GPUDBNN):
         Args:
             predictions_df: DataFrame containing predictions and image paths
             output_dir: Directory to save PDF files
-            cols_per_page: Number of image columns per page
-            rows_per_page: Number of image rows per page
+            cols_per_page: Number of image columns per page (default: 8)
+            rows_per_page: Number of image rows per page (default: 8)
         """
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -3166,6 +3166,28 @@ class DBNN(GPUDBNN):
                 print(f"Successfully created PDF for class '{class_name}'")
             except Exception as e:
                 print(f"Error building PDF for class '{class_name}': {str(e)}")
+
+    def predict_from_file(self, input_csv, output_dir):
+        """Predict from input CSV file and generate PDF mosaics"""
+        # Read predictions CSV
+        predictions_df = pd.read_csv(input_csv)
+
+        # Get user input for PDF layout
+        try:
+            cols_per_page = int(input("Please specify the number of columns of images per page (default 8): ") or 8)
+            rows_per_page = int(input("Please specify the number of rows of images per page (default 8): ") or 8)
+        except ValueError:
+            print("Invalid input, using defaults (8 columns x 8 rows)")
+            cols_per_page = 8
+            rows_per_page = 8
+
+        # Generate PDF mosaics with corrected parameter names
+        self.generate_class_pdf_mosaics(
+            predictions_df=predictions_df,
+            output_dir=output_dir,
+            cols_per_page=cols_per_page,
+            rows_per_page=rows_per_page
+        )
 
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
