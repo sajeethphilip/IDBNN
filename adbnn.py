@@ -5775,6 +5775,7 @@ class DBNN(GPUDBNN):
 
                             if valid_images:
                                 class_df = pd.DataFrame(valid_images)
+                                print(class_df.head())
                                 # Ensure we have the required columns
                                 if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
                                     self.generate_class_pdf_mosaics(
