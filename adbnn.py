@@ -3192,7 +3192,7 @@ class DBNN(GPUDBNN):
 
             # Initialize a single progress bar for this class
             pbar = tqdm(total=n_images,
-                       desc=f"Processing {class_name[:15]:<15}",
+                       desc=f"Processing {class_name[:25]:<25}",
                        unit="img",
                        position=0,
                        leave=False)
