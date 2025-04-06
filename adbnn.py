@@ -5719,7 +5719,7 @@ class DBNN(GPUDBNN):
                                 if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
                                     self.generate_class_pdf_mosaics(
                                         predictions_df=class_df,
-                                        output_dir=mosaic_dir, columns=columns,rows=rows
+                                        output_dir=mosaic_dir, columns=int(columns),rows=int(rows)
                                     )
                                 else:
                                     print("\033[KMissing required columns for PDF generation")
