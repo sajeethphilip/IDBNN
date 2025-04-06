@@ -2999,7 +2999,7 @@ class DBNN(GPUDBNN):
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
 
-    def generate_class_pdf_mosaics_1(self, predictions_df, output_dir, columns=4, rows=4):
+    def generate_class_pdf_mosaics_slow(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with one progress bar per class showing overall progress.
         """
