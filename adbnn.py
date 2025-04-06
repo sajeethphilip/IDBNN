@@ -5612,7 +5612,7 @@ class DBNN(GPUDBNN):
                     mosaic_dir = os.path.join(output_path, 'mosaics')
                     os.makedirs(mosaic_dir, exist_ok=True)
                     columns=input("Please specify the number of columns of images per page (defaults 8):" or 8)
-                    rows=input("Please specify the number of rows of images per page (defaults 7):" or 7)
+                    rows=input("Please specify the number of rows of images per page (defaults 8):" or 8)
                     for class_name, group in results.groupby('predicted_class'):
                         valid_images = []
                         for _, row in group.iterrows():
