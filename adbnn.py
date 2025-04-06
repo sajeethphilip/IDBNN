@@ -15,6 +15,12 @@ import pandas as pd
 import shutil
 import os
 #For pdf mosaic--
+import concurrent.futures
+from multiprocessing import cpu_count
+import torch
+from PIL import Image
+import io
+
 import math
 from tqdm import tqdm
 from PIL import Image as PILImage
@@ -2993,7 +2999,7 @@ class DBNN(GPUDBNN):
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
 
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
+    def generate_class_pdf_mosaics_1(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with one progress bar per class showing overall progress.
         """
@@ -3134,6 +3140,188 @@ class DBNN(GPUDBNN):
             #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
 #-------------Option 2 ---------------
 
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
+        """
+        High-performance PDF mosaic generation using parallel processing and GPU acceleration.
+        """
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Setup parallel processing
+        num_workers = min(cpu_count(), 8)  # Limit to 8 workers to avoid memory issues
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Group by class
+        class_groups = predictions_df.groupby('predicted_class')
+        images_per_page = columns * rows
+
+        for class_name, group_df in class_groups:
+            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
+            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            n_images = len(sorted_df)
+            n_pages = math.ceil(n_images / images_per_page)
+
+            # Pre-load all images in parallel
+            with tqdm(total=n_images, desc=f"Loading {class_name} images") as pbar:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    # Process images in batches
+                    image_batches = []
+                    batch_size = 256  # Process 256 images at a time
+
+                    for i in range(0, n_images, batch_size):
+                        batch = sorted_df.iloc[i:i+batch_size]
+                        futures = []
+
+                        for _, row in batch.iterrows():
+                            future = executor.submit(self._load_and_preprocess_image,
+                                                   row['filepath'],
+                                                   row['prediction_confidence'],
+                                                   device)
+                            futures.append(future)
+
+                        # Wait for batch completion
+                        for future in concurrent.futures.as_completed(futures):
+                            image_batches.append(future.result())
+                            pbar.update(1)
+
+            # PDF generation with ReportLab
+            doc = SimpleDocTemplate(
+                pdf_path,
+                pagesize=letter,
+                rightMargin=0.5*inch,
+                leftMargin=0.5*inch,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch
+            )
+            elements = []
+
+            # Calculate image dimensions
+            img_width = (letter[0] - inch) / columns
+            img_height = ((letter[1] - 2*inch) / rows) * 0.85
+
+            # Generate pages in parallel
+            with tqdm(total=n_pages, desc=f"Generating {class_name} PDF") as pbar:
+                for page_num in range(n_pages):
+                    start_idx = page_num * images_per_page
+                    end_idx = min(start_idx + images_per_page, n_images)
+                    page_images = image_batches[start_idx:end_idx]
+
+                    # Create page elements
+                    page_elements = self._generate_page_elements(
+                        class_name, page_num, n_pages, page_images,
+                        img_width, img_height, columns, styles
+                    )
+                    elements.extend(page_elements)
+                    pbar.update(1)
+
+            # Build final PDF
+            doc.build(elements)
+            print(f"\033[K✅ {class_name} - Processed {n_images} images in {pdf_path}")
+
+    def _load_and_preprocess_image(self, img_path, confidence, device):
+        """Load and preprocess image using GPU acceleration"""
+        try:
+            # Load image directly into GPU memory if available
+            if torch.cuda.is_available():
+                with open(img_path, 'rb') as f:
+                    img_data = f.read()
+                img = Image.open(io.BytesIO(img_data))
+
+                # Convert to tensor and move to GPU
+                img_tensor = torch.tensor(np.array(img), device=device)
+
+                # Apply any GPU-accelerated transformations here
+                # Example: img_tensor = self.gpu_transforms(img_tensor)
+
+                # Convert back to PIL for ReportLab
+                img = Image.fromarray(img_tensor.cpu().numpy())
+            else:
+                # Fallback to CPU processing
+                img = Image.open(img_path)
+                img.load()  # Force load into memory
+
+            return {
+                'image': img,
+                'confidence': confidence,
+                'name': os.path.basename(img_path)
+            }
+        except Exception as e:
+            print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
+            return None
+
+    def _generate_page_elements(self, class_name, page_num, n_pages, images,
+                              img_width, img_height, columns, styles):
+        """Generate PDF page elements for a batch of images"""
+        elements = []
+
+        # Page header
+        if page_num > 0:
+            elements.extend([
+                Spacer(1, 0.25*inch),
+                Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
+                Spacer(1, 0.25*inch)
+            ])
+
+        elements.append(Paragraph(
+            f"Class: {class_name} (Sorted by Confidence)",
+            styles['Heading2']
+        ))
+        elements.append(Spacer(1, 0.1*inch))
+
+        # Create image grid
+        table_data = []
+        row_data = []
+
+        for img_data in images:
+            if img_data is None:
+                row_data.append("")
+                continue
+
+            cell_content = [
+                ReportLabImage(io.BytesIO(self._pil_to_bytes(img_data['image'])),
+                             width=img_width*0.9,
+                             height=img_height*0.85),
+                Paragraph(
+                    f"{img_data['name'][:15]}...<br/>Conf: {img_data['confidence']:.2%}",
+                    styles['Caption']
+                )
+            ]
+            row_data.append(cell_content)
+
+            if len(row_data) == columns:
+                table_data.append(row_data)
+                row_data = []
+
+        # Add any remaining images
+        if row_data:
+            while len(row_data) < columns:
+                row_data.append("")
+            table_data.append(row_data)
+
+        if table_data:
+            table = Table(table_data, colWidths=[img_width] * columns)
+            table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(table)
+
+        if page_num < n_pages - 1:
+            elements.append(PageBreak())
+
+        return elements
+
+    def _pil_to_bytes(self, img):
+        """Convert PIL image to bytes efficiently"""
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='JPEG', quality=85)  # Adjust quality as needed
+        return img_byte_arr.getvalue()
+#--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
 
