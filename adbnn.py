@@ -3144,6 +3144,7 @@ class DBNN(GPUDBNN):
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with configurable grid layout (columns x rows per page).
+        Accumulates all pages first, then builds the PDF once at the end.
 
         Args:
             predictions_df: DataFrame containing predictions and image paths.
@@ -3151,11 +3152,10 @@ class DBNN(GPUDBNN):
             columns: Number of columns per page (default: 4).
             rows: Number of rows per page (default: 4).
         """
-        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
-
-        # Add custom Caption style for PDF
         styles = getSampleStyleSheet()
+
+        # Add custom Caption style if missing
         if 'Caption' not in styles:
             from reportlab.lib.styles import ParagraphStyle
             styles.add(ParagraphStyle(
@@ -3175,13 +3175,11 @@ class DBNN(GPUDBNN):
         for class_name, group_df in class_groups:
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-
-            # Sort by prediction confidence (highest first)
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
             n_images = len(sorted_df)
             n_pages = math.ceil(n_images / images_per_page)
 
-            # PDF setup with margins
+            # Initialize PDF document (but don't build yet)
             doc = SimpleDocTemplate(
                 pdf_path,
                 pagesize=letter,
@@ -3190,29 +3188,21 @@ class DBNN(GPUDBNN):
                 topMargin=0.5*inch,
                 bottomMargin=0.5*inch
             )
-            elements = []
+            elements = []  # Accumulate all elements here
 
-            # Calculate image dimensions based on page size and grid
-            usable_width = letter[0] - inch  # Account for margins
+            # Calculate image dimensions
+            usable_width = letter[0] - inch
             usable_height = letter[1] - 2*inch
             img_width = usable_width / columns
-            img_height = (usable_height / rows) * 0.85  # 85% of row height for image, 15% for caption
+            img_height = (usable_height / rows) * 0.85
 
-            # Single progress bar for the entire class
-            with tqdm(total=n_images,
-                     desc=f"{str(class_name)[:15]:<15}",
-                     unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
-                     leave=False) as pbar:
-
-                processed_images = 0
-
+            with tqdm(total=n_images, desc=f"Preparing {class_name}") as pbar:
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
                     end_idx = min(start_idx + images_per_page, n_images)
                     page_images = sorted_df.iloc[start_idx:end_idx]
 
-                    # Page header (skip for first page)
+                    # Add page header (except first page)
                     if page_num > 0:
                         elements.extend([
                             Spacer(1, 0.25*inch),
@@ -3226,31 +3216,25 @@ class DBNN(GPUDBNN):
                     ))
                     elements.append(Spacer(1, 0.1*inch))
 
-                    # Create image grid table
+                    # Build the grid for this page
                     table_data = []
                     row_data = []
 
                     for _, row in page_images.iterrows():
                         img_path = row['filepath']
-                        img_name = os.path.basename(img_path)
-                        confidence = row['prediction_confidence']
-
                         try:
-                            # Verify and load image
                             with PILImage.open(img_path) as img:
-                                img.verify()
+                                img.verify()  # Validate image
 
-                            # Create table cell with image and caption
                             cell_content = [
                                 ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
                                 Paragraph(
-                                    f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
+                                    f"{os.path.basename(img_path)[:15]}...<br/>Conf: {row['prediction_confidence']:.2%}",
                                     styles['Caption']
                                 )
                             ]
                             row_data.append(cell_content)
 
-                            # Start new row when current row is full
                             if len(row_data) == columns:
                                 table_data.append(row_data)
                                 row_data = []
@@ -3259,40 +3243,33 @@ class DBNN(GPUDBNN):
                             print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
                             continue
 
-                        # Update progress
-                        processed_images += 1
                         pbar.update(1)
 
-                    # Add any remaining images in the last row
+                    # Pad the last row if incomplete
                     if row_data:
-                        # Pad with empty cells if needed
-                        while len(row_data) < columns:
-                            row_data.append("")
+                        row_data.extend([""] * (columns - len(row_data)))
                         table_data.append(row_data)
 
-                    # Add table to PDF elements
+                    # Add the table to elements
                     if table_data:
-                        table_style = [
+                        table = Table(table_data, colWidths=[img_width] * columns)
+                        table.setStyle(TableStyle([
                             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                             ('LEFTPADDING', (0, 0), (-1, -1), 3),
                             ('RIGHTPADDING', (0, 0), (-1, -1), 3),
                             ('TOPPADDING', (0, 0), (-1, -1), 3),
                             ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                        ]
-                        table = Table(table_data, colWidths=[img_width] * columns)
-                        table.setStyle(TableStyle(table_style))
+                        ]))
                         elements.append(table)
 
                     # Add page break if not the last page
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
 
-                # Build the PDF after processing all pages
+                # Build the PDF ONCE after all elements are ready
                 doc.build(elements)
-
-            # Print completion message
-            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+                print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
