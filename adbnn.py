@@ -3003,6 +3003,7 @@ class DBNN(GPUDBNN):
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with configurable grid layout (columns x rows per page).
+        Captions are clickable hyperlinks to the original image paths.
 
         Args:
             predictions_df: DataFrame containing predictions and image paths.
@@ -3013,7 +3014,7 @@ class DBNN(GPUDBNN):
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
-        # Add custom Caption style for PDF
+        # Add custom styles
         styles = getSampleStyleSheet()
         if 'Caption' not in styles:
             from reportlab.lib.styles import ParagraphStyle
@@ -3024,7 +3025,16 @@ class DBNN(GPUDBNN):
                 leading=9,
                 spaceBefore=2,
                 spaceAfter=2,
-                alignment=1
+                alignment=1  # Center aligned
+            ))
+
+        # Add hyperlink style
+        if 'Hyperlink' not in styles:
+            styles.add(ParagraphStyle(
+                name='Hyperlink',
+                parent=styles['Caption'],
+                textColor=colors.blue,
+                underline=1
             ))
 
         # Group by predicted class
@@ -3099,13 +3109,14 @@ class DBNN(GPUDBNN):
                             with PILImage.open(img_path) as img:
                                 img.verify()
 
+                            # Create clickable caption with hyperlink
+                            caption_text = f'<link href="{img_path}">{img_name[:15]}...</link><br/>Conf: {confidence:.2%}'
+                            caption = Paragraph(caption_text, styles['Hyperlink'])
+
                             # Create table cell with image and caption
                             cell_content = [
                                 ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
-                                Paragraph(
-                                    f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
-                                    styles['Caption']
-                                )
+                                caption
                             ]
                             row_data.append(cell_content)
 
@@ -3150,8 +3161,8 @@ class DBNN(GPUDBNN):
                 # Build the PDF after processing all pages
                 doc.build(elements)
 
-            # Print completion message
-            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+                # Print completion message
+                print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
