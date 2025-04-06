@@ -3243,7 +3243,7 @@ class DBNN(GPUDBNN):
                             print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
                             continue
 
-                        pbar.update(1)
+
 
                     # Pad the last row if incomplete
                     if row_data:
@@ -3266,7 +3266,7 @@ class DBNN(GPUDBNN):
                     # Add page break if not the last page
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
-
+                    pbar.update(1)
                 # Build the PDF ONCE after all elements are ready
                 doc.build(elements)
                 #print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
