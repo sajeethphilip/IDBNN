@@ -3271,8 +3271,8 @@ class DBNN(GPUDBNN):
                     table.setStyle(TableStyle(table_style))
                     elements.append(table)
 
-                if page_num < n_pages - 1:
-                    elements.append(PageBreak())
+                #if page_num < n_pages - 1:
+                #    elements.append(PageBreak())
             pbar.update(1)
             # Build PDF after all pages processed
             doc.build(elements)
