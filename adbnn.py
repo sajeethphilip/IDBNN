@@ -3274,11 +3274,12 @@ class DBNN(GPUDBNN):
                 if page_num < n_pages - 1:
                     elements.append(PageBreak())
                 pbar.update(1)
-            # Close the progress bar for this class
-            pbar.close()
-
             # Build PDF after all pages processed
             doc.build(elements)
+
+        # Close the progress bar for this class
+        pbar.close()
+
 
         # Clear the line and print completion message
         #print(f"\033[K✅ {class_name} - Processed {n_images} images")
