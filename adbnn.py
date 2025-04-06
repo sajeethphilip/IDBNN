@@ -2999,10 +2999,10 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
-
-    def generate_class_pdf_mosaics_slow(self, predictions_df, output_dir, columns=4, rows=4):
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        Generate PDF mosaics with one progress bar per class showing overall progress.
+        Enhanced PDF mosaic generator with proper class selection validation
+        and optimized processing.
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -3021,18 +3021,71 @@ class DBNN(GPUDBNN):
                 alignment=1
             ))
 
-        # Group by class
-        class_groups = predictions_df.groupby('predicted_class')
+        # Validate and prepare class data
+        if 'predicted_class' not in predictions_df.columns:
+            raise ValueError("Input DataFrame must contain 'predicted_class' column")
+
+        # Get all unique classes and counts
+        class_counts = predictions_df['predicted_class'].value_counts()
+        unique_classes = class_counts.index.tolist()
+
+        if not unique_classes:
+            raise ValueError("No classes found in the predictions DataFrame")
+
+        # Interactive class selection with validation
+        print("\nAvailable classes with sample counts:")
+        for i, (class_name, count) in enumerate(class_counts.items(), 1):
+            print(f"{i}. {class_name} ({count} samples)")
+
+        while True:
+            selection = input("\nEnter classes to process (comma-separated numbers, 'all', or 'q' to quit): ").strip().lower()
+
+            if selection == 'q':
+                print("Operation cancelled by user.")
+                return
+
+            if selection == 'all':
+                selected_classes = unique_classes
+                break
+
+            try:
+                selected_indices = [int(x.strip())-1 for x in selection.split(',')]
+                selected_classes = []
+
+                for idx in selected_indices:
+                    if 0 <= idx < len(unique_classes):
+                        selected_classes.append(unique_classes[idx])
+                    else:
+                        print(f"⚠️ Invalid index: {idx+1}. Skipping...")
+
+                if not selected_classes:
+                    print("❌ No valid classes selected. Please try again.")
+                    continue
+
+                break
+
+            except ValueError:
+                print("❌ Invalid input. Please enter numbers separated by commas, 'all', or 'q'.")
+
+        # Process each selected class
         images_per_page = columns * rows
 
-        for class_name, group_df in class_groups:
+        for class_idx, class_name in enumerate(selected_classes, 1):
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+
+            # Filter and sort class data
+            class_data = predictions_df[predictions_df['predicted_class'] == class_name]
+            sorted_df = class_data.sort_values('prediction_confidence', ascending=False)
             n_images = len(sorted_df)
+
+            if n_images == 0:
+                print(f"⚠️ No images found for class '{class_name}'. Skipping...")
+                continue
+
             n_pages = math.ceil(n_images / images_per_page)
 
-            # PDF setup
+            # Initialize PDF
             doc = SimpleDocTemplate(
                 pdf_path,
                 pagesize=letter,
@@ -3049,14 +3102,15 @@ class DBNN(GPUDBNN):
             img_width = usable_width / columns
             img_height = (usable_height / rows) * 0.85
 
-            # Single progress bar for entire class
-            with tqdm(total=n_images,
-                     desc=f"{str(class_name)[:15]:<15}",
-                     unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
-                     leave=False) as pbar:
-
-                processed_images = 0
+            # Initialize progress bar for this class
+            with tqdm(
+                total=n_images,
+                desc=f"{class_idx}/{len(selected_classes)} {class_name[:15]:<15}",
+                unit='img',
+                position=0,
+                leave=True,
+                bar_format='{l_bar}{bar:50}{r_bar}{bar:-50b}'
+            ) as pbar:
 
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
@@ -3087,206 +3141,34 @@ class DBNN(GPUDBNN):
                         confidence = row['prediction_confidence']
 
                         try:
-                            with PILImage.open(img_path) as img:
-                                img.verify()
-
-                            cell_content = [
-                                ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
-                                Paragraph(
-                                    f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
-                                    styles['Caption']
-                                )
-                            ]
-                            row_data.append(cell_content)
-
-                            if len(row_data) == columns:
-                                table_data.append(row_data)
-                                row_data = []
-
-                        except Exception as e:
-                            row_data.append("")
-                            continue
-
-                        # Update progress - one increment per image
-                        processed_images += 1
-                        pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
-                        pbar.update(1)
-
-                    # Add any remaining images
-                    if row_data:
-                        while len(row_data) < columns:
-                            row_data.append("")
-                        table_data.append(row_data)
-
-                    if table_data:
-                        table_style = [
-                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                            ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-                            ('TOPPADDING', (0, 0), (-1, -1), 3),
-                            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                        ]
-                        table = Table(table_data, colWidths=[img_width] * columns)
-                        table.setStyle(TableStyle(table_style))
-                        elements.append(table)
-
-                    if page_num < n_pages - 1:
-                        elements.append(PageBreak())
-
-                # Build PDF after all pages processed
-                doc.build(elements)
-
-            # Clear line and print final status once
-            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
-#-------------Option 2 ---------------
-
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
-        """
-        Enhanced PDF mosaic generator with:
-        - Interactive class selection
-        - Optimized GPU/CPU utilization
-        - Single progress bar per class with embedded info
-        """
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Add custom Caption style
-        styles = getSampleStyleSheet()
-        if 'Caption' not in styles:
-            from reportlab.lib.styles import ParagraphStyle
-            styles.add(ParagraphStyle(
-                name='Caption',
-                parent=styles['Normal'],
-                fontSize=8,
-                leading=9,
-                spaceBefore=2,
-                spaceAfter=2,
-                alignment=1
-            ))
-
-        # Group and sort classes by count
-        class_groups = predictions_df.groupby('predicted_class')
-        class_counts = class_groups.size().sort_values(ascending=False)
-        unique_classes = class_counts.index.tolist()
-
-        # Interactive class selection
-        print("\nAvailable classes sorted by sample count:")
-        for i, (class_name, count) in enumerate(class_counts.items()):
-            print(f"{i+1}. {class_name} ({count} samples)")
-
-        selection = input("\nEnter classes to process (comma-separated numbers or 'all'): ").strip()
-        if selection.lower() == 'all':
-            selected_classes = unique_classes
-        else:
-            selected_indices = [int(x.strip())-1 for x in selection.split(',')]
-            selected_classes = [unique_classes[i] for i in selected_indices if i < len(unique_classes)]
-
-        # Process each selected class with optimized resources
-        images_per_page = columns * rows
-
-        for class_idx, class_name in enumerate(selected_classes, 1):
-            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-
-            # Get class data sorted by confidence
-            class_df = class_groups.get_group(class_name)
-            sorted_df = class_df.sort_values('prediction_confidence', ascending=False)
-            n_images = len(sorted_df)
-            n_pages = math.ceil(n_images / images_per_page)
-
-            # Initialize PDF
-            doc = SimpleDocTemplate(
-                pdf_path,
-                pagesize=letter,
-                rightMargin=0.5*inch,
-                leftMargin=0.5*inch,
-                topMargin=0.5*inch,
-                bottomMargin=0.5*inch
-            )
-            elements = []
-
-            # Calculate image dimensions
-            usable_width = letter[0] - inch
-            usable_height = letter[1] - 2*inch
-            img_width = usable_width / columns
-            img_height = (usable_height / rows) * 0.85
-
-            # Initialize progress bar for this class
-            pbar = tqdm(
-                total=n_images,
-                desc=f"{class_idx}/{len(selected_classes)} {class_name[:15]:<15}",
-                unit='img',
-                position=0,
-                leave=True,
-                bar_format='{l_bar}{bar:50}{r_bar}{bar:-50b}'
-            )
-
-            # Process images in batches for better GPU utilization
-            batch_size = min(100, images_per_page)  # Adjust based on available memory
-            processed_images = 0
-
-            for page_num in range(n_pages):
-                start_idx = page_num * images_per_page
-                end_idx = min(start_idx + images_per_page, n_images)
-                page_images = sorted_df.iloc[start_idx:end_idx]
-
-                # Page header
-                if page_num > 0:
-                    elements.extend([
-                        Spacer(1, 0.25*inch),
-                        Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
-                        Spacer(1, 0.25*inch)
-                    ])
-
-                elements.append(Paragraph(
-                    f"Class: {class_name} (Sorted by Confidence)",
-                    styles['Heading2']
-                ))
-                elements.append(Spacer(1, 0.1*inch))
-
-                # Process images in batches
-                table_data = []
-                row_data = []
-
-                for batch_start in range(0, len(page_images), batch_size):
-                    batch_end = min(batch_start + batch_size, len(page_images))
-                    batch = page_images.iloc[batch_start:batch_end]
-
-                    # Process batch (can be parallelized if needed)
-                    for _, row in batch.iterrows():
-                        img_path = row['filepath']
-                        confidence = row['prediction_confidence']
-
-                        try:
-                            # Use GPU-accelerated image loading if available
+                            # Load image (with GPU acceleration if available)
                             if torch.cuda.is_available():
                                 with torch.cuda.device(0):
                                     img = PILImage.open(img_path)
                                     img.verify()
                             else:
-                                with PILImage.open(img_path) as img:
-                                    img.verify()
+                                img = PILImage.open(img_path)
+                                img.verify()
 
                             cell_content = [
                                 ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
                                 Paragraph(
-                                    f"{os.path.basename(img_path)[:15]}...\nConf: {confidence:.2%}",
+                                    f"{img_name[:15]}...\nConf: {confidence:.2%}",
                                     styles['Caption']
                                 )
                             ]
                             row_data.append(cell_content)
 
-                            # Update progress bar with current image info
+                            # Update progress bar
                             pbar.set_postfix({
-                                'img': os.path.basename(img_path)[:10],
+                                'img': img_name[:10],
                                 'conf': f"{confidence:.1%}",
                                 'page': f"{page_num+1}/{n_pages}"
                             })
                             pbar.update(1)
-                            processed_images += 1
 
                         except Exception as e:
+                            print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
                             row_data.append("")
                             continue
 
@@ -3294,30 +3176,29 @@ class DBNN(GPUDBNN):
                             table_data.append(row_data)
                             row_data = []
 
-                # Pad the last row if incomplete
-                if row_data:
-                    row_data.extend([""] * (columns - len(row_data)))
-                    table_data.append(row_data)
+                    # Pad the last row if incomplete
+                    if row_data:
+                        row_data.extend([""] * (columns - len(row_data)))
+                        table_data.append(row_data)
 
-                if table_data:
-                    table = Table(table_data, colWidths=[img_width] * columns)
-                    table.setStyle(TableStyle([
-                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                        ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-                        ('TOPPADDING', (0, 0), (-1, -1), 3),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                    ]))
-                    elements.append(table)
+                    if table_data:
+                        table = Table(table_data, colWidths=[img_width] * columns)
+                        table.setStyle(TableStyle([
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                            ('TOPPADDING', (0, 0), (-1, -1), 3),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                        ]))
+                        elements.append(table)
 
-                if page_num < n_pages - 1:
-                    elements.append(PageBreak())
+                    if page_num < n_pages - 1:
+                        elements.append(PageBreak())
 
-            # Build PDF and close progress bar
-            doc.build(elements)
-            pbar.close()
-            print(f"\033[K✅ Saved {n_images} images for class '{class_name}' to {pdf_path}")
+                # Build PDF
+                doc.build(elements)
+                print(f"\033[K✅ Saved {n_images} images for class '{class_name}' to {pdf_path}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
