@@ -5704,7 +5704,8 @@ class DBNN(GPUDBNN):
                 if 'original_filename' and 'filepath' in results.columns:
                     mosaic_dir = os.path.join(output_path, 'mosaics')
                     os.makedirs(mosaic_dir, exist_ok=True)
-
+                    columns=input("Please specify the number of columns of images per page (defaults 4):" or 4)
+                    rows=input("Please specify the number of rows of images per page (defaults 6):" or 6)
                     for class_name, group in results.groupby('predicted_class'):
                         valid_images = []
                         for _, row in group.iterrows():
@@ -5718,7 +5719,7 @@ class DBNN(GPUDBNN):
                                 if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
                                     self.generate_class_pdf_mosaics(
                                         predictions_df=class_df,
-                                        output_dir=mosaic_dir
+                                        output_dir=mosaic_dir, columns=columns,rows=rows
                                     )
                                 else:
                                     print("\033[KMissing required columns for PDF generation")
