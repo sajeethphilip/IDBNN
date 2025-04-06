@@ -3196,7 +3196,12 @@ class DBNN(GPUDBNN):
             img_width = usable_width / columns
             img_height = (usable_height / rows) * 0.85
 
-            with tqdm(total=n_images, desc=f"Preparing {class_name}") as pbar:
+            # Use a single progress bar for the entire class
+            with tqdm(total=n_images,
+                     desc=f"Processing {class_name}",
+                     position=0,
+                     leave=True) as pbar:
+
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
                     end_idx = min(start_idx + images_per_page, n_images)
@@ -3243,7 +3248,8 @@ class DBNN(GPUDBNN):
                             print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
                             continue
 
-
+                        # Update progress after each image
+                        pbar.update(1)
 
                     # Pad the last row if incomplete
                     if row_data:
@@ -3266,7 +3272,7 @@ class DBNN(GPUDBNN):
                     # Add page break if not the last page
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
-            pbar.update(1)
+
             # Build the PDF ONCE after all elements are ready
             doc.build(elements)
             #print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
