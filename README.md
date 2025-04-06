@@ -29,6 +29,9 @@ To train/predcit using adbnn  (For Difference Boosting Neural Network
 
 ![image](https://github.com/user-attachments/assets/48ce9afe-bbb8-4736-936c-e2754245437f)
 
+![image](https://github.com/user-attachments/assets/cc891ddc-e23c-4937-968b-4311bdcb3bb4)
+
+
 
 # What is Difference Boosting Neural Network?
 
