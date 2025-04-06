@@ -3281,7 +3281,7 @@ class DBNN(GPUDBNN):
             doc.build(elements)
 
             # Clear the line and print completion message
-            print(f"\033[K✅ {class_name} - Processed {n_images} images")
+            #print(f"\033[K✅ {class_name} - Processed {n_images} images")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
