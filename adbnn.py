@@ -3267,9 +3267,9 @@ class DBNN(GPUDBNN):
                     if page_num < n_pages - 1:
                         elements.append(PageBreak())
 
-            # Build the PDF ONCE after all elements are ready
-            doc.build(elements)
-            print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
+                # Build the PDF ONCE after all elements are ready
+                doc.build(elements)
+                #print(f"\033[K✅ {class_name} - Saved {n_images} images to {pdf_path}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
