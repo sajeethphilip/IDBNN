@@ -3273,7 +3273,7 @@ class DBNN(GPUDBNN):
 
                 if page_num < n_pages - 1:
                     elements.append(PageBreak())
-                pbar.update(1)
+            pbar.update(1)
             # Build PDF after all pages processed
             doc.build(elements)
 
