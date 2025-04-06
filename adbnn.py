@@ -2999,196 +2999,290 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir, cols_per_page=8, rows_per_page=8):
-        """
-        Robust PDF mosaic generator that:
-        - Properly handles all classes in the predictions
-        - Creates correctly formatted tables
-        - Includes error handling for image loading
-        - Provides progress feedback
 
-        Args:
-            predictions_df: DataFrame containing predictions and image paths
-            output_dir: Directory to save PDF files
-            cols_per_page: Number of image columns per page (default: 8)
-            rows_per_page: Number of image rows per page (default: 8)
+    def generate_class_pdf_mosaics_slow(self, predictions_df, output_dir, columns=4, rows=4):
         """
-        # Create output directory if it doesn't exist
+        Generate PDF mosaics with one progress bar per class showing overall progress.
+        """
+        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
-        # Initialize PDF styles
+        # Add custom Caption style
         styles = getSampleStyleSheet()
-        caption_style = ParagraphStyle(
-            name='Caption',
-            parent=styles['Normal'],
-            fontSize=8,
-            leading=10,
-            alignment=TA_CENTER,
-            spaceBefore=2,
-            spaceAfter=2
-        )
+        if 'Caption' not in styles:
+            from reportlab.lib.styles import ParagraphStyle
+            styles.add(ParagraphStyle(
+                name='Caption',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=9,
+                spaceBefore=2,
+                spaceAfter=2,
+                alignment=1
+            ))
 
-        # Get all unique classes from predictions
-        if 'predicted_class' not in predictions_df.columns:
-            raise ValueError("Input DataFrame missing 'predicted_class' column")
+        # Group by class
+        class_groups = predictions_df.groupby('predicted_class')
+        images_per_page = columns * rows
 
-        # Get actual unique classes (fixes issue where only 1 class was detected)
-        unique_classes = predictions_df['predicted_class'].unique()
-        if len(unique_classes) == 0:
-            raise ValueError("No classes found in predictions data")
+        for class_name, group_df in class_groups:
+            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
+            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            n_images = len(sorted_df)
+            n_pages = math.ceil(n_images / images_per_page)
 
-        print(f"\nFound {len(unique_classes)} classes in predictions:")
-        for i, cls in enumerate(sorted(unique_classes), 1):
-            count = len(predictions_df[predictions_df['predicted_class'] == cls])
-            print(f"{i}. {cls} ({count} samples)")
-
-        # Process each class
-        for class_name in sorted(unique_classes):
-            class_samples = predictions_df[predictions_df['predicted_class'] == class_name]
-            if len(class_samples) == 0:
-                print(f"\nSkipping class {class_name} - no samples")
-                continue
-
-            # Sort by confidence (highest first)
-            if 'prediction_confidence' in class_samples.columns:
-                class_samples = class_samples.sort_values('prediction_confidence', ascending=False)
-
-            # Create PDF for this class
-            safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-            pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
-            print(f"\nCreating PDF for class '{class_name}' at {pdf_path}")
-
-            # Initialize PDF document
+            # PDF setup
             doc = SimpleDocTemplate(
                 pdf_path,
                 pagesize=letter,
-                rightMargin=36,
-                leftMargin=36,
-                topMargin=36,
-                bottomMargin=36
+                rightMargin=0.5*inch,
+                leftMargin=0.5*inch,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch
             )
-
             elements = []
 
-            # Add title page
-            elements.append(Paragraph(f"Class: {class_name}", styles['Heading1']))
-            elements.append(Spacer(1, 12))
-            elements.append(Paragraph(f"Total Samples: {len(class_samples)}", styles['Normal']))
-            elements.append(PageBreak())
+            # Calculate image dimensions
+            usable_width = letter[0] - inch
+            usable_height = letter[1] - 2*inch
+            img_width = usable_width / columns
+            img_height = (usable_height / rows) * 0.85
 
-            # Calculate images per page and total pages
-            images_per_page = cols_per_page * rows_per_page
-            total_pages = math.ceil(len(class_samples) / images_per_page)
+            # Single progress bar for entire class
+            with tqdm(total=n_images,
+                     desc=f"{str(class_name)[:15]:<15}",
+                     unit="img",
+                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
+                     leave=False) as pbar:
 
-            # Process images in batches for each page
-            for page_num in range(total_pages):
-                start_idx = page_num * images_per_page
-                end_idx = min(start_idx + images_per_page, len(class_samples))
-                page_samples = class_samples.iloc[start_idx:end_idx]
+                processed_images = 0
 
-                # Create a table for this page's images
-                table_data = []
+                for page_num in range(n_pages):
+                    start_idx = page_num * images_per_page
+                    end_idx = min(start_idx + images_per_page, n_images)
+                    page_images = sorted_df.iloc[start_idx:end_idx]
 
-                # Fill table rows
-                for row in range(rows_per_page):
-                    row_start = row * cols_per_page
-                    row_end = row_start + cols_per_page
-                    row_samples = page_samples.iloc[row_start:row_end] if row_start < len(page_samples) else []
+                    # Page header
+                    if page_num > 0:
+                        elements.extend([
+                            Spacer(1, 0.25*inch),
+                            Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
+                            Spacer(1, 0.25*inch)
+                        ])
 
-                    # Create table row with images and captions
-                    table_row = []
-                    for _, sample in row_samples.iterrows():
+                    elements.append(Paragraph(
+                        f"Class: {class_name} (Sorted by Confidence)",
+                        styles['Heading2']
+                    ))
+                    elements.append(Spacer(1, 0.1*inch))
+
+                    # Create image grid table
+                    table_data = []
+                    row_data = []
+
+                    for _, row in page_images.iterrows():
+                        img_path = row['filepath']
+                        img_name = os.path.basename(img_path)
+                        confidence = row['prediction_confidence']
+
                         try:
-                            # Load and resize image
-                            img_path = sample['filepath']
-                            img = Image.open(img_path)
-                            img.thumbnail((150, 150))  # Resize while maintaining aspect ratio
+                            with PILImage.open(img_path) as img:
+                                img.verify()
 
-                            # Create temporary file for resized image
-                            temp_img = io.BytesIO()
-                            img.save(temp_img, format='JPEG')
-                            temp_img.seek(0)
+                            cell_content = [
+                                ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
+                                Paragraph(
+                                    f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
+                                    styles['Caption']
+                                )
+                            ]
+                            row_data.append(cell_content)
 
-                            # Create PDF image element
-                            pdf_img = ReportLabImage(temp_img, width=1.5*inch, height=1.5*inch)
+                            if len(row_data) == columns:
+                                table_data.append(row_data)
+                                row_data = []
 
-                            # Create caption with filename and confidence
-                            caption = f"{os.path.basename(img_path)}"
-                            if 'prediction_confidence' in sample:
-                                caption += f"\nConf: {sample['prediction_confidence']:.1%}"
-
-                            table_row.append([
-                                pdf_img,
-                                Paragraph(caption, caption_style)
-                            ])
                         except Exception as e:
-                            print(f"Error loading image {img_path}: {str(e)}")
-                            table_row.append(["", f"Error: {str(e)}"])
+                            row_data.append("")
+                            continue
 
-                    # Pad row if needed
-                    while len(table_row) < cols_per_page:
-                        table_row.append(["", ""])
+                        # Update progress - one increment per image
+                        processed_images += 1
+                        pbar.set_postfix_str(f"P{page_num+1}/{n_pages} {confidence:.1%}")
+                        pbar.update(1)
 
-                    table_data.append(table_row)
+                    # Add any remaining images
+                    if row_data:
+                        while len(row_data) < columns:
+                            row_data.append("")
+                        table_data.append(row_data)
 
-                # Create table with proper dimensions
-                try:
-                    col_widths = [1.6*inch] * cols_per_page
-                    row_heights = [1.8*inch] * rows_per_page
+                    if table_data:
+                        table_style = [
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                            ('TOPPADDING', (0, 0), (-1, -1), 3),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                        ]
+                        table = Table(table_data, colWidths=[img_width] * columns)
+                        table.setStyle(TableStyle(table_style))
+                        elements.append(table)
 
-                    table = Table(
-                        table_data,
-                        colWidths=col_widths,
-                        rowHeights=row_heights,
-                        hAlign='CENTER'
-                    )
-
-                    # Style the table
-                    table.setStyle(TableStyle([
-                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey),
-                    ]))
-
-                    elements.append(table)
-                    elements.append(Paragraph(f"Page {page_num+1} of {total_pages}", styles['Normal']))
-
-                    if page_num < total_pages - 1:
+                    if page_num < n_pages - 1:
                         elements.append(PageBreak())
 
-                except Exception as e:
-                    print(f"Error creating table for page {page_num+1}: {str(e)}")
-                    continue
-
-            # Build the PDF document
-            try:
+                # Build PDF after all pages processed
                 doc.build(elements)
-                print(f"Successfully created PDF for class '{class_name}'")
-            except Exception as e:
-                print(f"Error building PDF for class '{class_name}': {str(e)}")
 
-    def predict_from_file(self, input_csv, output_dir):
-        """Predict from input CSV file and generate PDF mosaics"""
-        # Read predictions CSV
-        predictions_df = pd.read_csv(input_csv)
+            # Clear line and print final status once
+            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+#-------------Option 2 ---------------
 
-        # Get user input for PDF layout
-        try:
-            cols_per_page = int(input("Please specify the number of columns of images per page (default 8): ") or 8)
-            rows_per_page = int(input("Please specify the number of rows of images per page (default 8): ") or 8)
-        except ValueError:
-            print("Invalid input, using defaults (8 columns x 8 rows)")
-            cols_per_page = 8
-            rows_per_page = 8
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
+        """
+        Generate PDF mosaics with one stable progress bar per class showing overall progress.
+        """
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Generate PDF mosaics with corrected parameter names
-        self.generate_class_pdf_mosaics(
-            predictions_df=predictions_df,
-            output_dir=output_dir,
-            cols_per_page=cols_per_page,
-            rows_per_page=rows_per_page
-        )
+        # Add custom Caption style
+        styles = getSampleStyleSheet()
+        if 'Caption' not in styles:
+            from reportlab.lib.styles import ParagraphStyle
+            styles.add(ParagraphStyle(
+                name='Caption',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=9,
+                spaceBefore=2,
+                spaceAfter=2,
+                alignment=1
+            ))
 
+        # Group by class
+        class_groups = predictions_df.groupby('predicted_class')
+        images_per_page = columns * rows
+
+        for class_name, group_df in class_groups:
+            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
+            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            n_images = len(sorted_df)
+            n_pages = math.ceil(n_images / images_per_page)
+
+            # PDF setup
+            doc = SimpleDocTemplate(
+                pdf_path,
+                pagesize=letter,
+                rightMargin=0.5*inch,
+                leftMargin=0.5*inch,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch
+            )
+            elements = []
+
+            # Calculate image dimensions
+            usable_width = letter[0] - inch
+            usable_height = letter[1] - 2*inch
+            img_width = usable_width / columns
+            img_height = (usable_height / rows) * 0.85
+
+            # Initialize a single progress bar for this class
+            pbar = tqdm(total=n_images,
+                       desc=f"Processing {class_name[:25]:<25}",
+                       unit="img",
+                       position=0,
+                       leave=False)
+
+            processed_images = 0
+
+            for page_num in range(n_pages):
+                start_idx = page_num * images_per_page
+                end_idx = min(start_idx + images_per_page, n_images)
+                page_images = sorted_df.iloc[start_idx:end_idx]
+
+                # Page header
+                if page_num > 0:
+                    elements.extend([
+                        Spacer(1, 0.25*inch),
+                        Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
+                        Spacer(1, 0.25*inch)
+                    ])
+
+                elements.append(Paragraph(
+                    f"Class: {class_name} (Sorted by Confidence)",
+                    styles['Heading2']
+                ))
+                elements.append(Spacer(1, 0.1*inch))
+
+                # Create image grid table
+                table_data = []
+                row_data = []
+
+                for _, row in page_images.iterrows():
+                    img_path = row['filepath']
+                    img_name = os.path.basename(img_path)
+                    confidence = row['prediction_confidence']
+
+                    try:
+                        with PILImage.open(img_path) as img:
+                            img.verify()
+
+                        cell_content = [
+                            ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
+                            Paragraph(
+                                f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
+                                styles['Caption']
+                            )
+                        ]
+                        row_data.append(cell_content)
+
+                        if len(row_data) == columns:
+                            table_data.append(row_data)
+                            row_data = []
+
+                    except Exception as e:
+                        row_data.append("")
+                        continue
+
+                    # Update progress - one increment per image
+                    processed_images += 1
+
+
+                # Add any remaining images
+                if row_data:
+                    while len(row_data) < columns:
+                        row_data.append("")
+                    table_data.append(row_data)
+
+                if table_data:
+                    table_style = [
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                        ('TOPPADDING', (0, 0), (-1, -1), 3),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ]
+                    table = Table(table_data, colWidths=[img_width] * columns)
+                    table.setStyle(TableStyle(table_style))
+                    elements.append(table)
+
+                if page_num < n_pages - 1:
+                    elements.append(PageBreak())
+            pbar.update(1)
+            # Build PDF after all pages processed
+            doc.build(elements)
+
+        # Close the progress bar for this class
+        pbar.close()
+
+
+        # Clear the line and print completion message
+        #print(f"\033[K✅ {class_name} - Processed {n_images} images")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
@@ -5602,7 +5696,7 @@ class DBNN(GPUDBNN):
                     mosaic_dir = os.path.join(output_path, 'mosaics')
                     os.makedirs(mosaic_dir, exist_ok=True)
                     columns=input("Please specify the number of columns of images per page (defaults 8):" or 8)
-                    rows=input("Please specify the number of rows of images per page (defaults 8):" or 8)
+                    rows=input("Please specify the number of rows of images per page (defaults 7):" or 7)
                     for class_name, group in results.groupby('predicted_class'):
                         valid_images = []
                         for _, row in group.iterrows():
