@@ -3291,7 +3291,7 @@ class DBNN(GPUDBNN):
                 doc.build(elements)
 
             # Print completion message
-            print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
+            #print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
