@@ -2999,181 +2999,173 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
-    def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
+    def generate_class_pdf_mosaics(self, predictions_df, output_dir, cols_per_page=8, rows_per_page=10):
         """
-        Enhanced PDF mosaic generator that:
-        - Properly reads classes from CSV
-        - Adds hyperlinks to original images
-        - Has robust class selection
-        - Optimized processing
+        Robust PDF mosaic generator that:
+        - Properly handles all classes in the predictions
+        - Creates correctly formatted tables
+        - Includes error handling for image loading
+        - Provides progress feedback
+
+        Args:
+            predictions_df: DataFrame containing predictions and image paths
+            output_dir: Directory to save PDF files
+            cols_per_page: Number of image columns per page
+            rows_per_page: Number of image rows per page
         """
-        # Create output directory
+        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
-        # Add custom styles
+        # Initialize PDF styles
         styles = getSampleStyleSheet()
-        if 'Caption' not in styles:
-            styles.add(ParagraphStyle(
-                name='Caption',
-                parent=styles['Normal'],
-                fontSize=8,
-                leading=9,
-                spaceBefore=2,
-                spaceAfter=2,
-                alignment=1
-            ))
+        caption_style = ParagraphStyle(
+            name='Caption',
+            parent=styles['Normal'],
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+            spaceBefore=2,
+            spaceAfter=2
+        )
 
-        # 1. PROPER CLASS DETECTION FROM CSV DATA
+        # Get all unique classes from predictions
         if 'predicted_class' not in predictions_df.columns:
             raise ValueError("Input DataFrame missing 'predicted_class' column")
 
-        # Get unique classes directly from DataFrame
-        unique_classes = predictions_df['predicted_class'].unique().tolist()
-        if not unique_classes:
-            raise ValueError("No classes found in the predictions data")
+        # Get actual unique classes (fixes issue where only 1 class was detected)
+        unique_classes = predictions_df['predicted_class'].unique()
+        if len(unique_classes) == 0:
+            raise ValueError("No classes found in predictions data")
 
-        # Get counts for each class
-        class_counts = predictions_df['predicted_class'].value_counts().to_dict()
+        print(f"\nFound {len(unique_classes)} classes in predictions:")
+        for i, cls in enumerate(sorted(unique_classes), 1):
+            count = len(predictions_df[predictions_df['predicted_class'] == cls])
+            print(f"{i}. {cls} ({count} samples)")
 
-        # 2. INTERACTIVE CLASS SELECTION
-        print("\nAvailable classes with sample counts:")
-        for i, class_name in enumerate(unique_classes, 1):
-            print(f"{i}. {class_name} ({class_counts.get(class_name, 0)} samples)")
-
-        while True:
-            selection = input("\nEnter classes to process (comma-separated numbers or 'all'): ").strip().lower()
-
-            if selection == 'all':
-                selected_classes = unique_classes
-                break
-
-            try:
-                selected_indices = [int(x.strip())-1 for x in selection.split(',') if x.strip().isdigit()]
-                selected_classes = [unique_classes[i] for i in selected_indices if 0 <= i < len(unique_classes)]
-
-                if not selected_classes:
-                    print("❌ No valid classes selected. Please try again.")
-                    continue
-
-                break
-            except (ValueError, IndexError):
-                print("❌ Invalid input. Please enter numbers separated by commas or 'all'.")
-
-        # 3. PDF GENERATION WITH HYPERLINKS
-        images_per_page = columns * rows
-
-        for class_idx, class_name in enumerate(selected_classes, 1):
-            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-
-            # Filter and sort class data
-            class_data = predictions_df[predictions_df['predicted_class'] == class_name]
-            if class_data.empty:
-                print(f"⚠️ No images found for class '{class_name}'. Skipping...")
+        # Process each class
+        for class_name in sorted(unique_classes):
+            class_samples = predictions_df[predictions_df['predicted_class'] == class_name]
+            if len(class_samples) == 0:
+                print(f"\nSkipping class {class_name} - no samples")
                 continue
 
-            sorted_df = class_data.sort_values('prediction_confidence', ascending=False)
-            n_images = len(sorted_df)
-            n_pages = math.ceil(n_images / images_per_page)
+            # Sort by confidence (highest first)
+            if 'prediction_confidence' in class_samples.columns:
+                class_samples = class_samples.sort_values('prediction_confidence', ascending=False)
 
-            # PDF setup
-            doc = SimpleDocTemplate(pdf_path, pagesize=letter,
-                                  rightMargin=0.5*inch, leftMargin=0.5*inch,
-                                  topMargin=0.5*inch, bottomMargin=0.5*inch)
+            # Create PDF for this class
+            safe_class_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+            pdf_path = os.path.join(output_dir, f"class_{safe_class_name}_mosaic.pdf")
+            print(f"\nCreating PDF for class '{class_name}' at {pdf_path}")
+
+            # Initialize PDF document
+            doc = SimpleDocTemplate(
+                pdf_path,
+                pagesize=letter,
+                rightMargin=36,
+                leftMargin=36,
+                topMargin=36,
+                bottomMargin=36
+            )
+
             elements = []
 
-            # Calculate image dimensions
-            img_width = (letter[0] - 1.5*inch) / columns
-            img_height = (letter[1] - 2*inch) / rows * 0.8  # 80% of row height
+            # Add title page
+            elements.append(Paragraph(f"Class: {class_name}", styles['Heading1']))
+            elements.append(Spacer(1, 12))
+            elements.append(Paragraph(f"Total Samples: {len(class_samples)}", styles['Normal']))
+            elements.append(PageBreak())
 
-            # Progress bar with class info
-            with tqdm(total=n_images,
-                     desc=f"{class_idx}/{len(selected_classes)} {class_name[:15]:<15}",
-                     unit='img',
-                     bar_format='{l_bar}{bar:50}{r_bar}{bar:-50b}') as pbar:
+            # Calculate images per page and total pages
+            images_per_page = cols_per_page * rows_per_page
+            total_pages = math.ceil(len(class_samples) / images_per_page)
 
-                for page_num in range(n_pages):
-                    start_idx = page_num * images_per_page
-                    end_idx = min(start_idx + images_per_page, n_images)
-                    page_images = sorted_df.iloc[start_idx:end_idx]
+            # Process images in batches for each page
+            for page_num in range(total_pages):
+                start_idx = page_num * images_per_page
+                end_idx = min(start_idx + images_per_page, len(class_samples))
+                page_samples = class_samples.iloc[start_idx:end_idx]
 
-                    # Page header
-                    if page_num > 0:
-                        elements.extend([PageBreak()])
+                # Create a table for this page's images
+                table_data = []
 
-                    elements.append(Paragraph(
-                        f"Class: {class_name} (Sorted by Confidence) - Page {page_num+1}/{n_pages}",
-                        styles['Heading2']))
-                    elements.append(Spacer(1, 0.1*inch))
+                # Fill table rows
+                for row in range(rows_per_page):
+                    row_start = row * cols_per_page
+                    row_end = row_start + cols_per_page
+                    row_samples = page_samples.iloc[row_start:row_end] if row_start < len(page_samples) else []
 
-                    # Create image grid
-                    table_data = []
-                    row_data = []
-
-                    for _, row in page_images.iterrows():
-                        img_path = row['filepath']
-                        img_name = os.path.basename(img_path)
-                        confidence = row['prediction_confidence']
-                        full_res_path = os.path.abspath(img_path)  # Absolute path for hyperlink
-
+                    # Create table row with images and captions
+                    table_row = []
+                    for _, sample in row_samples.iterrows():
                         try:
-                            # Verify image
-                            with PILImage.open(img_path) as img:
-                                img.verify()
+                            # Load and resize image
+                            img_path = sample['filepath']
+                            img = Image.open(img_path)
+                            img.thumbnail((150, 150))  # Resize while maintaining aspect ratio
 
-                            # Create clickable image with hyperlink
-                            img = ReportLabImage(img_path,
-                                               width=img_width*0.9,
-                                               height=img_height*0.8)
-                            img.hyperlink = full_res_path  # Store original path
+                            # Create temporary file for resized image
+                            temp_img = io.BytesIO()
+                            img.save(temp_img, format='JPEG')
+                            temp_img.seek(0)
 
-                            # Create caption with link text
-                            caption = (f'<link href="{full_res_path}" color="blue">'
-                                      f'{img_name[:15]}... (Conf: {confidence:.2%})</link>')
+                            # Create PDF image element
+                            pdf_img = ReportLabImage(temp_img, width=1.5*inch, height=1.5*inch)
 
-                            cell_content = [
-                                img,
-                                Paragraph(caption, styles['Caption'])
-                            ]
-                            row_data.append(cell_content)
+                            # Create caption with filename and confidence
+                            caption = f"{os.path.basename(img_path)}"
+                            if 'prediction_confidence' in sample:
+                                caption += f"\nConf: {sample['prediction_confidence']:.1%}"
 
-                            # Update progress
-                            pbar.set_postfix_str(f"Conf: {confidence:.2%} | {img_name[:15]}")
-                            pbar.update(1)
-
+                            table_row.append([
+                                pdf_img,
+                                Paragraph(caption, caption_style)
+                            ])
                         except Exception as e:
-                            print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
-                            row_data.append(["", ""])
-                            continue
+                            print(f"Error loading image {img_path}: {str(e)}")
+                            table_row.append(["", f"Error: {str(e)}"])
 
-                        if len(row_data) == columns:
-                            table_data.append(row_data)
-                            row_data = []
+                    # Pad row if needed
+                    while len(table_row) < cols_per_page:
+                        table_row.append(["", ""])
 
-                    # Pad last row if needed
-                    if row_data:
-                        row_data += [["", ""]] * (columns - len(row_data))
-                        table_data.append(row_data)
+                    table_data.append(table_row)
 
-                    # Add table to elements
-                    if table_data:
-                        table = Table(table_data,
-                                    colWidths=[img_width]*columns,
-                                    rowHeights=[img_height]*rows)
-                        table.setStyle(TableStyle([
-                            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                            ('LEFTPADDING', (0,0), (-1,-1), 2),
-                            ('RIGHTPADDING', (0,0), (-1,-1), 2),
-                            ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey),
-                        ]))
-                        elements.append(table)
+                # Create table with proper dimensions
+                try:
+                    col_widths = [1.6*inch] * cols_per_page
+                    row_heights = [1.8*inch] * rows_per_page
 
-                # Build PDF
+                    table = Table(
+                        table_data,
+                        colWidths=col_widths,
+                        rowHeights=row_heights,
+                        hAlign='CENTER'
+                    )
+
+                    # Style the table
+                    table.setStyle(TableStyle([
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey),
+                    ]))
+
+                    elements.append(table)
+                    elements.append(Paragraph(f"Page {page_num+1} of {total_pages}", styles['Normal']))
+
+                    if page_num < total_pages - 1:
+                        elements.append(PageBreak())
+
+                except Exception as e:
+                    print(f"Error creating table for page {page_num+1}: {str(e)}")
+                    continue
+
+            # Build the PDF document
+            try:
                 doc.build(elements)
-                print(f"\033[K✅ Saved {n_images} images to {pdf_path}")
-                print(f"   - PDF contains clickable links to original images at:")
-                print(f"     {os.path.abspath(output_dir)}")
+                print(f"Successfully created PDF for class '{class_name}'")
+            except Exception as e:
+                print(f"Error building PDF for class '{class_name}': {str(e)}")
 
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
