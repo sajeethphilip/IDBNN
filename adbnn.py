@@ -5773,17 +5773,17 @@ class DBNN(GPUDBNN):
                             if os.path.exists(img_path):
                                 valid_images.append(row)
 
-                            if valid_images:
-                                class_df = pd.DataFrame(valid_images)
-                                print(class_df.head())
-                                # Ensure we have the required columns
-                                if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
-                                    self.generate_class_pdf_mosaics(
-                                        predictions_df=class_df,
-                                        output_dir=mosaic_dir, columns=int(columns),rows=int(rows)
-                                    )
-                                else:
-                                    print("\033[KMissing required columns for PDF generation")
+                    if valid_images:
+                        class_df = pd.DataFrame(valid_images)
+                        print(class_df.head())
+                        # Ensure we have the required columns
+                        if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
+                            self.generate_class_pdf_mosaics(
+                                predictions_df=class_df,
+                                output_dir=mosaic_dir, columns=int(columns),rows=int(rows)
+                            )
+                        else:
+                            print("\033[KMissing required columns for PDF generation")
 
             # Compute and return metrics if we have true labels
             metrics = {}
