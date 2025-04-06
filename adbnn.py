@@ -16,6 +16,21 @@ import pandas as pd
 import shutil
 import os
 #For pdf mosaic--
+
+import math
+import pandas as pd
+from PIL import Image as PILImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+from tqdm import tqdm
+from reportlab.platypus import Image as ReportLabImage
+from reportlab.platypus.flowables import Flowable
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from functools import partial
+
 import concurrent.futures
 from multiprocessing import cpu_count
 import torch
@@ -149,6 +164,17 @@ def get_dataset_name_from_path(file_path):
     dataset_name=file_path.split('/')[1]
     return dataset_name
 
+class ClickableImage(Flowable):
+    """Custom Flowable that creates clickable images in PDF"""
+    def __init__(self, img_path, width, height, hyperlink):
+        Flowable.__init__(self)
+        self.img = ReportLabImage(img_path, width=width, height=height)
+        self.hyperlink = hyperlink
+        self.width = width
+        self.height = height
+
+    def draw(self):
+        self.canv.linkURL(self.hyperlink, (0, 0, self.width, self.height), relative=1)
 
 
 class DatasetProcessor:
@@ -3144,14 +3170,14 @@ class DBNN(GPUDBNN):
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with one stable progress bar per class showing overall progress.
+        Allows user to select processing order and processes classes in parallel when possible.
         """
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
-        # Add custom Caption style
+        # Add custom styles
         styles = getSampleStyleSheet()
         if 'Caption' not in styles:
-            from reportlab.lib.styles import ParagraphStyle
             styles.add(ParagraphStyle(
                 name='Caption',
                 parent=styles['Normal'],
@@ -3162,15 +3188,39 @@ class DBNN(GPUDBNN):
                 alignment=1
             ))
 
-        # Group by class
-        class_groups = predictions_df.groupby('predicted_class')
-        images_per_page = columns * rows
+        # Get unique classes and let user select processing order
+        unique_classes = predictions_df['predicted_class'].unique()
+        print("\nFound the following classes in the dataset:")
+        for i, class_name in enumerate(unique_classes, 1):
+            print(f"{i}. {class_name}")
 
-        for class_name, group_df in class_groups:
+        print("\nEnter the order in which to process these classes (comma-separated numbers).")
+        print("Example: '3,1,2' will process in the order of class 3, then 1, then 2.")
+        order_input = input("Processing order (leave empty for default order): ").strip()
+
+        if order_input:
+            try:
+                selected_order = [int(x.strip()) - 1 for x in order_input.split(',')]
+                processing_order = [unique_classes[i] for i in selected_order]
+            except (ValueError, IndexError):
+                print("Invalid input. Using default order.")
+                processing_order = unique_classes
+        else:
+            processing_order = unique_classes
+
+        # Ask about parallel processing
+        max_workers = min(len(processing_order), multiprocessing.cpu_count())
+        print(f"\nAvailable CPU cores: {multiprocessing.cpu_count()}")
+        parallel = input(f"Process in parallel (up to {max_workers} classes at once)? (y/n): ").lower() == 'y'
+
+        # Process each class
+        def process_single_class(class_name, predictions_df, output_dir, columns, rows):
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
+            group_df = predictions_df[predictions_df['predicted_class'] == class_name]
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
             n_images = len(sorted_df)
+            images_per_page = columns * rows
             n_pages = math.ceil(n_images / images_per_page)
 
             # PDF setup
@@ -3190,14 +3240,12 @@ class DBNN(GPUDBNN):
             img_width = usable_width / columns
             img_height = (usable_height / rows) * 0.85
 
-            # Initialize a single progress bar for this class
+            # Progress bar for this class
             pbar = tqdm(total=n_images,
                        desc=f"Processing {class_name[:25]:<25}",
                        unit="img",
-                       position=0,
+                       position=processing_order.index(class_name),
                        leave=False)
-
-            processed_images = 0
 
             for page_num in range(n_pages):
                 start_idx = page_num * images_per_page
@@ -3226,13 +3274,22 @@ class DBNN(GPUDBNN):
                     img_path = row['filepath']
                     img_name = os.path.basename(img_path)
                     confidence = row['prediction_confidence']
+                    filepath = row['filepath']
 
                     try:
                         with PILImage.open(img_path) as img:
                             img.verify()
 
+                        # Create clickable image with hyperlink to source file
+                        clickable_img = ClickableImage(
+                            img_path,
+                            width=img_width*0.9,
+                            height=img_height*0.85,
+                            hyperlink=filepath
+                        )
+
                         cell_content = [
-                            ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
+                            clickable_img,
                             Paragraph(
                                 f"{img_name[:15]}...<br/>Conf: {confidence:.2%}",
                                 styles['Caption']
@@ -3248,9 +3305,8 @@ class DBNN(GPUDBNN):
                         row_data.append("")
                         continue
 
-                    # Update progress - one increment per image
-                    processed_images += 1
-
+                    # Update progress
+                    pbar.update(1)
 
                 # Add any remaining images
                 if row_data:
@@ -3273,16 +3329,29 @@ class DBNN(GPUDBNN):
 
                 if page_num < n_pages - 1:
                     elements.append(PageBreak())
-            pbar.update(1)
-            # Build PDF after all pages processed
+
+            # Build PDF
             doc.build(elements)
+            pbar.close()
+            return f"Completed {class_name} with {n_images} images"
 
-        # Close the progress bar for this class
-        pbar.close()
+        # Process classes either in parallel or sequentially
+        if parallel:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                process_func = partial(process_single_class,
+                                     predictions_df=predictions_df,
+                                     output_dir=output_dir,
+                                     columns=columns,
+                                     rows=rows)
+                results = list(executor.map(process_func, processing_order))
+                for result in results:
+                    print(result)
+        else:
+            for class_name in processing_order:
+                result = process_single_class(class_name, predictions_df, output_dir, columns, rows)
+                print(result)
 
-
-        # Clear the line and print completion message
-        #print(f"\033[K✅ {class_name} - Processed {n_images} images")
+        print("\nAll PDFs generated successfully!")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
