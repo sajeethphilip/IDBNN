@@ -1209,6 +1209,11 @@ class GPUDBNN:
 
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
+        # Load dataset configuration and data
+        self.config = DatasetConfig.load_config(self.dataset_name)
+        self.data = self._load_dataset()
+
+        self.target_column = self.config['target_column']
         if self.target_column not in self.data.columns:
             raise ValueError(
                 f"Target column '{self.target_column}' not found in dataset.\n"
