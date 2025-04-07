@@ -5718,7 +5718,7 @@ class DBNN(GPUDBNN):
             # Generate detailed results
             print(f"{Colors.BLUE}Generating detailed predictions...{Colors.ENDC}")
             results = self._generate_detailed_predictions(
-                X_orig=X_orig,
+                X_orig=self.X_orig,
                 predictions=y_pred,
                 true_labels=(y_true_str if y_true_str is not None else None),
                 posteriors=posteriors
