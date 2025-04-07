@@ -1113,6 +1113,23 @@ class GPUDBNN:
         # Initialize model components
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
+        # Only fit encoder if we're not in predict mode and not reusing a model
+        if not (self.mode == 'predict' or self.use_previous_model):
+            if self.target_column in self.data.columns:
+                self.label_encoder.fit(self.data[self.target_column])
+            else:
+                raise ValueError("Target column missing in training mode")
+        elif hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+            # Keep existing encoder
+            pass
+        else:
+            raise RuntimeError(
+                "Label encoder not initialized and required for prediction/continued training.\n"
+                "Possible solutions:\n"
+                "1. Train a new model first\n"
+                "2. Provide a valid pre-trained model with label encoder\n"
+                "3. Ensure target column exists in data for training"
+            )
         self.likelihood_params = None
         self.feature_pairs = None
         self.bin_edges = None  # Add bin_edges attribute
@@ -2625,119 +2642,120 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
 
             # Continue with training loop...
-            for round_num in range(max_rounds):
-                print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
-                print("\033[K" +f"Training set size: {len(train_indices)}")
-                print("\033[K" +f"Test set size: {len(test_indices)}")
+            while adaptive_patience_counter <5:
+                for round_num in range(max_rounds):
+                    print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
+                    print("\033[K" +f"Training set size: {len(train_indices)}")
+                    print("\033[K" +f"Test set size: {len(test_indices)}")
 
-                # Reset model to initial state for fresh training
-                #self.reset_to_initial_state()
+                    # Reset model to initial state for fresh training
+                    #self.reset_to_initial_state()
 
-                # Save indices for this epoch
-                self.save_epoch_data(round_num, train_indices, test_indices)
+                    # Save indices for this epoch
+                    self.save_epoch_data(round_num, train_indices, test_indices)
 
-                # Create feature tensors for training
-                X_train = self.X_tensor[train_indices]
-                y_train = self.y_tensor[train_indices]
+                    # Create feature tensors for training
+                    X_train = self.X_tensor[train_indices]
+                    y_train = self.y_tensor[train_indices]
 
-                # Train the model
-                save_path = f"data/{self.dataset_name}/Predictions/"
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                self.train_indices = train_indices
-                self.test_indices = test_indices
-                results = self.fit_predict(batch_size=batch_size, save_path=save_path)
+                    # Train the model
+                    save_path = f"data/{self.dataset_name}/Predictions/"
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    self.train_indices = train_indices
+                    self.test_indices = test_indices
+                    results = self.fit_predict(batch_size=batch_size, save_path=save_path)
 
-                # Check training accuracy
-                print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
-                train_accuracy=results['train_accuracy']
-                print("\033[K" +f"Training accuracy: {train_accuracy:.4f}         ")
+                    # Check training accuracy
+                    print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
+                    train_accuracy=results['train_accuracy']
+                    print("\033[K" +f"Training accuracy: {train_accuracy:.4f}         ")
 
-                # Get test accuracy from results
-                test_accuracy = results['test_accuracy']
+                    # Get test accuracy from results
+                    test_accuracy = results['test_accuracy']
 
-                # Check if we're improving overall
-                improved = False
-                if 'best_train_accuracy' not in locals():
-                    best_train_accuracy = self.best_combined_accuracy
-                    improved = True
-                elif self.best_combined_accuracy > best_train_accuracy + improvement_threshold:
-                    best_train_accuracy = self.best_combined_accuracy
-                    improved = True
-                    print("\033[K" +f"Improved training accuracy to {train_accuracy:.4f}")
+                    # Check if we're improving overall
+                    improved = False
+                    if 'best_train_accuracy' not in locals():
+                        best_train_accuracy = self.best_combined_accuracy
+                        improved = True
+                    elif self.best_combined_accuracy > best_train_accuracy + improvement_threshold:
+                        best_train_accuracy = self.best_combined_accuracy
+                        improved = True
+                        print("\033[K" +f"Improved training accuracy to {train_accuracy:.4f}")
 
-                # Reset adaptive patience if improved
-                if improved:
-                    adaptive_patience_counter = 0
-                    # Save the last training and test data
-                    self.save_last_split(self.train_indices, self.test_indices)
-                    print("\033[K" + "Saved model and data due to improved training accuracy")
-                else:
-                    adaptive_patience_counter += 1
-                    print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                    if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
-                        print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
-                        print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
-                        print("\033[K" +"Stopping adaptive training.")
-                        break
+                    # Reset adaptive patience if improved
+                    if improved:
+                        adaptive_patience_counter = 0
+                        # Save the last training and test data
+                        self.save_last_split(self.train_indices, self.test_indices)
+                        print("\033[K" + "Saved model and data due to improved training accuracy")
+                    else:
+                        adaptive_patience_counter += 1
+                        print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                        if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
+                            print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
+                            print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
+                            print("\033[K" +"Stopping adaptive training.")
+                            break
 
-                # Evaluate test data using combined predictions from fit_predict
-                test_predictions = results['test_predictions']['predicted_class']
-                y_test = self.y_tensor[test_indices].cpu().numpy()
+                    # Evaluate test data using combined predictions from fit_predict
+                    test_predictions = results['test_predictions']['predicted_class']
+                    y_test = self.y_tensor[test_indices].cpu().numpy()
 
-                # Convert test_predictions to a NumPy array if it's a Pandas Series
-                if isinstance(test_predictions, pd.Series):
-                    test_predictions = test_predictions.to_numpy()
+                    # Convert test_predictions to a NumPy array if it's a Pandas Series
+                    if isinstance(test_predictions, pd.Series):
+                        test_predictions = test_predictions.to_numpy()
 
-                # Ensure test_predictions is numeric
-                if test_predictions.dtype == np.object_:
-                    # If predictions are class labels, convert them to numeric indices
-                    test_predictions = self.label_encoder.transform(test_predictions)
-                else:
-                    # If predictions are numeric but stored as object, cast to int64
-                    test_predictions = test_predictions.astype(np.int64)
+                    # Ensure test_predictions is numeric
+                    if test_predictions.dtype == np.object_:
+                        # If predictions are class labels, convert them to numeric indices
+                        test_predictions = self.label_encoder.transform(test_predictions)
+                    else:
+                        # If predictions are numeric but stored as object, cast to int64
+                        test_predictions = test_predictions.astype(np.int64)
 
-                # Check if we've achieved perfect accuracy
-                if train_accuracy == 1.0:
-                    if len(test_indices) == 0:
-                        print("\033[K" +"No more test samples available. Training complete.")
-                        break
+                    # Check if we've achieved perfect accuracy
+                    if train_accuracy == 1.0:
+                        if len(test_indices) == 0:
+                            print("\033[K" +"No more test samples available. Training complete.")
+                            break
 
-                    # Get new training samples from misclassified examples
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        test_predictions, y_test, test_indices
-                    )
+                        # Get new training samples from misclassified examples
+                        new_train_indices = self._select_samples_from_failed_classes(
+                            test_predictions, y_test, test_indices
+                        )
 
-                    if not new_train_indices:
-                        print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
-                        self.in_adaptive_fit = False
-                        return {'train_indices': [], 'test_indices': []}
+                        if not new_train_indices:
+                            print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
+                            self.in_adaptive_fit = False
+                            return {'train_indices': [], 'test_indices': []}
 
-                else:
-                    # Training did not achieve 100% accuracy, select new samples
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        test_predictions, y_test, test_indices
-                    )
+                    else:
+                        # Training did not achieve 100% accuracy, select new samples
+                        new_train_indices = self._select_samples_from_failed_classes(
+                            test_predictions, y_test, test_indices
+                        )
 
-                    if not new_train_indices:
-                        print("\033[K" +"No suitable new samples found. Training complete.")
-                        break
-
-
-                if new_train_indices:
-                    # Reset to the best round's initial conditions
-                    if self.best_round_initial_conditions is not None:
-                        print("\033[K" +f"Resetting to initial conditions of best round {self.best_round}")
-                        self.current_W = self.best_round_initial_conditions['weights'].clone()
-                        self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
-                        self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
-                        self.bin_edges = self.best_round_initial_conditions['bin_edges']
-                        self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
+                        if not new_train_indices:
+                            print("\033[K" +"No suitable new samples found. Training complete.")
+                            break
 
 
-                # Update training and test sets with new samples
-                train_indices.extend(new_train_indices)
-                test_indices = list(set(test_indices) - set(new_train_indices))
-                print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
+                    if new_train_indices:
+                        # Reset to the best round's initial conditions
+                        if self.best_round_initial_conditions is not None:
+                            print("\033[K" +f"Resetting to initial conditions of best round {self.best_round}")
+                            self.current_W = self.best_round_initial_conditions['weights'].clone()
+                            self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
+                            self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
+                            self.bin_edges = self.best_round_initial_conditions['bin_edges']
+                            self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
+
+
+                    # Update training and test sets with new samples
+                    train_indices.extend(new_train_indices)
+                    test_indices = list(set(test_indices) - set(new_train_indices))
+                    print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
 
 
             # Record the end time
@@ -3339,7 +3357,18 @@ class DBNN(GPUDBNN):
         #if hasattr(self, 'feature_pairs') and self.feature_pairs is not None:
         if self.feature_pairs is not None:
             return self.feature_pairs
-
+        # Strict check for predict mode or use_previous_model
+        if (self.mode == 'predict' or self.use_previous_model) and not hasattr(self, 'feature_pairs'):
+            raise RuntimeError(
+                f"FATAL: Required feature pairs not found in model components.\n"
+                f"- Current mode: {'predict' if self.mode == 'predict' else 'train'}\n"
+                f"- Use previous model: {self.use_previous_model}\n"
+                f"Possible causes:\n"
+                f"1. Missing model components file\n"
+                f"2. Corrupted model data\n"
+                f"3. Trying to predict with untrained model\n"
+                f"Solution: Ensure model is properly trained first or provide correct model components."
+            )
         # Convert feature_indices to list if it's an integer
         if isinstance(feature_indices, int):
             feature_indices = list(range(feature_indices))
@@ -5303,7 +5332,7 @@ class DBNN(GPUDBNN):
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
                 # Initialize a fresh LabelEncoder first
-                self.label_encoder = LabelEncoder()
+                #self.label_encoder = LabelEncoder()
                 # If we have saved classes, set them
                 # Restore label encoder
                 # Restore label encoder
