@@ -1113,23 +1113,29 @@ class GPUDBNN:
         # Initialize model components
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
-        # Only fit encoder if we're not in predict mode and not reusing a model
-        if not (self.mode == 'predict' or self.use_previous_model):
-            if self.target_column in self.data.columns:
-                self.label_encoder.fit(self.data[self.target_column])
-            else:
-                raise ValueError("Target column missing in training mode")
-        elif hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
-            # Keep existing encoder
-            pass
+        # Handle label encoder initialization based on mode
+        if mode == 'predict':
+            # Strict validation for prediction mode
+            if not self._load_model_components():
+                raise RuntimeError(
+                    "Cannot run prediction - no trained model found.\n"
+                    f"Expected model files in: Model/{self.dataset_name}_*\n"
+                    "Please train the model first."
+                )
+        elif self.use_previous_model:
+            # Try to load existing model, but don't fail if it doesn't exist
+            try:
+                if not self._load_model_components():
+                    print("\033[K" +f"[INFO] No existing model found - starting fresh training")
+                    self._initialize_fresh_training()
+            except Exception as e:
+                print("\033[K" +f"[WARNING] Failed to load previous model: {str(e)}")
+                print("\033[K" +"Starting fresh training")
+                self._initialize_fresh_training()
         else:
-            raise RuntimeError(
-                "Label encoder not initialized and required for prediction/continued training.\n"
-                "Possible solutions:\n"
-                "1. Train a new model first\n"
-                "2. Provide a valid pre-trained model with label encoder\n"
-                "3. Ensure target column exists in data for training"
-            )
+            # Fresh training requested
+            self._initialize_fresh_training()
+
         self.likelihood_params = None
         self.feature_pairs = None
         self.bin_edges = None  # Add bin_edges attribute
@@ -1199,6 +1205,23 @@ class GPUDBNN:
         # Load saved weights and encoders
         self._load_best_weights()
         self._load_categorical_encoders()
+
+    def _initialize_fresh_training(self):
+        """Initialize components for fresh training"""
+        if self.target_column not in self.data.columns:
+            raise ValueError(
+                f"Target column '{self.target_column}' not found in dataset.\n"
+                f"Available columns: {list(self.data.columns)}"
+            )
+
+        # Fit label encoder and other fresh components
+        self.label_encoder.fit(self.data[self.target_column])
+        self.scaler = StandardScaler()
+        self.feature_pairs = None
+        self.likelihood_params = None
+
+        # Mark as fresh training
+        self.fresh_start = True
 
     def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
         """
