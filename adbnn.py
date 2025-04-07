@@ -1068,10 +1068,11 @@ class GPUDBNN:
                  max_epochs: int = Epochs, test_size: float = TestFraction,
                  random_state: int = TrainingRandomSeed, device: str = None,
                  fresh: bool = False, use_previous_model: bool = True,
-                 n_bins_per_dim: int = 64, model_type: str = "Histogram"):
+                 n_bins_per_dim: int = 64, model_type: str = "Histogram",mode: str=None):
         """Initialize GPUDBNN with support for continued training with fresh data"""
 
         # Set dataset_name and model type first
+        self.mode = mode
         self.dataset_name = dataset_name
         self.model_type = model_type  # Store model type as instance variable
         self.device = Train_device
@@ -1522,6 +1523,7 @@ class DBNN(GPUDBNN):
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
             model_type=config.model_type  # Pass model type from config
+            mode=self.mode
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
 
