@@ -3049,6 +3049,38 @@ class DBNN(GPUDBNN):
         return X_tensor
 
 #-----------------------------------------PDF mosaic -----------------------------------------------------
+    def _generate_prediction_analysis_files(self, predictions_df, true_labels=None):
+        """Generate CSV files for failed and correct predictions"""
+        dataset_name = self.dataset_name
+        output_dir = f"data/{dataset_name}/Predictions/"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save all predictions
+        predictions_df.to_csv(f"{output_dir}{dataset_name}_all_predictions.csv", index=False)
+
+        # Only generate failure/success files if we have true labels
+        if true_labels is not None:
+            # Add true labels to dataframe if not already present
+            if 'true_class' not in predictions_df.columns:
+                predictions_df['true_class'] = true_labels
+
+            # Create failed predictions CSV
+            failed_predictions = predictions_df[predictions_df['predicted_class'] != predictions_df['true_class']]
+            failed_predictions.to_csv(f"{output_dir}{dataset_name}_failed_predictions.csv", index=False)
+
+            # Create correct predictions CSV
+            correct_predictions = predictions_df[predictions_df['predicted_class'] == predictions_df['true_class']]
+            correct_predictions.to_csv(f"{output_dir}{dataset_name}_correct_predictions.csv", index=False)
+
+            return {
+                'all_predictions': f"{output_dir}{dataset_name}_all_predictions.csv",
+                'failed_predictions': f"{output_dir}{dataset_name}_failed_predictions.csv",
+                'correct_predictions': f"{output_dir}{dataset_name}_correct_predictions.csv"
+            }
+
+        return {
+            'all_predictions': f"{output_dir}{dataset_name}_all_predictions.csv"
+        }
 
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
         """
@@ -5558,7 +5590,8 @@ class DBNN(GPUDBNN):
     def predict_from_file(self, input_csv: str, output_path: str = None,
                          image_dir: str = None, batch_size: int = 128) -> Dict:
         """
-        Make predictions from CSV file with comprehensive output handling.
+        Make predictions from CSV file with comprehensive output handling, including
+        failure/success analysis and PDF mosaics.
 
         Args:
             input_csv: Path to input CSV file
@@ -5576,6 +5609,7 @@ class DBNN(GPUDBNN):
             df = pd.read_csv(input_csv)
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
             predict_mode = True if self.mode=='predict' else False
+
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
@@ -5594,9 +5628,10 @@ class DBNN(GPUDBNN):
                     except ValueError as e:
                         print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
                         # If target column isn't found, just proceed without renaming
+
             # Store original data
             self.X_orig = df.copy()
-            #print(df.head)
+
             # Handle output directory
             if output_path:
                 # Handle existing output path
@@ -5614,15 +5649,14 @@ class DBNN(GPUDBNN):
                         if choice == '1':  # Overwrite
                             print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
                             # Clear existing predictions file if it exists
-
                             predictions_path = os.path.join(output_path, 'predictions.csv')
                             if os.path.exists(predictions_path):
-
                                 os.remove(predictions_path)
-                            # Clear mosaics directory if exists
-                            mosaic_dir = os.path.join(output_path, 'mosaics')
-                            if os.path.exists(mosaic_dir):
-                                shutil.rmtree(mosaic_dir)
+                            # Clear analysis directories if they exist
+                            for analysis_type in ['mosaics', 'failed_analysis', 'correct_analysis']:
+                                analysis_dir = os.path.join(output_path, analysis_type)
+                                if os.path.exists(analysis_dir):
+                                    shutil.rmtree(analysis_dir)
                             break
 
                         elif choice == '2':  # New version
@@ -5669,7 +5703,6 @@ class DBNN(GPUDBNN):
                 y_true = None
 
             # Get features (drop target column if exists)
-            # Store original data (without target column if it exists)
             if self.target_column in df.columns:
                 X = df.drop(columns=[self.target_column])
             else:
@@ -5678,12 +5711,12 @@ class DBNN(GPUDBNN):
 
             # Generate predictions
             print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
-            y_pred,posteriors = self.predict(X, batch_size=batch_size)
+            y_pred, posteriors = self.predict(X, batch_size=batch_size)
             pred_classes = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
             confidences = posteriors[np.arange(len(y_pred)), y_pred].cpu().numpy()
+
             # Generate detailed results
             print(f"{Colors.BLUE}Generating detailed predictions...{Colors.ENDC}")
-
             results = self._generate_detailed_predictions(
                 X_orig=X,  # Pass the original features
                 predictions=y_pred,
@@ -5696,11 +5729,11 @@ class DBNN(GPUDBNN):
                 # Standard paths
                 predictions_path = os.path.join(output_path, 'predictions.csv')
                 metrics_path = os.path.join(output_path, 'metrics.txt')
+
                 # Ensure the predictions directory exists
-                predictions_dir = os.path.dirname(predictions_path)
-                os.makedirs(predictions_dir, exist_ok=True)
-                metrics_dir = os.path.dirname(metrics_path)
-                os.makedirs(metrics_dir, exist_ok=True)
+                os.makedirs(os.path.dirname(predictions_path), exist_ok=True)
+                os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+
                 # Save predictions
                 results['predicted_class'] = pred_classes
                 results['confidence'] = confidences
@@ -5721,29 +5754,94 @@ class DBNN(GPUDBNN):
                 with open(os.path.join(output_path, 'metadata.json'), 'w') as f:
                     json.dump(metadata, f, indent=2)
 
-                # --- Mosaic Generation (if image directory specified) ---
-                if 'original_filename' and 'filepath' in results.columns:
+                # --- Enhanced Mosaic Generation ---
+                if 'filepath' in results.columns:
+                    # Get mosaic layout parameters
+                    columns = input("Please specify the number of columns of images per page (default 10): ") or 10
+                    rows = input("Please specify the number of rows of images per page (default 10): ") or 10
+
+                    try:
+                        columns = int(columns)
+                        rows = int(rows)
+                    except ValueError:
+                        print(f"{Colors.RED}Invalid input. Using default 10x10 grid{Colors.ENDC}")
+                        columns = 10
+                        rows = 10
+
+                    # Create main mosaics directory
                     mosaic_dir = os.path.join(output_path, 'mosaics')
                     os.makedirs(mosaic_dir, exist_ok=True)
-                    columns=input("Please specify the number of columns of images per page (defaults 10):") or 10
-                    rows=input("Please specify the number of rows of images per page (defaults 10):") or 10
+
+                    # Generate class-wise mosaics
                     for class_name, group in results.groupby('predicted_class'):
                         valid_images = []
                         for _, row in group.iterrows():
-                            img_path =  row['filepath']
+                            img_path = row['filepath']
                             if os.path.exists(img_path):
                                 valid_images.append(row)
 
                         if valid_images:
                             class_df = pd.DataFrame(valid_images)
-                            # Ensure we have the required columns
-                            if all(col in class_df.columns for col in ['predicted_class', 'filepath', 'prediction_confidence']):
-                                self.generate_class_pdf_mosaics(
-                                    predictions_df=class_df,
-                                    output_dir=mosaic_dir, columns=int(columns),rows=int(rows)
-                                )
-                            else:
-                                print("\033[KMissing required columns for PDF generation")
+                            self.generate_class_pdf_mosaics(
+                                predictions_df=class_df,
+                                output_dir=mosaic_dir,
+                                columns=columns,
+                                rows=rows
+                            )
+
+                    # --- Failure/Success Analysis ---
+                    if y_true_str is not None and 'true_class' in results.columns:
+                        # Create analysis directories
+                        failed_dir = os.path.join(output_path, 'failed_analysis')
+                        correct_dir = os.path.join(output_path, 'correct_analysis')
+                        os.makedirs(failed_dir, exist_ok=True)
+                        os.makedirs(correct_dir, exist_ok=True)
+
+                        # Split into failed and correct predictions
+                        failed_predictions = results[results['predicted_class'] != results['true_class']]
+                        correct_predictions = results[results['predicted_class'] == results['true_class']]
+
+                        # Save analysis CSVs
+                        failed_predictions.to_csv(os.path.join(failed_dir, 'failed_predictions.csv'), index=False)
+                        correct_predictions.to_csv(os.path.join(correct_dir, 'correct_predictions.csv'), index=False)
+
+                        # Generate failure analysis mosaics
+                        if not failed_predictions.empty:
+                            print(f"{Colors.BLUE}Generating failure analysis mosaics...{Colors.ENDC}")
+                            for true_class, group in failed_predictions.groupby('true_class'):
+                                valid_images = []
+                                for _, row in group.iterrows():
+                                    img_path = row['filepath']
+                                    if os.path.exists(img_path):
+                                        valid_images.append(row)
+
+                                if valid_images:
+                                    class_df = pd.DataFrame(valid_images)
+                                    self.generate_class_pdf_mosaics(
+                                        predictions_df=class_df,
+                                        output_dir=failed_dir,
+                                        columns=columns,
+                                        rows=rows
+                                    )
+
+                        # Generate success analysis mosaics
+                        if not correct_predictions.empty:
+                            print(f"{Colors.BLUE}Generating success analysis mosaics...{Colors.ENDC}")
+                            for pred_class, group in correct_predictions.groupby('predicted_class'):
+                                valid_images = []
+                                for _, row in group.iterrows():
+                                    img_path = row['filepath']
+                                    if os.path.exists(img_path):
+                                        valid_images.append(row)
+
+                                if valid_images:
+                                    class_df = pd.DataFrame(valid_images)
+                                    self.generate_class_pdf_mosaics(
+                                        predictions_df=class_df,
+                                        output_dir=correct_dir,
+                                        columns=columns,
+                                        rows=rows
+                                    )
 
             # Compute and return metrics if we have true labels
             metrics = {}
@@ -5785,14 +5883,17 @@ class DBNN(GPUDBNN):
             return {
                 'predictions': results,
                 'metrics': metrics if metrics else None,
-                'metadata': metadata if output_path else None
+                'metadata': metadata if output_path else None,
+                'analysis_files': {
+                    'failed_predictions': os.path.join(output_path, 'failed_analysis') if y_true_str is not None else None,
+                    'correct_predictions': os.path.join(output_path, 'correct_analysis') if y_true_str is not None else None
+                } if output_path else None
             }
 
         except Exception as e:
             print(f"{Colors.RED}Prediction failed: {str(e)}{Colors.ENDC}")
             traceback.print_exc()
             raise
-
 
     def predict_new_data(self, new_data: pd.DataFrame) -> pd.DataFrame:
         """
