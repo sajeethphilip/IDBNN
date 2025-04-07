@@ -5258,110 +5258,193 @@ class DBNN(GPUDBNN):
 #--------------------------------------------------------------------------------------------------------------
 
     def _save_model_components(self):
-        """Save all model components to a pickle file"""
-        components = {
-            'scaler': self.scaler,
-            'label_encoder': {
-                'classes_': self.label_encoder.classes_.tolist(),
-                'mapping': {k: v for k, v in zip(self.label_encoder.classes_,
-                                                range(len(self.label_encoder.classes_)))}
-            },
-            'likelihood_params': self.likelihood_params,
-            'model_type': self.model_type,
-            'feature_pairs': self.feature_pairs,
-            'global_mean': self.global_mean,
-            'global_std': self.global_std,
-            'categorical_encoders': self.categorical_encoders,
-            'feature_columns': self.feature_columns,  # The actual features used
-            'original_columns': self.original_columns,  # All original features from config
-            'target_column': self.target_column,
-            'target_classes': self.label_encoder.classes_,
-            'target_mapping': dict(zip(self.label_encoder.classes_,
-                                     range(len(self.label_encoder.classes_)))),
-            'config': self.config,
-            'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
-            'original_columns': getattr(self, 'original_columns', None),
-            'best_error': self.best_error,  # Explicitly save best error
-            'last_training_loss': getattr(self, 'last_training_loss', float('inf')),
-            'weight_updater': self.weight_updater,
-            'n_bins_per_dim': self.n_bins_per_dim,
-            'bin_edges': self.bin_edges,  # Save bin_edges
-            'gaussian_params': self.gaussian_params  # Save gaussian_params
-        }
+        """Enhanced model component saving with validation and atomic writes"""
+        try:
+            # Validate critical components exist before saving
+            required_components = {
+                'scaler': self.scaler,
+                'label_encoder': self.label_encoder,
+                'feature_pairs': self.feature_pairs,
+                'model_type': self.model_type,
+                'target_column': self.target_column,
+                'n_bins_per_dim': self.n_bins_per_dim
+            }
 
-        # Add model-specific components
-        if self.model_type == "Histogram":
-            components.update({
-                'bin_probs': self.likelihood_params['bin_probs'],
-                'bin_edges': self.likelihood_params['bin_edges'],
-                'classes': self.likelihood_params['classes']
-            })
-        elif self.model_type == "Gaussian":
-            components.update({
-                'means': self.likelihood_params['means'],
-                'covs': self.likelihood_params['covs'],
-                'classes': self.likelihood_params['classes']
-            })
+            for name, component in required_components.items():
+                if component is None:
+                    raise ValueError(f"Cannot save model: {name} is None")
 
+            # Validate label encoder state
+            if not hasattr(self.label_encoder, 'classes_'):
+                raise ValueError("Label encoder not properly fitted")
 
-        # Get the filename using existing method
-        components_file = self._get_model_components_filename()
+            # Prepare components dictionary with validation
+            components = {
+                'version': 3,  # Version identifier for compatibility
+                'scaler': self.scaler,
+                'label_encoder': {
+                    'classes_': self.label_encoder.classes_.tolist(),
+                    'fitted': hasattr(self.label_encoder, 'classes_')
+                },
+                'model_type': self.model_type,
+                'feature_pairs': self.feature_pairs.cpu().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
+                'global_mean': self.global_mean,
+                'global_std': self.global_std,
+                'categorical_encoders': self.categorical_encoders,
+                'feature_columns': self.feature_columns,
+                'original_columns': getattr(self, 'original_columns', None),
+                'target_column': self.target_column,
+                'config': self.config,
+                'high_cardinality_columns': getattr(self, 'high_cardinality_columns', []),
+                'best_error': self.best_error,
+                'weight_updater': self.weight_updater,
+                'n_bins_per_dim': self.n_bins_per_dim,
+                'bin_edges': [edge.cpu().tolist() if torch.is_tensor(edge) else edge for edge in self.bin_edges] if hasattr(self, 'bin_edges') else None,
+                'gaussian_params': {
+                    'means': self.gaussian_params['means'].cpu().tolist() if torch.is_tensor(self.gaussian_params['means']) else self.gaussian_params['means'],
+                    'covs': self.gaussian_params['covs'].cpu().tolist() if torch.is_tensor(self.gaussian_params['covs']) else self.gaussian_params['covs'],
+                    'classes': self.gaussian_params['classes'].cpu().tolist() if torch.is_tensor(self.gaussian_params['classes']) else self.gaussian_params['classes']
+                } if hasattr(self, 'gaussian_params') and self.gaussian_params is not None else None
+            }
 
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(components_file), exist_ok=True)
+            # Add model-specific components with validation
+            if self.model_type == "Histogram":
+                if not all(k in self.likelihood_params for k in ['bin_probs', 'bin_edges', 'classes']):
+                    raise ValueError("Incomplete Histogram model parameters")
+                components.update({
+                    'likelihood_params': {
+                        'bin_probs': [prob.cpu().tolist() if torch.is_tensor(prob) else prob for prob in self.likelihood_params['bin_probs']],
+                        'bin_edges': [[edge.cpu().tolist() if torch.is_tensor(edge) else edge for edge in pair] for pair in self.likelihood_params['bin_edges']],
+                        'classes': self.likelihood_params['classes'].cpu().tolist() if torch.is_tensor(self.likelihood_params['classes']) else self.likelihood_params['classes'],
+                        'feature_pairs': self.likelihood_params['feature_pairs'].cpu().tolist() if torch.is_tensor(self.likelihood_params['feature_pairs']) else self.likelihood_params['feature_pairs']
+                    }
+                })
+            elif self.model_type == "Gaussian":
+                if not all(k in self.likelihood_params for k in ['means', 'covs', 'classes']):
+                    raise ValueError("Incomplete Gaussian model parameters")
+                components.update({
+                    'likelihood_params': {
+                        'means': self.likelihood_params['means'].cpu().tolist() if torch.is_tensor(self.likelihood_params['means']) else self.likelihood_params['means'],
+                        'covs': self.likelihood_params['covs'].cpu().tolist() if torch.is_tensor(self.likelihood_params['covs']) else self.likelihood_params['covs'],
+                        'classes': self.likelihood_params['classes'].cpu().tolist() if torch.is_tensor(self.likelihood_params['classes']) else self.likelihood_params['classes'],
+                        'feature_pairs': self.likelihood_params['feature_pairs'].cpu().tolist() if torch.is_tensor(self.likelihood_params['feature_pairs']) else self.likelihood_params['feature_pairs']
+                    }
+                })
 
-        # Save components to file
-        with open(components_file, 'wb') as f:
-            pickle.dump(components, f)
-            f.flush()  # Ensure the buffer is flushed to disk
-            os.fsync(f.fileno())  # Force write to disk
+            # Get filename and ensure directory exists
+            components_file = self._get_model_components_filename()
+            os.makedirs(os.path.dirname(components_file), exist_ok=True)
 
-        print("\033[K" +f"Saved model components to {components_file}")
-        print("\033[K" +f"[DEBUG] File size after save: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
-        return True
+            # Atomic save operation
+            temp_file = components_file + '.tmp'
+            with open(temp_file, 'wb') as f:
+                pickle.dump(components, f, protocol=pickle.HIGHEST_PROTOCOL)
+                f.flush()
+                os.fsync(f.fileno())
 
+            # Atomic rename
+            os.replace(temp_file, components_file)
+
+            print(f"\033[K[SUCCESS] Saved model components to {components_file} (Size: {os.path.getsize(components_file)/1024:.2f} KB)")
+            return True
+
+        except Exception as e:
+            print(f"\033[K[ERROR] Failed to save model components: {str(e)}")
+            traceback.print_exc()
+            # Clean up temporary file if it exists
+            if 'temp_file' in locals() and os.path.exists(temp_file):
+                os.remove(temp_file)
+            return False
 
     def _load_model_components(self):
-        """Load all model components"""
-        model_dir = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}')
+        """Enhanced model component loading with comprehensive validation"""
         components_file = self._get_model_components_filename()
-        print(f"The model components are loaded from {components_file}")
-        if os.path.exists(components_file):
-            print("\033[K" +f"[DEBUG] Loading model components from {components_file}", end="\r", flush=True)
-            print("\033[K" +f"[DEBUG] File size: {os.path.getsize(components_file)} bytes", end="\r", flush=True)
+
+        if not os.path.exists(components_file):
+            print(f"\033[K[ERROR] Model components file not found: {components_file}")
+            return False
+
+        try:
+            print(f"\033[K[INFO] Loading model components from {components_file} (Size: {os.path.getsize(components_file)/1024:.2f} KB)")
+
             with open(components_file, 'rb') as f:
                 components = pickle.load(f)
-                # Initialize a fresh LabelEncoder first
-                #self.label_encoder = LabelEncoder()
-                # If we have saved classes, set them
-                # Restore label encoder
-                # Restore label encoder
-                if 'label_encoder' in components:
-                    self.label_encoder = LabelEncoder()
-                    # Reconstruct the encoder state
-                    self.label_encoder.classes_ = np.array(components['label_encoder']['classes_'])
-                self.scaler = components['scaler']
-                self.likelihood_params = components['likelihood_params']
-                self.feature_pairs = components['feature_pairs']
-                self.feature_columns = components.get('feature_columns')
-                self.categorical_encoders = components['categorical_encoders']
-                self.high_cardinality_columns = components.get('high_cardinality_columns', [])
-                self.weight_updater = components.get('weight_updater')
-                self.n_bins_per_dim = components.get('n_bins_per_dim', 21)
-                self.bin_edges = components.get('bin_edges')  # Load bin_edges
-                self.gaussian_params = components.get('gaussian_params')  # Load gaussian_params
-                self.global_mean = components['global_mean']
-                self.global_std = components['global_std']
-                # Load categorical encoders if they exist
-                if 'categorical_encoders' in components:
-                    self.categorical_encoders = components['categorical_encoders']
-                print("\033[K" +f"Loaded model components from {components_file}", end="\r", flush=True)
-                return True
-        else:
-            print("\033[K" +f"[DEBUG] Model components file not found: {components_file}", end="\r", flush=True)
-        return False
 
+            # Validate file version and basic structure
+            if not isinstance(components, dict) or 'version' not in components:
+                raise ValueError("Invalid components file format")
 
+            # Version-specific validation
+            if components['version'] < 2:
+                raise ValueError(f"Unsupported components version: {components['version']}")
+
+            # Load and validate label encoder
+            if 'label_encoder' not in components or not components['label_encoder'].get('fitted', False):
+                raise ValueError("Label encoder not properly saved or not fitted")
+
+            self.label_encoder = LabelEncoder()
+            self.label_encoder.classes_ = np.array(components['label_encoder']['classes_'])
+
+            # Validate and load core components
+            required_components = [
+                'scaler', 'model_type', 'feature_pairs',
+                'target_column', 'n_bins_per_dim'
+            ]
+            for comp in required_components:
+                if comp not in components:
+                    raise ValueError(f"Missing required component: {comp}")
+                setattr(self, comp, components[comp])
+
+            # Load likelihood parameters with model-specific validation
+            if 'likelihood_params' not in components:
+                raise ValueError("Missing likelihood parameters")
+
+            self.likelihood_params = components['likelihood_params']
+
+            # Convert back to tensors if needed
+            if self.model_type == "Histogram":
+                self.likelihood_params['bin_probs'] = [torch.tensor(prob, device=self.device) for prob in self.likelihood_params['bin_probs']]
+                self.likelihood_params['bin_edges'] = [[torch.tensor(edge, device=self.device) for edge in pair] for pair in self.likelihood_params['bin_edges']]
+                self.likelihood_params['classes'] = torch.tensor(self.likelihood_params['classes'], device=self.device)
+                self.likelihood_params['feature_pairs'] = torch.tensor(self.likelihood_params['feature_pairs'], device=self.device)
+            elif self.model_type == "Gaussian":
+                self.likelihood_params['means'] = torch.tensor(self.likelihood_params['means'], device=self.device)
+                self.likelihood_params['covs'] = torch.tensor(self.likelihood_params['covs'], device=self.device)
+                self.likelihood_params['classes'] = torch.tensor(self.likelihood_params['classes'], device=self.device)
+                self.likelihood_params['feature_pairs'] = torch.tensor(self.likelihood_params['feature_pairs'], device=self.device)
+
+            # Load optional components
+            optional_components = [
+                'global_mean', 'global_std', 'categorical_encoders',
+                'feature_columns', 'original_columns', 'high_cardinality_columns',
+                'best_error', 'weight_updater', 'bin_edges', 'gaussian_params'
+            ]
+            for comp in optional_components:
+                if comp in components:
+                    # Convert tensors if needed
+                    if comp == 'bin_edges' and components[comp] is not None:
+                        setattr(self, comp, [[torch.tensor(edge, device=self.device) for edge in pair] for pair in components[comp]])
+                    elif comp == 'gaussian_params' and components[comp] is not None:
+                        gaussian_params = {
+                            'means': torch.tensor(components[comp]['means'], device=self.device),
+                            'covs': torch.tensor(components[comp]['covs'], device=self.device),
+                            'classes': torch.tensor(components[comp]['classes'], device=self.device)
+                        }
+                        setattr(self, comp, gaussian_params)
+                    else:
+                        setattr(self, comp, components[comp])
+
+            print(f"\033[K[SUCCESS] Loaded model components from {components_file}")
+            return True
+
+        except Exception as e:
+            print(f"\033[K[ERROR] Failed to load model components: {str(e)}")
+            traceback.print_exc()
+            # Reset critical components to prevent partial state
+            self.label_encoder = LabelEncoder()
+            self.scaler = StandardScaler()
+            self.feature_pairs = None
+            return False
 
     def predict_and_save(self, save_path=None, batch_size: int = 128):
         """Make predictions on data and save them using best model weights"""
