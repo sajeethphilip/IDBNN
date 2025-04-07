@@ -5433,17 +5433,23 @@ class DBNN(GPUDBNN):
 
             self.likelihood_params = components['likelihood_params']
 
-            # Convert back to tensors if needed
+            # Convert back to tensors using proper methods
+            def safe_to_tensor(data, device=None):
+                """Convert data to tensor using proper method based on input type"""
+                if isinstance(data, torch.Tensor):
+                    return data.to(device) if device else data.clone().detach()
+                return torch.tensor(data, device=device) if device else torch.tensor(data)
+
             if self.model_type == "Histogram":
-                self.likelihood_params['bin_probs'] = [torch.tensor(prob, device=self.device) for prob in self.likelihood_params['bin_probs']]
-                self.likelihood_params['bin_edges'] = [[torch.tensor(edge, device=self.device) for edge in pair] for pair in self.likelihood_params['bin_edges']]
-                self.likelihood_params['classes'] = torch.tensor(self.likelihood_params['classes'], device=self.device)
-                self.likelihood_params['feature_pairs'] = torch.tensor(self.likelihood_params['feature_pairs'], device=self.device)
+                self.likelihood_params['bin_probs'] = [safe_to_tensor(prob, self.device) for prob in self.likelihood_params['bin_probs']]
+                self.likelihood_params['bin_edges'] = [[safe_to_tensor(edge, self.device) for edge in pair] for pair in self.likelihood_params['bin_edges']]
+                self.likelihood_params['classes'] = safe_to_tensor(self.likelihood_params['classes'], self.device)
+                self.likelihood_params['feature_pairs'] = safe_to_tensor(self.likelihood_params['feature_pairs'], self.device)
             elif self.model_type == "Gaussian":
-                self.likelihood_params['means'] = torch.tensor(self.likelihood_params['means'], device=self.device)
-                self.likelihood_params['covs'] = torch.tensor(self.likelihood_params['covs'], device=self.device)
-                self.likelihood_params['classes'] = torch.tensor(self.likelihood_params['classes'], device=self.device)
-                self.likelihood_params['feature_pairs'] = torch.tensor(self.likelihood_params['feature_pairs'], device=self.device)
+                self.likelihood_params['means'] = safe_to_tensor(self.likelihood_params['means'], self.device)
+                self.likelihood_params['covs'] = safe_to_tensor(self.likelihood_params['covs'], self.device)
+                self.likelihood_params['classes'] = safe_to_tensor(self.likelihood_params['classes'], self.device)
+                self.likelihood_params['feature_pairs'] = safe_to_tensor(self.likelihood_params['feature_pairs'], self.device)
 
             # Load optional components
             optional_components = [
