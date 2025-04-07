@@ -1522,7 +1522,7 @@ class DBNN(GPUDBNN):
             random_state=config.random_seed,
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
-            model_type=config.model_type  # Pass model type from config
+            model_type=config.model_type,  # Pass model type from config
             mode=self.mode
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
