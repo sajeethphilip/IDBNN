@@ -14,7 +14,7 @@ To train/predcit using cdbnn (For Image Feature Extraction)
 '--config', type=str, help='path to configuration file'
 '--output', type=str, default='', help='output directory'
 
-To train/predcit using adbnn  (For Difference Boosting Neural Network
+To train/predict using adbnn  (For Difference Boosting Neural Network
 
   python adbnn.py [arguments]
 
@@ -30,6 +30,11 @@ To train/predcit using adbnn  (For Difference Boosting Neural Network
 ![image](https://github.com/user-attachments/assets/48ce9afe-bbb8-4736-936c-e2754245437f)
 
 ![image](https://github.com/user-attachments/assets/cc891ddc-e23c-4937-968b-4311bdcb3bb4)
+
+When predicting data with known labels, you also get 
+
+![image](https://github.com/user-attachments/assets/c2fd1ac1-c025-4237-bb68-e15f96a4aa99)
+
 
 
 
