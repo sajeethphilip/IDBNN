@@ -5493,7 +5493,7 @@ class DBNN(GPUDBNN):
                 if comp in components:
                     # Convert tensors if needed
                     if comp == 'bin_edges' and components[comp] is not None:
-                        setattr(self, comp, [[torch.tensor(edge, device=self.device) for edge in pair] for pair in components[comp]])
+                        setattr(self, comp, [[edge.clone().detach().to(self.device) for edge in pair] for pair in components[comp]])
                     elif comp == 'gaussian_params' and components[comp] is not None:
                         gaussian_params = {
                             'means': torch.tensor(components[comp]['means'], device=self.device),
