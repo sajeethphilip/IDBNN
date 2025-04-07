@@ -3,6 +3,8 @@
 #Tested an fully functional April 4 2025 3:34 am
 #Tested for more flexibility and added posteriors with class pedictions 5 April 7:22 pm
 # Enhanced mosaic images 6 April 2025 8:45 am
+# Feature pair automatic recomputation disabled
+# Training until patience enabled. April 7 8:14 am 2025
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
