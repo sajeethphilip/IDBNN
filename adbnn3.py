@@ -1,4 +1,3 @@
-#Working, fully functional with predcition 27/March/2025
 import torch
 import time
 import argparse
@@ -40,8 +39,6 @@ cardinality_tolerance=4 #Use when the features are likely to be extremly diverse
 LearningRate =0.1
 TrainingRandomSeed=42  #None # 42
 Epochs=1000
-bin_sizes =128
-n_bins_per_dim =128
 TestFraction=0.2
 Train=True #True #False #
 Train_only=False #True #
@@ -301,7 +298,14 @@ class DatasetConfig:
             "fresh_start": false,
             "use_previous_model": true
         }
-
+        # Save the configuration
+        config_path = f"data/{dataset_name}/{dataset_name}.conf"
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+            print("\033[K" +f"Created default configuration file: {config_path}")
+        except Exception as e:
+            print("\033[K" +f"Warning: Could not save configuration file: {str(e)}")
 
         return config
 
@@ -1348,7 +1352,7 @@ class DBNNConfig:
             config_data = json.load(f)
         return cls(**config_data)
 
-    def save_old(self, config_path: str):
+    def save(self, config_path: str):
         """Save configuration to JSON file"""
         config_dict = {k: v for k, v in self.__dict__.items()}
         with open(config_path, 'w') as f:
@@ -1520,15 +1524,13 @@ class DBNN(GPUDBNN):
         # Load or create the configuration file and update global variables
         config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
         # Update global variables based on the configuration file
-        global Train_device,bin_sizes,n_bins_per_dim, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+        global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
         Train_device = config.get("compute_device", Train_device)
         print(''f"The train device is set as {Train_device}")
         self.device=Train_device
         Trials = config.get("trials", Trials)
         cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
         cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
-        bin_sizes = config.get("bin_sizes", 128)
-        n_bins_per_dim = config.get("n_bins_per_dim", 128)
         LearningRate = config.get("learning_rate", LearningRate)
         TrainingRandomSeed = config.get("random_seed", TrainingRandomSeed)
         Epochs = config.get("epochs", Epochs)
@@ -4990,7 +4992,7 @@ from datetime import datetime
 import json
 import os
 
-def load_or_create_config(config_path: str) -> dict:
+def load_or_create_config(config_path: str = 'adaptive_dbnn.conf') -> dict:
     """
     Load the configuration file if it exists, or create a default one if it doesn't.
     Update global variables based on the configuration file.
@@ -5016,38 +5018,7 @@ def load_or_create_config(config_path: str) -> dict:
         "gen_samples": False,
         "enable_adaptive": True,
         "nokbd": False,
-        "display": None,
-        "training_params": {
-            "batch_size": None,  # Batch size will be dynamically calculated if not provided
-            "n_bins_per_dim": 128,
-            "minimum_training_accuracy": 0.95,
-            "invert_DBNN": True,
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.1,
-            "Save_training_epochs": False,
-            "training_save_path": "data",
-            "enable_vectorized": False,
-            "vectorization_warning_acknowledged": False,
-            "compute_device": "auto",
-            "use_interactive_kbd": False,
-            "modelType": "Histogram"
-        },
-        "active_learning": {
-            "tolerance": 1.0,
-            "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.3,
-            "marginal_margin_threshold": 0.1,
-            "min_divergence": 0.1
-        },
-        "execution_flags": {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True,
-            "gen_samples": False
-        }
+        "display": None
     }
 
     if os.path.exists(config_path):
@@ -5059,20 +5030,15 @@ def load_or_create_config(config_path: str) -> dict:
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         print(f"Created default configuration file at {config_path}")
-        print(config)
-        input("Press Enter Key")
-
 
     # Update global variables based on the configuration file
-    global Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+    global Train_device, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
 
     # Update Train_device based on the compute_device setting in the configuration file
     Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
     Trials = config.get("trials", 100)
     cardinality_threshold = config.get("cardinality_threshold", 0.9)
     cardinality_tolerance = config.get("cardinality_tolerance", 4)
-    bin_sizes = config.get("bin_sizes", 128)
-    n_bins_per_dim = config.get("n_bins_per_dim", 128)
     LearningRate = config.get("learning_rate", 0.1)
     TrainingRandomSeed = config.get("random_seed", 42)
     Epochs = config.get("epochs", 1000)
@@ -5085,13 +5051,6 @@ def load_or_create_config(config_path: str) -> dict:
     nokbd = config.get("nokbd", False)
     display = config.get("display", None)
 
-    # Dynamically calculate batch size if not provided in the training_params section
-    if "training_params" in config:
-        if "batch_size" not in config["training_params"] or config["training_params"]["batch_size"] is None:
-            # Calculate optimal batch size dynamically
-            sample_tensor_size = 4 * 1024 * 1024  # Example: 4MB per sample (adjust based on your dataset)
-            config["training_params"]["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
-
     return config
 
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
@@ -5099,14 +5058,14 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     Recursively find all matching .conf and .csv files in the data directory structure.
 
     Args:
-        data_dir: Root directory to search for datasets.
+        data_dir: Root directory to search for datasets
 
     Returns:
-        List of tuples (basename, conf_path, csv_path).
+        List of tuples (basename, conf_path, csv_path)
     """
     # Ensure data directory exists
     if not os.path.exists(data_dir):
-        print("\033[K" + f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
+        print("\033[K" +f"No '{data_dir}' directory found. Creating one...", end="\r", flush=True)
         os.makedirs(data_dir)
         return []
 
@@ -5125,27 +5084,25 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
 
             conf_path = os.path.join(root, conf_file)
 
-            # Look for matching CSV in the same directory and dataset-specific subdirectory
+            # Look for matching CSV in same directory and dataset-specific subdirectory
             csv_file = f"{basename}.csv"
             csv_paths = [
                 os.path.join(root, csv_file),
                 os.path.join(root, basename, csv_file)
             ]
-
-            # Load adaptive_dbnn.conf if it exists
+           # Load adaptive_dbnn.conf if it exists
             adaptive_conf = {}
-            adaptive_conf_path = os.path.join(data_dir, basename, 'adaptive_dbnn.conf')
+            adaptive_conf_path =f'{data_dir}/{basename}/adaptive_dbnn.conf'
             if os.path.exists(adaptive_conf_path):
                 try:
                     with open(adaptive_conf_path, 'r') as f:
                         adaptive_conf = json.load(f)
-                    print("\033[K" + f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
+                    print("\033[K" +f"Loaded adaptive configuration from {adaptive_conf_path}", end="\r", flush=True)
                 except Exception as e:
-                    print(f"Warning: Could not load adaptive configuration from {adaptive_conf_path}: {str(e)}")
+                    print(f"Warning: Could not load adaptive configuration from{adaptive_conf_path}: {str(e)}")
             else:
-                print("\033[K" + f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
+                print("\033[K" +f"No adaptive_dbnn.conf found in working directory {adaptive_conf_path}", end="\r", flush=True)
 
-            # Find the CSV file
             csv_path = None
             for path in csv_paths:
                 if os.path.exists(path):
@@ -5153,28 +5110,43 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
                     break
 
             if csv_path:
-                # Load the dataset configuration
-                try:
-                    with open(conf_path, 'r') as f:
-                        dataset_conf = json.load(f)
-                except Exception as e:
-                    print(f"Warning: Could not update configuration for {basename}: {str(e)}")
+                # Update configuration with adaptive settings if available
+                if adaptive_conf:
+                    try:
+                        with open(conf_path, 'r') as f:
+                            dataset_conf = json.load(f)
+
+                        # Update execution flags from adaptive configuration
+                        if 'execution_flags' in adaptive_conf:
+                            dataset_conf['execution_flags'] = adaptive_conf['execution_flags']
+
+                        # Update training parameters
+                        if 'training_params' in adaptive_conf:
+                            dataset_conf['training_params'].update(adaptive_conf['training_params'])
+
+                        # Save updated configuration
+                        with open(conf_path, 'w') as f:
+                            json.dump(dataset_conf, f, indent=4)
+                        print("\033[K" +f"Updated configuration for {basename} with adaptive settings", end="\r", flush=True)
+
+                    except Exception as e:
+                        print(f"Warning: Could not update configuration for {basename}: {str(e)}")
 
                 dataset_pairs.append((basename, conf_path, csv_path))
                 processed_datasets.add(basename)
-                print("\033[K" + f"Found dataset pair:", end="\r", flush=True)
-                print("\033[K" + f"  Config: {conf_path}", end="\r", flush=True)
-                print("\033[K" + f"  Data  : {csv_path}", end="\r", flush=True)
+                print("\033[K" +f"Found dataset pair:", end="\r", flush=True)
+                print("\033[K" +f"  Config: {conf_path}", end="\r", flush=True)
+                print("\033[K" +f"  Data  : {csv_path}", end="\r", flush=True)
             else:
-                print("\033[K" + f"Warning: Config file {conf_file} exists but no matching CSV found")
-                print("\033[K" + f"Looked in:")
+                print("\033[K" +f"Warning: Config file {conf_file} exists but no matching CSV found")
+                print("\033[K" +f"Looked in:")
                 for path in csv_paths:
-                    print("\033[K" + f"  - {path}")
+                    print("\033[K" +f"  - {path}")
 
     if not dataset_pairs:
-        print("\033[K" + "No matching .conf and .csv file pairs found.")
-        print("\033[K" + "Each dataset should have both a .conf configuration file and a matching .csv data file.")
-        print("\033[K" + "Example: 'dataset1.conf' and 'dataset1.csv'")
+        print("\033[K" +"No matching .conf and .csv file pairs found.")
+        print("\033[K" +"Each dataset should have both a .conf configuration file and a matching .csv data file.")
+        print("\033[K" +"Example: 'dataset1.conf' and 'dataset1.csv'")
 
     return dataset_pairs
 
@@ -5274,65 +5246,46 @@ def process_datasets():
     print("\033[K" +"All datasets processed")
 
 
-def validate_config(config: dict) -> dict:
+def validate_config(conf_path: str) -> bool:
     """
-    Validate the configuration parameters, ensuring that only the batch size is dynamically updated.
+    Validate configuration file and ensure proper folder structure
 
     Args:
-        config: Configuration dictionary.
+        conf_path: Path to configuration file
 
     Returns:
-        dict: Validated configuration dictionary.
+        True if valid, False otherwise
     """
-    validated_config = config.copy()
+    try:
+        with open(conf_path, 'r') as f:
+            config = json.load(f)
 
-    # Validate other parameters (only replace with defaults if missing or invalid)
-    if "device" not in validated_config or validated_config["device"] not in ["cuda", "cpu"]:
-        validated_config["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+        # Check required fields
+        required_fields = ['file_path', 'column_names', 'target_column']
+        for field in required_fields:
+            if field not in config:
+                print("\033[K" +f"Missing required field: {field}")
+                return False
 
-    if "trials" not in validated_config or not isinstance(validated_config["trials"], int):
-        validated_config["trials"] = 100
+        # Validate dataset directory exists
+        basename = os.path.splitext(os.path.basename(conf_path))[0]
+        dataset_dir = os.path.join('data', basename)
+        if not os.path.exists(dataset_dir):
+            print("\033[K" +f"Dataset directory missing: {dataset_dir}")
+            create_dir = input("Create directory? (y/n): ").lower() == 'y'
+            if create_dir:
+                os.makedirs(dataset_dir)
+                print("\033[K" +f"Created directory: {dataset_dir}")
+            else:
+                return False
 
-    if "cardinality_threshold" not in validated_config or not isinstance(validated_config["cardinality_threshold"], float):
-        validated_config["cardinality_threshold"] = 0.9
-
-    if "cardinality_tolerance" not in validated_config or not isinstance(validated_config["cardinality_tolerance"], int):
-        validated_config["cardinality_tolerance"] = 4
-
-    if "learning_rate" not in validated_config or not isinstance(validated_config["learning_rate"], float):
-        validated_config["learning_rate"] = 0.1
-
-    if "random_seed" not in validated_config or not isinstance(validated_config["random_seed"], int):
-        validated_config["random_seed"] = 42
-
-    if "epochs" not in validated_config or not isinstance(validated_config["epochs"], int):
-        validated_config["epochs"] = 1000
-
-    if "test_fraction" not in validated_config or not isinstance(validated_config["test_fraction"], float):
-        validated_config["test_fraction"] = 0.2
-
-    if "train" not in validated_config or not isinstance(validated_config["train"], bool):
-        validated_config["train"] = True
-
-    if "train_only" not in validated_config or not isinstance(validated_config["train_only"], bool):
-        validated_config["train_only"] = False
-
-    if "predict" not in validated_config or not isinstance(validated_config["predict"], bool):
-        validated_config["predict"] = True
-
-    if "gen_samples" not in validated_config or not isinstance(validated_config["gen_samples"], bool):
-        validated_config["gen_samples"] = False
-
-    if "enable_adaptive" not in validated_config or not isinstance(validated_config["enable_adaptive"], bool):
-        validated_config["enable_adaptive"] = True
-
-    if "nokbd" not in validated_config or not isinstance(validated_config["nokbd"], bool):
-        validated_config["nokbd"] = False
-
-    if "display" not in validated_config:
-        validated_config["display"] = None
-
-    return validated_config
+        return True
+    except json.JSONDecodeError:
+        print("\033[K" +f"Invalid JSON in configuration file: {conf_path}")
+        return False
+    except Exception as e:
+        print("\033[K" +f"Error validating configuration: {str(e)}")
+        return False
 
 def print_dataset_info(conf_path: str, csv_path: str):
     """Print information about the dataset with robust error handling"""
@@ -5407,9 +5360,9 @@ def main():
     if args.interactive:
         # Interactive mode to modify settings
         print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Interactive Mode{Colors.ENDC}")
-        dataset_name =input("\033[K" +f"{Colors.BOLD}Enter the name of the database:{Colors.ENDC}").strip().lower()
+
         # Load or create the configuration file
-        config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
+        config = load_or_create_config()
 
         # Display current configuration
         print("\033[K" +f"{Colors.BOLD}Current Configuration:{Colors.ENDC}")
@@ -5451,6 +5404,9 @@ def main():
                     return
             config['file_path'] = csv_file
 
+        # Save updated configuration
+        with open('adaptive_dbnn.conf', 'w') as f:
+            json.dump(config, f, indent=4)
 
         print("\033[K" +f"{Colors.GREEN}Configuration updated.{Colors.ENDC}")
 
