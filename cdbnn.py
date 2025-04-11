@@ -1,5 +1,6 @@
 #Working, fully functional with predcition 30/March/2025
 #Revisions on Mar30 2025 Stable version 8:56 AM
+# Added distance correlations to filter the output features. April 12, 3:45 am
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -88,6 +89,9 @@ import argparse
 from datetime import datetime
 import torch
 
+from scipy.spatial.distance import correlation
+from itertools import combinations
+
 logger = logging.getLogger(__name__)
 class Colors:
     """ANSI color codes for terminal output"""
@@ -133,6 +137,53 @@ class Colors:
             return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
+
+
+class DistanceCorrelationFeatureSelector:
+    """Helper class to select features based on distance correlation criteria"""
+
+    def __init__(self, upper_threshold=0.85, lower_threshold=0.01):
+        self.upper_threshold = upper_threshold
+        self.lower_threshold = lower_threshold
+
+    def calculate_distance_correlations(self, features, labels):
+        """Calculate distance correlations between features and labels"""
+        n_features = features.shape[1]
+        label_corrs = np.zeros(n_features)
+
+        # Calculate correlation with labels
+        for i in range(n_features):
+            label_corrs[i] = 1 - correlation(features[:, i], labels)
+
+        return label_corrs
+
+    def select_features(self, features, labels):
+        """Select features based on distance correlation criteria"""
+        label_corrs = self.calculate_distance_correlations(features, labels)
+
+        # Get indices of features that meet upper threshold
+        selected_indices = [i for i, corr in enumerate(label_corrs)
+                          if corr >= self.upper_threshold]
+
+        # Sort by correlation strength (descending)
+        selected_indices.sort(key=lambda i: -label_corrs[i])
+
+        # Remove features that are too correlated with each other
+        final_indices = []
+        feature_matrix = features[:, selected_indices]
+
+        for i, idx in enumerate(selected_indices):
+            keep = True
+            for j in final_indices:
+                # Calculate correlation between features
+                corr = 1 - correlation(feature_matrix[:, i], feature_matrix[:, selected_indices.index(j)])
+                if corr > self.lower_threshold:
+                    keep = False
+                    break
+            if keep:
+                final_indices.append(idx)
+
+        return final_indices, label_corrs
 
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
@@ -831,6 +882,204 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
+#--------------------------Distance Correlations ----------
+
+    def _select_features_using_distance_correlation(self, features, labels, config):
+        """Select features based on distance correlation criteria"""
+        selector = DistanceCorrelationFeatureSelector(
+            upper_threshold=config['distance_correlation_upper'],
+            lower_threshold=config['distance_correlation_lower']
+        )
+
+        selected_indices, corr_values = selector.select_features(features, labels)
+
+        # Create new feature matrix with only selected features
+        selected_features = features[:, selected_indices]
+        feature_names = [f'feature_{i}' for i in selected_indices]
+
+        return selected_features, feature_names, corr_values
+
+    def save_features(self, train_features: Dict[str, torch.Tensor],
+                     test_features: Dict[str, torch.Tensor],
+                     output_path: str) -> None:
+        """
+        Save features for training and test sets based on the adaptive flag.
+        Includes optional feature selection based on distance correlation thresholds.
+
+        Args:
+            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
+            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
+            output_path (str): Base path for saving the feature files.
+        """
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            # Create or load distance correlation config
+            config_dir = os.path.dirname(output_path)
+            dc_config_path = os.path.join(config_dir, 'feature_selection_config.json')
+            dc_config = self._get_distance_correlation_config(dc_config_path)
+
+            # Access enable_adaptive from training_params
+            try:
+                enable_adaptive = self.config['model'].get('enable_adaptive', True)
+            except:
+                enable_adaptive = True
+                logger.info(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
+
+            if enable_adaptive:
+                # In adaptive mode, only save the merged dataset (train folder)
+                train_df = self._features_to_dataframe(train_features, dc_config)
+                train_df.to_csv(output_path, index=False)
+                logger.info(f"Features saved to {output_path} (adaptive mode)")
+
+                # Save feature selection metadata if distance correlation was used
+                if dc_config.get('use_distance_correlation', True):
+                    self._save_feature_selection_metadata(train_features, dc_config, config_dir)
+            else:
+                # In non-adaptive mode, save train and test features separately
+                train_df = self._features_to_dataframe(train_features, dc_config)
+                test_df = self._features_to_dataframe(test_features, dc_config)
+
+                # Save training features
+                train_output_path = output_path.replace(".csv", "_train.csv")
+                train_df.to_csv(train_output_path, index=False)
+                logger.info(f"Training features saved to {train_output_path}")
+
+                # Save test features
+                test_output_path = output_path.replace(".csv", "_test.csv")
+                test_df.to_csv(test_output_path, index=False)
+                logger.info(f"Test features saved to {test_output_path}")
+
+                # Save feature selection metadata if distance correlation was used
+                if dc_config.get('use_distance_correlation', True):
+                    self._save_feature_selection_metadata(train_features, dc_config, config_dir)
+
+        except Exception as e:
+            logger.error(f"Error saving features: {str(e)}")
+            raise
+
+    def _get_distance_correlation_config(self, config_path: str) -> Dict:
+        """
+        Get distance correlation configuration, creating default config if it doesn't exist.
+
+        Args:
+            config_path (str): Path to the configuration file
+
+        Returns:
+            Dict: Configuration dictionary with these keys:
+                - use_distance_correlation (bool): Whether to use feature selection
+                - distance_correlation_upper (float): Upper threshold for label correlation
+                - distance_correlation_lower (float): Lower threshold for inter-feature correlation
+        """
+        default_config = {
+            'use_distance_correlation': True,
+            'distance_correlation_upper': 0.85,
+            'distance_correlation_lower': 0.01,
+            'description': ('Set use_distance_correlation to False to disable feature selection. '
+                           'Features must have label correlation > upper threshold and '
+                           'inter-feature correlation < lower threshold to be selected.')
+        }
+
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    user_config = json.load(f)
+                # Update defaults with any values from the file
+                for key in default_config:
+                    if key in user_config:
+                        default_config[key] = user_config[key]
+            except Exception as e:
+                logger.warning(f"Error loading distance correlation config: {str(e)}")
+        else:
+            # Create default config file if it doesn't exist
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as f:
+                json.dump(default_config, f, indent=4)
+            logger.info(f"Created default feature selection config at {config_path}")
+
+        return default_config
+
+    def _features_to_dataframe(self, feature_dict: Dict[str, torch.Tensor],
+                             dc_config: Dict) -> pd.DataFrame:
+        """
+        Convert features dictionary to a pandas DataFrame with optional feature selection.
+
+        Args:
+            feature_dict (Dict): Dictionary containing features and metadata
+            dc_config (Dict): Distance correlation configuration
+
+        Returns:
+            pd.DataFrame: DataFrame containing selected features and metadata
+        """
+        data_dict = {}
+
+        # Get base length from embeddings
+        base_length = len(feature_dict['embeddings']) if 'embeddings' in feature_dict else 0
+        if base_length == 0:
+            raise ValueError("No embeddings found in features")
+
+        # Process embeddings
+        features = feature_dict['embeddings'].cpu().numpy()
+
+        # Apply feature selection if enabled
+        if dc_config.get('use_distance_correlation', True) and 'labels' in feature_dict:
+            labels = feature_dict['labels'].cpu().numpy()
+
+            # Select features based on distance correlation
+            selector = DistanceCorrelationFeatureSelector(
+                upper_threshold=dc_config['distance_correlation_upper'],
+                lower_threshold=dc_config['distance_correlation_lower']
+            )
+            selected_indices, corr_values = selector.select_features(features, labels)
+
+            # Store only selected features
+            for new_idx, orig_idx in enumerate(selected_indices):
+                data_dict[f'feature_{new_idx}'] = features[:, orig_idx]
+                data_dict[f'original_feature_idx_{new_idx}'] = orig_idx
+                data_dict[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
+        else:
+            # Include all features if selection is disabled
+            for i in range(features.shape[1]):
+                data_dict[f'feature_{i}'] = features[:, i]
+
+        # Process labels and class names
+        if 'class_names' in feature_dict:
+            if len(feature_dict['class_names']) == base_length:
+                data_dict['target'] = feature_dict['class_names']
+        elif 'labels' in feature_dict:
+            if len(feature_dict['labels']) == base_length:
+                data_dict['target'] = feature_dict['labels'].cpu().numpy()
+
+        # Include additional metadata if available
+        optional_fields = ['indices', 'filenames']
+        for field in optional_fields:
+            if field in feature_dict and len(feature_dict[field]) == base_length:
+                data_dict[field] = feature_dict[field]
+
+        return pd.DataFrame(data_dict)
+
+    def _save_feature_selection_metadata(self, features: Dict[str, torch.Tensor],
+                                       dc_config: Dict, output_dir: str) -> None:
+        """
+        Save metadata about feature selection process.
+
+        Args:
+            features (Dict): Original feature dictionary
+            dc_config (Dict): Distance correlation configuration
+            output_dir (str): Directory to save metadata files
+        """
+        metadata = {
+            'timestamp': datetime.now().isoformat(),
+            'config': dc_config,
+            'original_feature_count': features['embeddings'].shape[1],
+            'description': 'Feature selection metadata'
+        }
+
+        metadata_path = os.path.join(output_dir, 'feature_selection_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=4)
+        logger.info(f"Saved feature selection metadata to {metadata_path}")
+
 #--------------------------
     def _initialize_clustering(self, config: Dict):
         """Initialize clustering parameters with existence check"""
@@ -1193,99 +1442,6 @@ class BaseAutoencoder(nn.Module):
         """
         return {}
 
-    def save_features(self, train_features: Dict[str, torch.Tensor], test_features: Dict[str, torch.Tensor], output_path: str) -> None:
-        """
-        Save features for training and test sets based on the adaptive flag.
-
-        Args:
-            train_features (Dict[str, torch.Tensor]): Features extracted from the training set.
-            test_features (Dict[str, torch.Tensor]): Features extracted from the test set.
-            output_path (str): Base path for saving the feature files.
-        """
-        try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            # Access enable_adaptive from training_params
-            try:
-                 enable_adaptive = self.config['model'].get('enable_adaptive', True)
-            except:
-                enable_adaptive = True
-                print(f"Enable Adaptive mode is set {enable_adaptive} for Save Mode")
-            if enable_adaptive:
-                # In adaptive mode, only save the merged dataset (train folder)
-                train_df = self._features_to_dataframe(train_features)
-                train_output_path = output_path
-                train_df.to_csv(train_output_path, index=False)
-                logger.info(f"Features saved to {train_output_path} (adaptive mode)")
-            else:
-                # In non-adaptive mode, save train and test features separately
-                train_df = self._features_to_dataframe(train_features)
-                test_df = self._features_to_dataframe(test_features)
-
-                # Save training features
-                train_output_path = output_path.replace(".csv", "_train.csv")
-                train_df.to_csv(train_output_path, index=False)
-                logger.info(f"Training features saved to {train_output_path}")
-
-                # Save test features
-                test_output_path = output_path.replace(".csv", "_test.csv")
-                test_df.to_csv(test_output_path, index=False)
-                logger.info(f"Test features saved to {test_output_path}")
-
-        except Exception as e:
-            logger.error(f"Error saving features: {str(e)}")
-            raise
-
-    def _features_to_dataframe(self, features: Dict[str, torch.Tensor]) -> pd.DataFrame:
-        """Convert features dictionary to a pandas DataFrame with proper class names."""
-        data_dict = {}
-
-        # Get base length from embeddings
-        base_length = len(features['embeddings']) if 'embeddings' in features else 0
-        if base_length == 0:
-            raise ValueError("No embeddings found in features")
-
-        # Process embeddings
-        embeddings = features['embeddings'].cpu().numpy()
-        for i in range(embeddings.shape[1]):
-            data_dict[f'feature_{i}'] = embeddings[:, i]
-
-        # Process labels - ensure same length as embeddings
-        if 'class_names' in features:
-            if len(features['class_names']) == base_length:
-                data_dict['target'] = features['class_names']
-            else:
-                logger.warning(f"class_names length {len(features['class_names'])} doesn't match embeddings length {base_length}")
-                data_dict['target'] = [str(i) for i in range(base_length)]
-        elif 'labels' in features:
-            if len(features['labels']) == base_length:
-                data_dict['target'] = features['labels'].cpu().numpy()
-            else:
-                logger.warning(f"labels length {len(features['labels'])} doesn't match embeddings length {base_length}")
-                data_dict['predicted_target'] = [str(i) for i in range(base_length)]
-        else:
-            data_dict['predicted_target'] = [str(i) for i in range(base_length)]
-
-        # Include additional metadata if available and length matches
-        optional_fields = ['indices', 'filenames']
-        for field in optional_fields:
-            if field in features:
-                if len(features[field]) == base_length:
-                    data_dict[field] = features[field]
-                else:
-                    logger.warning(f"{field} length {len(features[field])} doesn't match embeddings length {base_length}")
-                    data_dict[field] = [f"{field}_{i}" for i in range(base_length)]
-
-        # Add enhancement features if available
-        enhancement_dict = self._get_enhancement_columns(features)
-        for key, value in enhancement_dict.items():
-            if len(value) == base_length:
-                data_dict[key] = value
-            else:
-                logger.warning(f"Enhancement feature {key} length {len(value)} doesn't match embeddings length {base_length}")
-                data_dict[key] = [None] * base_length
-
-        return pd.DataFrame(data_dict)
 
     def _get_enhancement_columns(self, feature_dict: Dict[str, torch.Tensor]) -> Dict[str, np.ndarray]:
         """Extract enhancement-specific features for saving"""
