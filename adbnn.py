@@ -4470,7 +4470,6 @@ class DBNN(GPUDBNN):
                     save_path=save_path
                 )
 
-
         # Training complete
         epoch_pbar.close()
         #self._save_model_components()
