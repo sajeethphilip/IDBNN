@@ -903,48 +903,148 @@ class BaseAutoencoder(nn.Module):
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        Save extracted features to CSV files (with optional feature selection).
-        Configuration generation is handled separately by generate_configuration().
+        Save features for training and test sets with distance correlation feature selection.
+        Handles both adaptive and non-adaptive modes with proper configuration.
 
         Args:
-            train_features: Features from training set
-            test_features: Features from test set
-            output_path: Base path for output files
+            train_features: Features from training set (dict with 'embeddings', 'labels', etc.)
+            test_features: Features from test set (same format as train_features)
+            output_path: Full path for output CSV file (e.g., 'data/dataset/features.csv')
         """
         try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            output_dir = os.path.dirname(output_path)
+            os.makedirs(output_dir, exist_ok=True)
 
-            # Load/Create feature selection config
-            config_dir = os.path.dirname(output_path)
-            dc_config = self._get_distance_correlation_config(config_dir)
+            # Load distance correlation config (with proper error handling)
+            dc_config = self._get_distance_correlation_config(output_dir)
+            use_dc = dc_config.get('use_distance_correlation', True)
 
-            # Handle adaptive vs non-adaptive mode
+            # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
 
+            # Process features based on mode
             if enable_adaptive:
-                # Save combined features
-                features_df = self._prepare_features_dataframe(train_features, dc_config)
-                features_df.to_csv(output_path, index=False)
-                logger.info(f"Features saved to {output_path}")
-            else:
-                # Save train/test separately
-                train_df = self._prepare_features_dataframe(train_features, dc_config)
-                test_df = self._prepare_features_dataframe(test_features, dc_config)
+                # Adaptive mode - single combined output
+                features_df = self._prepare_features_dataframe(
+                    train_features,
+                    dc_config if use_dc else None
+                )
 
+                # Save features
+                features_df.to_csv(output_path, index=False)
+                logger.info(f"Saved features to {output_path} (adaptive mode)")
+
+                # Save metadata
+                feature_columns = [c for c in features_df.columns if c.startswith('feature_')]
+                self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
+            else:
+                # Non-adaptive mode - separate train/test files
+                train_df = self._prepare_features_dataframe(
+                    train_features,
+                    dc_config if use_dc else None
+                )
+                test_df = self._prepare_features_dataframe(
+                    test_features,
+                    dc_config if use_dc else None
+                )
+
+                # Save features
                 train_path = output_path.replace(".csv", "_train.csv")
                 test_path = output_path.replace(".csv", "_test.csv")
 
                 train_df.to_csv(train_path, index=False)
                 test_df.to_csv(test_path, index=False)
-                logger.info(f"Train/test features saved to {train_path} and {test_path}")
+                logger.info(f"Saved train features to {train_path}")
+                logger.info(f"Saved test features to {test_path}")
 
-            # Save feature selection metadata if used
-            if dc_config.get('use_distance_correlation', True):
-                self._save_feature_metadata(train_features, dc_config, config_dir)
+                # Save metadata (using train features as reference)
+                feature_columns = [c for c in train_df.columns if c.startswith('feature_')]
+                self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
 
         except Exception as e:
-            logger.error(f"Error saving features: {str(e)}")
-            raise
+            logger.error(f"Error in save_features: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise RuntimeError(f"Failed to save features: {str(e)}")
+
+
+    def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
+                                  dc_config: Optional[Dict]) -> pd.DataFrame:
+        """
+        Prepare DataFrame from features with optional distance correlation selection.
+
+        Args:
+            features: Dictionary containing 'embeddings', 'labels', etc.
+            dc_config: Distance correlation config or None if disabled
+
+        Returns:
+            pd.DataFrame: Processed features with metadata
+        """
+        data = {}
+
+        # Convert features to numpy
+        embeddings = features['embeddings'].cpu().numpy()
+        labels = features.get('labels', torch.zeros(len(embeddings))).cpu().numpy()
+
+        # Apply feature selection if enabled
+        if dc_config and dc_config.get('use_distance_correlation', True):
+            selector = DistanceCorrelationFeatureSelector(
+                upper_threshold=dc_config['distance_correlation_upper'],
+                lower_threshold=dc_config['distance_correlation_lower']
+            )
+            selected_indices, corr_values = selector.select_features(embeddings, labels)
+
+            # Store selected features with metadata
+            for new_idx, orig_idx in enumerate(selected_indices):
+                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
+                data[f'original_feature_idx_{new_idx}'] = orig_idx
+                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
+        else:
+            # Store all features without selection
+            for i in range(embeddings.shape[1]):
+                data[f'feature_{i}'] = embeddings[:, i]
+
+        # Add labels and metadata
+        if 'class_names' in features:
+            data['target'] = features['class_names']
+        else:
+            data['target'] = labels
+
+        if 'filenames' in features:
+            data['filename'] = features['filenames']
+
+        return pd.DataFrame(data)
+
+
+    def _get_distance_correlation_config(self, output_dir: str) -> Dict:
+        """
+        Safely load or create distance correlation configuration.
+
+        Args:
+            output_dir: Directory where config should be stored
+
+        Returns:
+            Dictionary with configuration parameters
+        """
+        config_path = os.path.join(output_dir, 'feature_selection_config.json')
+        default_config = {
+            'use_distance_correlation': True,
+            'distance_correlation_upper': 0.85,
+            'distance_correlation_lower': 0.01
+        }
+
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                # Validate loaded config
+                return {**default_config, **config}
+            else:
+                with open(config_path, 'w') as f:
+                    json.dump(default_config, f, indent=4)
+                return default_config
+        except Exception as e:
+            logger.warning(f"Could not load/create config: {str(e)} - using defaults")
+            return default_config
 
     def generate_configuration(self, features_path: str,
                              output_dir: str = None) -> str:
@@ -1011,61 +1111,15 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Error generating configuration: {str(e)}")
             raise
 
-    def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
-                                  dc_config: Dict) -> pd.DataFrame:
-        """
-        Prepare features DataFrame with optional selection.
-        Internal method used by save_features().
-        """
-        data = {}
 
-        # Convert features to numpy
-        embeddings = features['embeddings'].cpu().numpy()
-        labels = features.get('labels', torch.zeros(len(embeddings))).cpu().numpy()
-
-        # Apply feature selection if enabled
-        if dc_config.get('use_distance_correlation', True):
-            selector = DistanceCorrelationFeatureSelector(
-                upper_threshold=dc_config['distance_correlation_upper'],
-                lower_threshold=dc_config['distance_correlation_lower']
-            )
-            selected_indices, corr_values = selector.select_features(embeddings, labels)
-
-            # Store selected features with metadata
-            for new_idx, orig_idx in enumerate(selected_indices):
-                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = orig_idx
-                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
-        else:
-            # Store all features
-            for i in range(embeddings.shape[1]):
-                data[f'feature_{i}'] = embeddings[:, i]
-
-        # Add labels and metadata
-        if 'class_names' in features:
-            data['target'] = features['class_names']
-        else:
-            data['target'] = labels
-
-        if 'filenames' in features:
-            data['filename'] = features['filenames']
-
-        return pd.DataFrame(data)
-
-    def _save_feature_metadata(self, output_path: str, feature_columns: List[str]):
+    def _save_feature_metadata(self, output_dir: str, feature_columns: List[str], dc_config: Dict = None):
         """Save comprehensive metadata about the saved features and feature selection process.
 
         Args:
-            output_path (str): Path where features are being saved
+            output_dir (str): Directory where features are being saved
             feature_columns (List[str]): List of feature column names that were saved
+            dc_config (Dict): Distance correlation configuration (optional)
         """
-        # Get the directory where files will be saved
-        output_dir = os.path.dirname(output_path)
-
-        # Get distance correlation configuration
-        dc_config_path = os.path.join(output_dir, 'feature_selection_config.json')
-        dc_config = self._get_distance_correlation_config(dc_config_path)
-
         # Prepare base metadata
         metadata = {
             'timestamp': datetime.now().isoformat(),
@@ -1073,8 +1127,8 @@ class BaseAutoencoder(nn.Module):
                 'total_features': len(feature_columns),
                 'feature_columns': feature_columns,
                 'feature_selection': {
-                    'method': 'distance_correlation' if dc_config.get('use_distance_correlation', True) else 'none',
-                    'parameters': dc_config if dc_config.get('use_distance_correlation', True) else None
+                    'method': 'distance_correlation' if dc_config and dc_config.get('use_distance_correlation', True) else 'none',
+                    'parameters': dc_config if dc_config and dc_config.get('use_distance_correlation', True) else None
                 }
             },
             'model_config': {
@@ -1093,18 +1147,6 @@ class BaseAutoencoder(nn.Module):
             }
         }
 
-        # Add distance correlation details if it was used
-        if dc_config.get('use_distance_correlation', True):
-            # Try to load feature correlations if they exist
-            correlations_path = os.path.join(output_dir, 'feature_correlations.json')
-            if os.path.exists(correlations_path):
-                try:
-                    with open(correlations_path, 'r') as f:
-                        correlations = json.load(f)
-                    metadata['feature_info']['feature_selection']['correlations'] = correlations
-                except Exception as e:
-                    logger.warning(f"Could not load feature correlations: {str(e)}")
-
         # Save the metadata
         metadata_path = os.path.join(output_dir, 'feature_extraction_metadata.json')
 
@@ -1116,46 +1158,6 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Error saving feature metadata: {str(e)}")
             raise
 
-    def _get_distance_correlation_config(self, config_path: str) -> Dict:
-        """
-        Get distance correlation configuration, creating default config if it doesn't exist.
-
-        Args:
-            config_path (str): Path to the configuration file
-
-        Returns:
-            Dict: Configuration dictionary with these keys:
-                - use_distance_correlation (bool): Whether to use feature selection
-                - distance_correlation_upper (float): Upper threshold for label correlation
-                - distance_correlation_lower (float): Lower threshold for inter-feature correlation
-        """
-        default_config = {
-            'use_distance_correlation': True,
-            'distance_correlation_upper': 0.85,
-            'distance_correlation_lower': 0.01,
-            'description': ('Set use_distance_correlation to False to disable feature selection. '
-                           'Features must have label correlation > upper threshold and '
-                           'inter-feature correlation < lower threshold to be selected.')
-        }
-
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    user_config = json.load(f)
-                # Update defaults with any values from the file
-                for key in default_config:
-                    if key in user_config:
-                        default_config[key] = user_config[key]
-            except Exception as e:
-                logger.warning(f"Error loading distance correlation config: {str(e)}")
-        else:
-            # Create default config file if it doesn't exist
-            os.makedirs(os.path.dirname(config_path), exist_ok=True)
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=4)
-            logger.info(f"Created default feature selection config at {config_path}")
-
-        return default_config
 
     def _features_to_dataframe(self, feature_dict: Dict[str, torch.Tensor],
                              dc_config: Dict) -> pd.DataFrame:
