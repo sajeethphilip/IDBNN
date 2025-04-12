@@ -1242,21 +1242,19 @@ class BaseAutoencoder(nn.Module):
 
 #--------------------------
     def _initialize_clustering(self, config: Dict):
-        """Initialize clustering parameters with existence check"""
+        """Initialize clustering parameters with dimension validation"""
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
         if self.use_kl_divergence:
-            # Only initialize if not already exists
-            if not hasattr(self, 'cluster_centers'):
-                num_clusters = config['dataset'].get('num_classes', 10)
-                self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims))
+            num_clusters = config['dataset'].get('num_classes', 10)
 
-            if not hasattr(self, 'clustering_temperature'):
-                # Convert to tensor and register as buffer
-                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-                self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+            # Initialize with proper dimensions
+            self.register_buffer('cluster_centers',
+                               torch.randn(num_clusters, self.feature_dims))
+
+            temp_value = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
+            self.register_buffer('clustering_temperature',
+                               torch.tensor([temp_value], dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -1301,19 +1299,25 @@ class BaseAutoencoder(nn.Module):
                 self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
 
     def set_training_phase(self, phase: int):
-        """Set the training phase (1 or 2) with proper cluster initialization"""
+        """Handle phase transitions with dimension checks"""
         self.training_phase = phase
+
         if phase == 2 and self.use_kl_divergence:
-            if not hasattr(self, 'cluster_centers'):
-                # Initialize only if not already initialized
-                num_clusters = self.config['dataset'].get('num_classes', 10)
-                self.cluster_centers = nn.Parameter(
-                    torch.randn(num_clusters, self.feature_dims, device=self.device)
-                )
-                self.clustering_temperature = self.config['model']\
-                    .get('autoencoder_config', {})\
-                    .get('enhancements', {})\
-                    .get('clustering_temperature', 1.0)
+            # Verify dimensions match
+            if hasattr(self, 'cluster_centers'):
+                current_dims = self.cluster_centers.size(1)
+                if current_dims != self.feature_dims:
+                    logger.warning(f"Adjusting cluster centers from {current_dims} to {self.feature_dims} dimensions")
+                    self._reinitialize_cluster_centers()
+            else:
+                self._initialize_clustering(self.config)
+
+    def _reinitialize_cluster_centers(self):
+        """Reinitialize cluster centers to match current feature dims"""
+        num_clusters = self.cluster_centers.size(0)
+        self.register_buffer('cluster_centers',
+                           torch.randn(num_clusters, self.feature_dims,
+                                     device=self.cluster_centers.device))
 
     def _initialize_cluster_centers(self):
         """Initialize cluster centers using k-means"""
@@ -1635,6 +1639,13 @@ class BaseAutoencoder(nn.Module):
         output = {'embeddings': embeddings}  # Keep on same device as input
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
+
+            # Verify dimensions match
+            if embeddings.size(-1) != self.cluster_centers.size(-1):
+                raise ValueError(
+                    f"Embedding dim {embeddings.size(-1)} doesn't match "
+                    f"cluster centers dim {self.cluster_centers.size(-1)}"
+                )
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
             temperature = self.clustering_temperature
