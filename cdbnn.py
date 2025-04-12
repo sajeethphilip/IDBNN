@@ -1242,19 +1242,21 @@ class BaseAutoencoder(nn.Module):
 
 #--------------------------
     def _initialize_clustering(self, config: Dict):
-        """Initialize clustering parameters with dimension validation"""
+        """Initialize clustering parameters with existence check"""
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
         if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.register_buffer('cluster_centers',
+                                   torch.randn(num_clusters, self.feature_dims))
 
-            # Initialize with proper dimensions
-            self.register_buffer('cluster_centers',
-                               torch.randn(num_clusters, self.feature_dims))
-
-            temp_value = config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-            self.register_buffer('clustering_temperature',
-                               torch.tensor([temp_value], dtype=torch.float32))
+            if not hasattr(self, 'clustering_temperature'):
+                # Convert to tensor and register as buffer
+                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([temp_value], dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -1299,25 +1301,19 @@ class BaseAutoencoder(nn.Module):
                 self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
 
     def set_training_phase(self, phase: int):
-        """Handle phase transitions with dimension checks"""
+        """Set the training phase (1 or 2) with proper cluster initialization"""
         self.training_phase = phase
-
         if phase == 2 and self.use_kl_divergence:
-            # Verify dimensions match
-            if hasattr(self, 'cluster_centers'):
-                current_dims = self.cluster_centers.size(1)
-                if current_dims != self.feature_dims:
-                    logger.warning(f"Adjusting cluster centers from {current_dims} to {self.feature_dims} dimensions")
-                    self._reinitialize_cluster_centers()
-            else:
-                self._initialize_clustering(self.config)
-
-    def _reinitialize_cluster_centers(self):
-        """Reinitialize cluster centers to match current feature dims"""
-        num_clusters = self.cluster_centers.size(0)
-        self.register_buffer('cluster_centers',
-                           torch.randn(num_clusters, self.feature_dims,
-                                     device=self.cluster_centers.device))
+            if not hasattr(self, 'cluster_centers'):
+                # Initialize only if not already initialized
+                num_clusters = self.config['dataset'].get('num_classes', 10)
+                self.cluster_centers = nn.Parameter(
+                    torch.randn(num_clusters, self.feature_dims, device=self.device)
+                )
+                self.clustering_temperature = self.config['model']\
+                    .get('autoencoder_config', {})\
+                    .get('enhancements', {})\
+                    .get('clustering_temperature', 1.0)
 
     def _initialize_cluster_centers(self):
         """Initialize cluster centers using k-means"""
@@ -1639,13 +1635,6 @@ class BaseAutoencoder(nn.Module):
         output = {'embeddings': embeddings}  # Keep on same device as input
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
-
-            # Verify dimensions match
-            if embeddings.size(-1) != self.cluster_centers.size(-1):
-                raise ValueError(
-                    f"Embedding dim {embeddings.size(-1)} doesn't match "
-                    f"cluster centers dim {self.cluster_centers.size(-1)}"
-                )
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
             temperature = self.clustering_temperature
@@ -3566,7 +3555,8 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if not hasattr(self, 'clustering_temperature'):
                 temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+                                   torch.tensor([config['model']['autoencoder_config']
+                                               ['enhancements']['clustering_temperature']]))
 
     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
@@ -5023,7 +5013,6 @@ class FeatureExtractorCNN(nn.Module):
     def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
-        self.train_dataset = None  # Add dataset reference
 
         # Layer 1
         self.conv1 = nn.Sequential(
@@ -5096,10 +5085,6 @@ class FeatureExtractorCNN(nn.Module):
         # Fully connected layer
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
-
-    def set_dataset(self, dataset: Dataset):
-        """Store dataset reference (compatible with training interface)"""
-        self.train_dataset = dataset
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
@@ -7143,81 +7128,6 @@ class ArchitectureController:
         self.min_complexity = 0.5  # Minimum complexity factor
         self.max_complexity = 2.0  # Maximum complexity factor
 
-        # ANSI color codes for visualization
-        self.colors = {
-            'low': '\033[91m',    # Red
-            'medium': '\033[93m', # Yellow
-            'high': '\033[92m',   # Green
-            'reset': '\033[0m'
-        }
-
-    def visualize_architecture(self, model: nn.Module):
-        """Display color-coded model architecture based on complexity"""
-        print("\n" + "="*50)
-        print(f"{self.colors['high']}FINAL MODEL ARCHITECTURE{self.colors['reset']}")
-        print("="*50)
-
-        if isinstance(model, BaseAutoencoder):
-            self._visualize_autoencoder(model)
-        elif isinstance(model, FeatureExtractorCNN):
-            self._visualize_cnn(model)
-
-        print(f"\n{self.colors['medium']}Complexity Factor: {self.complexity_factor:.2f}{self.colors['reset']}")
-        print("="*50 + "\n")
-
-    def _visualize_autoencoder(self, model: BaseAutoencoder):
-        """Visualize autoencoder architecture with color coding"""
-        device = next(model.parameters()).device
-
-        # Encoder visualization
-        print(f"\n{self.colors['high']}ENCODER:{self.colors['reset']}")
-        for i, layer in enumerate(model.encoder_layers):
-            conv = layer[0]
-            color = self._get_complexity_color(conv.out_channels / conv.in_channels)
-            print(f"{color}Layer {i+1}: {conv.__class__.__name__} "
-                  f"(in={conv.in_channels}, out={conv.out_channels}, "
-                  f"k={conv.kernel_size}, s={conv.stride}){self.colors['reset']}")
-
-        # Latent space visualization
-        print(f"\n{self.colors['high']}LATENT SPACE:{self.colors['reset']}")
-        color = self._get_complexity_color(self.complexity_factor)
-        print(f"{color}Embedder: {model.embedder}{self.colors['reset']}")
-        print(f"{color}Feature Dimensions: {model.feature_dims}{self.colors['reset']}")
-
-        # Decoder visualization
-        print(f"\n{self.colors['high']}DECODER:{self.colors['reset']}")
-        for i, layer in enumerate(model.decoder_layers):
-            conv = layer[0]
-            color = self._get_complexity_color(conv.in_channels / conv.out_channels)
-            print(f"{color}Layer {i+1}: {conv.__class__.__name__} "
-                  f"(in={conv.in_channels}, out={conv.out_channels}, "
-                  f"k={conv.kernel_size}, s={conv.stride}){self.colors['reset']}")
-
-    def _visualize_cnn(self, model: FeatureExtractorCNN):
-        """Visualize CNN architecture with color coding"""
-        print(f"\n{self.colors['high']}FEATURE EXTRACTOR CNN:{self.colors['reset']}")
-        layers = [
-            model.conv1, model.conv2, model.conv3,
-            model.conv4, model.conv5, model.conv6, model.conv7
-        ]
-
-        for i, layer in enumerate(layers):
-            for m in layer.modules():
-                if isinstance(m, nn.Conv2d):
-                    ratio = m.out_channels / (m.in_channels if i > 0 else 3)
-                    color = self._get_complexity_color(ratio)
-                    print(f"{color}Layer {i+1}: {m.__class__.__name__} "
-                          f"(in={m.in_channels}, out={m.out_channels}, "
-                          f"k={m.kernel_size}, s={m.stride}){self.colors['reset']}")
-
-    def _get_complexity_color(self, ratio: float) -> str:
-        """Get color based on complexity ratio"""
-        if ratio < 0.8:
-            return self.colors['low']
-        elif ratio < 1.2:
-            return self.colors['medium']
-        return self.colors['high']
-
     def analyze_dataset(self, dataloader: DataLoader) -> Dict:
         """Analyze dataset characteristics to determine required complexity"""
         stats = {
@@ -7297,13 +7207,11 @@ class ArchitectureController:
         return self.complexity_factor
 
     def adjust_model(self, model: nn.Module) -> nn.Module:
-        """Adjust model architecture with visualization"""
+        """Adjust model architecture based on complexity factor"""
         if isinstance(model, BaseAutoencoder):
-            model = self._adjust_autoencoder(model)
+            return self._adjust_autoencoder(model)
         elif isinstance(model, FeatureExtractorCNN):
-            model = self._adjust_cnn(model)
-
-        self.visualize_architecture(model)  # Display final architecture
+            return self._adjust_cnn(model)
         return model
 
 
