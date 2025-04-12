@@ -2599,7 +2599,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         model = model.to(device)
 
         model = arch_controller.adjust_model(model)
-        model.to(config['device'] if 'device' in config else 'cpu')
+        #model.to(config['device'] if 'device' in config else 'cpu')
+        model = model.to(device)
 
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
