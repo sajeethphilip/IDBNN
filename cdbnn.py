@@ -7142,6 +7142,7 @@ class ArchitectureController:
 
     def __init__(self, config: Dict):
         self.config = config
+        self.feature_dims = config['model']['feature_dims']  # Store the configured feature dims
         self.complexity_factor = 1.0  # Default neutral factor
         self.dataset_stats = {}
         self.min_complexity = 0.5  # Minimum complexity factor
