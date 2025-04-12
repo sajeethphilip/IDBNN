@@ -2578,7 +2578,7 @@ class ModelFactory:
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
-        return model.to(config['device'] if 'device' in config else 'cpu')
+        return model.to(device)
 
 
 # Update the training loop to handle the new feature dictionary format
