@@ -5013,6 +5013,7 @@ class FeatureExtractorCNN(nn.Module):
     def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
+        self.train_dataset = None  # Add dataset reference
 
         # Layer 1
         self.conv1 = nn.Sequential(
@@ -5085,6 +5086,10 @@ class FeatureExtractorCNN(nn.Module):
         # Fully connected layer
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
+
+    def set_dataset(self, dataset: Dataset):
+        """Store dataset reference (compatible with training interface)"""
+        self.train_dataset = dataset
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
