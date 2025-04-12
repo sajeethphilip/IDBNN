@@ -2577,7 +2577,8 @@ class ModelFactory:
         if hasattr(model, 'in_channels'):
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
-
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        model=model.to(device)
         return model
 
 
@@ -2593,7 +2594,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         complexity = arch_controller.determine_complexity()
         config['model']['complexity_factor'] = complexity
         model = arch_controller.adjust_model(model)
-        model.to(config['device'] if 'device' in config else 'cpu')
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        model=model.to(device)
 
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
