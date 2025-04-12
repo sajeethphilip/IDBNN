@@ -1674,121 +1674,7 @@ class BaseAutoencoder(nn.Module):
 
         return output
 
-#---------------Architecture Controller -------------------------------
-class ArchitectureController:
-    """Dynamically controls model architecture complexity based on dataset characteristics"""
 
-    def __init__(self, config: Dict):
-        self.config = config
-        self.complexity_factor = 1.0  # Default neutral factor
-        self.dataset_stats = {}
-        self.min_complexity = 0.5  # Minimum complexity factor
-        self.max_complexity = 2.0  # Maximum complexity factor
-
-    def analyze_dataset(self, dataloader: DataLoader) -> Dict:
-        """Analyze dataset characteristics to determine required complexity"""
-        stats = {
-            'class_distribution': defaultdict(int),
-            'image_variability': 0.0,
-            'texture_complexity': 0.0
-        }
-
-        # Calculate basic statistics
-        for _, labels in dataloader:
-            for label in labels:
-                stats['class_distribution'][label.item()] += 1
-
-        # Calculate image variability (using first batch)
-        first_batch, _ = next(iter(dataloader))
-        stats['image_variability'] = first_batch.std().item()
-
-        # Simple texture complexity estimate
-        stats['texture_complexity'] = self._estimate_texture_complexity(first_batch)
-
-        self.dataset_stats = stats
-        return stats
-
-    def _estimate_texture_complexity(self, batch: torch.Tensor) -> float:
-        """Estimate texture complexity using gradient magnitude"""
-        if batch.dim() == 3:
-            batch = batch.unsqueeze(0)
-
-        # Calculate gradient magnitude
-        grad_x = F.conv2d(batch, torch.tensor([[[[-1, 0, 1]]]]).float().to(batch.device))
-        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]]).float().to(batch.device))
-        gradient_magnitude = (grad_x**2 + grad_y**2).sqrt()
-
-        return gradient_magnitude.mean().item()
-
-    def determine_complexity(self) -> float:
-        """Determine optimal complexity factor based on dataset analysis"""
-        num_classes = len(self.dataset_stats['class_distribution'])
-        variability = self.dataset_stats['image_variability']
-        texture = self.dataset_stats['texture_complexity']
-
-        # Base complexity on number of classes
-        class_factor = min(1.0 + (num_classes / 20), 2.0)
-
-        # Adjust based on image variability
-        var_factor = 0.5 + (variability / 0.3)  # Normalized to ~1 for typical images
-
-        # Adjust based on texture complexity
-        tex_factor = 0.7 + (texture / 0.2)  # Normalized to ~1 for typical textures
-
-        # Combined factor
-        self.complexity_factor = min(max(
-            (class_factor * var_factor * tex_factor) / 2.0,
-            self.min_complexity
-        ), self.max_complexity)
-
-        return self.complexity_factor
-
-    def adjust_model(self, model: nn.Module) -> nn.Module:
-        """Adjust model architecture based on complexity factor"""
-        if isinstance(model, BaseAutoencoder):
-            return self._adjust_autoencoder(model)
-        elif isinstance(model, FeatureExtractorCNN):
-            return self._adjust_cnn(model)
-        return model
-
-    def _adjust_autoencoder(self, model: BaseAutoencoder) -> BaseAutoencoder:
-        """Adjust autoencoder complexity"""
-        # Scale layer sizes based on complexity
-        for layer in model.encoder_layers:
-            if hasattr(layer, 'out_channels'):
-                layer.out_channels = int(layer.out_channels * self.complexity_factor)
-
-        for layer in model.decoder_layers:
-            if hasattr(layer, 'out_channels'):
-                layer.out_channels = int(layer.out_channels * self.complexity_factor)
-
-        # Adjust feature dimensions
-        model.feature_dims = int(model.feature_dims * self.complexity_factor)
-        model.embedder = self._create_embedder(model)
-        model.unembedder = self._create_unembedder(model)
-
-        return model
-
-    def _adjust_cnn(self, model: FeatureExtractorCNN) -> FeatureExtractorCNN:
-        """Adjust CNN complexity"""
-        # Scale channels in each convolutional layer
-        layers = [
-            model.conv1, model.conv2, model.conv3,
-            model.conv4, model.conv5, model.conv6, model.conv7
-        ]
-
-        for layer in layers:
-            for m in layer.modules():
-                if isinstance(m, nn.Conv2d):
-                    m.out_channels = int(m.out_channels * self.complexity_factor)
-                    m.in_channels = int(m.in_channels * self.complexity_factor)
-                elif isinstance(m, nn.Linear):
-                    m.out_features = int(m.out_features * self.complexity_factor)
-                    m.in_features = int(m.in_features * self.complexity_factor)
-
-        return model
-
-#---------------Architecture Controller Ends ------------------------
 class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
     """Autoencoder specialized for astronomical imaging features"""
 
@@ -7225,6 +7111,122 @@ class CombinedDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.combined_data[idx]
+
+#---------------Architecture Controller -------------------------------
+class ArchitectureController:
+    """Dynamically controls model architecture complexity based on dataset characteristics"""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.complexity_factor = 1.0  # Default neutral factor
+        self.dataset_stats = {}
+        self.min_complexity = 0.5  # Minimum complexity factor
+        self.max_complexity = 2.0  # Maximum complexity factor
+
+    def analyze_dataset(self, dataloader: DataLoader) -> Dict:
+        """Analyze dataset characteristics to determine required complexity"""
+        stats = {
+            'class_distribution': defaultdict(int),
+            'image_variability': 0.0,
+            'texture_complexity': 0.0
+        }
+
+        # Calculate basic statistics
+        for _, labels in dataloader:
+            for label in labels:
+                stats['class_distribution'][label.item()] += 1
+
+        # Calculate image variability (using first batch)
+        first_batch, _ = next(iter(dataloader))
+        stats['image_variability'] = first_batch.std().item()
+
+        # Simple texture complexity estimate
+        stats['texture_complexity'] = self._estimate_texture_complexity(first_batch)
+
+        self.dataset_stats = stats
+        return stats
+
+    def _estimate_texture_complexity(self, batch: torch.Tensor) -> float:
+        """Estimate texture complexity using gradient magnitude"""
+        if batch.dim() == 3:
+            batch = batch.unsqueeze(0)
+
+        # Calculate gradient magnitude
+        grad_x = F.conv2d(batch, torch.tensor([[[[-1, 0, 1]]]]).float().to(batch.device))
+        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]]).float().to(batch.device))
+        gradient_magnitude = (grad_x**2 + grad_y**2).sqrt()
+
+        return gradient_magnitude.mean().item()
+
+    def determine_complexity(self) -> float:
+        """Determine optimal complexity factor based on dataset analysis"""
+        num_classes = len(self.dataset_stats['class_distribution'])
+        variability = self.dataset_stats['image_variability']
+        texture = self.dataset_stats['texture_complexity']
+
+        # Base complexity on number of classes
+        class_factor = min(1.0 + (num_classes / 20), 2.0)
+
+        # Adjust based on image variability
+        var_factor = 0.5 + (variability / 0.3)  # Normalized to ~1 for typical images
+
+        # Adjust based on texture complexity
+        tex_factor = 0.7 + (texture / 0.2)  # Normalized to ~1 for typical textures
+
+        # Combined factor
+        self.complexity_factor = min(max(
+            (class_factor * var_factor * tex_factor) / 2.0,
+            self.min_complexity
+        ), self.max_complexity)
+
+        return self.complexity_factor
+
+    def adjust_model(self, model: nn.Module) -> nn.Module:
+        """Adjust model architecture based on complexity factor"""
+        if isinstance(model, BaseAutoencoder):
+            return self._adjust_autoencoder(model)
+        elif isinstance(model, FeatureExtractorCNN):
+            return self._adjust_cnn(model)
+        return model
+
+    def _adjust_autoencoder(self, model: BaseAutoencoder) -> BaseAutoencoder:
+        """Adjust autoencoder complexity"""
+        # Scale layer sizes based on complexity
+        for layer in model.encoder_layers:
+            if hasattr(layer, 'out_channels'):
+                layer.out_channels = int(layer.out_channels * self.complexity_factor)
+
+        for layer in model.decoder_layers:
+            if hasattr(layer, 'out_channels'):
+                layer.out_channels = int(layer.out_channels * self.complexity_factor)
+
+        # Adjust feature dimensions
+        model.feature_dims = int(model.feature_dims * self.complexity_factor)
+        model.embedder = self._create_embedder(model)
+        model.unembedder = self._create_unembedder(model)
+
+        return model
+
+    def _adjust_cnn(self, model: FeatureExtractorCNN) -> FeatureExtractorCNN:
+        """Adjust CNN complexity"""
+        # Scale channels in each convolutional layer
+        layers = [
+            model.conv1, model.conv2, model.conv3,
+            model.conv4, model.conv5, model.conv6, model.conv7
+        ]
+
+        for layer in layers:
+            for m in layer.modules():
+                if isinstance(m, nn.Conv2d):
+                    m.out_channels = int(m.out_channels * self.complexity_factor)
+                    m.in_channels = int(m.in_channels * self.complexity_factor)
+                elif isinstance(m, nn.Linear):
+                    m.out_features = int(m.out_features * self.complexity_factor)
+                    m.in_features = int(m.in_features * self.complexity_factor)
+
+        return model
+
+#---------------Architecture Controller Ends ------------------------
 
 def update_config_with_args(config: Dict, args) -> Dict:
     """Update configuration with command line arguments"""
