@@ -7554,6 +7554,8 @@ def parse_arguments():
                        help='Path to input data (directory or zip file)')
     parser.add_argument('--interactive', action='store_true',
                        help='Force interactive mode even with command line args')
+    parser.add_argument('--encoder_type', choices=['autoenc', 'cnn'],
+                       default='cnn', help='Decide model type cnn (default) or autoenc')
 
     # Prediction-specific
     parser.add_argument('--model-path', help='Path to trained model')
