@@ -7128,6 +7128,81 @@ class ArchitectureController:
         self.min_complexity = 0.5  # Minimum complexity factor
         self.max_complexity = 2.0  # Maximum complexity factor
 
+        # ANSI color codes for visualization
+        self.colors = {
+            'low': '\033[91m',    # Red
+            'medium': '\033[93m', # Yellow
+            'high': '\033[92m',   # Green
+            'reset': '\033[0m'
+        }
+
+    def visualize_architecture(self, model: nn.Module):
+        """Display color-coded model architecture based on complexity"""
+        print("\n" + "="*50)
+        print(f"{self.colors['high']}FINAL MODEL ARCHITECTURE{self.colors['reset']}")
+        print("="*50)
+
+        if isinstance(model, BaseAutoencoder):
+            self._visualize_autoencoder(model)
+        elif isinstance(model, FeatureExtractorCNN):
+            self._visualize_cnn(model)
+
+        print(f"\n{self.colors['medium']}Complexity Factor: {self.complexity_factor:.2f}{self.colors['reset']}")
+        print("="*50 + "\n")
+
+    def _visualize_autoencoder(self, model: BaseAutoencoder):
+        """Visualize autoencoder architecture with color coding"""
+        device = next(model.parameters()).device
+
+        # Encoder visualization
+        print(f"\n{self.colors['high']}ENCODER:{self.colors['reset']}")
+        for i, layer in enumerate(model.encoder_layers):
+            conv = layer[0]
+            color = self._get_complexity_color(conv.out_channels / conv.in_channels)
+            print(f"{color}Layer {i+1}: {conv.__class__.__name__} "
+                  f"(in={conv.in_channels}, out={conv.out_channels}, "
+                  f"k={conv.kernel_size}, s={conv.stride}){self.colors['reset']}")
+
+        # Latent space visualization
+        print(f"\n{self.colors['high']}LATENT SPACE:{self.colors['reset']}")
+        color = self._get_complexity_color(self.complexity_factor)
+        print(f"{color}Embedder: {model.embedder}{self.colors['reset']}")
+        print(f"{color}Feature Dimensions: {model.feature_dims}{self.colors['reset']}")
+
+        # Decoder visualization
+        print(f"\n{self.colors['high']}DECODER:{self.colors['reset']}")
+        for i, layer in enumerate(model.decoder_layers):
+            conv = layer[0]
+            color = self._get_complexity_color(conv.in_channels / conv.out_channels)
+            print(f"{color}Layer {i+1}: {conv.__class__.__name__} "
+                  f"(in={conv.in_channels}, out={conv.out_channels}, "
+                  f"k={conv.kernel_size}, s={conv.stride}){self.colors['reset']}")
+
+    def _visualize_cnn(self, model: FeatureExtractorCNN):
+        """Visualize CNN architecture with color coding"""
+        print(f"\n{self.colors['high']}FEATURE EXTRACTOR CNN:{self.colors['reset']}")
+        layers = [
+            model.conv1, model.conv2, model.conv3,
+            model.conv4, model.conv5, model.conv6, model.conv7
+        ]
+
+        for i, layer in enumerate(layers):
+            for m in layer.modules():
+                if isinstance(m, nn.Conv2d):
+                    ratio = m.out_channels / (m.in_channels if i > 0 else 3)
+                    color = self._get_complexity_color(ratio)
+                    print(f"{color}Layer {i+1}: {m.__class__.__name__} "
+                          f"(in={m.in_channels}, out={m.out_channels}, "
+                          f"k={m.kernel_size}, s={m.stride}){self.colors['reset']}")
+
+    def _get_complexity_color(self, ratio: float) -> str:
+        """Get color based on complexity ratio"""
+        if ratio < 0.8:
+            return self.colors['low']
+        elif ratio < 1.2:
+            return self.colors['medium']
+        return self.colors['high']
+
     def analyze_dataset(self, dataloader: DataLoader) -> Dict:
         """Analyze dataset characteristics to determine required complexity"""
         stats = {
@@ -7207,11 +7282,13 @@ class ArchitectureController:
         return self.complexity_factor
 
     def adjust_model(self, model: nn.Module) -> nn.Module:
-        """Adjust model architecture based on complexity factor"""
+        """Adjust model architecture with visualization"""
         if isinstance(model, BaseAutoencoder):
-            return self._adjust_autoencoder(model)
+            model = self._adjust_autoencoder(model)
         elif isinstance(model, FeatureExtractorCNN):
-            return self._adjust_cnn(model)
+            model = self._adjust_cnn(model)
+
+        self.visualize_architecture(model)  # Display final architecture
         return model
 
 
