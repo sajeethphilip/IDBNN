@@ -2580,6 +2580,25 @@ class ModelFactory:
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
+            # Force correct dimensions
+            if hasattr(model, 'embedder'):
+                # For autoencoder models
+                model.embedder = nn.Sequential(
+                    nn.Linear(model.flattened_size, feature_dims),
+                    nn.BatchNorm1d(feature_dims),
+                    nn.LeakyReLU(0.2)
+                ).to(device)
+                model.feature_dims = feature_dims
+            elif isinstance(model, FeatureExtractorCNN):
+                # For CNN models - add a projection layer
+                original_output = model.fc
+                model.fc = nn.Sequential(
+                    original_output,
+                    nn.Linear(original_output.out_features, feature_dims),
+                    nn.BatchNorm1d(feature_dims),
+                    nn.ReLU()
+                ).to(device)
+
         return model.to(device)
 
 
@@ -7207,11 +7226,34 @@ class ArchitectureController:
         return self.complexity_factor
 
     def adjust_model(self, model: nn.Module) -> nn.Module:
-        """Adjust model architecture based on complexity factor"""
-        if isinstance(model, BaseAutoencoder):
-            return self._adjust_autoencoder(model)
-        elif isinstance(model, FeatureExtractorCNN):
-            return self._adjust_cnn(model)
+        """Adjust model architecture based on complexity analysis"""
+        if isinstance(model, FeatureExtractorCNN):
+            # Ensure final layer outputs the correct dimension
+            if hasattr(model, 'fc'):
+                if isinstance(model.fc, nn.Sequential):
+                    # Find the actual output layer
+                    for layer in reversed(model.fc):
+                        if isinstance(layer, nn.Linear):
+                            if layer.out_features != self.feature_dims:
+                                layer = nn.Linear(layer.in_features, self.feature_dims)
+                                layer = layer.to(next(model.parameters()).device)
+                            break
+                elif model.fc.out_features != self.feature_dims:
+                    model.fc = nn.Linear(model.fc.in_features, self.feature_dims)
+                    model.fc = model.fc.to(next(model.parameters()).device)
+        elif hasattr(model, 'embedder'):
+            # For autoencoder models
+            if isinstance(model.embedder, nn.Sequential):
+                for layer in model.embedder:
+                    if isinstance(layer, nn.Linear):
+                        if layer.out_features != self.feature_dims:
+                            layer = nn.Linear(layer.in_features, self.feature_dims)
+                            layer = layer.to(next(model.parameters()).device)
+                        break
+            elif model.embedder.out_features != self.feature_dims:
+                model.embedder = nn.Linear(model.embedder.in_features, self.feature_dims)
+                model.embedder = model.embedder.to(next(model.parameters()).device)
+
         return model
 
 
