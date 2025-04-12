@@ -1,6 +1,7 @@
 #Working, fully functional with predcition 30/March/2025
 #Revisions on Mar30 2025 Stable version 8:56 AM
 # Added distance correlations to filter the output features. April 12, 3:45 am
+# Added self learning autoencoder mode April 13, 12:16 am
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -53,7 +54,6 @@ import torch.nn.functional as F
 import kornia.filters as KF
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import kornia.filters as KF
 import torch
 import torch.nn as nn
