@@ -2594,8 +2594,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         complexity = arch_controller.determine_complexity()
         config['model']['complexity_factor'] = complexity
         model = arch_controller.adjust_model(model)
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model=model.to(device)
+        model.to(config['device'] if 'device' in config else 'cpu')
 
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
