@@ -7816,6 +7816,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
 
         device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
         model=model.to(device)
+        loss_manager=loss_manager.to(device)
         # Get training confirmation
         if not get_training_confirmation(logger):
             return 0
