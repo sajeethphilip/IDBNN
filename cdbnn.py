@@ -3566,8 +3566,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if not hasattr(self, 'clustering_temperature'):
                 temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([config['model']['autoencoder_config']
-                                               ['enhancements']['clustering_temperature']]))
+                                   torch.tensor([temp_value], dtype=torch.float32))
 
     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
