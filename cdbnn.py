@@ -2402,6 +2402,7 @@ class UnifiedCheckpoint:
         self.dataset_name = config['dataset']['name']
         self.checkpoint_path = os.path.join(self.checkpoint_dir, f"{self.dataset_name}_unified.pth")
         self.current_state = None
+        self.model_type = config['model'].get('encoder_type', 'autoenc')  # Track model type
 
         # Create checkpoint directory if it doesn't exist
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -2426,8 +2427,8 @@ class UnifiedCheckpoint:
             logger.info("Initialized new unified checkpoint")
 
     def get_state_key(self, phase: int, model: nn.Module) -> str:
-        """Generate unique key for current model state"""
-        components = [f"phase{phase}"]
+        """Generate unique key including model type"""
+        components = [f"phase{phase}", f"model_{self.model_type}"]
 
         if phase == 2:
             if model.use_kl_divergence:
@@ -2724,14 +2725,19 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
     """Training logic for each phase with enhanced checkpoint handling"""
+
     history = defaultdict(list)
     device = next(model.parameters()).device
+    # Initialize with model-specific best loss
+    best_loss = float('inf')
 
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
-    # Load best loss from checkpoint
-    best_loss = safe_get_scalar(checkpoint_manager.get_best_loss(phase, model))
+    # Get model-specific best loss if exists
+    model_specific_best = checkpoint_manager.get_best_loss(phase, model)
+    if model_specific_best is not None:
+        best_loss = model_specific_best
     patience_counter = 0
 
     try:
