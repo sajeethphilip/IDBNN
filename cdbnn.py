@@ -179,7 +179,7 @@ class ArchitectureController:
 
         # Calculate gradient magnitude
         grad_x = F.conv2d(batch, torch.tensor([[[[-1, 0, 1]]]]).float().to(batch.device))
-        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]).float().to(batch.device))
+        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]]).float().to(batch.device))
         gradient_magnitude = (grad_x**2 + grad_y**2).sqrt()
 
         return gradient_magnitude.mean().item()
