@@ -7209,6 +7209,30 @@ class ArchitectureController:
             return self._adjust_cnn(model)
         return model
 
+
+    def _create_embedder(self, model: BaseAutoencoder) -> nn.Sequential:
+        """Create new embedder layer with adjusted complexity"""
+        flattened_size = model.flattened_size
+        feature_dims = int(model.feature_dims * self.complexity_factor)
+
+        return nn.Sequential(
+            nn.Linear(flattened_size, feature_dims),
+            nn.BatchNorm1d(feature_dims),
+            nn.LeakyReLU(0.2)
+        )
+
+    def _create_unembedder(self, model: BaseAutoencoder) -> nn.Sequential:
+        """Create new unembedder layer with adjusted complexity"""
+        flattened_size = model.flattened_size
+        feature_dims = int(model.feature_dims * self.complexity_factor)
+
+        return nn.Sequential(
+            nn.Linear(feature_dims, flattened_size),
+            nn.BatchNorm1d(flattened_size),
+            nn.LeakyReLU(0.2)
+        )
+
+
     def _adjust_autoencoder(self, model: BaseAutoencoder) -> BaseAutoencoder:
         """Adjust autoencoder complexity"""
         # Scale layer sizes based on complexity
