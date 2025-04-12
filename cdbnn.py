@@ -7147,15 +7147,35 @@ class ArchitectureController:
         return stats
 
     def _estimate_texture_complexity(self, batch: torch.Tensor) -> float:
-        """Estimate texture complexity using gradient magnitude"""
+        """Estimate texture complexity using gradient magnitude.
+
+        Args:
+            batch: Input tensor of shape (B, C, H, W) or (C, H, W).
+
+        Returns:
+            float: Average gradient magnitude as a measure of texture complexity.
+        """
         if batch.dim() == 3:
-            batch = batch.unsqueeze(0)
+            batch = batch.unsqueeze(0)  # Add batch dimension if missing
 
-        # Calculate gradient magnitude
-        grad_x = F.conv2d(batch, torch.tensor([[[[-1, 0, 1]]]]).float().to(batch.device))
-        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]]).float().to(batch.device))
-        gradient_magnitude = (grad_x**2 + grad_y**2).sqrt()
+        # Define Sobel filters for gradient calculation
+        sobel_x = torch.tensor([[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]],
+                              dtype=torch.float32, device=batch.device)
+        sobel_y = torch.tensor([[[-1, -2, -1], [0, 0, 0], [1, 2, 1]]],
+                              dtype=torch.float32, device=batch.device)
 
+        # Ensure filters match input channels
+        sobel_x = sobel_x.repeat(batch.size(1), 1, 1, 1)  # Shape: (C, 1, 3, 3)
+        sobel_y = sobel_y.repeat(batch.size(1), 1, 1, 1)  # Shape: (C, 1, 3, 3)
+
+        # Calculate gradients with padding to maintain spatial dimensions
+        grad_x = F.conv2d(batch, sobel_x, padding=1, groups=batch.size(1))
+        grad_y = F.conv2d(batch, sobel_y, padding=1, groups=batch.size(1))
+
+        # Compute gradient magnitude
+        gradient_magnitude = torch.sqrt(grad_x.pow(2) + grad_y.pow(2))
+
+        # Return average gradient magnitude as a complexity measure
         return gradient_magnitude.mean().item()
 
     def determine_complexity(self) -> float:
