@@ -2538,6 +2538,8 @@ class ModelFactory:
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
         """Create model with proper channel handling."""
+        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
@@ -2577,9 +2579,8 @@ class ModelFactory:
         if hasattr(model, 'in_channels'):
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model=model.to(device)
-        return model
+
+        return model.to(device)
 
 
 # Update the training loop to handle the new feature dictionary format
@@ -7208,8 +7209,6 @@ class ArchitectureController:
             return self._adjust_autoencoder(model)
         elif isinstance(model, FeatureExtractorCNN):
             return self._adjust_cnn(model)
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model=model.to(device)
         return model
 
 
@@ -7251,8 +7250,7 @@ class ArchitectureController:
         model.feature_dims = int(model.feature_dims * self.complexity_factor)
         model.embedder = self._create_embedder(model)
         model.unembedder = self._create_unembedder(model)
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model=model.to(device)
+
         return model
 
     def _adjust_cnn(self, model: FeatureExtractorCNN) -> FeatureExtractorCNN:
@@ -7271,8 +7269,7 @@ class ArchitectureController:
                 elif isinstance(m, nn.Linear):
                     m.out_features = int(m.out_features * self.complexity_factor)
                     m.in_features = int(m.in_features * self.complexity_factor)
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model=model.to(device)
+
         return model
 
 #---------------Architecture Controller Ends ------------------------
@@ -7818,7 +7815,6 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
 
         # Initialize model and loss manager
         model, loss_manager = initialize_model_components(config, logger)
-
 
         # Get training confirmation
         if not get_training_confirmation(logger):
