@@ -1353,7 +1353,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
+            if current_size < 28:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
@@ -5861,7 +5861,7 @@ class CustomImageDataset(Dataset):
         os.makedirs(self.preprocessed_dir, exist_ok=True)
 
         # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {self.target_size}x{self.target_size}")):
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images")):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
@@ -6119,7 +6119,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+        feature_dims = min(28, np.prod(input_size) // 4)
 
         return {
             "dataset": {
