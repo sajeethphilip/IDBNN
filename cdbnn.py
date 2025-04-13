@@ -1704,7 +1704,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature.to(embeddings.device)
+            temperature = self.clustering_temperature.to(embeddings.device) if hasattr(self, 'clustering_temperature') else torch.tensor(1.0, device=embeddings.device)
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -3683,9 +3683,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if not hasattr(self, 'clustering_temperature'):
                 temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([config['model']['autoencoder_config']
-                                               ['enhancements']['clustering_temperature']]))
-
+                                   torch.tensor([temp_value], dtype=torch.float32))
     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
         self.label_encoder = label_encoder
