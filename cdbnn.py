@@ -1710,7 +1710,7 @@ class BaseAutoencoder(nn.Module):
             distances = torch.cdist(embeddings, cluster_centers)
 
             # Convert distances to probabilities (soft assignments)
-            q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
+            q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
             if labels is not None:
