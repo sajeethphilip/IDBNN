@@ -4979,7 +4979,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """CNN-based feature extractor model with dynamic depth based on input size"""
+    """CNN-based feature extractor model with dynamic architecture based on input size"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
@@ -5009,10 +5009,10 @@ class FeatureExtractorCNN(nn.Module):
 
         # Layer configurations: (out_channels, use_attention)
         layer_configs = [
-            (128, True),   # Layer 3
+            (128, True),   # Layer 3 with attention
             (256, False),  # Layer 4
             (512, False),  # Layer 5
-            (512, True),   # Layer 6
+            (512, True),   # Layer 6 with attention
             (512, False)   # Layer 7
         ]
 
@@ -5040,6 +5040,7 @@ class FeatureExtractorCNN(nn.Module):
 
         # Will be set during first forward pass
         self.num_used_layers = None
+        self.current_fc = None  # Will hold potentially modified FC layer
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
@@ -5049,19 +5050,33 @@ class FeatureExtractorCNN(nn.Module):
         x = self.conv1(x)
         x = self.conv2(x)
 
-        # Determine how many dynamic layers to use (only on first forward)
+        # Determine how many dynamic layers to use (only on first forward pass)
         if self.num_used_layers is None:
             spatial_dim = x.size(-1)
             self.num_used_layers = 0
 
-            for _ in range(len(self.dynamic_layers)):
-                spatial_dim = spatial_dim // 2  # Account for pooling
-                if spatial_dim >= self.min_spatial_dim:
+            # Simulate forward pass to determine how many layers we can use
+            temp_spatial = spatial_dim
+            for _ in self.dynamic_layers:
+                temp_spatial = temp_spatial // 2  # Account for pooling
+                if temp_spatial >= self.min_spatial_dim:
                     self.num_used_layers += 1
                 else:
                     break
 
-            logger.info(f"Using {self.num_used_layers} dynamic layers for input size {x.size()}")
+            # Adjust final FC layer if needed
+            if self.num_used_layers < len(self.dynamic_layers):
+                # Get the output channels from the last used dynamic layer
+                last_used_out_channels = self.dynamic_layers[self.num_used_layers-1][0].out_channels
+                if last_used_out_channels != self.fc.in_features:
+                    # Create a new FC layer with correct dimensions
+                    self.current_fc = nn.Linear(last_used_out_channels, self.feature_dims).to(x.device)
+                else:
+                    self.current_fc = self.fc
+            else:
+                self.current_fc = self.fc
+
+            logger.info(f"Using {self.num_used_layers+2} total layers (2 fixed + {self.num_used_layers} dynamic) for input size {x.size()}")
 
         # Apply dynamic layers
         for i in range(self.num_used_layers):
@@ -5071,20 +5086,7 @@ class FeatureExtractorCNN(nn.Module):
         # Global pooling and FC layer
         x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)
-
-        # Adjust FC layer if using fewer layers
-        if self.num_used_layers < len(self.dynamic_layers):
-            in_features = self.dynamic_layers[self.num_used_layers-1][0].out_channels
-            if in_features != self.fc.in_features:
-                # Create temporary FC layer with correct dimensions
-                fc = nn.Linear(in_features, self.feature_dims).to(x.device)
-                x = fc(x)
-                # Replace the FC layer for future passes
-                self.fc = fc
-            else:
-                x = self.fc(x)
-        else:
-            x = self.fc(x)
+        x = self.current_fc(x)
 
         if x.size(0) > 1:  # Only apply batch norm if batch size > 1
             x = self.batch_norm(x)
