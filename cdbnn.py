@@ -4,7 +4,8 @@
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
-
+import cv2
+import skimage
 import torch
 import copy
 import sys
