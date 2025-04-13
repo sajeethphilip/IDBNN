@@ -6179,7 +6179,7 @@ class CustomImageDataset(Dataset):
         self.data_dir = data_dir
         self.transform = transform
         #self.target_size = target_size  # Store target_size as an instance variable
-
+        self.target_size = tuple(config['dataset']['input_size'])
         self.overlap = overlap
         self.image_files = []
         self.labels = []
@@ -6191,7 +6191,7 @@ class CustomImageDataset(Dataset):
 
         # Load config
         self.config = config if config is not None else {}
-        self.target_size = list(self.config.get(['dataset']).get(['input_size']))[0]
+        #self.target_size = tuple( self.config.get(['dataset']).get(['input_size']))
         self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
