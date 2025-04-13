@@ -440,6 +440,19 @@ class ArchitectureGenerator:
             nn.MaxPool2d(2),
             nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
         )
+    def _calculate_depth(self, metrics: Dict) -> int:
+        """Calculate network depth based on complexity metrics"""
+        # Combine complexity scores (values between 0-1)
+        complexity = (
+            metrics.get('texture', {}).get('texture_complexity', 0.5) +
+            metrics.get('color', {}).get('color_variation', 0.5) +
+            metrics.get('shape', {}).get('shape_variability', 0.5)
+        ) / 3  # Average
+
+        # Map complexity to depth (4-8 layers)
+        min_depth = 4
+        max_depth = 8
+        return min_depth + int(complexity * (max_depth - min_depth))
 
 class TextModelVisualizer:
     """Generates plain text model architecture diagrams"""
@@ -6178,7 +6191,13 @@ class CustomImageDataset(Dataset):
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        self.target_size = target_size  # Store target_size as an instance variable
+        input_size = config['dataset']['input_size']
+        if isinstance(input_size, int):
+            self.target_size = (input_size, input_size)
+        elif isinstance(input_size, (list, tuple)):
+            self.target_size = tuple(input_size)
+        else:
+            raise ValueError("input_size must be int or tuple/list")
 
         self.overlap = overlap
         self.image_files = []
