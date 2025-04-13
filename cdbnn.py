@@ -1207,9 +1207,19 @@ class BaseAutoencoder(nn.Module):
         self.input_shape = input_shape
         self.in_channels = input_shape[0]
         self.feature_dims = feature_dims
-        self.config = config
         self.train_dataset = None
-        self.target_size = tuple(config['dataset']['input_size'])
+        #self.target_size = tuple(config['dataset']['input_size'])
+        self.config = config if config is not None else {}
+        input_cfg = self.config.get('dataset', {})
+        size = input_cfg.get('input_size', 256)
+
+        if isinstance(size, int):
+            self.target_size = size
+        elif isinstance(size, (list, tuple)):
+            self.target_size = size[0]  # Use first dimension
+        else:
+            self.target_size = 256  # Final fallback
+
         # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
