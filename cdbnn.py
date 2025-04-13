@@ -4980,11 +4980,15 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
 
 class FeatureExtractorCNN(nn.Module):
     """CNN-based feature extractor model with dynamic architecture based on input size"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
+    def __init__(self, in_channels: int = None, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
         self.feature_dims = feature_dims
         self.min_spatial_dim = 4  # Minimum spatial dimension before stopping layer addition
+        # Validate in_channels
+        if in_channels not in [1, 3]:
+            logger.warning(f"Unusual number of input channels: {in_channels}. Defaulting to 1 if <=1, 3 otherwise")
+            in_channels = 1 if in_channels <= 1 else 3
 
         # Base layers that will always be used
         self.conv1 = nn.Sequential(
