@@ -1699,30 +1699,38 @@ class BaseAutoencoder(nn.Module):
 
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Organize latent space using KL divergence with consistent behavior for prediction"""
-        output = {'embeddings': embeddings}  # Keep on same device as input
+        output = {'embeddings': embeddings}
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature.to(embeddings.device) if hasattr(self, 'clustering_temperature') else torch.tensor(1.0, device=embeddings.device)
 
-            # Calculate distances to cluster centers
+            # Handle temperature - ensure it's always a tensor
+            if hasattr(self, 'clustering_temperature'):
+                if isinstance(self.clustering_temperature, torch.Tensor):
+                    temperature = self.clustering_temperature.to(embeddings.device)
+                else:
+                    # If somehow it's not a tensor, convert it
+                    temperature = torch.tensor([self.clustering_temperature],
+                                             dtype=torch.float32,
+                                             device=embeddings.device)
+                    self.clustering_temperature = temperature
+            else:
+                temperature = torch.tensor([1.0], device=embeddings.device)
+
+            # Rest of the method remains the same...
             distances = torch.cdist(embeddings, cluster_centers)
-
-            # Convert distances to probabilities (soft assignments)
             q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
             if labels is not None:
-                # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(self.cluster_centers.size(0)):
                     mask = (labels == i)
                     if mask.any():
                         p_dist[mask, i] = 1.0
             else:
-                # During prediction, use current distribution as target
-                p_dist = q_dist.detach()  # Stop gradient for target
+                p_dist = q_dist.detach()
 
             output.update({
                 'cluster_probabilities': q_dist,
@@ -3678,12 +3686,14 @@ class BaseFeatureExtractor(nn.Module, ABC):
             if not hasattr(self, 'cluster_centers'):
                 num_clusters = config['dataset'].get('num_classes', 10)
                 self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims))
+                                   torch.randn(num_clusters, self.feature_dims, device=self.device))
 
             if not hasattr(self, 'clustering_temperature'):
-                temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
+                temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
+                # Initialize as tensor on the correct device
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+                                   torch.tensor([temp_value], dtype=torch.float32, device=self.device))
+
     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
         self.label_encoder = label_encoder
@@ -3709,20 +3719,33 @@ class BaseFeatureExtractor(nn.Module, ABC):
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including label encoder"""
-        self.label_encoder = state_dict.pop('label_encoder', None)
-        self.reverse_label_encoder = state_dict.pop('reverse_label_encoder', None)
-        super().load_state_dict(state_dict, strict)
+        """Load state dict including clustering parameters"""
+        # First load the standard state dict
+        result = super().load_state_dict(state_dict, strict=False)
 
-        if cluster_centers is not None:
+        # Handle clustering parameters
+        if 'cluster_centers' in state_dict:
             if not hasattr(self, 'cluster_centers'):
-                self.cluster_centers = nn.Parameter(
-                    torch.empty_like(cluster_centers)
-                )
-            self.cluster_centers.data = cluster_centers
+                self.register_buffer('cluster_centers',
+                                   torch.empty_like(state_dict['cluster_centers']))
+            self.cluster_centers.data.copy_(state_dict['cluster_centers'])
 
-        if clustering_temp is not None:
-            self.clustering_temperature = clustering_temp.item()
+        if 'clustering_temperature' in state_dict:
+            temp = state_dict['clustering_temperature']
+            if isinstance(temp, torch.Tensor):
+                if not hasattr(self, 'clustering_temperature'):
+                    self.register_buffer('clustering_temperature',
+                                       torch.empty_like(temp))
+                self.clustering_temperature.data.copy_(temp)
+            else:
+                # Handle case where temperature was saved as float
+                if not hasattr(self, 'clustering_temperature'):
+                    self.register_buffer('clustering_temperature',
+                                       torch.tensor([temp], dtype=torch.float32))
+                else:
+                    self.clustering_temperature.fill_(temp)
+
+        return result
 
     def save_checkpoint(self, path: str, is_best: bool = False):
         """Save model checkpoint."""
