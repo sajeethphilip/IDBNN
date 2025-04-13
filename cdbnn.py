@@ -249,7 +249,7 @@ class PredictionManager:
             raise ValueError(f"Invalid input path: {input_path}")
 
     def _load_model(self) -> nn.Module:
-        """Load the trained model with all clustering parameters"""
+        """Load the trained model with all clustering and classification parameters"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
@@ -257,6 +257,7 @@ class PredictionManager:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
+        # Load checkpoint with device handling
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
         except RuntimeError as e:
@@ -266,44 +267,104 @@ class PredictionManager:
             else:
                 raise e
 
-        # Modified verification to be more flexible
+        # Determine which state to load
+        state_key = self._determine_state_key(model, checkpoint)
+        if state_key not in checkpoint['model_states']:
+            available_states = list(checkpoint['model_states'].keys())
+            raise ValueError(
+                f"Required state '{state_key}' not found in checkpoint. "
+                f"Available states: {available_states}"
+            )
+
+        state_container = checkpoint['model_states'][state_key]
+        state_dict = state_container.get('best') or state_container.get('current')
+        if state_dict is None:
+            raise ValueError(f"No valid state found in container '{state_key}'")
+
+        # Load model weights
+        model.load_state_dict(state_dict['state_dict'], strict=False)
+
+        # Handle KL divergence parameters
         if model.use_kl_divergence:
-            state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+            self._load_clustering_params(model, state_dict, state_key)
 
-            # Handle missing clustering_params gracefully
-            config = checkpoint['model_states']['phase2_kld']['best'].get('config', {})
-            clustering_params = config.get('clustering_params', {})
+        # Handle class embedding parameters
+        if model.use_class_encoding:
+            self._load_classification_params(model, state_dict)
 
-            # Check for temperature in different possible locations
-            # Initialize temperature - check multiple possible locations
-            if 'clustering_temperature' in state_dict:
-                model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
-            elif 'temperature' in clustering_params:  # Backward compatibility
-                model.clustering_temperature = torch.tensor(
-                    [clustering_params['temperature']],
-                    device=self.device
-                )
-            else:
-                model.clustering_temperature = torch.tensor([1.0], device=self.device)
-                logger.warning("Using default clustering temperature 1.0")
-
-
-        # Load the state dict (strict=False to allow missing keys)
-        model.load_state_dict(state_dict, strict=False)
-
-        # Verify clustering parameters were loaded correctly
-        if model.use_kl_divergence:
-            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
-                raise RuntimeError("Cluster centers failed to load")
-            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
-                raise RuntimeError("Clustering temperature failed to load")
-
-        # Force phase 2 for prediction to use clustering
-        model.set_training_phase(2)
+        # Set appropriate training phase
+        model.set_training_phase(2 if (model.use_kl_divergence or model.use_class_encoding) else 1)
         model.eval()
 
-        logger.info("Model loaded successfully with clustering parameters.")
+        logger.info(f"Model loaded successfully from state '{state_key}'")
         return model
+
+    def _determine_state_key(self, model: nn.Module, checkpoint: dict) -> str:
+        """Determine which state key to use based on model configuration"""
+        components = ["phase2"]  # Default to phase2 for prediction
+
+        if model.use_kl_divergence:
+            components.append("kld")
+        if model.use_class_encoding:
+            components.append("cls")
+
+        primary_key = "_".join(components)
+
+        # Fallback logic if primary key doesn't exist
+        if primary_key not in checkpoint['model_states']:
+            if model.use_kl_divergence:
+                # Try without class encoding
+                fallback_key = "phase2_kld"
+                if fallback_key in checkpoint['model_states']:
+                    logger.warning(f"Using fallback state '{fallback_key}'")
+                    return fallback_key
+
+            # Ultimate fallback to phase1
+            if "phase1" in checkpoint['model_states']:
+                logger.warning("Falling back to phase1 state")
+                return "phase1"
+
+        return primary_key
+
+    def _load_clustering_params(self, model: nn.Module, state_dict: dict, state_key: str):
+        """Load clustering-specific parameters"""
+        # Cluster centers
+        if 'cluster_centers' in state_dict:
+            model.cluster_centers = state_dict['cluster_centers'].to(self.device)
+        else:
+            # Initialize with correct dimensions if missing
+            num_clusters = self.config['dataset'].get('num_classes', 10)
+            model.cluster_centers = torch.randn(
+                num_clusters, model.feature_dims, device=self.device
+            )
+            logger.warning(f"Cluster centers not found in state '{state_key}', initialized randomly")
+
+        # Temperature
+        if 'clustering_temperature' in state_dict:
+            model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
+        else:
+            model.clustering_temperature = torch.tensor(
+                [self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']],
+                device=self.device
+            )
+            logger.warning("Using default clustering temperature from config")
+
+    def _load_classification_params(self, model: nn.Module, state_dict: dict):
+        """Verify classifier parameters were loaded"""
+        if not hasattr(model, 'classifier'):
+            raise RuntimeError("Class encoding enabled but no classifier in model")
+
+        # Check if classifier weights were loaded
+        classifier_params = [name for name in state_dict['state_dict'] if 'classifier' in name]
+        if not classifier_params:
+            logger.warning("Classifier parameters not found in checkpoint")
+
+        # Initialize label encoders if available
+        if 'label_encoder' in state_dict:
+            model.label_encoder = state_dict['label_encoder']
+            model.reverse_label_encoder = {
+                v: k for k, v in model.label_encoder.items()
+            }
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
@@ -2427,20 +2488,24 @@ class UnifiedCheckpoint:
             logger.info("Initialized new unified checkpoint")
 
     def get_state_key(self, phase: int, model: nn.Module) -> str:
-        """Generate unique key including model type"""
-        components = [f"phase{phase}", f"model_{self.model_type}"]
+        """Generate state key with fallback logic"""
+        components = [f"phase{phase}"]
 
+        # Only add modifiers for phase 2
         if phase == 2:
             if model.use_kl_divergence:
                 components.append("kld")
             if model.use_class_encoding:
                 components.append("cls")
 
-            image_type = self.config['dataset'].get('image_type', 'general')
-            if image_type != 'general':
-                components.append(image_type)
+        key = "_".join(components)
 
-        return "_".join(components)
+        # Fallback to phase1 if phase2 doesn't exist
+        if phase == 2 and key not in self.current_state['model_states']:
+            logger.warning(f"State {key} not found, attempting phase1 fallback")
+            return "phase1"
+
+        return key
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                          phase: int, epoch: int, loss: float, is_best: bool = False):
