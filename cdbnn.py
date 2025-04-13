@@ -413,26 +413,64 @@ class InputAnalyzer:
 class ArchitectureGenerator:
     """Generates adaptive architectures"""
 
+    def _calculate_depth(self, metrics: Dict) -> int:
+        """Calculate network depth based on complexity metrics"""
+        # Safely get metrics with defaults
+        texture_complexity = metrics.get('texture', {}).get('texture_complexity', 0.5)
+        color_variation = metrics.get('color', {}).get('color_variation', 0.5)
+        shape_variability = metrics.get('shape', {}).get('shape_variability', 0.5)
+
+        # Calculate average complexity (values between 0-1)
+        complexity = (texture_complexity + color_variation + shape_variability) / 3
+
+        # Map complexity to depth (4-8 layers)
+        min_depth = 4
+        max_depth = 8
+        return min(max_depth, max(min_depth, min_depth + int(complexity * (max_depth - min_depth))))
+
+    def _calculate_channels(self, in_channels: int, layer_idx: int, total_layers: int) -> int:
+        """Calculate output channels for a layer"""
+        # Start with base channels and increase then decrease
+        base_channels = 32
+        if layer_idx < total_layers // 2:
+            return in_channels * 2
+        return max(in_channels // 2, base_channels)
+
     def generate_encoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
+        """Generate encoder layers based on input analysis"""
+        if metrics is None:
+            metrics = {}  # Ensure metrics is never None
+
         layers = nn.ModuleList()
         in_channels = input_shape[0]
-
-        # Determine depth based on complexity
         depth = self._calculate_depth(metrics)
 
         for i in range(depth):
             out_channels = self._calculate_channels(in_channels, i, depth)
             layers.append(self._create_conv_block(in_channels, out_channels, metrics))
+            in_channels = out_channels
 
-            # Add attention if shape complexity is high
-            if metrics.get('shape_variability', 0) > 0.7 and i % 2 == 1:
-                layers.append(SelfAttention(out_channels))
+        return layers
 
+    def generate_decoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
+        """Generate decoder layers based on input analysis"""
+        if metrics is None:
+            metrics = {}  # Ensure metrics is never None
+
+        layers = nn.ModuleList()
+        in_channels = input_shape[0]
+        depth = self._calculate_depth(metrics)
+
+        # Reverse order for decoder
+        for i in reversed(range(depth)):
+            out_channels = self._calculate_channels(in_channels, i, depth)
+            layers.append(self._create_deconv_block(in_channels, out_channels, metrics))
             in_channels = out_channels
 
         return layers
 
     def _create_conv_block(self, in_c, out_c, metrics):
+        """Create a convolutional block with adaptive parameters"""
         return nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_c),
@@ -440,19 +478,15 @@ class ArchitectureGenerator:
             nn.MaxPool2d(2),
             nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
         )
-    def _calculate_depth(self, metrics: Dict) -> int:
-        """Calculate network depth based on complexity metrics"""
-        # Combine complexity scores (values between 0-1)
-        complexity = (
-            metrics.get('texture', {}).get('texture_complexity', 0.5) +
-            metrics.get('color', {}).get('color_variation', 0.5) +
-            metrics.get('shape', {}).get('shape_variability', 0.5)
-        ) / 3  # Average
 
-        # Map complexity to depth (4-8 layers)
-        min_depth = 4
-        max_depth = 8
-        return min_depth + int(complexity * (max_depth - min_depth))
+    def _create_deconv_block(self, in_c, out_c, metrics):
+        """Create a deconvolutional block with adaptive parameters"""
+        return nn.Sequential(
+            nn.ConvTranspose2d(in_c, out_c, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(),
+            nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
+        )
 
 class TextModelVisualizer:
     """Generates plain text model architecture diagrams"""
