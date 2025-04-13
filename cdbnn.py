@@ -1704,7 +1704,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature
+            temperature = self.clustering_temperature.to(embeddings.device)
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -3323,6 +3323,9 @@ class ClusteringLoss(nn.Module):
         self.cluster_centers = nn.Parameter(torch.randn(num_clusters, feature_dims))
 
     def forward(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Ensure cluster centers are on same device as embeddings
+        cluster_centers = self.cluster_centers.to(embeddings.device)
+
         # Calculate distances to cluster centers
         distances = torch.cdist(embeddings, self.cluster_centers)
 
@@ -3375,6 +3378,13 @@ class EnhancedAutoEncoderLoss(nn.Module):
                 embedding: torch.Tensor,
                 classification_logits: torch.Tensor,
                 labels: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        # Ensure all tensors are on same device
+        device = input_data.device
+        reconstruction = reconstruction.to(device)
+        embedding = embedding.to(device)
+        classification_logits = classification_logits.to(device)
+
         # Reconstruction loss
         recon_loss = F.mse_loss(reconstruction, input_data)
 
