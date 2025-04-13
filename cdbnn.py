@@ -942,6 +942,8 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
         # Initialize clustering parameters
         self._initialize_clustering(config)
+        # Move model to appropriate device
+        self.to(self.device)
 
         # Ensure clustering_temperature is always a tensor
         if not hasattr(self, 'clustering_temperature'):
@@ -1319,19 +1321,16 @@ class BaseAutoencoder(nn.Module):
                 self.register_buffer('cluster_centers',
                                    torch.randn(num_clusters, self.feature_dims, device=self.device))
 
-
             # Ensure clustering_temperature is always a tensor
             temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
             if not hasattr(self, 'clustering_temperature'):
                 self.register_buffer('clustering_temperature',
                                    torch.tensor([temp_value], dtype=torch.float32, device=self.device))
-            else:
+            elif isinstance(self.clustering_temperature, float):
                 # If it exists but is a float, convert to tensor
-                if isinstance(self.clustering_temperature, float):
-                    self.register_buffer('clustering_temperature',
-                                       torch.tensor([self.clustering_temperature],
-                                                   dtype=torch.float32,
-                                                   device=self.device))
+                self.clustering_temperature = torch.tensor([self.clustering_temperature],
+                                                         dtype=torch.float32,
+                                                         device=self.device)
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
