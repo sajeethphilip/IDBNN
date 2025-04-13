@@ -310,25 +310,36 @@ class PredictionManager:
         # Handle clustering parameters with proper type conversion
         if model.use_kl_divergence:
             if 'cluster_centers' in state_dict:
-                centers = state_dict['cluster_centers'].to(self.device)
-                if isinstance(model.cluster_centers, nn.Parameter):
-                    model.cluster_centers = nn.Parameter(centers)
-                else:
-                    model.register_buffer('cluster_centers', centers)
+                centers = state_dict['cluster_centers']
+                if centers is not None:  # Handle case where centers might be None
+                    if isinstance(centers, torch.Tensor):
+                        centers = centers.to(self.device)
+                        if isinstance(model.cluster_centers, nn.Parameter):
+                            model.cluster_centers = nn.Parameter(centers)
+                        else:
+                            model.register_buffer('cluster_centers', centers)
+                    else:
+                        logger.warning("Cluster centers in checkpoint are not a tensor")
 
             if 'clustering_temperature' in state_dict:
-                model.clustering_temperature.data.copy_(
-                    state_dict['clustering_temperature'].to(self.device))
+                temp = state_dict['clustering_temperature']
+                if isinstance(temp, torch.Tensor):
+                    model.clustering_temperature = temp.to(self.device)
+                elif isinstance(temp, float):
+                    model.clustering_temperature = torch.tensor([temp], device=self.device)
+                else:
+                    logger.warning(f"Unexpected temperature type: {type(temp)}")
 
         # Handle class embedding parameters
         if model.use_class_encoding:
             self._load_classification_params(model, state_dict)
 
-        # Set appropriate training phase
-        model.set_training_phase(2 if (model.use_kl_divergence or model.use_class_encoding) else 1)
+        # Set appropriate training phase based on loaded state
+        loaded_phase = state_dict.get('phase', 1)
+        model.set_training_phase(loaded_phase)
         model.eval()
 
-        logger.info(f"Model loaded successfully from state '{state_key}'")
+        logger.info(f"Model loaded successfully from state '{state_key}' (Phase {loaded_phase})")
         return model
 
     def _determine_state_key(self, model: nn.Module, checkpoint: dict) -> str:
@@ -2548,35 +2559,30 @@ class UnifiedCheckpoint:
         return key
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
-                         phase: int, epoch: int, loss: float, is_best: bool = False):
+                        phase: int, epoch: int, loss: float, is_best: bool = False):
+        # Ensure clustering_temperature is always a tensor when saving
+        temp = model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0])
+        if isinstance(temp, float):
+            temp = torch.tensor([temp])
 
-        """Save model state including all clustering parameters"""
-        # Save cluster centers appropriately based on their type
-        cluster_state = model.cluster_centers.data if hasattr(model, 'cluster_centers') else None
-
-        state_key = self.get_state_key(phase, model)
-
-        # Prepare state dictionary with clustering parameters
         state_dict = {
             'state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'epoch': epoch,
             'phase': phase,
             'loss': loss,
-            'cluster_centers': cluster_state,
-            'clustering_temperature': model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0]),
-            'timestamp': datetime.now().isoformat(),
+            'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
+            'clustering_temperature': temp,
+            'training_phase': model.training_phase,
             'config': {
                 'kl_divergence': model.use_kl_divergence,
                 'class_encoding': model.use_class_encoding,
-                'image_type': self.config['dataset'].get('image_type', 'general'),
-                'clustering_params': {
-                    'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
-                 }
+                'image_type': self.config['dataset'].get('image_type', 'general')
             }
         }
 
-        # Update model_states in the checkpoint
+        # Initialize state container if needed
+        state_key = self.get_state_key(phase, model)
         if state_key not in self.current_state['model_states']:
             self.current_state['model_states'][state_key] = {
                 'current': None,
@@ -2584,13 +2590,17 @@ class UnifiedCheckpoint:
                 'history': []
             }
 
+        # Save state
         self.current_state['model_states'][state_key]['current'] = state_dict
         if is_best:
             self.current_state['model_states'][state_key]['best'] = state_dict
+            self.current_state['model_states'][state_key]['history'].append({
+                'epoch': epoch,
+                'loss': loss,
+                'phase': phase
+            })
 
-        # Save checkpoint
         torch.save(self.current_state, self.checkpoint_path)
-        logger.info(f"Saved state {state_key} with clustering parameters to unified checkpoint")
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
@@ -2907,142 +2917,135 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _train_phase(model: nn.Module, train_loader: DataLoader,
-                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
-                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic for each phase with enhanced checkpoint handling"""
+    def _train_phase(model: nn.Module, train_loader: DataLoader,
+                    optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                    epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+        """Training logic for each phase with enhanced checkpoint handling"""
 
-    history = defaultdict(list)
-    device = next(model.parameters()).device
-    # Initialize with model-specific best loss
-    best_loss = float('inf')
+        history = defaultdict(list)
+        device = next(model.parameters()).device
 
-    # Initialize unified checkpoint
-    checkpoint_manager = UnifiedCheckpoint(config)
+        # Initialize unified checkpoint
+        checkpoint_manager = UnifiedCheckpoint(config)
 
-    # Get model-specific best loss if exists
-    model_specific_best = checkpoint_manager.get_best_loss(phase, model)
-    if model_specific_best is not None:
-        best_loss = model_specific_best
-    patience_counter = 0
+        # Get model-specific best loss if exists
+        best_loss = checkpoint_manager.get_best_loss(phase, model) or float('inf')
+        patience_counter = 0
 
-    try:
-        for epoch in range(start_epoch, epochs):
-            model.train()
-            running_loss = 0.0
-            num_batches = len(train_loader)
+        try:
+            # Explicitly set training phase and initialize clustering if needed
+            model.set_training_phase(phase)
+            if phase == 2 and model.use_kl_divergence:
+                if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
+                    model._initialize_cluster_centers()
+                logger.info(f"Initialized cluster centers for Phase 2: {model.cluster_centers.shape}")
 
-            # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
-            for batch_idx, (data, labels) in enumerate(pbar):
-                try:
-                    data = data.to(device)
-                    labels = labels.to(device)
+            for epoch in range(start_epoch, epochs):
+                model.train()
+                running_loss = 0.0
+                num_batches = len(train_loader)
 
-                    # Zero gradients
-                    optimizer.zero_grad()
+                # Training loop
+                pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+                for batch_idx, (data, labels) in enumerate(pbar):
+                    try:
+                        data = data.to(device)
+                        labels = labels.to(device)
 
-                    # Forward pass
-                    if phase == 1:
-                        # Phase 1: Only reconstruction
-                        embeddings = model.encode(data)
-                        if isinstance(embeddings, tuple):
-                            embeddings = embeddings[0]
-                        reconstruction = model.decode(embeddings)
-                        loss = F.mse_loss(reconstruction, data)
-                    else:
-                        # Phase 2: Include clustering and classification
-                        output = model(data)
-                        if isinstance(output, dict):
-                            reconstruction = output['reconstruction']
-                            embedding = output['embedding']
+                        # Zero gradients
+                        optimizer.zero_grad()
+
+                        # Forward pass with proper phase handling
+                        if phase == 1:
+                            # Phase 1: Only reconstruction
+                            embeddings = model.encode(data)
+                            if isinstance(embeddings, tuple):
+                                embeddings = embeddings[0]
+                            reconstruction = model.decode(embeddings)
+                            loss = F.mse_loss(reconstruction, data)
                         else:
-                            embedding, reconstruction = output
+                            # Phase 2: Include clustering and classification
+                            output = model(data)
+                            reconstruction = output['reconstruction'] if isinstance(output, dict) else output[1]
+                            embedding = output['embedding'] if isinstance(output, dict) else output[0]
 
-                        # Calculate base loss
-                        loss_result = loss_manager.calculate_loss(reconstruction, data,
-                                                               config['dataset'].get('image_type', 'general'))
-                        loss = loss_result['loss']
+                            # Calculate base loss
+                            loss_result = loss_manager.calculate_loss(reconstruction, data,
+                                                                   config['dataset'].get('image_type', 'general'))
+                            loss = loss_result['loss']
 
-                        # Add KL divergence loss if enabled
-                        if model.use_kl_divergence:
-                            latent_info = model.organize_latent_space(embedding, labels)
-                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
-                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
-                                kl_loss = F.kl_div(
-                                    latent_info['cluster_probabilities'].log(),
-                                    latent_info['target_distribution'],
-                                    reduction='batchmean'
-                                )
-                                loss += kl_weight * kl_loss
+                            # Add KL divergence loss if enabled
+                            if model.use_kl_divergence:
+                                latent_info = model.organize_latent_space(embedding, labels)
+                                kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+                                if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
+                                    kl_loss = F.kl_div(
+                                        latent_info['cluster_probabilities'].log(),
+                                        latent_info['target_distribution'],
+                                        reduction='batchmean'
+                                    )
+                                    loss += kl_weight * kl_loss
 
-                        # Add classification loss if enabled
-                        if model.use_class_encoding and hasattr(model, 'classifier'):
-                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
-                            class_logits = model.classifier(embedding)
-                            class_loss = F.cross_entropy(class_logits, labels)
-                            loss += class_weight * class_loss
+                            # Add classification loss if enabled
+                            if model.use_class_encoding and hasattr(model, 'classifier'):
+                                class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+                                class_logits = model.classifier(embedding)
+                                class_loss = F.cross_entropy(class_logits, labels)
+                                loss += class_weight * class_loss
 
-                    # Backward pass and optimization
-                    loss.backward()
-                    optimizer.step()
+                        # Backward pass and optimization
+                        loss.backward()
+                        optimizer.step()
 
-                    # Get loss value safely
-                    loss_value = safe_get_scalar(loss)
-                    running_loss += loss_value
+                        # Update metrics
+                        loss_value = safe_get_scalar(loss)
+                        running_loss += loss_value
+                        current_avg_loss = running_loss / (batch_idx + 1)
+                        pbar.set_postfix({
+                            'loss': f'{current_avg_loss:.4f}',
+                            'best': f'{best_loss:.4f}'
+                        })
 
-                    # Update progress bar
-                    current_avg_loss = running_loss / (batch_idx + 1)
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
+                        # Memory cleanup
+                        del data, loss
+                        torch.cuda.empty_cache()
 
-                    # Memory cleanup
-                    del data, loss
-                    if phase == 2:
-                        del output
-                    torch.cuda.empty_cache()
+                    except Exception as e:
+                        logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                        continue
 
-                except Exception as e:
-                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
-                    logger.error(f"Error type: {type(e).__name__}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    continue
+                # Calculate epoch average loss
+                avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
+                history[f'phase{phase}_loss'].append(avg_loss)
 
-            # Calculate epoch average loss
-            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
-            history[f'phase{phase}_loss'].append(avg_loss)
+                # Checkpoint and early stopping
+                is_best = avg_loss < best_loss
+                if is_best:
+                    best_loss = avg_loss
+                    patience_counter = 0
+                    checkpoint_manager.save_model_state(
+                        model=model,
+                        optimizer=optimizer,
+                        phase=phase,
+                        epoch=epoch,
+                        loss=avg_loss,
+                        is_best=True
+                    )
+                    logger.info(f"New best model saved for phase {phase} with loss: {avg_loss:.4f}")
+                else:
+                    patience_counter += 1
 
-            # Checkpoint and early stopping
-            is_best = avg_loss < best_loss
-            if is_best:
-                best_loss = avg_loss
-                patience_counter = 0
-                checkpoint_manager.save_model_state(
-                    model=model,
-                    optimizer=optimizer,
-                    phase=phase,
-                    epoch=epoch,
-                    loss=avg_loss,
-                    is_best=True
-                )
-            else:
-                patience_counter += 1
+                if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+                    logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
+                    break
 
-            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
-                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
-                break
+                logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
-            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+        except Exception as e:
+            logger.error(f"Error in training phase {phase}: {str(e)}")
+            raise
 
-    except Exception as e:
-        logger.error(f"Error in training phase {phase}: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
-
-    return history
+        return history
 
 
 class ReconstructionManager:
