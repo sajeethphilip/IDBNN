@@ -5782,7 +5782,7 @@ class CustomImageDataset(Dataset):
 
         # Load config
         self.config = config if config is not None else {}
-         if  self.config.get('resize_images',False):
+        if  self.config.get('resize_images',False):
              size=256
         else:
             input_cfg = self.config.get('dataset', {})
