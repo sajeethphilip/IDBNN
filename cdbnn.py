@@ -2532,6 +2532,10 @@ class UnifiedCheckpoint:
             }
         }
 
+        # Add additional info if provided
+        if additional_info:
+            state_dict['additional_info'] = additional_info
+
         # Update model_states in the checkpoint
         if state_key not in self.current_state['model_states']:
             self.current_state['model_states'][state_key] = {
