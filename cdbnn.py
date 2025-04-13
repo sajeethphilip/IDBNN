@@ -1,7 +1,7 @@
 #Working, fully functional with predcition 30/March/2025
 #Revisions on Mar30 2025 Stable version 8:56 AM
 # Added distance correlations to filter the output features. April 12, 3:45 am
-# Added  ArchitectureController class to automate architecture as per data complexity April 13, 03:37 am
+# Added self learning autoencoder mode April 13, 12:16 am
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -138,29 +138,6 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
-class ClusteringMixin:
-    def _initialize_clustering(self, config: Dict):
-        """Unified clustering initialization that works for both training and prediction"""
-        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
-
-        if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
-
-            # Initialize cluster centers as Parameter if training, buffer if prediction
-            if not hasattr(self, 'cluster_centers'):
-                if self.training:
-                    self.cluster_centers = nn.Parameter(
-                        torch.randn(num_clusters, self.feature_dims))
-                else:
-                    self.register_buffer('cluster_centers',
-                                       torch.randn(num_clusters, self.feature_dims))
-
-            # Temperature is always a buffer
-            temp_value = config['model']['autoencoder_config']['enhancements'].get(
-                'clustering_temperature', 1.0)
-            if not hasattr(self, 'clustering_temperature'):
-                self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value]))
 
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
@@ -272,7 +249,7 @@ class PredictionManager:
             raise ValueError(f"Invalid input path: {input_path}")
 
     def _load_model(self) -> nn.Module:
-        """Load the trained model with all clustering and classification parameters"""
+        """Load the trained model with all clustering parameters"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
@@ -280,7 +257,6 @@ class PredictionManager:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-        # Load checkpoint with device handling
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
         except RuntimeError as e:
@@ -290,124 +266,44 @@ class PredictionManager:
             else:
                 raise e
 
-        # Determine which state to load
-        state_key = self._determine_state_key(model, checkpoint)
-        if state_key not in checkpoint['model_states']:
-            available_states = list(checkpoint['model_states'].keys())
-            raise ValueError(
-                f"Required state '{state_key}' not found in checkpoint. "
-                f"Available states: {available_states}"
-            )
-
-        state_container = checkpoint['model_states'][state_key]
-        state_dict = state_container.get('best') or state_container.get('current')
-        if state_dict is None:
-            raise ValueError(f"No valid state found in container '{state_key}'")
-
-        # Load model weights
-        model.load_state_dict(state_dict['state_dict'], strict=False)
-
-        # Handle clustering parameters with proper type conversion
+        # Modified verification to be more flexible
         if model.use_kl_divergence:
-            if 'cluster_centers' in state_dict:
-                centers = state_dict['cluster_centers']
-                if centers is not None:  # Handle case where centers might be None
-                    if isinstance(centers, torch.Tensor):
-                        centers = centers.to(self.device)
-                        if isinstance(model.cluster_centers, nn.Parameter):
-                            model.cluster_centers = nn.Parameter(centers)
-                        else:
-                            model.register_buffer('cluster_centers', centers)
-                    else:
-                        logger.warning("Cluster centers in checkpoint are not a tensor")
+            state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
 
+            # Handle missing clustering_params gracefully
+            config = checkpoint['model_states']['phase2_kld']['best'].get('config', {})
+            clustering_params = config.get('clustering_params', {})
+
+            # Check for temperature in different possible locations
+            # Initialize temperature - check multiple possible locations
             if 'clustering_temperature' in state_dict:
-                temp = state_dict['clustering_temperature']
-                if isinstance(temp, torch.Tensor):
-                    model.clustering_temperature = temp.to(self.device)
-                elif isinstance(temp, float):
-                    model.clustering_temperature = torch.tensor([temp], device=self.device)
-                else:
-                    logger.warning(f"Unexpected temperature type: {type(temp)}")
+                model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
+            elif 'temperature' in clustering_params:  # Backward compatibility
+                model.clustering_temperature = torch.tensor(
+                    [clustering_params['temperature']],
+                    device=self.device
+                )
+            else:
+                model.clustering_temperature = torch.tensor([1.0], device=self.device)
+                logger.warning("Using default clustering temperature 1.0")
 
-        # Handle class embedding parameters
-        if model.use_class_encoding:
-            self._load_classification_params(model, state_dict)
 
-        # Set appropriate training phase based on loaded state
-        loaded_phase = state_dict.get('phase', 1)
-        model.set_training_phase(loaded_phase)
+        # Load the state dict (strict=False to allow missing keys)
+        model.load_state_dict(state_dict, strict=False)
+
+        # Verify clustering parameters were loaded correctly
+        if model.use_kl_divergence:
+            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
+                raise RuntimeError("Cluster centers failed to load")
+            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
+                raise RuntimeError("Clustering temperature failed to load")
+
+        # Force phase 2 for prediction to use clustering
+        model.set_training_phase(2)
         model.eval()
 
-        logger.info(f"Model loaded successfully from state '{state_key}' (Phase {loaded_phase})")
+        logger.info("Model loaded successfully with clustering parameters.")
         return model
-
-    def _determine_state_key(self, model: nn.Module, checkpoint: dict) -> str:
-        """Determine which state key to use based on model configuration"""
-        components = ["phase2"]  # Default to phase2 for prediction
-
-        if model.use_kl_divergence:
-            components.append("kld")
-        if model.use_class_encoding:
-            components.append("cls")
-
-        primary_key = "_".join(components)
-
-        # Fallback logic if primary key doesn't exist
-        if primary_key not in checkpoint['model_states']:
-            if model.use_kl_divergence:
-                # Try without class encoding
-                fallback_key = "phase2_kld"
-                if fallback_key in checkpoint['model_states']:
-                    logger.warning(f"Using fallback state '{fallback_key}'")
-                    return fallback_key
-
-            # Ultimate fallback to phase1
-            if "phase1" in checkpoint['model_states']:
-                logger.warning("Falling back to phase1 state")
-                return "phase1"
-
-        return primary_key
-
-    def _load_clustering_params(self, model: nn.Module, state_dict: dict, state_key: str):
-        """Load clustering-specific parameters"""
-        # Cluster centers
-        if 'cluster_centers' in state_dict:
-            model.cluster_centers = state_dict['cluster_centers'].to(self.device)
-        else:
-            # Initialize with correct dimensions if missing
-            num_clusters = self.config['dataset'].get('num_classes', 10)
-            model.cluster_centers = torch.randn(
-                num_clusters, model.feature_dims, device=self.device
-            )
-            logger.warning(f"Cluster centers not found in state '{state_key}', initialized randomly")
-
-        # Temperature
-        if 'clustering_temperature' in state_dict:
-            model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
-        else:
-            model.clustering_temperature = torch.tensor(
-                [self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']],
-                device=self.device
-            )
-            logger.warning("Using default clustering temperature from config")
-
-    def _load_classification_params(self, model: nn.Module, state_dict: dict):
-        """Verify classifier parameters were loaded"""
-        if not hasattr(model, 'classifier'):
-            raise RuntimeError("Class encoding enabled but no classifier in model")
-
-        # Check if classifier weights were loaded
-        classifier_params = [name for name in state_dict['state_dict'] if 'classifier' in name]
-        if not classifier_params:
-            logger.warning("Classifier parameters not found in checkpoint")
-
-        # Initialize label encoders if available
-        if 'label_encoder' in state_dict:
-            model.label_encoder = state_dict['label_encoder']
-            model.reverse_label_encoder = {
-                v: k for k, v in model.label_encoder.items()
-            }
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
@@ -762,7 +658,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
@@ -881,7 +777,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
 
         logger.info(f"Confusion matrix saved to {cm_path}")
 
-class BaseAutoencoder(nn.Module, ClusteringMixin):
+class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
@@ -985,14 +881,6 @@ class BaseAutoencoder(nn.Module, ClusteringMixin):
         self.history = defaultdict(list)
         # Initialize clustering parameters
         self._initialize_clustering(config)
-        # Move model to appropriate device
-        self.to(self.device)
-
-        # Ensure clustering_temperature is always a tensor
-        if not hasattr(self, 'clustering_temperature'):
-            temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
-            self.register_buffer('clustering_temperature',
-                               torch.tensor([temp_value], dtype=torch.float32, device=self.device))
 
 #--------------------------Distance Correlations ----------
 
@@ -1353,7 +1241,22 @@ class BaseAutoencoder(nn.Module, ClusteringMixin):
         logger.info(f"Saved feature selection metadata to {metadata_path}")
 
 #--------------------------
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters with existence check"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
+        if self.use_kl_divergence:
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.register_buffer('cluster_centers',
+                                   torch.randn(num_clusters, self.feature_dims))
+
+            if not hasattr(self, 'clustering_temperature'):
+                # Convert to tensor and register as buffer
+                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([temp_value], dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -1440,26 +1343,20 @@ class BaseAutoencoder(nn.Module, ClusteringMixin):
             )
 
     def _calculate_layer_sizes(self) -> List[int]:
-        """Calculate progressive channel sizes for encoder/decoder with dynamic minimum size"""
+        """Calculate progressive channel sizes for encoder/decoder"""
         base_channels = 32
         sizes = []
         current_size = base_channels
 
-        # Get minimum dimension from input shape
         min_dim = min(self.input_shape[1:])
-
-        # Calculate maximum possible layers based on minimum dimension
-        max_layers = int(np.log2(min_dim)) - 2  # Leave room for at least 4x4 features
-
-        # Dynamic minimum size based on input dimensions
-        min_size = max(16, min_dim // 8)  # At least 16, but proportional to input size
+        max_layers = int(np.log2(min_dim)) - 2
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < min(256, min_size * 8):  # Cap at 256 but relate to input size
+            if current_size < 128:
                 current_size *= 2
 
-        logging.info(f"Layer sizes: {sizes} (min_size={min_size}, max_layers={max_layers})")
+        logging.info(f"Layer sizes: {sizes}")
         return sizes
 
     def _create_encoder_layers(self) -> nn.ModuleList:
@@ -1735,39 +1632,30 @@ class BaseAutoencoder(nn.Module, ClusteringMixin):
 
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Organize latent space using KL divergence with consistent behavior for prediction"""
-        output = {'embeddings': embeddings}
+        output = {'embeddings': embeddings}  # Keep on same device as input
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
+            temperature = self.clustering_temperature
 
-            # Handle temperature - ensure it's always a tensor
-            if hasattr(self, 'clustering_temperature'):
-                if isinstance(self.clustering_temperature, torch.Tensor):
-                    temperature = self.clustering_temperature.to(embeddings.device)
-                else:
-                    # If somehow it's not a tensor, convert it
-                    temperature = torch.tensor([self.clustering_temperature],
-                                             dtype=torch.float32,
-                                             device=embeddings.device)
-                    self.clustering_temperature = temperature
-            else:
-                temperature = torch.tensor([1.0], device=embeddings.device)
-                self.register_buffer('clustering_temperature', temperature)
-
-            # Rest of the method remains the same...
+            # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
-            q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
+
+            # Convert distances to probabilities (soft assignments)
+            q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
             if labels is not None:
+                # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(self.cluster_centers.size(0)):
                     mask = (labels == i)
                     if mask.any():
                         p_dist[mask, i] = 1.0
             else:
-                p_dist = q_dist.detach()
+                # During prediction, use current distribution as target
+                p_dist = q_dist.detach()  # Stop gradient for target
 
             output.update({
                 'cluster_probabilities': q_dist,
@@ -2539,32 +2427,27 @@ class UnifiedCheckpoint:
             logger.info("Initialized new unified checkpoint")
 
     def get_state_key(self, phase: int, model: nn.Module) -> str:
-        """Generate state key with fallback logic"""
-        components = [f"phase{phase}"]
+        """Generate unique key including model type"""
+        components = [f"phase{phase}", f"model_{self.model_type}"]
 
-        # Only add modifiers for phase 2
         if phase == 2:
             if model.use_kl_divergence:
                 components.append("kld")
             if model.use_class_encoding:
                 components.append("cls")
 
-        key = "_".join(components)
+            image_type = self.config['dataset'].get('image_type', 'general')
+            if image_type != 'general':
+                components.append(image_type)
 
-        # Fallback to phase1 if phase2 doesn't exist
-        if phase == 2 and key not in self.current_state['model_states']:
-            logger.warning(f"State {key} not found, attempting phase1 fallback")
-            return "phase1"
-
-        return key
+        return "_".join(components)
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
-                        phase: int, epoch: int, loss: float, is_best: bool = False):
-        # Ensure clustering_temperature is always a tensor when saving
-        temp = model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0])
-        if isinstance(temp, float):
-            temp = torch.tensor([temp])
+                         phase: int, epoch: int, loss: float, is_best: bool = False):
+        """Save model state including all clustering parameters"""
+        state_key = self.get_state_key(phase, model)
 
+        # Prepare state dictionary with clustering parameters
         state_dict = {
             'state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -2572,17 +2455,19 @@ class UnifiedCheckpoint:
             'phase': phase,
             'loss': loss,
             'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
-            'clustering_temperature': temp,
-            'training_phase': model.training_phase,
+            'clustering_temperature': model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0]),
+            'timestamp': datetime.now().isoformat(),
             'config': {
                 'kl_divergence': model.use_kl_divergence,
                 'class_encoding': model.use_class_encoding,
-                'image_type': self.config['dataset'].get('image_type', 'general')
+                'image_type': self.config['dataset'].get('image_type', 'general'),
+                'clustering_params': {
+                    'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
+                 }
             }
         }
 
-        # Initialize state container if needed
-        state_key = self.get_state_key(phase, model)
+        # Update model_states in the checkpoint
         if state_key not in self.current_state['model_states']:
             self.current_state['model_states'][state_key] = {
                 'current': None,
@@ -2590,17 +2475,13 @@ class UnifiedCheckpoint:
                 'history': []
             }
 
-        # Save state
         self.current_state['model_states'][state_key]['current'] = state_dict
         if is_best:
             self.current_state['model_states'][state_key]['best'] = state_dict
-            self.current_state['model_states'][state_key]['history'].append({
-                'epoch': epoch,
-                'loss': loss,
-                'phase': phase
-            })
 
+        # Save checkpoint
         torch.save(self.current_state, self.checkpoint_path)
+        logger.info(f"Saved state {state_key} with clustering parameters to unified checkpoint")
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
@@ -2608,48 +2489,20 @@ class UnifiedCheckpoint:
         state_key = self.get_state_key(phase, model)
 
         if state_key not in self.current_state['model_states']:
-            available_states = list(self.current_state['model_states'].keys())
-            logger.warning(f"Requested state {state_key} not found in checkpoint. Available states: {available_states}")
+            logger.info(f"No existing state found for {state_key}")
             return None
 
         # Get appropriate state
-        state_container = self.current_state['model_states'][state_key]
-        state_dict = state_container['best' if load_best else 'current']
-
+        state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
         if state_dict is None:
-            logger.warning(f"Requested {'best' if load_best else 'current'} state for {state_key} is None")
             return None
 
         # Load state
-        try:
-            # Load model state with strict=False to handle partial matches
-            model.load_state_dict(state_dict['state_dict'], strict=False)
+        model.load_state_dict(state_dict['state_dict'])
+        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
 
-            # Handle optimizer loading carefully
-            if 'optimizer_state_dict' in state_dict and optimizer is not None:
-                try:
-                    optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-                except ValueError as e:
-                    logger.warning(f"Couldn't load optimizer state: {str(e)}")
-
-            # Ensure clustering parameters are loaded
-            if phase == 2 and model.use_kl_divergence:
-                if 'cluster_centers' in state_dict:
-                    if not hasattr(model, 'cluster_centers'):
-                        model.register_buffer('cluster_centers', state_dict['cluster_centers'].to(model.device))
-                    else:
-                        model.cluster_centers.data.copy_(state_dict['cluster_centers'].to(model.device))
-
-                if 'clustering_temperature' in state_dict:
-                    if not hasattr(model, 'clustering_temperature'):
-                        model.register_buffer('clustering_temperature', state_dict['clustering_temperature'].to(model.device))
-                    else:
-                        model.clustering_temperature.data.copy_(state_dict['clustering_temperature'].to(model.device))
-
-            return state_dict
-        except Exception as e:
-            logger.error(f"Error loading state {state_key}: {str(e)}")
-            return None
+        logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
+        return state_dict
 
     def get_best_loss(self, phase: int, model: nn.Module) -> float:
         """Get best loss for current configuration"""
@@ -2685,8 +2538,6 @@ class ModelFactory:
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
         """Create model with proper channel handling."""
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
@@ -2727,26 +2578,7 @@ class ModelFactory:
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
-            # Force correct dimensions
-            if hasattr(model, 'embedder'):
-                # For autoencoder models
-                model.embedder = nn.Sequential(
-                    nn.Linear(model.flattened_size, feature_dims),
-                    nn.BatchNorm1d(feature_dims),
-                    nn.LeakyReLU(0.2)
-                ).to(device)
-                model.feature_dims = feature_dims
-            elif isinstance(model, FeatureExtractorCNN):
-                # For CNN models - add a projection layer
-                original_output = model.fc
-                model.fc = nn.Sequential(
-                    original_output,
-                    nn.Linear(original_output.out_features, feature_dims),
-                    nn.BatchNorm1d(feature_dims),
-                    nn.ReLU()
-                ).to(device)
-
-        return model.to(device)
+        return model.to(config['device'] if 'device' in config else 'cpu')
 
 
 # Update the training loop to handle the new feature dictionary format
@@ -2760,11 +2592,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         arch_controller.analyze_dataset(train_loader)
         complexity = arch_controller.determine_complexity()
         config['model']['complexity_factor'] = complexity
-        # Move model to device BEFORE adjustments
-        device = config.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        model = model.to(device)
         model = arch_controller.adjust_model(model)
-        model = model.to(device)
+        model.to(config['device'] if 'device' in config else 'cpu')
 
     # Store dataset reference in model
     model.set_dataset(train_loader.dataset)
@@ -2924,22 +2753,19 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     history = defaultdict(list)
     device = next(model.parameters()).device
+    # Initialize with model-specific best loss
+    best_loss = float('inf')
 
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
     # Get model-specific best loss if exists
-    best_loss = checkpoint_manager.get_best_loss(phase, model) or float('inf')
+    model_specific_best = checkpoint_manager.get_best_loss(phase, model)
+    if model_specific_best is not None:
+        best_loss = model_specific_best
     patience_counter = 0
 
     try:
-        # Explicitly set training phase and initialize clustering if needed
-        model.set_training_phase(phase)
-        if phase == 2 and model.use_kl_divergence:
-            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
-                model._initialize_cluster_centers()
-            logger.info(f"Initialized cluster centers for Phase 2: {model.cluster_centers.shape}")
-
         for epoch in range(start_epoch, epochs):
             model.train()
             running_loss = 0.0
@@ -2955,7 +2781,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     # Zero gradients
                     optimizer.zero_grad()
 
-                    # Forward pass with proper phase handling
+                    # Forward pass
                     if phase == 1:
                         # Phase 1: Only reconstruction
                         embeddings = model.encode(data)
@@ -2966,8 +2792,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     else:
                         # Phase 2: Include clustering and classification
                         output = model(data)
-                        reconstruction = output['reconstruction'] if isinstance(output, dict) else output[1]
-                        embedding = output['embedding'] if isinstance(output, dict) else output[0]
+                        if isinstance(output, dict):
+                            reconstruction = output['reconstruction']
+                            embedding = output['embedding']
+                        else:
+                            embedding, reconstruction = output
 
                         # Calculate base loss
                         loss_result = loss_manager.calculate_loss(reconstruction, data,
@@ -2997,9 +2826,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss.backward()
                     optimizer.step()
 
-                    # Update metrics
+                    # Get loss value safely
                     loss_value = safe_get_scalar(loss)
                     running_loss += loss_value
+
+                    # Update progress bar
                     current_avg_loss = running_loss / (batch_idx + 1)
                     pbar.set_postfix({
                         'loss': f'{current_avg_loss:.4f}',
@@ -3008,10 +2839,14 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                     # Memory cleanup
                     del data, loss
+                    if phase == 2:
+                        del output
                     torch.cuda.empty_cache()
 
                 except Exception as e:
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
 
             # Calculate epoch average loss
@@ -3031,7 +2866,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss=avg_loss,
                     is_best=True
                 )
-                logger.info(f"New best model saved for phase {phase} with loss: {avg_loss:.4f}")
             else:
                 patience_counter += 1
 
@@ -3043,6 +2877,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
     return history
@@ -3364,9 +3200,6 @@ class ClusteringLoss(nn.Module):
         self.cluster_centers = nn.Parameter(torch.randn(num_clusters, feature_dims))
 
     def forward(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Ensure cluster centers are on same device as embeddings
-        cluster_centers = self.cluster_centers.to(embeddings.device)
-
         # Calculate distances to cluster centers
         distances = torch.cdist(embeddings, self.cluster_centers)
 
@@ -3419,13 +3252,6 @@ class EnhancedAutoEncoderLoss(nn.Module):
                 embedding: torch.Tensor,
                 classification_logits: torch.Tensor,
                 labels: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        # Ensure all tensors are on same device
-        device = input_data.device
-        reconstruction = reconstruction.to(device)
-        embedding = embedding.to(device)
-        classification_logits = classification_logits.to(device)
-
         # Reconstruction loss
         recon_loss = F.mse_loss(reconstruction, input_data)
 
@@ -3658,7 +3484,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BaseFeatureExtractor(nn.Module, ClusteringMixin, ABC):
+class BaseFeatureExtractor(nn.Module, ABC):
     """Abstract base class for feature extraction models."""
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
@@ -3710,6 +3536,23 @@ class BaseFeatureExtractor(nn.Module, ClusteringMixin, ABC):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters with existence check"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+
+        if self.use_kl_divergence:
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.register_buffer('cluster_centers',
+                                   torch.randn(num_clusters, self.feature_dims))
+
+            if not hasattr(self, 'clustering_temperature'):
+                temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([config['model']['autoencoder_config']
+                                               ['enhancements']['clustering_temperature']]))
+
     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
         self.label_encoder = label_encoder
@@ -3735,37 +3578,20 @@ class BaseFeatureExtractor(nn.Module, ClusteringMixin, ABC):
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including clustering parameters"""
-        # First load the standard state dict
-        result = super().load_state_dict(state_dict, strict=False)
+        """Load state dict including label encoder"""
+        self.label_encoder = state_dict.pop('label_encoder', None)
+        self.reverse_label_encoder = state_dict.pop('reverse_label_encoder', None)
+        super().load_state_dict(state_dict, strict)
 
-        # Handle clustering parameters
-        if 'cluster_centers' in state_dict:
+        if cluster_centers is not None:
             if not hasattr(self, 'cluster_centers'):
-                self.register_buffer('cluster_centers',
-                                   torch.empty_like(state_dict['cluster_centers']))
-            self.cluster_centers.data.copy_(state_dict['cluster_centers'])
+                self.cluster_centers = nn.Parameter(
+                    torch.empty_like(cluster_centers)
+                )
+            self.cluster_centers.data = cluster_centers
 
-        if 'clustering_temperature' in state_dict:
-            temp = state_dict['clustering_temperature']
-            if isinstance(temp, torch.Tensor):
-                if not hasattr(self, 'clustering_temperature'):
-                    self.register_buffer('clustering_temperature',
-                                       torch.empty_like(temp))
-                self.clustering_temperature.data.copy_(temp)
-            else:
-                # Handle case where temperature was saved as float
-                if not hasattr(self, 'clustering_temperature'):
-                    self.register_buffer('clustering_temperature',
-                                       torch.tensor([temp], dtype=torch.float32))
-                else:
-                    if isinstance(self.clustering_temperature, torch.Tensor):
-                        self.clustering_temperature.fill_(temp)
-                    else:
-                        self.clustering_temperature = torch.tensor([temp], dtype=torch.float32)
-
-
-        return result
+        if clustering_temp is not None:
+            self.clustering_temperature = clustering_temp.item()
 
     def save_checkpoint(self, path: str, is_best: bool = False):
         """Save model checkpoint."""
@@ -5991,7 +5817,7 @@ class CustomImageDataset(Dataset):
 
         # Load config
         self.config = config if config is not None else {}
-        self.resize_images = self.config.get('resize_images', False)  # Default to False
+        self.resize_images = self.config.get('resize_images', True)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -6329,7 +6155,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": False,
+                "resize_images": True,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
@@ -7292,7 +7118,6 @@ class ArchitectureController:
 
     def __init__(self, config: Dict):
         self.config = config
-        self.feature_dims = config['model']['feature_dims']  # Store the configured feature dims
         self.complexity_factor = 1.0  # Default neutral factor
         self.dataset_stats = {}
         self.min_complexity = 0.5  # Minimum complexity factor
@@ -7322,35 +7147,15 @@ class ArchitectureController:
         return stats
 
     def _estimate_texture_complexity(self, batch: torch.Tensor) -> float:
-        """Estimate texture complexity using gradient magnitude.
-
-        Args:
-            batch: Input tensor of shape (B, C, H, W) or (C, H, W).
-
-        Returns:
-            float: Average gradient magnitude as a measure of texture complexity.
-        """
+        """Estimate texture complexity using gradient magnitude"""
         if batch.dim() == 3:
-            batch = batch.unsqueeze(0)  # Add batch dimension if missing
+            batch = batch.unsqueeze(0)
 
-        # Define Sobel filters for gradient calculation
-        sobel_x = torch.tensor([[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]],
-                              dtype=torch.float32, device=batch.device)
-        sobel_y = torch.tensor([[[-1, -2, -1], [0, 0, 0], [1, 2, 1]]],
-                              dtype=torch.float32, device=batch.device)
+        # Calculate gradient magnitude
+        grad_x = F.conv2d(batch, torch.tensor([[[[-1, 0, 1]]]]).float().to(batch.device))
+        grad_y = F.conv2d(batch, torch.tensor([[[[-1], [0], [1]]]]).float().to(batch.device))
+        gradient_magnitude = (grad_x**2 + grad_y**2).sqrt()
 
-        # Ensure filters match input channels
-        sobel_x = sobel_x.repeat(batch.size(1), 1, 1, 1)  # Shape: (C, 1, 3, 3)
-        sobel_y = sobel_y.repeat(batch.size(1), 1, 1, 1)  # Shape: (C, 1, 3, 3)
-
-        # Calculate gradients with padding to maintain spatial dimensions
-        grad_x = F.conv2d(batch, sobel_x, padding=1, groups=batch.size(1))
-        grad_y = F.conv2d(batch, sobel_y, padding=1, groups=batch.size(1))
-
-        # Compute gradient magnitude
-        gradient_magnitude = torch.sqrt(grad_x.pow(2) + grad_y.pow(2))
-
-        # Return average gradient magnitude as a complexity measure
         return gradient_magnitude.mean().item()
 
     def determine_complexity(self) -> float:
@@ -7377,59 +7182,12 @@ class ArchitectureController:
         return self.complexity_factor
 
     def adjust_model(self, model: nn.Module) -> nn.Module:
-        """Adjust model architecture based on complexity analysis"""
-        if isinstance(model, FeatureExtractorCNN):
-            # Ensure final layer outputs the correct dimension
-            if hasattr(model, 'fc'):
-                if isinstance(model.fc, nn.Sequential):
-                    # Find the actual output layer
-                    for layer in reversed(model.fc):
-                        if isinstance(layer, nn.Linear):
-                            if layer.out_features != self.feature_dims:
-                                layer = nn.Linear(layer.in_features, self.feature_dims)
-                                layer = layer.to(next(model.parameters()).device)
-                            break
-                elif model.fc.out_features != self.feature_dims:
-                    model.fc = nn.Linear(model.fc.in_features, self.feature_dims)
-                    model.fc = model.fc.to(next(model.parameters()).device)
-        elif hasattr(model, 'embedder'):
-            # For autoencoder models
-            if isinstance(model.embedder, nn.Sequential):
-                for layer in model.embedder:
-                    if isinstance(layer, nn.Linear):
-                        if layer.out_features != self.feature_dims:
-                            layer = nn.Linear(layer.in_features, self.feature_dims)
-                            layer = layer.to(next(model.parameters()).device)
-                        break
-            elif model.embedder.out_features != self.feature_dims:
-                model.embedder = nn.Linear(model.embedder.in_features, self.feature_dims)
-                model.embedder = model.embedder.to(next(model.parameters()).device)
-
+        """Adjust model architecture based on complexity factor"""
+        if isinstance(model, BaseAutoencoder):
+            return self._adjust_autoencoder(model)
+        elif isinstance(model, FeatureExtractorCNN):
+            return self._adjust_cnn(model)
         return model
-
-
-    def _create_embedder(self, model: BaseAutoencoder) -> nn.Sequential:
-        """Create new embedder layer with adjusted complexity"""
-        flattened_size = model.flattened_size
-        feature_dims = int(model.feature_dims * self.complexity_factor)
-
-        return nn.Sequential(
-            nn.Linear(flattened_size, feature_dims),
-            nn.BatchNorm1d(feature_dims),
-            nn.LeakyReLU(0.2)
-        )
-
-    def _create_unembedder(self, model: BaseAutoencoder) -> nn.Sequential:
-        """Create new unembedder layer with adjusted complexity"""
-        flattened_size = model.flattened_size
-        feature_dims = int(model.feature_dims * self.complexity_factor)
-
-        return nn.Sequential(
-            nn.Linear(feature_dims, flattened_size),
-            nn.BatchNorm1d(flattened_size),
-            nn.LeakyReLU(0.2)
-        )
-
 
     def _adjust_autoencoder(self, model: BaseAutoencoder) -> BaseAutoencoder:
         """Adjust autoencoder complexity"""
@@ -7676,7 +7434,7 @@ def configure_enhancements(config: Dict) -> Dict:
         enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() == 'n':
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
         enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
