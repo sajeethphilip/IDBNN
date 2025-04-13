@@ -266,37 +266,61 @@ class PredictionManager:
             else:
                 raise e
 
-        # Modified verification to be more flexible
-        if model.use_kl_divergence:
-            state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+        # More flexible state dict loading
+        state_dict = None
+        if 'model_states' in checkpoint:
+            # Try different possible state dict locations
+            possible_keys = [
+                'phase2_kld',  # Original expected key
+                'phase2',      # Possible alternative
+                'best',        # Some checkpoints might store directly under 'best'
+                'current'      # Or under 'current'
+            ]
 
-            # Handle missing clustering_params gracefully
-            config = checkpoint['model_states']['phase2_kld']['best'].get('config', {})
-            clustering_params = config.get('clustering_params', {})
+            for key in possible_keys:
+                if key in checkpoint['model_states']:
+                    if 'best' in checkpoint['model_states'][key]:
+                        state_dict = checkpoint['model_states'][key]['best']['state_dict']
+                        break
+                    elif 'state_dict' in checkpoint['model_states'][key]:
+                        state_dict = checkpoint['model_states'][key]['state_dict']
+                        break
 
-            # Check for temperature in different possible locations
-            # Initialize temperature - check multiple possible locations
-            if 'clustering_temperature' in state_dict:
-                model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
-            elif 'temperature' in clustering_params:  # Backward compatibility
-                model.clustering_temperature = torch.tensor(
-                    [clustering_params['temperature']],
-                    device=self.device
-                )
-            else:
-                model.clustering_temperature = torch.tensor([1.0], device=self.device)
-                logger.warning("Using default clustering temperature 1.0")
+            if state_dict is None:
+                # Fallback to first available state dict
+                for key, value in checkpoint['model_states'].items():
+                    if 'state_dict' in value:
+                        state_dict = value['state_dict']
+                        break
+        else:
+            # Direct state dict (older format)
+            state_dict = checkpoint
 
+        if state_dict is None:
+            raise ValueError("Could not find valid state dict in checkpoint")
 
         # Load the state dict (strict=False to allow missing keys)
         model.load_state_dict(state_dict, strict=False)
 
-        # Verify clustering parameters were loaded correctly
+        # Handle clustering parameters
         if model.use_kl_divergence:
-            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
-                raise RuntimeError("Cluster centers failed to load")
-            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
-                raise RuntimeError("Clustering temperature failed to load")
+            # Try to get temperature from different possible locations
+            temp_sources = [
+                state_dict.get('clustering_temperature'),
+                checkpoint.get('clustering_temperature'),
+                self.config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
+            ]
+
+            for temp in temp_sources:
+                if temp is not None:
+                    if isinstance(temp, torch.Tensor):
+                        model.clustering_temperature = temp.to(self.device)
+                    else:
+                        model.clustering_temperature = torch.tensor([temp], device=self.device)
+                    break
+            else:
+                model.clustering_temperature = torch.tensor([1.0], device=self.device)
+                logger.warning("Using default clustering temperature 1.0")
 
         # Force phase 2 for prediction to use clustering
         model.set_training_phase(2)
