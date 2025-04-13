@@ -6188,7 +6188,7 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
+                 overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
         input_size = config['dataset']['input_size']
