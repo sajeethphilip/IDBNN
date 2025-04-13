@@ -138,6 +138,31 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
+class ClusteringMixin:
+    """Mixin class for clustering functionality"""
+    def _initialize_clustering(self, config: Dict):
+        """Unified clustering initialization for all models"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
+
+        if self.use_kl_divergence:
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.cluster_centers = nn.Parameter(
+                    torch.randn(num_clusters, self.feature_dims, device=self.device))
+
+            # Ensure clustering_temperature is always a tensor
+            temp_value = config['model']['autoencoder_config']['enhancements'].get(
+                'clustering_temperature', 1.0)
+            if not hasattr(self, 'clustering_temperature'):
+                self.register_buffer('clustering_temperature',
+                    torch.tensor([temp_value], dtype=torch.float32, device=self.device))
+            elif isinstance(self.clustering_temperature, float):
+                # Convert existing float to tensor
+                self.clustering_temperature = torch.tensor(
+                    [self.clustering_temperature],
+                    dtype=torch.float32,
+                    device=self.device)
 
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
@@ -838,7 +863,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
 
         logger.info(f"Confusion matrix saved to {cm_path}")
 
-class BaseAutoencoder(nn.Module):
+class BaseAutoencoder(nn.Module, ClusteringMixin):
     """Base autoencoder class with all foundational methods"""
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
@@ -1310,27 +1335,7 @@ class BaseAutoencoder(nn.Module):
         logger.info(f"Saved feature selection metadata to {metadata_path}")
 
 #--------------------------
-    def _initialize_clustering(self, config: Dict):
-        """Initialize clustering parameters with existence check"""
-        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
-        if self.use_kl_divergence:
-            # Only initialize if not already exists
-            if not hasattr(self, 'cluster_centers'):
-                num_clusters = config['dataset'].get('num_classes', 10)
-                self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims, device=self.device))
-
-            # Ensure clustering_temperature is always a tensor
-            temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
-            if not hasattr(self, 'clustering_temperature'):
-                self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32, device=self.device))
-            elif isinstance(self.clustering_temperature, float):
-                # If it exists but is a float, convert to tensor
-                self.clustering_temperature = torch.tensor([self.clustering_temperature],
-                                                         dtype=torch.float32,
-                                                         device=self.device)
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -3639,7 +3644,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BaseFeatureExtractor(nn.Module, ABC):
+class BaseFeatureExtractor(nn.Module, ClusteringMixin, ABC):
     """Abstract base class for feature extraction models."""
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
@@ -3691,24 +3696,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
-    def _initialize_clustering(self, config: Dict):
-        """Initialize clustering parameters with existence check"""
-        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
-
-        if self.use_kl_divergence:
-            # Only initialize if not already exists
-            if not hasattr(self, 'cluster_centers'):
-                num_clusters = config['dataset'].get('num_classes', 10)
-                self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims, device=self.device))
-
-            if not hasattr(self, 'clustering_temperature'):
-                temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
-                # Initialize as tensor on the correct device
-                self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32, device=self.device))
-
-    def set_label_encoder(self, label_encoder: Dict):
+     def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
         self.label_encoder = label_encoder
         self.reverse_label_encoder = {v: k for k, v in label_encoder.items()}
