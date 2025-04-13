@@ -139,30 +139,28 @@ class Colors:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
 class ClusteringMixin:
-    """Mixin class for clustering functionality"""
     def _initialize_clustering(self, config: Dict):
-        """Unified clustering initialization for all models"""
+        """Unified clustering initialization that works for both training and prediction"""
         self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
         if self.use_kl_divergence:
-            # Only initialize if not already exists
-            if not hasattr(self, 'cluster_centers'):
-                num_clusters = config['dataset'].get('num_classes', 10)
-                self.cluster_centers = nn.Parameter(
-                    torch.randn(num_clusters, self.feature_dims, device=self.device))
+            num_clusters = config['dataset'].get('num_classes', 10)
 
-            # Ensure clustering_temperature is always a tensor
+            # Initialize cluster centers as Parameter if training, buffer if prediction
+            if not hasattr(self, 'cluster_centers'):
+                if self.training:
+                    self.cluster_centers = nn.Parameter(
+                        torch.randn(num_clusters, self.feature_dims))
+                else:
+                    self.register_buffer('cluster_centers',
+                                       torch.randn(num_clusters, self.feature_dims))
+
+            # Temperature is always a buffer
             temp_value = config['model']['autoencoder_config']['enhancements'].get(
                 'clustering_temperature', 1.0)
             if not hasattr(self, 'clustering_temperature'):
                 self.register_buffer('clustering_temperature',
-                    torch.tensor([temp_value], dtype=torch.float32, device=self.device))
-            elif isinstance(self.clustering_temperature, float):
-                # Convert existing float to tensor
-                self.clustering_temperature = torch.tensor(
-                    [self.clustering_temperature],
-                    dtype=torch.float32,
-                    device=self.device)
+                                   torch.tensor([temp_value]))
 
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
@@ -309,9 +307,18 @@ class PredictionManager:
         # Load model weights
         model.load_state_dict(state_dict['state_dict'], strict=False)
 
-        # Handle KL divergence parameters
+        # Handle clustering parameters with proper type conversion
         if model.use_kl_divergence:
-            self._load_clustering_params(model, state_dict, state_key)
+            if 'cluster_centers' in state_dict:
+                centers = state_dict['cluster_centers'].to(self.device)
+                if isinstance(model.cluster_centers, nn.Parameter):
+                    model.cluster_centers = nn.Parameter(centers)
+                else:
+                    model.register_buffer('cluster_centers', centers)
+
+            if 'clustering_temperature' in state_dict:
+                model.clustering_temperature.data.copy_(
+                    state_dict['clustering_temperature'].to(self.device))
 
         # Handle class embedding parameters
         if model.use_class_encoding:
@@ -2542,7 +2549,11 @@ class UnifiedCheckpoint:
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                          phase: int, epoch: int, loss: float, is_best: bool = False):
+
         """Save model state including all clustering parameters"""
+        # Save cluster centers appropriately based on their type
+        cluster_state = model.cluster_centers.data if hasattr(model, 'cluster_centers') else None
+
         state_key = self.get_state_key(phase, model)
 
         # Prepare state dictionary with clustering parameters
@@ -2552,7 +2563,7 @@ class UnifiedCheckpoint:
             'epoch': epoch,
             'phase': phase,
             'loss': loss,
-            'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
+            'cluster_centers': cluster_state,
             'clustering_temperature': model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0]),
             'timestamp': datetime.now().isoformat(),
             'config': {
