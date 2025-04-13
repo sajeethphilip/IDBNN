@@ -2985,13 +2985,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     phase=phase,
                     epoch=epoch,
                     loss=avg_loss,
-                    is_best=True,
-                    additional_info={
-                        'phase': phase,
-                        'use_kl_divergence': model.use_kl_divergence,
-                        'use_class_encoding': model.use_class_encoding,
-                        'image_type': config['dataset'].get('image_type', 'general')
-                    }
+                    is_best=True
                 )
             else:
                 patience_counter += 1
