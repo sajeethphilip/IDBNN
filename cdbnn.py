@@ -413,62 +413,26 @@ class InputAnalyzer:
 class ArchitectureGenerator:
     """Generates adaptive architectures"""
 
-    def _calculate_depth(self, metrics: Dict) -> int:
-        """Safe depth calculation with defaults"""
-        texture = metrics.get('texture', {}).get('texture_complexity', 0.5)
-        color = metrics.get('color', {}).get('color_variation', 0.5)
-        shape = metrics.get('shape', {}).get('shape_variability', 0.5)
-
-        complexity = (texture + color + shape) / 3
-        return min(8, max(4, int(4 + complexity * 4)))
-
-    def _calculate_channels(self, in_channels: int, layer_idx: int, total_layers: int) -> int:
-        """Calculate output channels for a layer"""
-        # Start with base channels and increase then decrease
-        base_channels = 32
-        if layer_idx < total_layers // 2:
-            return in_channels * 2
-        return max(in_channels // 2, base_channels)
-
-    def generate_encoder(self, metrics: Optional[Dict], input_shape: Tuple) -> nn.ModuleList:
-        """Generate encoder layers with safe metric handling"""
-        # Provide default metrics if None
-        safe_metrics = metrics or {
-            'texture': {'texture_complexity': 0.5},
-            'color': {'color_variation': 0.5},
-            'shape': {'shape_variability': 0.5}
-        }
-
+    def generate_encoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
         layers = nn.ModuleList()
         in_channels = input_shape[0]
-        depth = self._calculate_depth(safe_metrics)
+
+        # Determine depth based on complexity
+        depth = self._calculate_depth(metrics)
 
         for i in range(depth):
             out_channels = self._calculate_channels(in_channels, i, depth)
-            layers.append(self._create_conv_block(in_channels, out_channels, safe_metrics))
-            in_channels = out_channels
+            layers.append(self._create_conv_block(in_channels, out_channels, metrics))
 
-        return layers
+            # Add attention if shape complexity is high
+            if metrics.get('shape_variability', 0) > 0.7 and i % 2 == 1:
+                layers.append(SelfAttention(out_channels))
 
-    def generate_decoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
-        """Generate decoder layers based on input analysis"""
-        if metrics is None:
-            metrics = {}  # Ensure metrics is never None
-
-        layers = nn.ModuleList()
-        in_channels = input_shape[0]
-        depth = self._calculate_depth(metrics)
-
-        # Reverse order for decoder
-        for i in reversed(range(depth)):
-            out_channels = self._calculate_channels(in_channels, i, depth)
-            layers.append(self._create_deconv_block(in_channels, out_channels, metrics))
             in_channels = out_channels
 
         return layers
 
     def _create_conv_block(self, in_c, out_c, metrics):
-        """Create a convolutional block with adaptive parameters"""
         return nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_c),
@@ -476,15 +440,19 @@ class ArchitectureGenerator:
             nn.MaxPool2d(2),
             nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
         )
+    def _calculate_depth(self, metrics: Dict) -> int:
+        """Calculate network depth based on complexity metrics"""
+        # Combine complexity scores (values between 0-1)
+        complexity = (
+            metrics.get('texture', {}).get('texture_complexity', 0.5) +
+            metrics.get('color', {}).get('color_variation', 0.5) +
+            metrics.get('shape', {}).get('shape_variability', 0.5)
+        ) / 3  # Average
 
-    def _create_deconv_block(self, in_c, out_c, metrics):
-        """Create a deconvolutional block with adaptive parameters"""
-        return nn.Sequential(
-            nn.ConvTranspose2d(in_c, out_c, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(),
-            nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
-        )
+        # Map complexity to depth (4-8 layers)
+        min_depth = 4
+        max_depth = 8
+        return min_depth + int(complexity * (max_depth - min_depth))
 
 class TextModelVisualizer:
     """Generates plain text model architecture diagrams"""
@@ -1207,19 +1175,9 @@ class BaseAutoencoder(nn.Module):
         self.input_shape = input_shape
         self.in_channels = input_shape[0]
         self.feature_dims = feature_dims
+        self.config = config
         self.train_dataset = None
-        #self.target_size = tuple(config['dataset']['input_size'])
-        self.config = config if config is not None else {}
-        input_cfg = self.config.get('dataset', {})
-        size = input_cfg.get('input_size', 256)
-
-        if isinstance(size, int):
-            self.target_size = size
-        elif isinstance(size, (list, tuple)):
-            self.target_size = size[0]  # Use first dimension
-        else:
-            self.target_size = 256  # Final fallback
-
+        self.target_size = tuple(config['dataset']['input_size'])
         # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
@@ -2990,21 +2948,16 @@ class ModelFactory:
         )
         feature_dims = config['model']['feature_dims']
 
-        # Initialize analyzer and generator with default metrics
+        # Initialize analyzer and generator
         analyzer = InputAnalyzer()
         generator = ArchitectureGenerator()
 
-        # Get sample batch for analysis with error handling
-        try:
-            sample_loader = get_sample_loader(config)
-            complexity_profile = analyzer.analyze(sample_loader.dataset)
-        except Exception as e:
-            logger.warning(f"Could not analyze dataset complexity: {str(e)}")
-            complexity_profile = {
-                'texture': {'texture_complexity': 0.5},
-                'color': {'color_variation': 0.5, 'color_contrast': 0.5},
-                'shape': {'shape_variability': 0.5, 'edge_density': 0.5}
-            }
+        # Get sample batch for analysis
+        sample_loader = get_sample_loader(config)
+        complexity_profile = analyzer.analyze(sample_loader.dataset)
+
+        # Get model type
+        image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model
         image_type = config['dataset'].get('image_type', 'general')
@@ -3017,7 +2970,7 @@ class ModelFactory:
         else:
             base_class = BaseAutoencoder
 
-        # Generate adaptive architecture with safe metrics
+        # Generate adaptive architecture
         model = base_class(input_shape, feature_dims, config)
         model.encoder_layers = generator.generate_encoder(complexity_profile, input_shape)
         model.decoder_layers = generator.generate_decoder(complexity_profile, input_shape)
@@ -3029,6 +2982,7 @@ class ModelFactory:
                                   f"{config['dataset']['name']}_architecture.txt")
             vis_str = visualizer.visualize(model, input_shape, vis_path)
             logger.info(f"Model architecture:\n{vis_str}")
+
 
         return model
 
@@ -6234,21 +6188,10 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 overlap: float = 0.5, config: Optional[Dict] = None):
+                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        # Load config
-        self.config = config if config is not None else {}
-        input_cfg = self.config.get('dataset', {})
-        size = input_cfg.get('input_size', 256)
-
-        if isinstance(size, int):
-            self.target_size = size
-        elif isinstance(size, (list, tuple)):
-            self.target_size = size[0]  # Use first dimension
-        else:
-            self.target_size = 256  # Final fallback
-
+        self.target_size = target_size  # Store target_size as an instance variable
 
         self.overlap = overlap
         self.image_files = []
@@ -6259,7 +6202,8 @@ class CustomImageDataset(Dataset):
         self.reverse_encoder = {}
         self.preprocessed_images = []  # Store preprocessed images or paths
 
-
+        # Load config
+        self.config = config if config is not None else {}
         self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
@@ -6281,14 +6225,6 @@ class CustomImageDataset(Dataset):
                             self.filenames.append(img_name)  # Populate filenames list
 
         # Preprocess all images during initialization
-        self.transform = transforms.Compose([
-            transforms.Resize(self.target_size),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=config['dataset'].get('mean', [0.485, 0.456, 0.406]),
-                std=config['dataset'].get('std', [0.229, 0.224, 0.225])
-            )
-        ])
         self._preprocess_all_images()
 
     def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
