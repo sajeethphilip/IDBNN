@@ -3696,7 +3696,7 @@ class BaseFeatureExtractor(nn.Module, ClusteringMixin, ABC):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
-     def set_label_encoder(self, label_encoder: Dict):
+    def set_label_encoder(self, label_encoder: Dict):
         """Set label encoder dictionary (class names to indices)"""
         self.label_encoder = label_encoder
         self.reverse_label_encoder = {v: k for k, v in label_encoder.items()}
