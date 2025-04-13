@@ -943,6 +943,12 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
+        # Ensure clustering_temperature is always a tensor
+        if not hasattr(self, 'clustering_temperature'):
+            temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
+            self.register_buffer('clustering_temperature',
+                               torch.tensor([temp_value], dtype=torch.float32, device=self.device))
+
 #--------------------------Distance Correlations ----------
 
     def _select_features_using_distance_correlation(self, features, labels, config):
@@ -1311,13 +1317,21 @@ class BaseAutoencoder(nn.Module):
             if not hasattr(self, 'cluster_centers'):
                 num_clusters = config['dataset'].get('num_classes', 10)
                 self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims))
+                                   torch.randn(num_clusters, self.feature_dims, device=self.device))
 
+
+            # Ensure clustering_temperature is always a tensor
+            temp_value = config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
             if not hasattr(self, 'clustering_temperature'):
-                # Convert to tensor and register as buffer
-                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+                                   torch.tensor([temp_value], dtype=torch.float32, device=self.device))
+            else:
+                # If it exists but is a float, convert to tensor
+                if isinstance(self.clustering_temperature, float):
+                    self.register_buffer('clustering_temperature',
+                                       torch.tensor([self.clustering_temperature],
+                                                   dtype=torch.float32,
+                                                   device=self.device))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include clustering parameters"""
@@ -1717,6 +1731,7 @@ class BaseAutoencoder(nn.Module):
                     self.clustering_temperature = temperature
             else:
                 temperature = torch.tensor([1.0], device=embeddings.device)
+                self.register_buffer('clustering_temperature', temperature)
 
             # Rest of the method remains the same...
             distances = torch.cdist(embeddings, cluster_centers)
@@ -3743,7 +3758,11 @@ class BaseFeatureExtractor(nn.Module, ABC):
                     self.register_buffer('clustering_temperature',
                                        torch.tensor([temp], dtype=torch.float32))
                 else:
-                    self.clustering_temperature.fill_(temp)
+                    if isinstance(self.clustering_temperature, torch.Tensor):
+                        self.clustering_temperature.fill_(temp)
+                    else:
+                        self.clustering_temperature = torch.tensor([temp], dtype=torch.float32)
+
 
         return result
 
