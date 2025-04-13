@@ -426,7 +426,7 @@ class ArchitectureGenerator:
         # Map complexity to depth (4-8 layers)
         min_depth = 4
         max_depth = 8
-        return min(max_depth, max(min_depth, min_depth + int(complexity * (max_depth - min_depth)))
+        return min(max_depth, max(min_depth, min_depth + int(complexity * (max_depth - min_depth))))
 
     def _calculate_channels(self, in_channels: int, layer_idx: int, total_layers: int) -> int:
         """Calculate output channels for a layer"""
