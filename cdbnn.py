@@ -2489,20 +2489,48 @@ class UnifiedCheckpoint:
         state_key = self.get_state_key(phase, model)
 
         if state_key not in self.current_state['model_states']:
-            logger.info(f"No existing state found for {state_key}")
+            available_states = list(self.current_state['model_states'].keys())
+            logger.warning(f"Requested state {state_key} not found in checkpoint. Available states: {available_states}")
             return None
 
         # Get appropriate state
-        state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
+        state_container = self.current_state['model_states'][state_key]
+        state_dict = state_container['best' if load_best else 'current']
+
         if state_dict is None:
+            logger.warning(f"Requested {'best' if load_best else 'current'} state for {state_key} is None")
             return None
 
         # Load state
-        model.load_state_dict(state_dict['state_dict'])
-        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+        try:
+            # Load model state with strict=False to handle partial matches
+            model.load_state_dict(state_dict['state_dict'], strict=False)
 
-        logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
-        return state_dict
+            # Handle optimizer loading carefully
+            if 'optimizer_state_dict' in state_dict and optimizer is not None:
+                try:
+                    optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+                except ValueError as e:
+                    logger.warning(f"Couldn't load optimizer state: {str(e)}")
+
+            # Ensure clustering parameters are loaded
+            if phase == 2 and model.use_kl_divergence:
+                if 'cluster_centers' in state_dict:
+                    if not hasattr(model, 'cluster_centers'):
+                        model.register_buffer('cluster_centers', state_dict['cluster_centers'].to(model.device))
+                    else:
+                        model.cluster_centers.data.copy_(state_dict['cluster_centers'].to(model.device))
+
+                if 'clustering_temperature' in state_dict:
+                    if not hasattr(model, 'clustering_temperature'):
+                        model.register_buffer('clustering_temperature', state_dict['clustering_temperature'].to(model.device))
+                    else:
+                        model.clustering_temperature.data.copy_(state_dict['clustering_temperature'].to(model.device))
+
+            return state_dict
+        except Exception as e:
+            logger.error(f"Error loading state {state_key}: {str(e)}")
+            return None
 
     def get_best_loss(self, phase: int, model: nn.Module) -> float:
         """Get best loss for current configuration"""
@@ -2889,6 +2917,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     epoch=epoch,
                     loss=avg_loss,
                     is_best=True
+                    additional_info={
+                        'phase': phase,
+                        'use_kl_divergence': model.use_kl_divergence,
+                        'use_class_encoding': model.use_class_encoding,
+                        'image_type': config['dataset'].get('image_type', 'general')
+                    }
                 )
             else:
                 patience_counter += 1
