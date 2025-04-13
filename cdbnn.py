@@ -719,7 +719,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
+        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
