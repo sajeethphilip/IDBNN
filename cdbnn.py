@@ -139,25 +139,245 @@ class Colors:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
 #------------Arch Gen -------------------------------------
-class InputAnalyzer:
-    """Analyzes input dataset characteristics"""
+class TextureComplexity:
+    """Measures texture complexity using Gray-Level Co-occurrence Matrix (GLCM)"""
+
+    def compute(self, images: torch.Tensor) -> float:
+        """
+        Args:
+            images: Tensor of shape (N, C, H, W)
+        Returns:
+            Texture complexity score (0-1)
+        """
+        if images.dim() != 4:
+            raise ValueError("Input must be 4D tensor (N,C,H,W)")
+
+        # Convert to grayscale if needed
+        if images.size(1) == 3:
+            images = 0.2989 * images[:,0] + 0.5870 * images[:,1] + 0.1140 * images[:,2]
+        elif images.size(1) == 1:
+            images = images.squeeze(1)
+        else:
+            raise ValueError("Unsupported channel dimension")
+
+        # Normalize to 0-255
+        images = (images - images.min()) / (images.max() - images.min()) * 255
+        images = images.byte().cpu().numpy()
+
+        complexities = []
+        for img in images:
+            # Calculate GLCM
+            glcm = skimage.feature.graycomatrix(
+                img,
+                distances=[5],
+                angles=[0],
+                levels=256,
+                symmetric=True,
+                normed=True
+            )
+
+            # Calculate contrast (higher = more complex)
+            contrast = skimage.feature.graycoprops(glcm, 'contrast')[0, 0]
+            complexities.append(contrast)
+
+        # Normalize to 0-1 range
+        max_contrast = 1000  # Empirical upper bound
+        return min(np.mean(complexities) / max_contrast, 1.0)
+
+
+class TextureAnalyzer:
+    """Wrapper for texture analysis with caching"""
 
     def __init__(self):
-        self.metric_calculators = [
-            TextureComplexity(),
-            ColorDistribution(),
-            ShapeVariability()
-        ]
+        self.cache = {}
+        self.computer = TextureComplexity()
 
-    def analyze(self, dataset) -> Dict[str, float]:
-        metrics = {}
-        sample_size = min(500, len(dataset))
-        samples = torch.stack([dataset[i][0] for i in range(sample_size)])
+    def compute(self, dataset) -> Dict[str, float]:
+        """Returns {'texture_complexity': float}"""
+        # Use dataset fingerprint for caching
+        fingerprint = f"{len(dataset)}_{hash(dataset)}"
 
-        for calculator in self.metric_calculators:
-            metrics.update(calculator.compute(samples))
+        if fingerprint not in self.cache:
+            sample = self._get_representative_sample(dataset)
+            self.cache[fingerprint] = {
+                'texture_complexity': self.computer.compute(sample)
+            }
 
-        return metrics
+        return self.cache[fingerprint]
+
+    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
+        """Get balanced sample across classes"""
+        indices = torch.randperm(len(dataset))[:sample_size]
+        samples = [dataset[i][0].unsqueeze(0) for i in indices]
+        return torch.cat(samples, dim=0)
+
+class ColorDistribution:
+    """Analyzes color distribution characteristics"""
+
+    def compute(self, images: torch.Tensor) -> Dict[str, float]:
+        """
+        Returns:
+            {
+                'color_variation': float (0-1),
+                'color_contrast': float (0-1)
+            }
+        """
+        if images.dim() != 4:
+            raise ValueError("Input must be 4D tensor (N,C,H,W)")
+
+        # Convert to LAB color space for perceptual analysis
+        lab_images = self._rgb_to_lab(images)
+
+        # Calculate color variation (std of a and b channels)
+        a_std = lab_images[:,1].std().item()
+        b_std = lab_images[:,2].std().item()
+        color_variation = (a_std + b_std) / 200  # Normalized (max ~200)
+
+        # Calculate color contrast (max - min luminance)
+        l_contrast = (lab_images[:,0].max() - lab_images[:,0].min()).item() / 100
+
+        return {
+            'color_variation': min(color_variation, 1.0),
+            'color_contrast': min(l_contrast, 1.0)
+        }
+
+    def _rgb_to_lab(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
+        """Convert RGB tensor to LAB color space"""
+        rgb_np = rgb_tensor.permute(0,2,3,1).cpu().numpy() * 255
+        lab_images = []
+
+        for img in rgb_np:
+            lab = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2LAB)
+            lab_images.append(torch.from_numpy(lab).float())
+
+        lab_tensor = torch.stack(lab_images).permute(0,3,1,2)
+        lab_tensor[:,0] /= 100  # L [0,100] -> [0,1]
+        lab_tensor[:,1:] += 128 # a,b [-127,127] -> [1,255]
+        lab_tensor[:,1:] /= 255 # a,b -> [0,1]
+
+        return lab_tensor.to(rgb_tensor.device)
+
+
+class ColorDistributionAnalyzer:
+    """Wrapper for color analysis with caching"""
+
+    def __init__(self):
+        self.cache = {}
+        self.computer = ColorDistribution()
+
+    def compute(self, dataset) -> Dict[str, float]:
+        """Returns color characteristics"""
+        fingerprint = f"{len(dataset)}_{hash(dataset)}"
+
+        if fingerprint not in self.cache:
+            sample = self._get_representative_sample(dataset)
+            self.cache[fingerprint] = self.computer.compute(sample)
+
+        return self.cache[fingerprint]
+
+    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
+        """Get balanced color sample"""
+        indices = torch.randperm(len(dataset))[:sample_size]
+        samples = [dataset[i][0].unsqueeze(0) for i in indices]
+        return torch.cat(samples, dim=0)
+
+class ShapeComplexity:
+    """Measures shape complexity using edge detection and contour analysis"""
+
+    def compute(self, images: torch.Tensor) -> Dict[str, float]:
+        """
+        Returns:
+            {
+                'shape_variability': float (0-1),
+                'edge_density': float (0-1)
+            }
+        """
+        if images.dim() != 4:
+            raise ValueError("Input must be 4D tensor (N,C,H,W)")
+
+        # Convert to grayscale
+        if images.size(1) == 3:
+            images = 0.2989 * images[:,0] + 0.5870 * images[:,1] + 0.1140 * images[:,2]
+        images = images.unsqueeze(1)  # Add channel dim
+
+        edge_densities = []
+        contour_counts = []
+
+        for img in images:
+            # Normalize and convert to numpy
+            img_np = ((img - img.min()) / (img.max() - img.min()) * 255).byte()[0].cpu().numpy()
+
+            # Edge detection
+            edges = cv2.Canny(img_np, 50, 150)
+            edge_density = edges.mean() / 255
+
+            # Contour detection
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            edge_densities.append(edge_density)
+            contour_counts.append(len(contours))
+
+        # Normalize metrics
+        max_contours = 50  # Empirical max
+        return {
+            'shape_variability': min(np.mean(contour_counts) / max_contours, 1.0),
+            'edge_density': min(np.mean(edge_densities), 1.0)
+        }
+
+
+class ShapeComplexityAnalyzer:
+    """Wrapper for shape analysis with caching"""
+
+    def __init__(self):
+        self.cache = {}
+        self.computer = ShapeComplexity()
+
+    def compute(self, dataset) -> Dict[str, float]:
+        """Returns shape characteristics"""
+        fingerprint = f"{len(dataset)}_{hash(dataset)}"
+
+        if fingerprint not in self.cache:
+            sample = self._get_representative_sample(dataset)
+            self.cache[fingerprint] = self.computer.compute(sample)
+
+        return self.cache[fingerprint]
+
+    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
+        """Get balanced sample for shape analysis"""
+        indices = torch.randperm(len(dataset))[:sample_size]
+        samples = [dataset[i][0].unsqueeze(0) for i in indices]
+        return torch.cat(samples, dim=0)
+
+
+class InputAnalyzer:
+    """Orchestrates all input analysis components"""
+
+    def __init__(self):
+        self.analyzers = {
+            'texture': TextureAnalyzer(),
+            'color': ColorDistributionAnalyzer(),
+            'shape': ShapeComplexityAnalyzer()
+        }
+
+    def analyze(self, dataset) -> Dict[str, Dict[str, float]]:
+        """
+        Returns comprehensive analysis:
+        {
+            'texture': {'texture_complexity': float},
+            'color': {'color_variation': float, 'color_contrast': float},
+            'shape': {'shape_variability': float, 'edge_density': float}
+        }
+        """
+        analysis = {}
+
+        for name, analyzer in self.analyzers.items():
+            try:
+                analysis[name] = analyzer.compute(dataset)
+            except Exception as e:
+                logger.error(f"Error in {name} analysis: {str(e)}")
+                analysis[name] = {}
+
+        return analysis
 
 class ArchitectureGenerator:
     """Generates adaptive architectures"""
