@@ -6227,8 +6227,8 @@ class CustomImageDataset(Dataset):
                  overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        input_cfg = config.get('dataset', {})
-        size = input_cfg.get('input_size', 256)
+        size= config['dataset']['input_size' ]
+
 
         if isinstance(size, int):
             self.target_size = size
