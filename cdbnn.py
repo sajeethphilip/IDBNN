@@ -414,19 +414,13 @@ class ArchitectureGenerator:
     """Generates adaptive architectures"""
 
     def _calculate_depth(self, metrics: Dict) -> int:
-        """Calculate network depth based on complexity metrics"""
-        # Safely get metrics with defaults
-        texture_complexity = metrics.get('texture', {}).get('texture_complexity', 0.5)
-        color_variation = metrics.get('color', {}).get('color_variation', 0.5)
-        shape_variability = metrics.get('shape', {}).get('shape_variability', 0.5)
+        """Safe depth calculation with defaults"""
+        texture = metrics.get('texture', {}).get('texture_complexity', 0.5)
+        color = metrics.get('color', {}).get('color_variation', 0.5)
+        shape = metrics.get('shape', {}).get('shape_variability', 0.5)
 
-        # Calculate average complexity (values between 0-1)
-        complexity = (texture_complexity + color_variation + shape_variability) / 3
-
-        # Map complexity to depth (4-8 layers)
-        min_depth = 4
-        max_depth = 8
-        return min(max_depth, max(min_depth, min_depth + int(complexity * (max_depth - min_depth))))
+        complexity = (texture + color + shape) / 3
+        return min(8, max(4, int(4 + complexity * 4)))
 
     def _calculate_channels(self, in_channels: int, layer_idx: int, total_layers: int) -> int:
         """Calculate output channels for a layer"""
@@ -436,18 +430,22 @@ class ArchitectureGenerator:
             return in_channels * 2
         return max(in_channels // 2, base_channels)
 
-    def generate_encoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
-        """Generate encoder layers based on input analysis"""
-        if metrics is None:
-            metrics = {}  # Ensure metrics is never None
+    def generate_encoder(self, metrics: Optional[Dict], input_shape: Tuple) -> nn.ModuleList:
+        """Generate encoder layers with safe metric handling"""
+        # Provide default metrics if None
+        safe_metrics = metrics or {
+            'texture': {'texture_complexity': 0.5},
+            'color': {'color_variation': 0.5},
+            'shape': {'shape_variability': 0.5}
+        }
 
         layers = nn.ModuleList()
         in_channels = input_shape[0]
-        depth = self._calculate_depth(metrics)
+        depth = self._calculate_depth(safe_metrics)
 
         for i in range(depth):
             out_channels = self._calculate_channels(in_channels, i, depth)
-            layers.append(self._create_conv_block(in_channels, out_channels, metrics))
+            layers.append(self._create_conv_block(in_channels, out_channels, safe_metrics))
             in_channels = out_channels
 
         return layers
@@ -2982,16 +2980,21 @@ class ModelFactory:
         )
         feature_dims = config['model']['feature_dims']
 
-        # Initialize analyzer and generator
+        # Initialize analyzer and generator with default metrics
         analyzer = InputAnalyzer()
         generator = ArchitectureGenerator()
 
-        # Get sample batch for analysis
-        sample_loader = get_sample_loader(config)
-        complexity_profile = analyzer.analyze(sample_loader.dataset)
-
-        # Get model type
-        image_type = config['dataset'].get('image_type', 'general')
+        # Get sample batch for analysis with error handling
+        try:
+            sample_loader = get_sample_loader(config)
+            complexity_profile = analyzer.analyze(sample_loader.dataset)
+        except Exception as e:
+            logger.warning(f"Could not analyze dataset complexity: {str(e)}")
+            complexity_profile = {
+                'texture': {'texture_complexity': 0.5},
+                'color': {'color_variation': 0.5, 'color_contrast': 0.5},
+                'shape': {'shape_variability': 0.5, 'edge_density': 0.5}
+            }
 
         # Create appropriate model
         image_type = config['dataset'].get('image_type', 'general')
@@ -3004,7 +3007,7 @@ class ModelFactory:
         else:
             base_class = BaseAutoencoder
 
-        # Generate adaptive architecture
+        # Generate adaptive architecture with safe metrics
         model = base_class(input_shape, feature_dims, config)
         model.encoder_layers = generator.generate_encoder(complexity_profile, input_shape)
         model.decoder_layers = generator.generate_decoder(complexity_profile, input_shape)
@@ -3016,7 +3019,6 @@ class ModelFactory:
                                   f"{config['dataset']['name']}_architecture.txt")
             vis_str = visualizer.visualize(model, input_shape, vis_path)
             logger.info(f"Model architecture:\n{vis_str}")
-
 
         return model
 
@@ -6225,19 +6227,16 @@ class CustomImageDataset(Dataset):
                  overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        try:
-            input_size = config['dataset']['input_size']
-            if isinstance(input_size, int):
-                self.target_size = (input_size, input_size)
-            elif isinstance(input_size, (list, tuple)):
-                if len(input_size) == 1:
-                    self.target_size = (input_size[0], input_size[0])
-                else:
-                    self.target_size = tuple(input_size[:2])  # Take first two elements
-            else:
-                raise ValueError("input_size must be int or tuple/list")
-        except KeyError:
-            self.target_size = (256, 256)  # Default fallback
+        input_cfg = config.get('dataset', {})
+        size = input_cfg.get('input_size', 256)
+
+        if isinstance(size, int):
+            self.target_size = size
+        elif isinstance(size, (list, tuple)):
+            self.target_size = size[0]  # Use first dimension
+        else:
+            self.target_size = 256  # Final fallback
+
 
         self.overlap = overlap
         self.image_files = []
