@@ -5777,10 +5777,23 @@ def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFea
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
+                 overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
-        self.transform = transform
-        self.target_size = target_size  # Store target_size as an instance variable
+
+        # Load config
+        self.config = config if config is not None else {}
+         if  self.config.get('resize_images',False):
+             size=256
+        else:
+            input_cfg = self.config.get('dataset', {})
+            size = input_cfg.get('input_size', 256)
+
+        if isinstance(size, int):
+            self.target_size = size
+        elif isinstance(size, (list, tuple)):
+            self.target_size = size[0]  # Use first dimension
+        else:
+            self.target_size = 256  # Final fallback
         self.overlap = overlap
         self.image_files = []
         self.labels = []
@@ -5790,9 +5803,10 @@ class CustomImageDataset(Dataset):
         self.reverse_encoder = {}
         self.preprocessed_images = []  # Store preprocessed images or paths
 
-        # Load config
-        self.config = config if config is not None else {}
-        self.resize_images = self.config.get('resize_images', True)  # Default to False
+
+        self.resize_images = self.config.get('resize_images', False)  # Default to False
+        if self.resize_images:
+            self.target_size = 256
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -5811,7 +5825,15 @@ class CustomImageDataset(Dataset):
                             self.labels.append(self.label_encoder[class_name])
                             self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
                             self.filenames.append(img_name)  # Populate filenames list
-
+        self.transform = transforms.Compose([
+            transforms.Resize(self.target_size),
+            transforms.CenterCrop(self.target_size),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=input_cfg.get('mean', [0.485, 0.456, 0.406]),
+                std=input_cfg.get('std', [0.229, 0.224, 0.225])
+            )
+        ])
         # Preprocess all images during initialization
         self._preprocess_all_images()
 
@@ -6130,7 +6152,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": True,
+                "resize_images": False,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
