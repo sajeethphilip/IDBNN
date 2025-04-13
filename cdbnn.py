@@ -528,7 +528,7 @@ class BaseEnhancementConfig:
                 'enable_phase2': False,
                 'enhancements': {
                     'use_kl_divergence': True,
-                    'use_class_encoding': False,
+                    'use_class_encoding': True,
                     'kl_divergence_weight': 0.1,
                     'classification_weight': 0.1,
                     'clustering_temperature': 1.0,
@@ -5792,7 +5792,7 @@ class CustomImageDataset(Dataset):
 
         # Load config
         self.config = config if config is not None else {}
-        self.resize_images = self.config.get('resize_images', True)  # Default to False
+        self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -6130,7 +6130,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": True,
+                "resize_images": False,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
