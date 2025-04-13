@@ -6227,8 +6227,10 @@ class CustomImageDataset(Dataset):
                  overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        size= config['dataset']['input_size' ]
-
+        # Load config
+        self.config = config if config is not None else {}
+        input_cfg = self.config.get('dataset', {})
+        size = input_cfg.get('input_size', 256)
 
         if isinstance(size, int):
             self.target_size = size
@@ -6247,8 +6249,7 @@ class CustomImageDataset(Dataset):
         self.reverse_encoder = {}
         self.preprocessed_images = []  # Store preprocessed images or paths
 
-        # Load config
-        self.config = config if config is not None else {}
+
         self.resize_images = self.config.get('resize_images', False)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
