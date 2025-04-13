@@ -4986,6 +4986,8 @@ class FeatureExtractorCNN(nn.Module):
         self.feature_dims = feature_dims
         self.min_spatial_dim = 4  # Minimum spatial dimension before stopping layer addition
         # Validate in_channels
+        print(in_channels)
+        input("Press Ctrl-C")
         if in_channels not in [1, 3]:
             logger.warning(f"Unusual number of input channels: {in_channels}. Defaulting to 1 if <=1, 3 otherwise")
             in_channels = 1 if in_channels <= 1 else 3
