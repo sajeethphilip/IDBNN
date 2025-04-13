@@ -94,6 +94,36 @@ from scipy.spatial.distance import correlation
 from itertools import combinations
 
 logger = logging.getLogger(__name__)
+
+
+def get_sample_loader(config: Dict) -> DataLoader:
+    """Create a sample DataLoader for architecture analysis."""
+    input_size = tuple(config['dataset']['input_size'])
+    in_channels = config['dataset']['in_channels']
+
+    # Create a dummy dataset with random images
+    class DummyDataset(Dataset):
+        def __init__(self, num_samples=100):
+            self.num_samples = num_samples
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=config['dataset']['mean'],
+                    std=config['dataset']['std']
+                )
+            ])
+
+        def __len__(self):
+            return self.num_samples
+
+        def __getitem__(self, idx):
+            # Generate random image
+            img = torch.rand(in_channels, *input_size)
+            return self.transform(img), 0  # Dummy label
+
+    dataset = DummyDataset()
+    return DataLoader(dataset, batch_size=32, shuffle=True)
+
 class Colors:
     """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
@@ -1146,6 +1176,7 @@ class BaseAutoencoder(nn.Module):
 
         # Calculate layer dimensions
         self.layer_sizes = self._calculate_layer_sizes()
+
 
         # Track progressive spatial dimensions
         for _ in self.layer_sizes:
@@ -6147,7 +6178,8 @@ class CustomImageDataset(Dataset):
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        self.target_size = target_size  # Store target_size as an instance variable
+        #self.target_size = target_size  # Store target_size as an instance variable
+        self.target_size = tuple( self.config.get(['dataset']).get(['input_size']))
         self.overlap = overlap
         self.image_files = []
         self.labels = []
