@@ -4,8 +4,7 @@
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
-import cv2
-import skimage
+
 import torch
 import copy
 import sys
@@ -94,36 +93,6 @@ from scipy.spatial.distance import correlation
 from itertools import combinations
 
 logger = logging.getLogger(__name__)
-
-
-def get_sample_loader(config: Dict) -> DataLoader:
-    """Create a sample DataLoader for architecture analysis."""
-    input_size = tuple(config['dataset']['input_size'])
-    in_channels = config['dataset']['in_channels']
-
-    # Create a dummy dataset with random images
-    class DummyDataset(Dataset):
-        def __init__(self, num_samples=100):
-            self.num_samples = num_samples
-            self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=config['dataset']['mean'],
-                    std=config['dataset']['std']
-                )
-            ])
-
-        def __len__(self):
-            return self.num_samples
-
-        def __getitem__(self, idx):
-            # Generate random image
-            img = torch.rand(in_channels, *input_size)
-            return self.transform(img), 0  # Dummy label
-
-    dataset = DummyDataset()
-    return DataLoader(dataset, batch_size=32, shuffle=True)
-
 class Colors:
     """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
@@ -169,390 +138,6 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
-#------------Arch Gen -------------------------------------
-class TextureComplexity:
-    """Measures texture complexity using Gray-Level Co-occurrence Matrix (GLCM)"""
-
-    def compute(self, images: torch.Tensor) -> float:
-        """
-        Args:
-            images: Tensor of shape (N, C, H, W)
-        Returns:
-            Texture complexity score (0-1)
-        """
-        if images.dim() != 4:
-            raise ValueError("Input must be 4D tensor (N,C,H,W)")
-
-        # Convert to grayscale if needed
-        if images.size(1) == 3:
-            images = 0.2989 * images[:,0] + 0.5870 * images[:,1] + 0.1140 * images[:,2]
-        elif images.size(1) == 1:
-            images = images.squeeze(1)
-        else:
-            raise ValueError("Unsupported channel dimension")
-
-        # Normalize to 0-255
-        images = (images - images.min()) / (images.max() - images.min()) * 255
-        images = images.byte().cpu().numpy()
-
-        complexities = []
-        for img in images:
-            # Calculate GLCM
-            glcm = skimage.feature.graycomatrix(
-                img,
-                distances=[5],
-                angles=[0],
-                levels=256,
-                symmetric=True,
-                normed=True
-            )
-
-            # Calculate contrast (higher = more complex)
-            contrast = skimage.feature.graycoprops(glcm, 'contrast')[0, 0]
-            complexities.append(contrast)
-
-        # Normalize to 0-1 range
-        max_contrast = 1000  # Empirical upper bound
-        return min(np.mean(complexities) / max_contrast, 1.0)
-
-
-class TextureAnalyzer:
-    """Wrapper for texture analysis with caching"""
-
-    def __init__(self):
-        self.cache = {}
-        self.computer = TextureComplexity()
-
-    def compute(self, dataset) -> Dict[str, float]:
-        """Returns {'texture_complexity': float}"""
-        # Use dataset fingerprint for caching
-        fingerprint = f"{len(dataset)}_{hash(dataset)}"
-
-        if fingerprint not in self.cache:
-            sample = self._get_representative_sample(dataset)
-            self.cache[fingerprint] = {
-                'texture_complexity': self.computer.compute(sample)
-            }
-
-        return self.cache[fingerprint]
-
-    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
-        """Get balanced sample across classes"""
-        indices = torch.randperm(len(dataset))[:sample_size]
-        samples = [dataset[i][0].unsqueeze(0) for i in indices]
-        return torch.cat(samples, dim=0)
-
-class ColorDistribution:
-    """Analyzes color distribution characteristics"""
-
-    def compute(self, images: torch.Tensor) -> Dict[str, float]:
-        """
-        Returns:
-            {
-                'color_variation': float (0-1),
-                'color_contrast': float (0-1)
-            }
-        """
-        if images.dim() != 4:
-            raise ValueError("Input must be 4D tensor (N,C,H,W)")
-
-        # Convert to LAB color space for perceptual analysis
-        lab_images = self._rgb_to_lab(images)
-
-        # Calculate color variation (std of a and b channels)
-        a_std = lab_images[:,1].std().item()
-        b_std = lab_images[:,2].std().item()
-        color_variation = (a_std + b_std) / 200  # Normalized (max ~200)
-
-        # Calculate color contrast (max - min luminance)
-        l_contrast = (lab_images[:,0].max() - lab_images[:,0].min()).item() / 100
-
-        return {
-            'color_variation': min(color_variation, 1.0),
-            'color_contrast': min(l_contrast, 1.0)
-        }
-
-    def _rgb_to_lab(self, rgb_tensor: torch.Tensor) -> torch.Tensor:
-        """Convert RGB tensor to LAB color space"""
-        rgb_np = rgb_tensor.permute(0,2,3,1).cpu().numpy() * 255
-        lab_images = []
-
-        for img in rgb_np:
-            lab = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2LAB)
-            lab_images.append(torch.from_numpy(lab).float())
-
-        lab_tensor = torch.stack(lab_images).permute(0,3,1,2)
-        lab_tensor[:,0] /= 100  # L [0,100] -> [0,1]
-        lab_tensor[:,1:] += 128 # a,b [-127,127] -> [1,255]
-        lab_tensor[:,1:] /= 255 # a,b -> [0,1]
-
-        return lab_tensor.to(rgb_tensor.device)
-
-
-class ColorDistributionAnalyzer:
-    """Wrapper for color analysis with caching"""
-
-    def __init__(self):
-        self.cache = {}
-        self.computer = ColorDistribution()
-
-    def compute(self, dataset) -> Dict[str, float]:
-        """Returns color characteristics"""
-        fingerprint = f"{len(dataset)}_{hash(dataset)}"
-
-        if fingerprint not in self.cache:
-            sample = self._get_representative_sample(dataset)
-            self.cache[fingerprint] = self.computer.compute(sample)
-
-        return self.cache[fingerprint]
-
-    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
-        """Get balanced color sample"""
-        indices = torch.randperm(len(dataset))[:sample_size]
-        samples = [dataset[i][0].unsqueeze(0) for i in indices]
-        return torch.cat(samples, dim=0)
-
-class ShapeComplexity:
-    """Measures shape complexity using edge detection and contour analysis"""
-
-    def compute(self, images: torch.Tensor) -> Dict[str, float]:
-        """
-        Returns:
-            {
-                'shape_variability': float (0-1),
-                'edge_density': float (0-1)
-            }
-        """
-        if images.dim() != 4:
-            raise ValueError("Input must be 4D tensor (N,C,H,W)")
-
-        # Convert to grayscale
-        if images.size(1) == 3:
-            images = 0.2989 * images[:,0] + 0.5870 * images[:,1] + 0.1140 * images[:,2]
-        images = images.unsqueeze(1)  # Add channel dim
-
-        edge_densities = []
-        contour_counts = []
-
-        for img in images:
-            # Normalize and convert to numpy
-            img_np = ((img - img.min()) / (img.max() - img.min()) * 255).byte()[0].cpu().numpy()
-
-            # Edge detection
-            edges = cv2.Canny(img_np, 50, 150)
-            edge_density = edges.mean() / 255
-
-            # Contour detection
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            edge_densities.append(edge_density)
-            contour_counts.append(len(contours))
-
-        # Normalize metrics
-        max_contours = 50  # Empirical max
-        return {
-            'shape_variability': min(np.mean(contour_counts) / max_contours, 1.0),
-            'edge_density': min(np.mean(edge_densities), 1.0)
-        }
-
-
-class ShapeComplexityAnalyzer:
-    """Wrapper for shape analysis with caching"""
-
-    def __init__(self):
-        self.cache = {}
-        self.computer = ShapeComplexity()
-
-    def compute(self, dataset) -> Dict[str, float]:
-        """Returns shape characteristics"""
-        fingerprint = f"{len(dataset)}_{hash(dataset)}"
-
-        if fingerprint not in self.cache:
-            sample = self._get_representative_sample(dataset)
-            self.cache[fingerprint] = self.computer.compute(sample)
-
-        return self.cache[fingerprint]
-
-    def _get_representative_sample(self, dataset, sample_size=100) -> torch.Tensor:
-        """Get balanced sample for shape analysis"""
-        indices = torch.randperm(len(dataset))[:sample_size]
-        samples = [dataset[i][0].unsqueeze(0) for i in indices]
-        return torch.cat(samples, dim=0)
-
-
-class InputAnalyzer:
-    """Orchestrates all input analysis components"""
-
-    def __init__(self):
-        self.analyzers = {
-            'texture': TextureAnalyzer(),
-            'color': ColorDistributionAnalyzer(),
-            'shape': ShapeComplexityAnalyzer()
-        }
-
-    def analyze(self, dataset) -> Dict[str, Dict[str, float]]:
-        """
-        Returns comprehensive analysis:
-        {
-            'texture': {'texture_complexity': float},
-            'color': {'color_variation': float, 'color_contrast': float},
-            'shape': {'shape_variability': float, 'edge_density': float}
-        }
-        """
-        analysis = {}
-
-        for name, analyzer in self.analyzers.items():
-            try:
-                analysis[name] = analyzer.compute(dataset)
-            except Exception as e:
-                logger.error(f"Error in {name} analysis: {str(e)}")
-                analysis[name] = {}
-
-        return analysis
-
-class ArchitectureGenerator:
-    """Generates adaptive architectures"""
-
-    def _calculate_depth(self, metrics: Dict) -> int:
-        """Calculate network depth based on complexity metrics"""
-        # Safely get metrics with defaults
-        texture_complexity = metrics.get('texture', {}).get('texture_complexity', 0.5)
-        color_variation = metrics.get('color', {}).get('color_variation', 0.5)
-        shape_variability = metrics.get('shape', {}).get('shape_variability', 0.5)
-
-        # Calculate average complexity (values between 0-1)
-        complexity = (texture_complexity + color_variation + shape_variability) / 3
-
-        # Map complexity to depth (4-8 layers)
-        min_depth = 4
-        max_depth = 8
-        return min(max_depth, max(min_depth, min_depth + int(complexity * (max_depth - min_depth))))
-
-    def _calculate_channels(self, in_channels: int, layer_idx: int, total_layers: int) -> int:
-        """Calculate output channels for a layer"""
-        # Start with base channels and increase then decrease
-        base_channels = 32
-        if layer_idx < total_layers // 2:
-            return in_channels * 2
-        return max(in_channels // 2, base_channels)
-
-    def generate_encoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
-        """Generate encoder layers based on input analysis"""
-        if metrics is None:
-            metrics = {}  # Ensure metrics is never None
-
-        layers = nn.ModuleList()
-        in_channels = input_shape[0]
-        depth = self._calculate_depth(metrics)
-
-        for i in range(depth):
-            out_channels = self._calculate_channels(in_channels, i, depth)
-            layers.append(self._create_conv_block(in_channels, out_channels, metrics))
-            in_channels = out_channels
-
-        return layers
-
-    def generate_decoder(self, metrics: Dict, input_shape: Tuple) -> nn.ModuleList:
-        """Generate decoder layers based on input analysis"""
-        if metrics is None:
-            metrics = {}  # Ensure metrics is never None
-
-        layers = nn.ModuleList()
-        in_channels = input_shape[0]
-        depth = self._calculate_depth(metrics)
-
-        # Reverse order for decoder
-        for i in reversed(range(depth)):
-            out_channels = self._calculate_channels(in_channels, i, depth)
-            layers.append(self._create_deconv_block(in_channels, out_channels, metrics))
-            in_channels = out_channels
-
-        return layers
-
-    def _create_conv_block(self, in_c, out_c, metrics):
-        """Create a convolutional block with adaptive parameters"""
-        return nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
-        )
-
-    def _create_deconv_block(self, in_c, out_c, metrics):
-        """Create a deconvolutional block with adaptive parameters"""
-        return nn.Sequential(
-            nn.ConvTranspose2d(in_c, out_c, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(),
-            nn.Dropout(max(0.1, 0.5 - metrics.get('texture_complexity', 0)*0.4))
-        )
-
-class TextModelVisualizer:
-    """Generates plain text model architecture diagrams"""
-
-    @staticmethod
-    def visualize(model: nn.Module, input_shape: tuple, file_path: str = None) -> str:
-        """
-        Generate and optionally save plain text model architecture
-
-        Args:
-            model: PyTorch model to visualize
-            input_shape: Input tensor shape (channels, height, width)
-            file_path: Optional path to save visualization
-
-        Returns:
-            String containing the text visualization
-        """
-        # Generate model summary
-        summary_str = []
-        summary_str.append("\n" + "="*80)
-        summary_str.append(f"Model Architecture: {model.__class__.__name__}")
-        summary_str.append("="*80)
-
-        # Add input shape info
-        summary_str.append(f"\nInput Shape: {input_shape}")
-
-        # Generate layer-by-layer description
-        summary_str.append("\nLayer (type)         Output Shape         Param #")
-        summary_str.append("-"*55)
-
-        total_params = 0
-        for name, layer in model.named_children():
-            # Get layer output shape
-            try:
-                dummy_input = torch.randn(1, *input_shape)
-                output = layer(dummy_input)
-                output_shape = tuple(output.shape[1:])
-            except:
-                output_shape = "?"
-
-            # Get parameter count
-            params = sum(p.numel() for p in layer.parameters())
-            total_params += params
-
-            # Format layer info
-            layer_type = layer.__class__.__name__
-            layer_str = (f"{name.ljust(20)} {str(output_shape).ljust(20)} "
-                        f"{params:,}")
-            summary_str.append(layer_str)
-
-        # Add total parameters
-        summary_str.append("-"*55)
-        summary_str.append(f"Total params: {total_params:,}")
-        summary_str.append("="*80 + "\n")
-
-        # Create final string
-        visualization = "\n".join(summary_str)
-
-        # Save to file if requested
-        if file_path:
-            with open(file_path, 'w') as f:
-                f.write(visualization)
-
-        return visualization
-
-#------------Arch Gen Ends------------------------------
 
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
@@ -943,7 +528,7 @@ class BaseEnhancementConfig:
                 'enable_phase2': False,
                 'enhancements': {
                     'use_kl_divergence': True,
-                    'use_class_encoding': True,
+                    'use_class_encoding': False,
                     'kl_divergence_weight': 0.1,
                     'classification_weight': 0.1,
                     'clustering_temperature': 1.0,
@@ -1073,7 +658,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
@@ -1211,7 +796,7 @@ class BaseAutoencoder(nn.Module):
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
-        self.target_size = tuple(config['dataset']['input_size'])
+
         # Device configuration
         self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
                                  and torch.cuda.is_available() else 'cpu')
@@ -1223,7 +808,6 @@ class BaseAutoencoder(nn.Module):
 
         # Calculate layer dimensions
         self.layer_sizes = self._calculate_layer_sizes()
-
 
         # Track progressive spatial dimensions
         for _ in self.layer_sizes:
@@ -1769,7 +1353,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 28:
+            if current_size < 128:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
@@ -2808,27 +2392,6 @@ class EnhancedLossManager:
             else:
                 return {'loss': torch.tensor(float(result), device=reconstruction.device)}
 
-    def calculate_phase2_loss(self, model_output, targets):
-        """Calculate phase 2 loss with all enhancements"""
-        base_loss = F.mse_loss(model_output['reconstruction'], targets)
-
-        if 'cluster_probabilities' in model_output:
-            kl_loss = F.kl_div(
-                model_output['cluster_probabilities'].log(),
-                model_output['target_distribution'],
-                reduction='batchmean'
-            )
-            base_loss += self.config['kl_divergence_weight'] * kl_loss
-
-        if 'class_logits' in model_output:
-            class_loss = F.cross_entropy(
-                model_output['class_logits'],
-                model_output['cluster_assignments'] if 'cluster_assignments' in model_output
-                else targets
-            )
-            base_loss += self.config['classification_weight'] * class_loss
-
-        return base_loss
 
 class UnifiedCheckpoint:
     """Manages a unified checkpoint file containing multiple model states"""
@@ -2982,137 +2545,82 @@ class ModelFactory:
         )
         feature_dims = config['model']['feature_dims']
 
-        # Initialize analyzer and generator
-        analyzer = InputAnalyzer()
-        generator = ArchitectureGenerator()
-
-        # Get sample batch for analysis
-        sample_loader = get_sample_loader(config)
-        complexity_profile = analyzer.analyze(sample_loader.dataset)
-
         # Get model type
         image_type = config['dataset'].get('image_type', 'general')
 
-        # Create appropriate model
-        image_type = config['dataset'].get('image_type', 'general')
+        # Create appropriate model with proper channel handling
         if image_type == 'astronomical':
-            base_class = AstronomicalStructurePreservingAutoencoder
+            model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
         elif image_type == 'medical':
-            base_class = MedicalStructurePreservingAutoencoder
+            model = MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
         elif image_type == 'agricultural':
-            base_class = AgriculturalPatternAutoencoder
+            model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
         else:
-            base_class = BaseAutoencoder
+            model = BaseAutoencoder(input_shape, feature_dims, config)
 
-        # Generate adaptive architecture
-        model = base_class(input_shape, feature_dims, config)
-        model.encoder_layers = generator.generate_encoder(complexity_profile, input_shape)
-        model.decoder_layers = generator.generate_decoder(complexity_profile, input_shape)
-
-        # Generate and save text visualization
-        if config['execution_flags'].get('visualize_model', True):
-            visualizer = TextModelVisualizer()
-            vis_path = os.path.join(config['training']['checkpoint_dir'],
-                                  f"{config['dataset']['name']}_architecture.txt")
-            vis_str = visualizer.visualize(model, input_shape, vis_path)
-            logger.info(f"Model architecture:\n{vis_str}")
-
+        # Verify channel compatibility
+        if hasattr(model, 'in_channels'):
+            if model.in_channels != config['dataset']['in_channels']:
+                logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
         return model
 
 
-    # Update the training loop to handle the new feature dictionary format
-    def train_model(model: nn.Module, train_loader: DataLoader,
-                   config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-        """Two-phase training implementation using unified _train_epoch"""
-        # Initialize optimizer and dataset reference
+# Update the training loop to handle the new feature dictionary format
+def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training implementation with checkpoint handling"""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
+
+    history = defaultdict(list)
+
+    # Initialize starting epoch and phase
+    start_epoch = getattr(model, 'current_epoch', 0)
+    current_phase = getattr(model, 'training_phase', 1)
+
+    # Phase 1: Pure reconstruction (if not already completed)
+    if current_phase == 1:
+        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
+        model.set_training_phase(1)
         optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-        model.optimizer = optimizer
-        model.set_dataset(train_loader.dataset)
 
-        history = defaultdict(list)
-        start_epoch = getattr(model, 'current_epoch', 0)
-        current_phase = getattr(model, 'training_phase', 1)
+        phase1_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch
+        )
+        history.update(phase1_history)
 
-        # Phase 1: Pure reconstruction
-        if current_phase == 1:
-            logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
-            model.set_training_phase(1)
+        # Reset start_epoch for phase 2
+        start_epoch = 0
+    else:
+        logger.info("Phase 1 already completed, skipping")
 
-            # Reset optimizer for phase 1
-            optimizer = optim.Adam(model.parameters(),
-                                 lr=config['model']['learning_rate'])
-            model.optimizer = optimizer
+    # Phase 2: Latent space organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        if current_phase < 2:
+            logger.info("Starting Phase 2: Latent space organization")
+            model.set_training_phase(2)
+        else:
+            logger.info("Resuming Phase 2: Latent space organization")
 
-            phase1_history = self._train_phase_with_unified_epoch(
-                model, train_loader, optimizer, loss_manager,
-                config['training']['epochs'], 1, config,
-                start_epoch=start_epoch
-            )
-            history.update(phase1_history)
-            start_epoch = 0
+        # Lower learning rate for fine-tuning
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
 
-        # Phase 2: Latent space organization
-        if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-            if current_phase < 2:
-                logger.info("Starting Phase 2: Latent space organization")
-                model.set_training_phase(2)
+        phase2_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch if current_phase == 2 else 0
+        )
 
-            # Lower learning rate for phase 2
-            optimizer = optim.Adam(model.parameters(),
-                                 lr=config['model']['learning_rate'] * 0.1)
-            model.optimizer = optimizer
+        # Merge histories
+        for key, value in phase2_history.items():
+            history[f"phase2_{key}"] = value
 
-            phase2_history = self._train_phase_with_unified_epoch(
-                model, train_loader, optimizer, loss_manager,
-                config['training']['epochs'], 2, config,
-                start_epoch=start_epoch if current_phase == 2 else 0
-            )
+    return history
 
-            for key, value in phase2_history.items():
-                history[f"phase2_{key}"] = value
-
-        return history
-
-    def _train_phase_with_unified_epoch(model, train_loader, optimizer, loss_manager,
-                                      epochs, phase, config, start_epoch=0):
-        """Phase-specific training using the unified epoch approach"""
-        history = defaultdict(list)
-        best_loss = float('inf')
-        patience_counter = 0
-
-        for epoch in range(start_epoch, epochs):
-            model.current_epoch = epoch
-            model.training_phase = phase
-
-            # Use the base class _train_epoch implementation
-            train_loss, train_metric = model._train_epoch(train_loader)
-
-            # Phase-specific validation and loss computation
-            if phase == 1:
-                val_loss = train_loss  # Phase 1 typically doesn't use validation
-            else:
-                val_loss = loss_manager.calculate_phase2_loss(model, train_loader)
-
-            # Log metrics
-            history['loss'].append(train_loss)
-            history['metric'].append(train_metric)
-            if phase == 2:
-                history['val_loss'].append(val_loss)
-
-            # Checkpoint and early stopping
-            if val_loss < best_loss - config['training'].get('min_delta', 0.001):
-                best_loss = val_loss
-                patience_counter = 0
-                model._save_checkpoint(is_best=True)
-            else:
-                patience_counter += 1
-
-            if patience_counter >= config['training'].get('patience', 5):
-                logger.info(f"Early stopping triggered in phase {phase}")
-                break
-
-        return history
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -4372,66 +3880,11 @@ class BaseFeatureExtractor(nn.Module, ABC):
 
         return config
 
+    @abstractmethod
     def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
-        """Unified epoch implementation that respects training phase"""
-        self.train()
-        running_loss = 0.0
-        running_metric = 0.0
-        is_autoencoder = hasattr(self, 'decode')
+        """Train one epoch"""
+        pass
 
-        pbar = tqdm(train_loader, desc=f'Phase {self.training_phase} - Epoch {self.current_epoch + 1}')
-
-        for batch_idx, (inputs, targets) in enumerate(pbar):
-            inputs = inputs.to(self.device)
-            targets = targets.to(self.device) if not is_autoencoder else inputs
-
-            # Forward pass with phase-specific behavior
-            self.optimizer.zero_grad()
-
-            if self.training_phase == 1 or not is_autoencoder:
-                loss, metric = self._compute_loss_and_metric(inputs, targets)
-            else:
-                # Phase 2 autoencoder uses enhanced losses
-                output = self(inputs)
-                loss = loss_manager.calculate_phase2_loss(output, targets)
-                metric = 1 - F.mse_loss(output['reconstruction'], targets).item()
-
-            # Backward pass
-            loss.backward()
-            self.optimizer.step()
-
-            # Update metrics
-            running_loss += loss.item()
-            running_metric += metric
-
-            pbar.set_postfix({
-                'loss': f'{running_loss/(batch_idx+1):.4f}',
-                'metric': f'{(running_metric/(batch_idx+1)) * 100 if not is_autoencoder else running_metric/(batch_idx+1):.4f}'
-            })
-
-        return (running_loss / len(train_loader),
-                (running_metric / len(train_loader)) * 100 if not is_autoencoder
-                else running_metric / len(train_loader))
-
-    def _compute_loss_and_metric(self, inputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """
-        Compute model-specific loss and metric
-        Args:
-            inputs: Input tensor
-            targets: Target tensor (labels for CNN, inputs for Autoencoder)
-        Returns:
-            Tuple of (loss_tensor, metric_float)
-        """
-        if hasattr(self, 'decode'):  # Autoencoder case
-            embeddings, reconstructions = self(inputs)
-            loss = F.mse_loss(reconstructions, targets)
-            metric = 1 - loss.item()  # Reconstruction quality
-        else:  # CNN case
-            outputs = self(inputs)
-            loss = F.cross_entropy(outputs, targets)
-            metric = (outputs.argmax(1) == targets).float().mean().item()
-
-        return loss, metric
     @abstractmethod
     def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
         """Validate the model"""
@@ -4679,7 +4132,63 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             feature_dims=self.feature_dims
         ).to(self.device)
 
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch with reconstruction visualization"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        reconstruction_accuracy = 0.0
 
+        # Create output directory for training reconstructions
+        output_dir = os.path.join('data', self.config['dataset']['name'],
+                                'training_decoder_output', f'epoch_{self.current_epoch}')
+        os.makedirs(output_dir, exist_ok=True)
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        for batch_idx, (inputs, _) in enumerate(pbar):
+            try:
+                inputs = inputs.to(self.device)
+
+                # Log input shape and channels
+                logger.debug(f"Input tensor shape: {inputs.shape}, channels: {inputs.size(1)}")
+
+                self.optimizer.zero_grad()
+                embedding, reconstruction = self.feature_extractor(inputs)
+
+                # Verify reconstruction shape matches input
+                if reconstruction.shape != inputs.shape:
+                    raise ValueError(f"Reconstruction shape {reconstruction.shape} "
+                                  f"doesn't match input shape {inputs.shape}")
+
+                # Calculate loss
+                loss = self._calculate_loss(inputs, reconstruction, embedding)
+                loss.backward()
+                self.optimizer.step()
+
+                # Update metrics
+                running_loss += loss.item()
+                reconstruction_accuracy += 1.0 - F.mse_loss(reconstruction, inputs).item()
+
+                # Save reconstructions periodically
+                if batch_idx % 50 == 0:
+                    self._save_training_batch(inputs, reconstruction, batch_idx, output_dir)
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = (reconstruction_accuracy / (batch_idx + 1)) * 100
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'recon_acc': f'{batch_acc:.2f}%'
+                })
+
+            except Exception as e:
+                logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                raise
+
+        pbar.close()
+        return (running_loss / len(train_loader),
+                (reconstruction_accuracy / len(train_loader)) * 100)
 
     def _calculate_loss(self, inputs: torch.Tensor, reconstruction: torch.Tensor,
                       embedding: torch.Tensor) -> torch.Tensor:
@@ -5861,6 +5370,52 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {checkpoint_path}")
 
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        try:
+            for batch_idx, (inputs, targets) in enumerate(pbar):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                self.optimizer.zero_grad()
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = 100. * correct / total
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'acc': f'{batch_acc:.2f}%'
+                })
+
+                # Cleanup
+                del inputs, outputs, loss
+                if batch_idx % 50 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Error in batch {batch_idx}: {str(e)}")
+            raise
+
+        pbar.close()
+        return running_loss / len(train_loader), 100. * correct / total
 
     def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
         """Validate model"""
@@ -6226,7 +5781,6 @@ class CustomImageDataset(Dataset):
         self.data_dir = data_dir
         self.transform = transform
         self.target_size = target_size  # Store target_size as an instance variable
-
         self.overlap = overlap
         self.image_files = []
         self.labels = []
@@ -6238,7 +5792,7 @@ class CustomImageDataset(Dataset):
 
         # Load config
         self.config = config if config is not None else {}
-        self.resize_images = self.config.get('resize_images', False)  # Default to False
+        self.resize_images = self.config.get('resize_images', True)  # Default to False
 
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
@@ -6307,7 +5861,7 @@ class CustomImageDataset(Dataset):
         os.makedirs(self.preprocessed_dir, exist_ok=True)
 
         # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images")):
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {self.target_size}x{self.target_size}")):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
@@ -6565,7 +6119,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(28, np.prod(input_size) // 4)
+        feature_dims = min(128, np.prod(input_size) // 4)
 
         return {
             "dataset": {
@@ -6576,7 +6130,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": False,
+                "resize_images": True,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
@@ -7739,7 +7293,7 @@ def configure_enhancements(config: Dict) -> Dict:
         enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() == 'n':
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
         enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
