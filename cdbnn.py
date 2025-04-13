@@ -1404,20 +1404,26 @@ class BaseAutoencoder(nn.Module):
             )
 
     def _calculate_layer_sizes(self) -> List[int]:
-        """Calculate progressive channel sizes for encoder/decoder"""
+        """Calculate progressive channel sizes for encoder/decoder with dynamic minimum size"""
         base_channels = 32
         sizes = []
         current_size = base_channels
 
+        # Get minimum dimension from input shape
         min_dim = min(self.input_shape[1:])
-        max_layers = int(np.log2(min_dim)) - 2
+
+        # Calculate maximum possible layers based on minimum dimension
+        max_layers = int(np.log2(min_dim)) - 2  # Leave room for at least 4x4 features
+
+        # Dynamic minimum size based on input dimensions
+        min_size = max(16, min_dim // 8)  # At least 16, but proportional to input size
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
+            if current_size < min(256, min_size * 8):  # Cap at 256 but relate to input size
                 current_size *= 2
 
-        logging.info(f"Layer sizes: {sizes}")
+        logging.info(f"Layer sizes: {sizes} (min_size={min_size}, max_layers={max_layers})")
         return sizes
 
     def _create_encoder_layers(self) -> nn.ModuleList:
