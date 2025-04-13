@@ -360,7 +360,7 @@ class PredictionManager:
             if cluster_centers is not None:
                 if not hasattr(model, 'cluster_centers'):
                     model.cluster_centers = nn.Parameter(
-                        torch.empty_like(cluster_centers)
+                        torch.empty_like(cluster_centers))
                     logger.info("Initialized cluster_centers parameter")
                 model.cluster_centers.data = cluster_centers
                 logger.info("Loaded cluster centers data")
