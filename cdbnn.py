@@ -257,6 +257,10 @@ class PredictionManager:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
+        # Print checkpoint path and size
+        logger.info(f"Loading checkpoint from: {checkpoint_path}")
+        logger.info(f"Checkpoint size: {os.path.getsize(checkpoint_path)/1024/1024:.2f} MB")
+
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
         except RuntimeError as e:
@@ -266,42 +270,83 @@ class PredictionManager:
             else:
                 raise e
 
+        # Print all top-level keys in checkpoint
+        logger.info(f"Checkpoint keys: {list(checkpoint.keys())}")
+
         # Initialize state_dict and clustering parameters
         state_dict = None
         cluster_centers = None
         clustering_temp = None
 
-        # Handle unified checkpoint format
+        # Debug print the model_states structure if it exists
         if 'model_states' in checkpoint:
-            # Try to find the best model state from any phase
-            for phase in ['phase2', 'phase1', 'best']:
+            logger.info("Found 'model_states' in checkpoint")
+            logger.info(f"model_states keys: {list(checkpoint['model_states'].keys())}")
+
+            # Print details of each phase in model_states
+            for phase, phase_data in checkpoint['model_states'].items():
+                logger.info(f"Phase '{phase}' contents:")
+                if isinstance(phase_data, dict):
+                    for key, value in phase_data.items():
+                        if key in ['current', 'best'] and isinstance(value, dict):
+                            logger.info(f"  {key} keys: {list(value.keys())}")
+                            if 'state_dict' in value:
+                                logger.info(f"    state_dict exists with {len(value['state_dict'])} parameters")
+                        else:
+                            logger.info(f"  {key}: {type(value)}")
+                else:
+                    logger.info(f"  {type(phase_data)}")
+
+        # Case 1: Unified checkpoint format
+        if 'model_states' in checkpoint:
+            # Search through all phases for the best model state
+            for phase in ['phase2', 'phase2_kld', 'phase1', 'best']:
                 if phase in checkpoint['model_states']:
                     phase_data = checkpoint['model_states'][phase]
+                    logger.info(f"Checking phase: {phase}")
                     if isinstance(phase_data, dict):
                         # Check both 'current' and 'best' entries
                         for key in ['best', 'current']:
                             if key in phase_data and isinstance(phase_data[key], dict):
+                                logger.info(f"Checking {key} in {phase}")
                                 if 'state_dict' in phase_data[key]:
                                     state_dict = phase_data[key]['state_dict']
+                                    logger.info(f"Found state_dict in {phase}/{key}")
                                     # Get clustering parameters if available
                                     cluster_centers = phase_data[key].get('cluster_centers')
                                     clustering_temp = phase_data[key].get('clustering_temperature')
+                                    logger.info(f"Cluster centers: {cluster_centers is not None}")
+                                    logger.info(f"Clustering temp: {clustering_temp is not None}")
                                     break
                         if state_dict is not None:
                             break
 
-        # If no state found in model_states, check root level
+        # Case 2: Direct checkpoint format
         if state_dict is None:
+            logger.info("Checking direct checkpoint format")
             for key in ['state_dict', 'model_state_dict', 'model']:
                 if key in checkpoint:
                     state_dict = checkpoint[key]
                     cluster_centers = checkpoint.get('cluster_centers')
                     clustering_temp = checkpoint.get('clustering_temperature')
+                    logger.info(f"Found state_dict in root level key: {key}")
+                    logger.info(f"Cluster centers: {cluster_centers is not None}")
+                    logger.info(f"Clustering temp: {clustering_temp is not None}")
                     break
 
         if state_dict is None:
+            logger.error("Could not find state_dict in any expected location")
+            logger.error(f"Checkpoint structure: {pprint.pformat(checkpoint, depth=2)}")
             raise ValueError("Could not find valid state dict in checkpoint. "
                            f"Checkpoint keys: {list(checkpoint.keys())}")
+
+        # Print model architecture before loading
+        logger.info("Model architecture before loading state:")
+        logger.info(model)
+
+        # Print first few state_dict keys
+        logger.info(f"State_dict contains {len(state_dict)} parameters")
+        logger.info(f"First 5 state_dict keys: {list(state_dict.keys())[:5]}")
 
         # Load model state
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
@@ -315,20 +360,30 @@ class PredictionManager:
             if cluster_centers is not None:
                 if not hasattr(model, 'cluster_centers'):
                     model.cluster_centers = nn.Parameter(
-                        torch.empty_like(cluster_centers))
+                        torch.empty_like(cluster_centers)
+                    logger.info("Initialized cluster_centers parameter")
                 model.cluster_centers.data = cluster_centers
+                logger.info("Loaded cluster centers data")
 
             if clustering_temp is not None:
                 model.clustering_temperature = clustering_temp.item()
+                logger.info(f"Set clustering temperature to {model.clustering_temperature}")
             else:
                 model.clustering_temperature = torch.tensor(
                     [self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']],
                     device=self.device
                 )
+                logger.info(f"Using default clustering temperature: {model.clustering_temperature}")
+
+        # Print model architecture after loading
+        logger.info("Model architecture after loading state:")
+        logger.info(model)
 
         # Set to evaluation mode
         model.set_training_phase(2)
         model.eval()
+        logger.info(f"Model set to training phase: {model.training_phase}")
+        logger.info(f"Model training mode: {model.training}")
 
         logger.info("Model loaded successfully from checkpoint")
         return model
