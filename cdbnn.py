@@ -271,10 +271,10 @@ class PredictionManager:
         cluster_centers = None
         clustering_temp = None
 
-        # Case 1: Unified checkpoint format
+        # Handle unified checkpoint format
         if 'model_states' in checkpoint:
-            # Search through all phases for the best model state
-            for phase in ['phase2', 'phase2_kld', 'phase1', 'best']:
+            # Try to find the best model state from any phase
+            for phase in ['phase2', 'phase1', 'best']:
                 if phase in checkpoint['model_states']:
                     phase_data = checkpoint['model_states'][phase]
                     if isinstance(phase_data, dict):
@@ -290,7 +290,7 @@ class PredictionManager:
                         if state_dict is not None:
                             break
 
-        # Case 2: Direct checkpoint format
+        # If no state found in model_states, check root level
         if state_dict is None:
             for key in ['state_dict', 'model_state_dict', 'model']:
                 if key in checkpoint:
@@ -316,7 +316,6 @@ class PredictionManager:
                 if not hasattr(model, 'cluster_centers'):
                     model.cluster_centers = nn.Parameter(
                         torch.empty_like(cluster_centers)
-                    )
                 model.cluster_centers.data = cluster_centers
 
             if clustering_temp is not None:
