@@ -266,80 +266,72 @@ class PredictionManager:
             else:
                 raise e
 
-        # Debug: Log the checkpoint structure
-        logger.debug(f"Checkpoint keys: {list(checkpoint.keys())}")
-
-        # Try to find the state dict in various possible locations
+        # Initialize state_dict and clustering parameters
         state_dict = None
+        cluster_centers = None
+        clustering_temp = None
 
-        # Case 1: Check if checkpoint is directly the state dict
-        if all(key.startswith(('encoder', 'decoder', 'embedder')) for key in checkpoint.keys()):
-            state_dict = checkpoint
-
-        # Case 2: Look in model_states for phase2 or best model
-        elif 'model_states' in checkpoint:
-            # Try to find the best model state from any phase
+        # Case 1: Unified checkpoint format
+        if 'model_states' in checkpoint:
+            # Search through all phases for the best model state
             for phase in ['phase2', 'phase2_kld', 'phase1', 'best']:
                 if phase in checkpoint['model_states']:
                     phase_data = checkpoint['model_states'][phase]
-                    if isinstance(phase_data, dict) and 'state_dict' in phase_data:
-                        state_dict = phase_data['state_dict']
-                        break
-                    elif isinstance(phase_data, dict) and 'best' in phase_data:
-                        if 'state_dict' in phase_data['best']:
-                            state_dict = phase_data['best']['state_dict']
+                    if isinstance(phase_data, dict):
+                        # Check both 'current' and 'best' entries
+                        for key in ['best', 'current']:
+                            if key in phase_data and isinstance(phase_data[key], dict):
+                                if 'state_dict' in phase_data[key]:
+                                    state_dict = phase_data[key]['state_dict']
+                                    # Get clustering parameters if available
+                                    cluster_centers = phase_data[key].get('cluster_centers')
+                                    clustering_temp = phase_data[key].get('clustering_temperature')
+                                    break
+                        if state_dict is not None:
                             break
 
-        # Case 3: Check for direct state_dict keys
+        # Case 2: Direct checkpoint format
         if state_dict is None:
             for key in ['state_dict', 'model_state_dict', 'model']:
                 if key in checkpoint:
                     state_dict = checkpoint[key]
+                    cluster_centers = checkpoint.get('cluster_centers')
+                    clustering_temp = checkpoint.get('clustering_temperature')
                     break
 
         if state_dict is None:
             raise ValueError("Could not find valid state dict in checkpoint. "
                            f"Checkpoint keys: {list(checkpoint.keys())}")
 
-        # Load the state dict with strict=False to handle partial matches
+        # Load model state
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-
         if missing_keys:
             logger.warning(f"Missing keys in checkpoint: {missing_keys}")
         if unexpected_keys:
             logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
 
-        # Handle clustering parameters if they exist in the checkpoint
+        # Handle clustering parameters
         if model.use_kl_divergence:
-            # Try to get temperature from multiple possible locations
-            temp_sources = [
-                state_dict.get('clustering_temperature'),
-                checkpoint.get('clustering_temperature'),
-                self.config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
-            ]
+            if cluster_centers is not None:
+                if not hasattr(model, 'cluster_centers'):
+                    model.cluster_centers = nn.Parameter(
+                        torch.empty_like(cluster_centers)
+                    )
+                model.cluster_centers.data = cluster_centers
 
-            for temp in temp_sources:
-                if temp is not None:
-                    if isinstance(temp, torch.Tensor):
-                        model.clustering_temperature = temp.to(self.device)
-                    else:
-                        model.clustering_temperature = torch.tensor([temp], device=self.device)
-                    break
+            if clustering_temp is not None:
+                model.clustering_temperature = clustering_temp.item()
             else:
-                model.clustering_temperature = torch.tensor([1.0], device=self.device)
-                logger.warning("Using default clustering temperature 1.0")
+                model.clustering_temperature = torch.tensor(
+                    [self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']],
+                    device=self.device
+                )
 
-            # Handle cluster centers if they exist
-            if 'cluster_centers' in state_dict:
-                model.cluster_centers = state_dict['cluster_centers'].to(self.device)
-            elif hasattr(model, 'cluster_centers'):
-                logger.warning("No cluster centers found in checkpoint, keeping initialized values")
-
-        # Force phase 2 for prediction to use clustering
+        # Set to evaluation mode
         model.set_training_phase(2)
         model.eval()
 
-        logger.info("Model loaded successfully with clustering parameters.")
+        logger.info("Model loaded successfully from checkpoint")
         return model
 
 
