@@ -249,7 +249,7 @@ class PredictionManager:
             raise ValueError(f"Invalid input path: {input_path}")
 
     def _load_model(self) -> nn.Module:
-        """Load the trained model with all clustering parameters"""
+        """Load the trained model with flexible checkpoint handling"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
@@ -266,48 +266,63 @@ class PredictionManager:
             else:
                 raise e
 
-        # More flexible state dict loading
-        state_dict = None
+        # Debug: Log the checkpoint structure
+        logger.debug(f"Checkpoint keys: {list(checkpoint.keys())}")
         if 'model_states' in checkpoint:
-            # Try different possible state dict locations
-            possible_keys = [
-                'phase2_kld',  # Original expected key
-                'phase2',      # Possible alternative
-                'best',        # Some checkpoints might store directly under 'best'
-                'current'      # Or under 'current'
-            ]
+            logger.debug(f"Model states keys: {list(checkpoint['model_states'].keys())}")
 
-            for key in possible_keys:
-                if key in checkpoint['model_states']:
-                    if 'best' in checkpoint['model_states'][key]:
-                        state_dict = checkpoint['model_states'][key]['best']['state_dict']
+        # Flexible state dict extraction
+        state_dict = None
+        config = None
+        clustering_params = {}
+
+        # Case 1: New unified checkpoint format
+        if 'model_states' in checkpoint:
+            for phase in ['phase2_kld', 'phase2', 'phase1', 'best', 'current']:
+                if phase in checkpoint['model_states']:
+                    phase_data = checkpoint['model_states'][phase]
+                    if 'best' in phase_data and 'state_dict' in phase_data['best']:
+                        state_dict = phase_data['best']['state_dict']
+                        config = phase_data['best'].get('config', {})
                         break
-                    elif 'state_dict' in checkpoint['model_states'][key]:
-                        state_dict = checkpoint['model_states'][key]['state_dict']
+                    elif 'state_dict' in phase_data:
+                        state_dict = phase_data['state_dict']
+                        config = phase_data.get('config', {})
                         break
 
-            if state_dict is None:
-                # Fallback to first available state dict
-                for key, value in checkpoint['model_states'].items():
-                    if 'state_dict' in value:
-                        state_dict = value['state_dict']
-                        break
-        else:
-            # Direct state dict (older format)
-            state_dict = checkpoint
+        # Case 2: Direct state dict (older format)
+        if state_dict is None:
+            for key in ['state_dict', 'model_state_dict', 'model']:
+                if key in checkpoint:
+                    state_dict = checkpoint[key]
+                    break
+
+        # Case 3: Maybe the checkpoint is the state dict itself
+        if state_dict is None:
+            # Check if any of the keys look like model parameters
+            param_keys = [k for k in checkpoint.keys() if any(x in k for x in ['weight', 'bias', 'running'])]
+            if param_keys:
+                logger.warning("Assuming checkpoint contains direct model parameters")
+                state_dict = checkpoint
 
         if state_dict is None:
-            raise ValueError("Could not find valid state dict in checkpoint")
+            raise ValueError("Could not find valid state dict in checkpoint. "
+                           f"Checkpoint keys: {list(checkpoint.keys())}")
 
-        # Load the state dict (strict=False to allow missing keys)
-        model.load_state_dict(state_dict, strict=False)
+        # Load the state dict
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
 
         # Handle clustering parameters
         if model.use_kl_divergence:
-            # Try to get temperature from different possible locations
+            # Try to get temperature from multiple possible locations
             temp_sources = [
                 state_dict.get('clustering_temperature'),
                 checkpoint.get('clustering_temperature'),
+                config.get('clustering_params', {}).get('temperature') if config else None,
                 self.config['model']['autoencoder_config']['enhancements'].get('clustering_temperature', 1.0)
             ]
 
@@ -321,6 +336,12 @@ class PredictionManager:
             else:
                 model.clustering_temperature = torch.tensor([1.0], device=self.device)
                 logger.warning("Using default clustering temperature 1.0")
+
+            # Handle cluster centers
+            if 'cluster_centers' in state_dict:
+                model.cluster_centers = state_dict['cluster_centers'].to(self.device)
+            elif hasattr(model, 'cluster_centers'):
+                logger.warning("No cluster centers found in checkpoint, keeping initialized values")
 
         # Force phase 2 for prediction to use clustering
         model.set_training_phase(2)
