@@ -6178,7 +6178,7 @@ class CustomImageDataset(Dataset):
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        #self.target_size = target_size  # Store target_size as an instance variable
+        self.target_size = target_size  # Store target_size as an instance variable
 
         self.overlap = overlap
         self.image_files = []
