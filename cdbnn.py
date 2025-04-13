@@ -4979,12 +4979,14 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             raise
 
 class FeatureExtractorCNN(nn.Module):
-    """CNN-based feature extractor model with self-attention"""
+    """CNN-based feature extractor model with dynamic depth based on input size"""
     def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
         super().__init__()
         self.dropout_prob = dropout_prob
+        self.feature_dims = feature_dims
+        self.min_spatial_dim = 4  # Minimum spatial dimension before stopping layer addition
 
-        # Layer 1
+        # Base layers that will always be used
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -4993,7 +4995,6 @@ class FeatureExtractorCNN(nn.Module):
             nn.Dropout(dropout_prob)
         )
 
-        # Layer 2
         self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
@@ -5002,88 +5003,93 @@ class FeatureExtractorCNN(nn.Module):
             nn.Dropout(dropout_prob)
         )
 
-        # Layer 3
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
-        )
+        # Dynamic layers that will be conditionally added
+        self.dynamic_layers = nn.ModuleList()
+        self.attention_layers = nn.ModuleList()
 
-        # Self-attention after Layer 3
-        self.attention1 = SelfAttention(128)
+        # Layer configurations: (out_channels, use_attention)
+        layer_configs = [
+            (128, True),   # Layer 3
+            (256, False),  # Layer 4
+            (512, False),  # Layer 5
+            (512, True),   # Layer 6
+            (512, False)   # Layer 7
+        ]
 
-        # Layer 4
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
-        )
+        for out_channels, use_attention in layer_configs:
+            self.dynamic_layers.append(
+                nn.Sequential(
+                    nn.Conv2d(64 if len(self.dynamic_layers) == 0 else
+                              self.dynamic_layers[-1][0].out_channels,
+                             out_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(),
+                    nn.MaxPool2d(2),
+                    nn.Dropout(dropout_prob)
+                )
+            )
+            if use_attention:
+                self.attention_layers.append(SelfAttention(out_channels))
+            else:
+                self.attention_layers.append(nn.Identity())
 
-        # Layer 5
-        self.conv5 = nn.Sequential(
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
-        )
-
-        # Layer 6
-        self.conv6 = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(dropout_prob)
-        )
-
-        # Self-attention after Layer 6
-        self.attention2 = SelfAttention(512)
-
-        # Layer 7
-        self.conv7 = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
-        )
-
-        # Fully connected layer
+        # Final layers
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512, feature_dims)
         self.batch_norm = nn.BatchNorm1d(feature_dims)
+
+        # Will be set during first forward pass
+        self.num_used_layers = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(0)  # Add batch dimension
 
-        # Forward pass through layers
-        x1 = self.conv1(x)
-        x2 = self.conv2(x1)
-        x3 = self.conv3(x2)
+        # First two fixed layers
+        x = self.conv1(x)
+        x = self.conv2(x)
 
-        # Apply self-attention
-        x3 = self.attention1(x3)
+        # Determine how many dynamic layers to use (only on first forward)
+        if self.num_used_layers is None:
+            spatial_dim = x.size(-1)
+            self.num_used_layers = 0
 
-        x4 = self.conv4(x3)
-        x5 = self.conv5(x4)
-        x6 = self.conv6(x5)
+            for _ in range(len(self.dynamic_layers)):
+                spatial_dim = spatial_dim // 2  # Account for pooling
+                if spatial_dim >= self.min_spatial_dim:
+                    self.num_used_layers += 1
+                else:
+                    break
 
-        # Apply self-attention
-        x6 = self.attention2(x6)
+            logger.info(f"Using {self.num_used_layers} dynamic layers for input size {x.size()}")
 
-        x7 = self.conv7(x6)
+        # Apply dynamic layers
+        for i in range(self.num_used_layers):
+            x = self.dynamic_layers[i](x)
+            x = self.attention_layers[i](x)
 
-        # Flatten and fully connected layer
-        x7 = x7.view(x7.size(0), -1)
-        x7 = self.fc(x7)
-        if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
-            x7 = self.batch_norm(x7)
+        # Global pooling and FC layer
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)
 
-        return x7
+        # Adjust FC layer if using fewer layers
+        if self.num_used_layers < len(self.dynamic_layers):
+            in_features = self.dynamic_layers[self.num_used_layers-1][0].out_channels
+            if in_features != self.fc.in_features:
+                # Create temporary FC layer with correct dimensions
+                fc = nn.Linear(in_features, self.feature_dims).to(x.device)
+                x = fc(x)
+                # Replace the FC layer for future passes
+                self.fc = fc
+            else:
+                x = self.fc(x)
+        else:
+            x = self.fc(x)
+
+        if x.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x = self.batch_norm(x)
+
+        return x
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
