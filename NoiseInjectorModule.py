@@ -6,7 +6,10 @@ from PIL import Image, ImageTk
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-
+#--------------------------Noise Injection Module ----------------------------
+# This module introduces different kinds of noise in images
+# author: Ninan Sajeeth Philip, April 14 2025
+#---------------------------------------------------------------------------------------
 
 class NoiseInjectionApp:
     def __init__(self, root):
