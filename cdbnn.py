@@ -1250,7 +1250,7 @@ class BaseAutoencoder(nn.Module):
                 # Convert to tensor and register as buffer
                 temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
                 self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+                                   torch.tensor(temp_value, dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include all necessary components"""
