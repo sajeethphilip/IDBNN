@@ -279,14 +279,34 @@ class PredictionManager:
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
 
-        # Load the state dict
+        # Load the state dict with strict=False to handle potential missing keys
         model.load_state_dict(state_dict, strict=False)
 
-        # Verify both components were loaded correctly
+        # Handle clustering parameters explicitly
         if model.use_kl_divergence:
-            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
+            # Cluster centers
+            if 'cluster_centers' in state_dict:
+                if not hasattr(model, 'cluster_centers'):
+                    model.register_buffer('cluster_centers',
+                                        torch.empty_like(state_dict['cluster_centers']))
+                model.cluster_centers.data.copy_(state_dict['cluster_centers'])
+            elif not hasattr(model, 'cluster_centers'):
                 raise RuntimeError("Cluster centers failed to load")
-            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
+
+            # Clustering temperature
+            if 'clustering_temperature' in state_dict:
+                temp = state_dict['clustering_temperature']
+                if not hasattr(model, 'clustering_temperature'):
+                    # Initialize as scalar tensor
+                    model.register_buffer('clustering_temperature',
+                                        torch.tensor(1.0, dtype=torch.float32))
+
+                # Handle both tensor and float cases
+                if isinstance(temp, torch.Tensor):
+                    model.clustering_temperature.data.copy_(temp)
+                else:
+                    model.clustering_temperature.data.fill_(temp)
+            elif not hasattr(model, 'clustering_temperature'):
                 raise RuntimeError("Clustering temperature failed to load")
 
         if model.use_class_encoding and hasattr(model, 'classifier'):
