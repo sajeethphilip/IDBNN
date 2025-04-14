@@ -4219,7 +4219,7 @@ class DatasetProcessor:
                 "autoencoder_config": {
                     "reconstruction_weight": 1.0,
                     "feature_weight": 0.1,
-                    "convergence_threshold": 0.001,
+                    "convergence_threshold": 0.0001,
                     "min_epochs": 10,
                     "patience": 5,
                     "enhancements": {
