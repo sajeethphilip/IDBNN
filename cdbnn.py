@@ -3802,7 +3802,21 @@ class CustomImageDataset(Dataset):
                  target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
         self.data_dir = data_dir
         self.transform = transform
-        self.target_size = target_size  # Store target_size as an instance variable
+         # Load config
+        self.config = config if config is not None else {}
+        if  self.config.get('resize_images',False):
+             size=256
+        else:
+            input_cfg = self.config.get('dataset', {})
+            size = input_cfg.get('input_size', 256)
+
+        if isinstance(size, int):
+            self.target_size = size
+        elif isinstance(size, (list, tuple)):
+            self.target_size = size[0]  # Use first dimension
+        else:
+            self.target_size = 256  # Final fallback
+
         self.overlap = overlap
         self.image_files = []
         self.labels = []
@@ -3812,10 +3826,10 @@ class CustomImageDataset(Dataset):
         self.reverse_encoder = {}
         self.preprocessed_images = []  # Store preprocessed images or paths
 
-        # Load config
-        self.config = config if config is not None else {}
-        self.resize_images = self.config.get('resize_images', True)  # Default to False
 
+        self.resize_images = self.config.get('resize_images', False)  # Default to False
+        if self.resize_images:
+            self.target_size = 256
         if csv_file and os.path.exists(csv_file):
             self.data = pd.read_csv(csv_file)
         else:
@@ -3883,7 +3897,7 @@ class CustomImageDataset(Dataset):
         os.makedirs(self.preprocessed_dir, exist_ok=True)
 
         # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing and resizing images to {self.target_size}x{self.target_size}")):
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing images"):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
@@ -4152,7 +4166,7 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "resize_images": True,
+                "resize_images": False,
                 "train_dir": train_dir,
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
