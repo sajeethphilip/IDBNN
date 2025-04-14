@@ -1294,21 +1294,22 @@ class BaseAutoencoder(nn.Module):
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, strict=False)
 
         # Load clustering parameters
-        if 'cluster_centers' in state_dict:
+        cluster_centers = state_dict.get('cluster_centers')
+        clustering_temp = state_dict.get('clustering_temperature')
+
+        if cluster_centers is not None:
             if not hasattr(self, 'cluster_centers'):
-                self.register_buffer('cluster_centers', state_dict['cluster_centers'])
-            else:
-                self.cluster_centers.data.copy_(state_dict['cluster_centers'])
+                self.register_buffer('cluster_centers', torch.empty_like(cluster_centers))
+            self.cluster_centers.data.copy_(cluster_centers)
 
-        if 'clustering_temperature' in state_dict:
+        if clustering_temp is not None:
             if not hasattr(self, 'clustering_temperature'):
-                self.register_buffer('clustering_temperature', state_dict['clustering_temperature'])
+                self.register_buffer('clustering_temperature', torch.empty_like(clustering_temp))
+            # Handle both tensor and float cases
+            if isinstance(clustering_temp, torch.Tensor):
+                self.clustering_temperature.data.copy_(clustering_temp)
             else:
-                self.clustering_temperature.data.copy_(state_dict['clustering_temperature'])
-
-        # Load classifier if it exists
-        if 'classifier_state' in state_dict and hasattr(self, 'classifier'):
-            self.classifier.load_state_dict(state_dict['classifier_state'])
+                self.clustering_temperature.data.fill_(clustering_temp)
 
         if strict:
             if missing_keys:
