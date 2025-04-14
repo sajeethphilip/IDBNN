@@ -1265,65 +1265,106 @@ class BaseAutoencoder(nn.Module):
                 num_clusters = config['dataset'].get('num_classes', 10)
                 self.register_buffer('cluster_centers',
                                    torch.randn(num_clusters, self.feature_dims))
+                logger.debug(f"Initialized cluster_centers with shape {self.cluster_centers.shape}")
 
             if not hasattr(self, 'clustering_temperature'):
                 # Convert to tensor and register as buffer
                 temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-                self.register_buffer('clustering_temperature',
-                                   torch.tensor([temp_value], dtype=torch.float32))
+                if not isinstance(temp_value, torch.Tensor):
+                    temp_value = torch.tensor([temp_value], dtype=torch.float32)
+                self.register_buffer('clustering_temperature', temp_value)
+                logger.debug(f"Initialized clustering_temperature as tensor with value {self.clustering_temperature}")
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include all necessary components"""
         state = super().state_dict(*args, **kwargs)
 
-        # Add clustering parameters if they exist
+        # Debug logging for clustering parameters
         if hasattr(self, 'cluster_centers'):
             state['cluster_centers'] = self.cluster_centers
+            logger.debug(f"Saving cluster_centers with shape {self.cluster_centers.shape}")
+
         if hasattr(self, 'clustering_temperature'):
-            # Ensure we save the tensor value
-            state['clustering_temperature'] = self.clustering_temperature if isinstance(
-                self.clustering_temperature, torch.Tensor) else torch.tensor([self.clustering_temperature])
+            # Ensure we're saving a tensor
+            if not isinstance(self.clustering_temperature, torch.Tensor):
+                logger.warning(f"Converting clustering_temperature from {type(self.clustering_temperature)} to tensor")
+                self.clustering_temperature = torch.tensor([self.clustering_temperature], dtype=torch.float32)
+            state['clustering_temperature'] = self.clustering_temperature
+            logger.debug(f"Saving clustering_temperature with value {self.clustering_temperature.item()}")
 
         # Add classifier if it exists
         if hasattr(self, 'classifier'):
             state['classifier_state'] = self.classifier.state_dict()
+            logger.debug("Saved classifier state")
 
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including all components"""
+        """Load state dict including all components with debug logging"""
+        logger.debug("Starting state dict loading")
+
+        # Log all keys in the state dict
+        logger.debug(f"State dict keys: {list(state_dict.keys())}")
+
         # Load main model state
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, strict=False)
+        logger.debug(f"Missing keys: {missing_keys}")
+        logger.debug(f"Unexpected keys: {unexpected_keys}")
 
-        # Load clustering parameters
+        # Load clustering parameters with detailed checks
         if 'cluster_centers' in state_dict:
+            logger.debug("Found cluster_centers in state dict")
             if not hasattr(self, 'cluster_centers'):
+                logger.debug("Initializing new cluster_centers buffer")
                 self.register_buffer('cluster_centers', state_dict['cluster_centers'])
             else:
+                logger.debug("Copying cluster_centers data")
                 self.cluster_centers.data.copy_(state_dict['cluster_centers'])
+            logger.debug(f"Loaded cluster_centers with shape {self.cluster_centers.shape}")
 
         if 'clustering_temperature' in state_dict:
+            logger.debug("Found clustering_temperature in state dict")
             temp_value = state_dict['clustering_temperature']
+
             # Handle both tensor and float cases
             if isinstance(temp_value, torch.Tensor):
+                logger.debug("clustering_temperature is already a tensor")
                 temp_tensor = temp_value
             else:
-                temp_tensor = torch.tensor([temp_value], dtype=torch.float32)
+                logger.debug(f"Converting clustering_temperature from {type(temp_value)} to tensor")
+                temp_tensor = torch.tensor([temp_value], dtype=torch.float32, device=self.device)
 
             if not hasattr(self, 'clustering_temperature'):
+                logger.debug("Registering new clustering_temperature buffer")
                 self.register_buffer('clustering_temperature', temp_tensor)
             else:
+                logger.debug("Copying clustering_temperature data")
+                # Ensure existing attribute is a tensor
+                if not isinstance(self.clustering_temperature, torch.Tensor):
+                    logger.warning("Existing clustering_temperature was not a tensor - converting")
+                    self.clustering_temperature = torch.tensor([self.clustering_temperature],
+                                                             dtype=torch.float32,
+                                                             device=self.device)
                 self.clustering_temperature.data.copy_(temp_tensor)
 
+            logger.debug(f"Loaded clustering_temperature with value {self.clustering_temperature.item()}")
+
         # Load classifier if it exists
-        if 'classifier_state' in state_dict and hasattr(self, 'classifier'):
-            self.classifier.load_state_dict(state_dict['classifier_state'])
+        if 'classifier_state' in state_dict:
+            logger.debug("Found classifier_state in state dict")
+            if hasattr(self, 'classifier'):
+                self.classifier.load_state_dict(state_dict['classifier_state'])
+                logger.debug("Loaded classifier state")
+            else:
+                logger.warning("Classifier state found but no classifier in model")
 
         if strict:
             if missing_keys:
                 raise RuntimeError(f"Missing keys: {missing_keys}")
             if unexpected_keys:
                 raise RuntimeError(f"Unexpected keys: {unexpected_keys}")
+
+        logger.debug("State dict loading completed successfully")
 #--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
