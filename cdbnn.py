@@ -2922,7 +2922,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Checkpoint and early stopping
-            is_best =  (best_loss- avg_loss) > min_th
+            if ((best_loss - avg_loss) > min_th):
+                is_best =  True
+                print(f"{Colors.GREEN}Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}{Colors.ENDC}",end="\r",flush=False)
+            else:
+                is_best=False
+                print(f"{Colors.RED}Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}{Colors.ENDC}",end="\r",flush=False)
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -2934,7 +2939,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss=avg_loss,
                     is_best=True
                 )
-                print(f"{Colors.GREEN}Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}{Colors.ENDC}",end="\r",flush=True)
+
             else:
                 patience_counter += 1
             #print(f"{Colors.GREEN}Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}{Colors.ENDC}",end="\r",flush=True)
