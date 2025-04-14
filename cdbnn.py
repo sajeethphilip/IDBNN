@@ -2511,6 +2511,7 @@ class UnifiedCheckpoint:
                 'history': []
             }
 
+
         self.current_state['model_states'][state_key]['current'] = state_dict
         if is_best:
             self.current_state['model_states'][state_key]['best'] = state_dict
