@@ -2498,7 +2498,7 @@ class UnifiedCheckpoint:
                 'image_type': self.config['dataset'].get('image_type', 'general'),
                 'clustering_params': {
                     'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
-                    'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') else 1.0
+                    'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') and isinstance(model.clustering_temperature, torch.Tensor) else 1.0
                 }
             }
         }
