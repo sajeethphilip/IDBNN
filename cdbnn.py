@@ -658,7 +658,7 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
             enhancements['kl_divergence_weight'] = 0.0
 
         # Class encoding configuration
-        if input("Enable class encoding? (y/n) [y]: ").lower() != 'n':
+        if input("Enable class encoding? (y/n) [n]: ").lower() == 'y':
             enhancements['use_class_encoding'] = True
             weight = input("Enter classification weight (0-1) [0.1]: ").strip()
             enhancements['classification_weight'] = float(weight) if weight else 0.1
@@ -792,7 +792,7 @@ class BaseAutoencoder(nn.Module):
 
         # Basic configuration
         self.input_shape = input_shape
-        self.in_channels =config['dataset']['in_channels']
+        self.in_channels = input_shape[0]
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
@@ -4978,7 +4978,112 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             logger.error(f"Error loading model: {str(e)}")
             raise
 
+class FeatureExtractorCNN(nn.Module):
+    """CNN-based feature extractor model with self-attention"""
+    def __init__(self, in_channels: int = 3, feature_dims: int = 128, dropout_prob: float = 0.5):
+        super().__init__()
+        self.dropout_prob = dropout_prob
 
+        # Layer 1
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 2
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 3
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Self-attention after Layer 3
+        self.attention1 = SelfAttention(128)
+
+        # Layer 4
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 5
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Layer 6
+        self.conv6 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(dropout_prob)
+        )
+
+        # Self-attention after Layer 6
+        self.attention2 = SelfAttention(512)
+
+        # Layer 7
+        self.conv7 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
+        )
+
+        # Fully connected layer
+        self.fc = nn.Linear(512, feature_dims)
+        self.batch_norm = nn.BatchNorm1d(feature_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # Add batch dimension
+
+        # Forward pass through layers
+        x1 = self.conv1(x)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
+
+        # Apply self-attention
+        x3 = self.attention1(x3)
+
+        x4 = self.conv4(x3)
+        x5 = self.conv5(x4)
+        x6 = self.conv6(x5)
+
+        # Apply self-attention
+        x6 = self.attention2(x6)
+
+        x7 = self.conv7(x6)
+
+        # Flatten and fully connected layer
+        x7 = x7.view(x7.size(0), -1)
+        x7 = self.fc(x7)
+        if x7.size(0) > 1:  # Only apply batch norm if batch size > 1
+            x7 = self.batch_norm(x7)
+
+        return x7
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
@@ -5151,6 +5256,288 @@ class AutoencoderLoss(nn.Module):
         return self.reconstruction_weight * recon_loss + \
                self.feature_weight * feature_loss
 
+
+class CNNFeatureExtractor(BaseFeatureExtractor):
+    """CNN-based feature extractor implementation"""
+
+    def _create_model(self) -> nn.Module:
+        """Create CNN model"""
+        return FeatureExtractorCNN(
+            in_channels=self.config['dataset']['in_channels'],
+            feature_dims=self.feature_dims
+        ).to(self.device)
+
+    def _load_from_checkpoint(self):
+        """Load model from checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Try to find latest checkpoint
+        checkpoint_path = self._find_latest_checkpoint()
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            try:
+                logger.info(f"Loading checkpoint from {checkpoint_path}")
+
+                # Debug: Ensure model is initialized
+                if not hasattr(self, 'feature_extractor') or self.feature_extractor is None:
+                    logger.error("Model (feature_extractor) is not initialized. Initializing now...")
+                    self.feature_extractor = self._create_model()
+
+                # Determine the appropriate device for loading
+                if torch.cuda.is_available():
+                    map_location = self.device  # Use GPU if available
+                else:
+                    map_location = torch.device('cpu')  # Fallback to CPU
+
+                # Load checkpoint with weights_only=True for security
+                checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+
+                # Debug: Verify checkpoint contents
+                if 'state_dict' not in checkpoint:
+                    logger.error("Checkpoint does not contain 'state_dict'. Cannot load model.")
+                    raise KeyError("Checkpoint missing 'state_dict'")
+
+                # Load model state
+                self.feature_extractor.load_state_dict(checkpoint['state_dict'])
+
+                # Initialize and load optimizer
+                self.optimizer = self._initialize_optimizer()
+                if 'optimizer_state_dict' in checkpoint:
+                    try:
+                        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        logger.info("Optimizer state loaded")
+                    except Exception as e:
+                        logger.warning(f"Failed to load optimizer state: {str(e)}")
+
+                # Load training state
+                self.current_epoch = checkpoint.get('epoch', 0)
+                self.best_accuracy = checkpoint.get('best_accuracy', 0.0)
+                self.best_loss = checkpoint.get('best_loss', float('inf'))
+
+                # Load history
+                if 'history' in checkpoint:
+                    self.history = defaultdict(list, checkpoint['history'])
+
+                logger.info("Checkpoint loaded successfully")
+
+            except Exception as e:
+                logger.error(f"Error loading checkpoint: {str(e)}")
+                self.optimizer = self._initialize_optimizer()
+        else:
+            logger.info("No checkpoint found, starting from scratch")
+            self.optimizer = self._initialize_optimizer()
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint file"""
+        dataset_name = self.config['dataset']['name']
+        checkpoint_dir = os.path.join('data', dataset_name, 'checkpoints')
+
+        if not os.path.exists(checkpoint_dir):
+            return None
+
+        # Check for best model first
+        best_path = os.path.join(checkpoint_dir, f"{dataset_name}_best.pth")
+        if os.path.exists(best_path):
+            return best_path
+
+        # Check for latest checkpoint
+        checkpoint_path = os.path.join(checkpoint_dir, f"{dataset_name}_checkpoint.pth")
+        if os.path.exists(checkpoint_path):
+            return checkpoint_path
+
+        return None
+
+    def _save_checkpoint(self, is_best: bool = False):
+        """Save model checkpoint"""
+        checkpoint_dir = self.config['training']['checkpoint_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        checkpoint = {
+            'state_dict': self.feature_extractor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epoch': self.current_epoch,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+            'history': dict(self.history),
+            'config': self.config
+        }
+
+        # Save latest checkpoint
+        dataset_name = self.config['dataset']['name']
+        filename = f"{dataset_name}_{'best' if is_best else 'checkpoint'}.pth"
+        checkpoint_path = os.path.join(checkpoint_dir, filename)
+
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Saved {'best' if is_best else 'latest'} checkpoint to {checkpoint_path}")
+
+    def _train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+        """Train one epoch"""
+        self.feature_extractor.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        pbar = tqdm(train_loader, desc=f'Epoch {self.current_epoch + 1}',
+                   unit='batch', leave=False)
+
+        try:
+            for batch_idx, (inputs, targets) in enumerate(pbar):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                self.optimizer.zero_grad()
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Update progress bar
+                batch_loss = running_loss / (batch_idx + 1)
+                batch_acc = 100. * correct / total
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'acc': f'{batch_acc:.2f}%'
+                })
+
+                # Cleanup
+                del inputs, outputs, loss
+                if batch_idx % 50 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Error in batch {batch_idx}: {str(e)}")
+            raise
+
+        pbar.close()
+        return running_loss / len(train_loader), 100. * correct / total
+
+    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
+        """Validate model"""
+        self.feature_extractor.eval()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self.feature_extractor(inputs)
+                loss = F.cross_entropy(outputs, targets)
+
+                running_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+                # Cleanup
+                del inputs, outputs, loss
+
+        return running_loss / len(val_loader), 100. * correct / total
+
+    def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
+        """
+        Extract features from a DataLoader with improved label handling.
+
+        Args:
+            loader (DataLoader): DataLoader for the dataset.
+            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
+
+        Returns:
+            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        """
+        self.eval()
+        all_embeddings = []
+        all_labels = []
+        all_indices = []  # Store file indices
+        all_filenames = []  # Store filenames
+        all_class_names = []  # Store actual class names
+
+        try:
+            with torch.no_grad():
+                for batch_idx, (inputs, labels) in enumerate(tqdm(loader, desc=f"Extracting {dataset_type} features")):
+                    inputs = inputs.to(self.device)
+                    labels = labels.to(self.device)
+
+                    # Get metadata if available, otherwise use placeholders
+                    if hasattr(loader.dataset, 'get_additional_info'):
+                        # Custom dataset with metadata
+                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
+                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+
+                        # Improved class name handling
+                        if hasattr(loader.dataset, 'reverse_encoder'):
+                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
+                        elif hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [f"class_{label.item()}" for label in labels]
+                    else:
+                        # Dataset without metadata (e.g., torchvision)
+                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+
+                        # Better fallback for class names
+                        if hasattr(loader.dataset, 'classes'):
+                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                        else:
+                            class_names = [str(label.item()) for label in labels]
+
+                    # Extract embeddings
+                    embeddings = self.encode(inputs)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]
+
+                    # Append to lists
+                    all_embeddings.append(embeddings)
+                    all_labels.append(labels)
+                    all_indices.extend(indices)
+                    all_filenames.extend(filenames)
+                    all_class_names.extend(class_names)
+
+                # Concatenate all results
+                embeddings = torch.cat(all_embeddings)
+                labels = torch.cat(all_labels)
+
+                feature_dict = {
+                    'embeddings': embeddings,
+                    'labels': labels,
+                    'indices': all_indices,
+                    'filenames': all_filenames,
+                    'class_names': all_class_names  # Now contains proper class names in all cases
+                }
+
+                return feature_dict
+
+        except Exception as e:
+            logger.error(f"Error during feature extraction: {str(e)}")
+            raise
+
+    def get_feature_shape(self) -> Tuple[int, ...]:
+        """Get shape of extracted features"""
+        return (self.feature_dims,)
+
+    def plot_feature_distribution(self, loader: DataLoader, save_path: Optional[str] = None):
+        """Plot distribution of extracted features"""
+        features, _ = self.extract_features(loader)
+        features = features.numpy()
+
+        plt.figure(figsize=(12, 6))
+        plt.hist(features.flatten(), bins=50, density=True)
+        plt.title('Feature Distribution')
+        plt.xlabel('Feature Value')
+        plt.ylabel('Density')
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            logger.info(f"Feature distribution plot saved to {save_path}")
+        plt.close()
 
 
 class EnhancedAutoEncoderFeatureExtractor(AutoEncoderFeatureExtractor):
@@ -5376,6 +5763,17 @@ class StructurePreservingAutoencoder(DynamicAutoencoder):
         return embedding, reconstruction
 
 
+def get_feature_extractor(config: Dict, device: Optional[str] = None) -> BaseFeatureExtractor:
+    """Get appropriate feature extractor with enhanced image handling"""
+    encoder_type = config['model'].get('encoder_type', 'cnn').lower()
+
+    if encoder_type == 'cnn':
+        return CNNFeatureExtractor(config, device)
+    elif encoder_type == 'autoenc':
+        # Always use enhanced version for autoencoder
+        return EnhancedAutoEncoderFeatureExtractor(config, device)
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
@@ -6895,7 +7293,7 @@ def configure_enhancements(config: Dict) -> Dict:
         enhancements['use_kl_divergence'] = False
 
     # Class encoding configuration
-    if input("Enable class encoding? (y/n) [y]: ").lower() == 'n':
+    if input("Enable class encoding? (y/n) [n]: ").lower() != 'y':
         enhancements['use_class_encoding'] = False
         enhancements['classification_weight'] = float(input("Enter classification weight (0-1) [0.1]: ") or 0.1)
     else:
@@ -7475,6 +7873,6 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
     return merged
 
 if __name__ == '__main__':
-    #print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
-    print("Updated on April 14/2025 Stable version")
+    print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
+    print("Updated on March 30/2025 Stable version")
     sys.exit(main())
