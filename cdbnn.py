@@ -1280,7 +1280,9 @@ class BaseAutoencoder(nn.Module):
         if hasattr(self, 'cluster_centers'):
             state['cluster_centers'] = self.cluster_centers
         if hasattr(self, 'clustering_temperature'):
-            state['clustering_temperature'] = self.clustering_temperature
+            # Ensure we save the tensor value
+            state['clustering_temperature'] = self.clustering_temperature if isinstance(
+                self.clustering_temperature, torch.Tensor) else torch.tensor([self.clustering_temperature])
 
         # Add classifier if it exists
         if hasattr(self, 'classifier'):
@@ -1301,10 +1303,17 @@ class BaseAutoencoder(nn.Module):
                 self.cluster_centers.data.copy_(state_dict['cluster_centers'])
 
         if 'clustering_temperature' in state_dict:
-            if not hasattr(self, 'clustering_temperature'):
-                self.register_buffer('clustering_temperature', state_dict['clustering_temperature'])
+            temp_value = state_dict['clustering_temperature']
+            # Handle both tensor and float cases
+            if isinstance(temp_value, torch.Tensor):
+                temp_tensor = temp_value
             else:
-                self.clustering_temperature.data.copy_(state_dict['clustering_temperature'])
+                temp_tensor = torch.tensor([temp_value], dtype=torch.float32)
+
+            if not hasattr(self, 'clustering_temperature'):
+                self.register_buffer('clustering_temperature', temp_tensor)
+            else:
+                self.clustering_temperature.data.copy_(temp_tensor)
 
         # Load classifier if it exists
         if 'classifier_state' in state_dict and hasattr(self, 'classifier'):
