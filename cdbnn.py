@@ -3554,7 +3554,7 @@ class DynamicAutoencoder(nn.Module):
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, num_classes: Optional[int] = None):
         super().__init__()
         self.input_shape = input_shape  # e.g., (3, 32, 32) for CIFAR
-        self.in_channels = input_shape[0]  # Store input channels explicitly
+        self.in_channels = config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.num_classes = num_classes
 
