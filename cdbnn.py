@@ -2939,7 +2939,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
-            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+            #logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
