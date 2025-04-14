@@ -3703,7 +3703,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         model = config.setdefault('model', {})
         model.setdefault('feature_dims', 128)
         model.setdefault('learning_rate', 0.001)
-        model.setdefault('encoder_type', 'cnn')
+        model.setdefault('encoder_type', 'autoenc')
         model.setdefault('modelType', 'Histogram')
 
         # Add autoencoder enhancement configuration
@@ -6201,7 +6201,7 @@ def parse_arguments():
     parser.add_argument('--interactive', action='store_true',
                        help='Force interactive mode even with command line args')
     parser.add_argument('--encoder_type', choices=['autoenc', 'cnn'],
-                       default='cnn', help='Decide model type cnn (default) or autoenc')
+                       default='autoenc', help='Decide model type autoenc (default) or cnn')
 
     # Prediction-specific
     parser.add_argument('--model-path', help='Path to trained model')
