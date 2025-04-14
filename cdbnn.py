@@ -2883,7 +2883,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 )
             else:
                 patience_counter += 1
-
+            print(f"Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}")
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
