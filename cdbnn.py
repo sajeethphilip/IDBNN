@@ -3897,7 +3897,7 @@ class CustomImageDataset(Dataset):
         os.makedirs(self.preprocessed_dir, exist_ok=True)
 
         # Preprocess images with a progress bar
-        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing images"):
+        for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Preprocessing images")):
             image = Image.open(img_path).convert('RGB')
             image_tensor = transforms.ToTensor()(image)
 
