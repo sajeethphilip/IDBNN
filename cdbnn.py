@@ -2770,7 +2770,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     device = next(model.parameters()).device
     # Initialize with model-specific best loss
     best_loss = float('inf')
-
+    min_th=float(config['model'].get( "autoencoder_config").get( "convergence_threshold"))
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
@@ -2870,7 +2870,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Checkpoint and early stopping
-            is_best = avg_loss < best_loss
+            is_best =  (best_loss- avg_loss) > min_th
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
