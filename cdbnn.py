@@ -1293,23 +1293,32 @@ class BaseAutoencoder(nn.Module):
         # Load main model state
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, strict=False)
 
-        # Load clustering parameters
-        cluster_centers = state_dict.get('cluster_centers')
-        clustering_temp = state_dict.get('clustering_temperature')
+        # Load clustering parameters with proper type checking
+        if hasattr(self, 'use_kl_divergence') and self.use_kl_divergence:
+            # Handle cluster centers
+            if 'cluster_centers' in state_dict:
+                cluster_centers = state_dict['cluster_centers']
+                if not hasattr(self, 'cluster_centers'):
+                    self.register_buffer('cluster_centers', torch.empty_like(cluster_centers))
 
-        if cluster_centers is not None:
-            if not hasattr(self, 'cluster_centers'):
-                self.register_buffer('cluster_centers', torch.empty_like(cluster_centers))
-            self.cluster_centers.data.copy_(cluster_centers)
+                if isinstance(cluster_centers, torch.Tensor):
+                    self.cluster_centers.data.copy_(cluster_centers)
+                else:
+                    self.cluster_centers.data.copy_(torch.tensor(cluster_centers,
+                                                               dtype=torch.float32,
+                                                               device=self.cluster_centers.device))
 
-        if clustering_temp is not None:
-            if not hasattr(self, 'clustering_temperature'):
-                self.register_buffer('clustering_temperature', torch.empty_like(clustering_temp))
-            # Handle both tensor and float cases
-            if isinstance(clustering_temp, torch.Tensor):
-                self.clustering_temperature.data.copy_(clustering_temp)
-            else:
-                self.clustering_temperature.data.fill_(clustering_temp)
+            # Handle clustering temperature
+            if 'clustering_temperature' in state_dict:
+                temp = state_dict['clustering_temperature']
+                if not hasattr(self, 'clustering_temperature'):
+                    self.register_buffer('clustering_temperature',
+                                       torch.tensor(1.0, dtype=torch.float32))
+
+                if isinstance(temp, torch.Tensor):
+                    self.clustering_temperature.data.copy_(temp)
+                else:
+                    self.clustering_temperature.data.fill_(float(temp))
 
         if strict:
             if missing_keys:
