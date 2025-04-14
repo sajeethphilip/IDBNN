@@ -1264,14 +1264,16 @@ class BaseAutoencoder(nn.Module):
             if not hasattr(self, 'cluster_centers'):
                 num_clusters = config['dataset'].get('num_classes', 10)
                 self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims))
+                                   torch.randn(num_clusters, self.feature_dims,
+                                     device=self.device))
                 logger.debug(f"Initialized cluster_centers with shape {self.cluster_centers.shape}")
 
             if not hasattr(self, 'clustering_temperature'):
                 # Convert to tensor and register as buffer
                 temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
                 if not isinstance(temp_value, torch.Tensor):
-                    temp_value = torch.tensor([temp_value], dtype=torch.float32)
+                    temp_value = torch.tensor([temp_value], dtype=torch.float32,
+                                      device=self.device)
                 self.register_buffer('clustering_temperature', temp_value)
                 logger.debug(f"Initialized clustering_temperature as tensor with value {self.clustering_temperature}")
 
@@ -1728,7 +1730,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature
+            temperature = self.clustering_temperature.to(embeddings.device)
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
