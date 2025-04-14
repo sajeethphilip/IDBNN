@@ -14,7 +14,7 @@ from tkinter import ttk, filedialog, messagebox
 class NoiseInjectionApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PyTorch Noise Injection Tool")
+        self.root.title("Noise Injection Module")
         self.root.geometry("1000x800")
 
         # Variables
