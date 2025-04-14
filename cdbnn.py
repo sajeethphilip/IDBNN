@@ -282,6 +282,23 @@ class PredictionManager:
         # Load the state dict
         model.load_state_dict(state_dict, strict=False)
 
+        # Handle clustering temperature conversion if needed
+        if model.use_kl_divergence:
+            if hasattr(model, 'clustering_temperature'):
+                if isinstance(model.clustering_temperature, float):
+                    # Convert float to tensor
+                    model.clustering_temperature = torch.tensor(
+                        [model.clustering_temperature],
+                        dtype=torch.float32,
+                        device=self.device
+                    )
+                elif not isinstance(model.clustering_temperature, torch.Tensor):
+                    model.clustering_temperature = torch.tensor(
+                        [1.0],  # default value
+                        dtype=torch.float32,
+                        device=self.device
+                    )
+
         # Verify both components were loaded correctly
         if model.use_kl_divergence:
             if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
@@ -298,7 +315,6 @@ class PredictionManager:
 
         logger.info("Model loaded successfully with all components")
         return model
-
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with consistent clustering output
