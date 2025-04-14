@@ -792,7 +792,7 @@ class BaseAutoencoder(nn.Module):
 
         # Basic configuration
         self.input_shape = input_shape
-        self.in_channels = input_shape[0]
+        self.in_channels =config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
