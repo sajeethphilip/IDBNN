@@ -60,6 +60,9 @@ class NoiseInjectionApp:
         noise_frame = ttk.LabelFrame(self.root, text="Noise Controls", padding=10)
         noise_frame.pack(fill=tk.X, padx=10, pady=5)
 
+        # Configure grid weights to make sliders expand
+        noise_frame.grid_columnconfigure(3, weight=1)
+
         # Create sliders for each noise type
         for i, noise in enumerate(self.noise_types):
             # Scale type selection
@@ -97,10 +100,10 @@ class NoiseInjectionApp:
         self.image_frame.pack(fill=tk.BOTH, expand=True)
 
         self.original_label = ttk.Label(self.image_frame)
-        self.original_label.pack(side=tk.LEFT, expand=True)
+        self.original_label.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
 
         self.processed_label = ttk.Label(self.image_frame)
-        self.processed_label.pack(side=tk.RIGHT, expand=True)
+        self.processed_label.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
 
         # Noise gauge
         gauge_frame = ttk.LabelFrame(self.root, text="Total Noise Level", padding=10)
@@ -211,13 +214,33 @@ class NoiseInjectionApp:
         # Convert back to PIL Image
         noisy_image = transforms.ToPILImage()(self.processed_image)
 
-        # Resize for display if too large
-        max_size = (400, 400)
-        original_display = self.preview_image.copy()
-        noisy_display = noisy_image.copy()
+        # Get available display size
+        window_width = self.image_frame.winfo_width()
+        window_height = self.image_frame.winfo_height()
 
-        original_display.thumbnail(max_size)
-        noisy_display.thumbnail(max_size)
+        # Calculate max size for each image (half of available width, full height)
+        max_width = max(1, (window_width // 2) - 20)  # Subtract padding
+        max_height = max(1, window_height - 20)
+
+        # Resize images while maintaining aspect ratio
+        def resize_image(img):
+            img_ratio = img.width / img.height
+            frame_ratio = max_width / max_height
+
+            if img_ratio > frame_ratio:
+                # Image is wider than frame
+                new_width = max_width
+                new_height = int(max_width / img_ratio)
+            else:
+                # Image is taller than frame
+                new_height = max_height
+                new_width = int(max_height * img_ratio)
+
+            return img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        original_display = resize_image(self.preview_image.copy())
+        noisy_display = resize_image(noisy_image.copy())
+
 
         # Convert to Tkinter PhotoImage
         self.tk_images = []  # Clear previous images to prevent garbage collection
