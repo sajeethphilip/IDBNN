@@ -5240,7 +5240,7 @@ def get_interactive_args():
 
     # Get encoder type
     while True:
-        default = last_args.get('encoder_type', 'cnn') if last_args else 'autoenc'
+        default = last_args.get('encoder_type', 'autoenc') if last_args else 'autoenc'
         prompt = f"Enter encoder type (cnn/autoenc) [{default}]: "
         encoder_type = input(prompt).strip().lower() or default
         if encoder_type in ['cnn', 'autoenc']:
