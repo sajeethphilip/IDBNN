@@ -801,7 +801,11 @@ class BaseAutoencoder(nn.Module):
         super().__init__()
 
         # Basic configuration
-        self.input_shape = input_shape
+        self.input_shape = (
+            config['dataset']['in_channels'],  # Use configured channels
+            config['dataset']['input_size'][0],
+            config['dataset']['input_size'][1]
+        )
         self.in_channels =config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.config = config
@@ -812,9 +816,9 @@ class BaseAutoencoder(nn.Module):
                                  and torch.cuda.is_available() else 'cpu')
 
         # Shape tracking initialization
-        self.shape_registry = {'input': input_shape}
+        self.shape_registry = {'input': self.input_shape}
         self.spatial_dims = []
-        current_size = input_shape[1]
+        current_size = self.input_shape[1]
 
         # Calculate layer dimensions
         self.layer_sizes = self._calculate_layer_sizes()
@@ -3553,14 +3557,18 @@ class DCTLayer(nn.Module):     # Do a cosine Transform
 class DynamicAutoencoder(nn.Module):
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, num_classes: Optional[int] = None):
         super().__init__()
-        self.input_shape = input_shape  # e.g., (3, 32, 32) for CIFAR
+        self.input_shape = (
+            config['dataset']['in_channels'],  # Use configured channels
+            config['dataset']['input_size'][0],
+            config['dataset']['input_size'][1]
+        )
         self.in_channels = config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.num_classes = num_classes
 
         # Calculate progressive spatial dimensions
         self.spatial_dims = []
-        current_size = input_shape[1]  # Start with height (assuming square)
+        current_size = self.input_shape[1]  # Start with height (assuming square)
         self.layer_sizes = self._calculate_layer_sizes()
 
         for _ in self.layer_sizes:
