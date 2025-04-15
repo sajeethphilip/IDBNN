@@ -1276,7 +1276,7 @@ class BaseAutoencoder(nn.Module):
         else:
             # Ensure existing temperature is a tensor
             if not isinstance(self.clustering_temperature, torch.Tensor):
-                self.clustering_temperature = torch.tensor([float(temp_value)], dtype=torch.float32)
+                self.clustering_temperature = torch.tensor([float(temp_value)], dtype=torch.float32,device=self.device)
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include all necessary components"""
@@ -1289,7 +1289,7 @@ class BaseAutoencoder(nn.Module):
         if hasattr(self, 'clustering_temperature'):
             if not isinstance(self.clustering_temperature, torch.Tensor):
                 self.clustering_temperature = torch.tensor([float(self.clustering_temperature)],
-                                                         dtype=torch.float32)
+                                                         dtype=torch.float32,device=self.device)
             state['clustering_temperature'] = self.clustering_temperature
 
 
@@ -1315,7 +1315,7 @@ class BaseAutoencoder(nn.Module):
         if 'clustering_temperature' in state_dict:
             temp = state_dict['clustering_temperature']
             if not isinstance(temp, torch.Tensor):
-                temp = torch.tensor([float(temp)], dtype=torch.float32)
+                temp = torch.tensor([float(temp)], dtype=torch.float32,device=self.device)
 
             if not hasattr(self, 'clustering_temperature'):
                 self.register_buffer('clustering_temperature', temp)
