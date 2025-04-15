@@ -4926,10 +4926,13 @@ class DBNN(GPUDBNN):
         return W
 
     def _calculate_class_wise_accuracy(self, y_true, y_pred):
-        """Calculate class-wise accuracy metrics"""
+        """Calculate class-wise accuracy metrics with device handling"""
+        # Ensure both tensors are on the same device (preferably CPU for this operation)
+        y_true = y_true.cpu()
+        y_pred = y_pred.cpu()
+
         unique_classes = torch.unique(y_true)
         class_accuracies = {}
-        total_samples = len(y_true)
 
         for class_id in unique_classes:
             class_mask = (y_true == class_id)
@@ -5032,12 +5035,16 @@ class DBNN(GPUDBNN):
             y_all = torch.cat([y_train, y_test], dim=0)
             all_pred_classes, all_posteriors = self.predict(X_all, batch_size=batch_size)
 
+            # Move tensors to CPU for accuracy calculation
+            y_all_cpu = y_all.cpu()
+            all_pred_classes_cpu = all_pred_classes.cpu()
+
             # Calculate accuracy metrics
             if class_preference:
-                # Calculate class-wise accuracy
-                class_accuracies = self._calculate_class_wise_accuracy(y_all, all_pred_classes)
+                # Calculate class-wise accuracy on CPU
+                class_accuracies = self._calculate_class_wise_accuracy(y_all_cpu, all_pred_classes_cpu)
 
-                # Use minimum class accuracy as the criterion (can be changed to sum/mean if preferred)
+                # Use minimum class accuracy as the criterion
                 current_metric = min([v['accuracy'] for v in class_accuracies.values()])
                 best_metric = self.best_combined_accuracy
 
@@ -5048,8 +5055,8 @@ class DBNN(GPUDBNN):
                     print(f"\033[K  {class_name}: {metrics['accuracy']:.2%} ({metrics['correct']}/{metrics['n_samples']})")
                 print(f"\033[KMinimum class accuracy: {current_metric:.2%}")
             else:
-                # Original behavior - overall accuracy
-                current_metric = (y_all == all_pred_classes).float().mean().item()
+                # Original behavior - overall accuracy calculated on CPU
+                current_metric = (y_all_cpu == all_pred_classes_cpu).float().mean().item()
                 best_metric = self.best_combined_accuracy
 
             # Update best model if improved
