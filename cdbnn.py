@@ -2786,7 +2786,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     device = next(model.parameters()).device
     # Initialize with model-specific best loss
     best_loss = float('inf')
-
+    min_thr= float(config['model']['autoencoder_config']["convergence_threshold"])
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
@@ -2874,7 +2874,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                         pbar.set_postfix({
                             'loss': f'{Colors.RED}{current_avg_loss:.4f}{Colors.ENDC}',
                             'best': f'{Colors.YELLOW}{best_loss:.4f}{Colors.ENDC}',
-                            'patience': f'{Colors.RED}{patience_counter}{Colors.ENDC}'
+                            'patience': f'{Colors.RED}{patience_counter+1}{Colors.ENDC}'
                         })
 
 
@@ -2895,7 +2895,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Checkpoint and early stopping
-            is_best = avg_loss < best_loss
+            is_best =  (best_loss - avg_loss) >min_thr
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
