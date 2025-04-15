@@ -4457,7 +4457,8 @@ class DatasetProcessor:
                 "enable_vectorized": False,
                 "vectorization_warning_acknowledged": False,
                 "compute_device": "auto",
-                "use_interactive_kbd": False
+                "use_interactive_kbd": False,
+                "class_preference": True
             },
             "execution_flags": {
                 "train": True,
@@ -4491,7 +4492,8 @@ class DatasetProcessor:
                 "Save_training_epochs": False,
                 "training_save_path": os.path.join(self.dataset_dir, "training_data"),
                 "modelType": "Histogram",
-                "compute_device": "auto"
+                "compute_device": "auto",
+                "class_preference": True
             },
             "execution_flags": {
                 "train": True,
