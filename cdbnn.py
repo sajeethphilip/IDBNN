@@ -806,7 +806,7 @@ class BaseAutoencoder(nn.Module):
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        input_shape=self.input_shape.copy()
+        input_shape=self.input_shape
         self.in_channels =config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.config = config
@@ -3563,7 +3563,7 @@ class DynamicAutoencoder(nn.Module):
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        input_shape=self.input_shape.copy()
+        input_shape=self.input_shape
         self.in_channels = config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.num_classes = num_classes
