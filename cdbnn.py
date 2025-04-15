@@ -806,6 +806,7 @@ class BaseAutoencoder(nn.Module):
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
+        input_shape=self.input_shape.copy()
         self.in_channels =config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.config = config
@@ -816,9 +817,9 @@ class BaseAutoencoder(nn.Module):
                                  and torch.cuda.is_available() else 'cpu')
 
         # Shape tracking initialization
-        self.shape_registry = {'input': self.input_shape}
+        self.shape_registry = {'input': input_shape}
         self.spatial_dims = []
-        current_size = self.input_shape[1]
+        current_size = input_shape[1]
 
         # Calculate layer dimensions
         self.layer_sizes = self._calculate_layer_sizes()
@@ -1264,109 +1265,57 @@ class BaseAutoencoder(nn.Module):
             if not hasattr(self, 'cluster_centers'):
                 num_clusters = config['dataset'].get('num_classes', 10)
                 self.register_buffer('cluster_centers',
-                                   torch.randn(num_clusters, self.feature_dims,
-                                     device=self.device))
-                logger.debug(f"Initialized cluster_centers with shape {self.cluster_centers.shape}")
+                                   torch.randn(num_clusters, self.feature_dims))
 
             if not hasattr(self, 'clustering_temperature'):
                 # Convert to tensor and register as buffer
                 temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
-                if not isinstance(temp_value, torch.Tensor):
-                    temp_value = torch.tensor([temp_value], dtype=torch.float32,
-                                      device=self.device)
-                self.register_buffer('clustering_temperature', temp_value)
-                logger.debug(f"Initialized clustering_temperature as tensor with value {self.clustering_temperature}")
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([temp_value], dtype=torch.float32))
 
     def state_dict(self, *args, **kwargs):
         """Extend state dict to include all necessary components"""
         state = super().state_dict(*args, **kwargs)
 
-        # Debug logging for clustering parameters
+        # Add clustering parameters if they exist
         if hasattr(self, 'cluster_centers'):
             state['cluster_centers'] = self.cluster_centers
-            logger.debug(f"Saving cluster_centers with shape {self.cluster_centers.shape}")
-
         if hasattr(self, 'clustering_temperature'):
-            # Ensure we're saving a tensor
-            if not isinstance(self.clustering_temperature, torch.Tensor):
-                logger.warning(f"Converting clustering_temperature from {type(self.clustering_temperature)} to tensor")
-                self.clustering_temperature = torch.tensor([self.clustering_temperature], dtype=torch.float32)
             state['clustering_temperature'] = self.clustering_temperature
-            logger.debug(f"Saving clustering_temperature with value {self.clustering_temperature.item()}")
 
         # Add classifier if it exists
         if hasattr(self, 'classifier'):
             state['classifier_state'] = self.classifier.state_dict()
-            logger.debug("Saved classifier state")
 
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including all components with debug logging"""
-        logger.debug("Starting state dict loading")
-
-        # Log all keys in the state dict
-        logger.debug(f"State dict keys: {list(state_dict.keys())}")
-
+        """Load state dict including all components"""
         # Load main model state
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, strict=False)
-        logger.debug(f"Missing keys: {missing_keys}")
-        logger.debug(f"Unexpected keys: {unexpected_keys}")
 
-        # Load clustering parameters with detailed checks
+        # Load clustering parameters
         if 'cluster_centers' in state_dict:
-            logger.debug("Found cluster_centers in state dict")
             if not hasattr(self, 'cluster_centers'):
-                logger.debug("Initializing new cluster_centers buffer")
                 self.register_buffer('cluster_centers', state_dict['cluster_centers'])
             else:
-                logger.debug("Copying cluster_centers data")
                 self.cluster_centers.data.copy_(state_dict['cluster_centers'])
-            logger.debug(f"Loaded cluster_centers with shape {self.cluster_centers.shape}")
 
         if 'clustering_temperature' in state_dict:
-            logger.debug("Found clustering_temperature in state dict")
-            temp_value = state_dict['clustering_temperature']
-
-            # Handle both tensor and float cases
-            if isinstance(temp_value, torch.Tensor):
-                logger.debug("clustering_temperature is already a tensor")
-                temp_tensor = temp_value
-            else:
-                logger.debug(f"Converting clustering_temperature from {type(temp_value)} to tensor")
-                temp_tensor = torch.tensor([temp_value], dtype=torch.float32, device=self.device)
-
             if not hasattr(self, 'clustering_temperature'):
-                logger.debug("Registering new clustering_temperature buffer")
-                self.register_buffer('clustering_temperature', temp_tensor)
+                self.register_buffer('clustering_temperature', state_dict['clustering_temperature'])
             else:
-                logger.debug("Copying clustering_temperature data")
-                # Ensure existing attribute is a tensor
-                if not isinstance(self.clustering_temperature, torch.Tensor):
-                    logger.warning("Existing clustering_temperature was not a tensor - converting")
-                    self.clustering_temperature = torch.tensor([self.clustering_temperature],
-                                                             dtype=torch.float32,
-                                                             device=self.device)
-                self.clustering_temperature.data.copy_(temp_tensor)
-
-            logger.debug(f"Loaded clustering_temperature with value {self.clustering_temperature.item()}")
+                self.clustering_temperature.data.copy_(state_dict['clustering_temperature'])
 
         # Load classifier if it exists
-        if 'classifier_state' in state_dict:
-            logger.debug("Found classifier_state in state dict")
-            if hasattr(self, 'classifier'):
-                self.classifier.load_state_dict(state_dict['classifier_state'])
-                logger.debug("Loaded classifier state")
-            else:
-                logger.warning("Classifier state found but no classifier in model")
+        if 'classifier_state' in state_dict and hasattr(self, 'classifier'):
+            self.classifier.load_state_dict(state_dict['classifier_state'])
 
         if strict:
             if missing_keys:
                 raise RuntimeError(f"Missing keys: {missing_keys}")
             if unexpected_keys:
                 raise RuntimeError(f"Unexpected keys: {unexpected_keys}")
-
-        logger.debug("State dict loading completed successfully")
 #--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
@@ -1730,7 +1679,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
-            temperature = self.clustering_temperature.to(embeddings.device)
+            temperature = self.clustering_temperature
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -2822,7 +2771,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     device = next(model.parameters()).device
     # Initialize with model-specific best loss
     best_loss = float('inf')
-    min_th=float(config['model'].get( "autoencoder_config").get( "convergence_threshold"))
+
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
@@ -2901,8 +2850,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     current_avg_loss = running_loss / (batch_idx + 1)
                     pbar.set_postfix({
                         'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}',
-                        'patience':f'{patience_counter}'
+                        'best': f'{best_loss:.4f}'
                     })
 
                     # Memory cleanup
@@ -2922,12 +2870,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             history[f'phase{phase}_loss'].append(avg_loss)
 
             # Checkpoint and early stopping
-            if (best_loss <= (avg_loss + min_th)):
-                is_best =  False
-                print(f"{Colors.RED}Patience counter: {patience_counter} with Epoch avg loss:{avg_loss} and Best Epoch avg loss at {best_loss}{Colors.ENDC}")
-            else:
-                is_best=True
-                print(f"{Colors.GREEN}Patience counter: {patience_counter} with Epoch avg loss:{avg_loss} and Best Epoch avg loss at {best_loss}{Colors.ENDC}")
+            is_best = avg_loss < best_loss
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -2939,15 +2882,14 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss=avg_loss,
                     is_best=True
                 )
-
             else:
                 patience_counter += 1
-            #print(f"{Colors.GREEN}Patience counter: {patience_counter} with avg loss:{avg_loss} and Best loss at {best_loss}{Colors.ENDC}",end="\r",flush=True)
+
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
-            #logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
@@ -3621,13 +3563,14 @@ class DynamicAutoencoder(nn.Module):
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
+        input_shape=self.input_shape.copy()
         self.in_channels = config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.num_classes = num_classes
 
         # Calculate progressive spatial dimensions
         self.spatial_dims = []
-        current_size = self.input_shape[1]  # Start with height (assuming square)
+        current_size = input_shape[1]  # Start with height (assuming square)
         self.layer_sizes = self._calculate_layer_sizes()
 
         for _ in self.layer_sizes:
@@ -4277,7 +4220,7 @@ class DatasetProcessor:
                 "autoencoder_config": {
                     "reconstruction_weight": 1.0,
                     "feature_weight": 0.1,
-                    "convergence_threshold": 0.0001,
+                    "convergence_threshold": 0.001,
                     "min_epochs": 10,
                     "patience": 5,
                     "enhancements": {
