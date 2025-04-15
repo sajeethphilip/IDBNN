@@ -357,7 +357,8 @@ class DatasetConfig:
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
             "inverse_learning_rate": 0.001,
-            "save_plots": True
+            "save_plots": True,
+            "class_preference": True
         }
         config["active_learning"]= {
             "tolerance": 1.0,
@@ -4924,12 +4925,34 @@ class DBNN(GPUDBNN):
                 W[class_id][feature_pair] = torch.tensor(0.1, dtype=torch.float32)
         return W
 
+    def _calculate_class_wise_accuracy(self, y_true, y_pred):
+        """Calculate class-wise accuracy metrics"""
+        unique_classes = torch.unique(y_true)
+        class_accuracies = {}
+        total_samples = len(y_true)
+
+        for class_id in unique_classes:
+            class_mask = (y_true == class_id)
+            n_class_samples = class_mask.sum().item()
+            if n_class_samples == 0:
+                continue
+
+            correct = (y_pred[class_mask] == y_true[class_mask]).sum().item()
+            class_acc = correct / n_class_samples
+            class_accuracies[class_id.item()] = {
+                'accuracy': class_acc,
+                'n_samples': n_class_samples,
+                'correct': correct
+            }
+
+        return class_accuracies
 
     def fit_predict(self, batch_size: int = 128, save_path: str = None):
         """Full training and prediction pipeline with GPU optimization and optional prediction saving"""
         try:
             # Set a flag to indicate we're printing metrics
             self._last_metrics_printed = True
+            class_preference = self.config.get('training_params', {}).get('class_preference', True)
 
             # If this is a fresh training round, reset to the best round's initial conditions
             if self.best_round_initial_conditions is not None:
@@ -5008,20 +5031,44 @@ class DBNN(GPUDBNN):
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
             all_pred_classes, all_posteriors = self.predict(X_all, batch_size=batch_size)
-            # Ensure all tensors are on the same device (GPU)
-            all_pr = all_pred_classes.to(self.device)  # Move predictions to GPU
-            y_all_pr = y_all.to(self.device)  # Ensure y_all is on GPU (though it likely already is)
 
-            combined_accuracy = len(X_all[y_all_pr == all_pr]) / len(X_all)
-            if combined_accuracy > self.best_combined_accuracy:
+            # Calculate accuracy metrics
+            if class_preference:
+                # Calculate class-wise accuracy
+                class_accuracies = self._calculate_class_wise_accuracy(y_all, all_pred_classes)
+
+                # Use minimum class accuracy as the criterion (can be changed to sum/mean if preferred)
+                current_metric = min([v['accuracy'] for v in class_accuracies.values()])
+                best_metric = self.best_combined_accuracy
+
+                # Print class-wise metrics
+                print("\033[K" + f"{Colors.GREEN}Class-wise accuracies:{Colors.ENDC}")
+                for class_id, metrics in class_accuracies.items():
+                    class_name = self.label_encoder.inverse_transform([class_id])[0]
+                    print(f"\033[K  {class_name}: {metrics['accuracy']:.2%} ({metrics['correct']}/{metrics['n_samples']})")
+                print(f"\033[KMinimum class accuracy: {current_metric:.2%}")
+            else:
+                # Original behavior - overall accuracy
+                current_metric = (y_all == all_pred_classes).float().mean().item()
+                best_metric = self.best_combined_accuracy
+
+            # Update best model if improved
+            if current_metric > best_metric:
                 print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                print("\033[K" +  f"{Colors.GREEN}The best combined accuracy has improved from {self.best_combined_accuracy} to {combined_accuracy}{Colors.ENDC}")
-                print("\033[K" +  f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
-                self.best_combined_accuracy = combined_accuracy
-                self._save_model_components()
-                #self._save_best_weights()
+                if class_preference:
+                    print("\033[K" + f"{Colors.GREEN}Best minimum class accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
+                    # Store the mean class accuracy as best_combined_accuracy
+                    mean_class_acc = sum([v['accuracy'] for v in class_accuracies.values()]) / len(class_accuracies)
+                    self.best_combined_accuracy = mean_class_acc
+                else:
+                    print("\033[K" + f"{Colors.GREEN}Best combined accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
+                    self.best_combined_accuracy = current_metric
+                print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
 
-            self.reset_to_initial_state() #After saving the weights, reset to inital state for next round.
+                self._save_model_components()
+
+            self.reset_to_initial_state() # After saving the weights, reset to initial state for next round.
+
 
             # Extract predictions for training and test data using stored indices
             y_train_pred =  all_pred_classes[:len(y_train)]  # Predictions for training data
@@ -6321,7 +6368,8 @@ def load_or_create_config(config_path: str) -> dict:
             "vectorization_warning_acknowledged": False,
             "compute_device": "auto",
             "use_interactive_kbd": False,
-            "modelType": "Histogram"
+            "modelType": "Histogram",
+            "class_preference": True
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -6786,6 +6834,7 @@ def main():
         print("\033[K" + f"- Epochs: {config.get('training_params', {}).get('epochs', 1000)}")
         print("\033[K" + f"- Test Fraction: {config.get('training_params', {}).get('test_fraction', 0.2)}")
         print("\033[K" + f"- Enable Adaptive: {config.get('training_params', {}).get('enable_adaptive', True)}")
+        print("\033[K" + f"- Enable class-wise preference in training: {config.get('training_params', {}).get('class_preference',True )}")
 
         # Get mode
         mode = input("\033[K" + f"{Colors.BOLD}Enter mode (train/train_predict/predict/invertDBNN): {Colors.ENDC}").strip().lower()
