@@ -516,6 +516,7 @@ class PredictionManager:
 
 
 
+
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
 
