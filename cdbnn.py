@@ -2863,10 +2863,20 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                     # Update progress bar
                     current_avg_loss = running_loss / (batch_idx + 1)
-                    pbar.set_postfix({
-                        'loss': f'{current_avg_loss:.4f}',
-                        'best': f'{best_loss:.4f}'
-                    })
+                    if current_avg_loss < best_loss:
+
+                        pbar.set_postfix({
+                            'loss': f'{Colors.GREEN}{current_avg_loss:.4f}{Colors.ENDC}',
+                            'best': f'{Colors.YELLOW}{best_loss:.4f}{Colors.ENDC}',
+                            'patience': f'{Colors.GREEN}{patience_counter}{Colors.ENDC}'
+                        })
+                    else:
+                        pbar.set_postfix({
+                            'loss': f'{Colors.RED}{current_avg_loss:.4f}{Colors.ENDC}',
+                            'best': f'{Colors.YELLOW}{best_loss:.4f}{Colors.ENDC}',
+                            'patience': f'{Colors.RED}{patience_counter}{Colors.ENDC}'
+                        })
+
 
                     # Memory cleanup
                     del data, loss
@@ -2904,7 +2914,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
-            logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+            #logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
