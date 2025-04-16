@@ -5053,7 +5053,7 @@ class DBNN(GPUDBNN):
                 # Print class-wise metrics
                 print("\033[K" + f"{Colors.GREEN}Class-wise accuracies:{Colors.ENDC}")
                 for class_id, metrics in class_accuracies.items():
-                    current_metric=current_metric+({metrics['correct']}/{metrics['n_samples']})
+                    current_metric=current_metric+(metrics['correct']/metrics['n_samples'])
                     class_name = self.label_encoder.inverse_transform([class_id])[0]
                     print(f"\033[K  {class_name}: {metrics['accuracy']:.2%} ({metrics['correct']}/{metrics['n_samples']})")
                 print(f"\033[KClass-wise accuracy: {current_metric:.2%}")
