@@ -2524,7 +2524,7 @@ class DBNN(GPUDBNN):
         DEBUG.log("Model reset to initial state.")
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
-                            improvement_threshold: float = 0.001,
+                            improvement_threshold: float = 0.0001,
                             load_epoch: int = None,
                             batch_size: int = 128):
         """Modified adaptive training strategy with proper fresh start handling"""
