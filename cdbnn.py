@@ -349,7 +349,7 @@ class PredictionManager:
                 'original_filename',
                 'filepath',
                 'label_type',  # New column indicating label source
-                'label_value', # Combined column for both true and predicted labels
+                'target', # Combined column for both true and predicted labels
                 'cluster_assignment',
                 'cluster_confidence'
             ] + feature_cols)
@@ -406,16 +406,16 @@ class PredictionManager:
                     # Determine label source and value
                     if true_class == "unknown" or true_class == "":
                         label_type = "predicted"
-                        label_value = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
+                        target = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
                     else:
                         label_type = "true"
-                        label_value = true_class
+                        target = true_class
 
                     row = [
                         orig_name,        # Original filename
                         filename,         # Full filepath
                         label_type,      # Label source
-                        label_value,     # Actual label value (true or predicted)
+                        target,     # Actual label value (true or predicted)
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
