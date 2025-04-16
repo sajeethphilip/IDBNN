@@ -5047,7 +5047,7 @@ class DBNN(GPUDBNN):
                 class_accuracies = self._calculate_class_wise_accuracy(y_all_cpu, all_pred_classes_cpu)
 
                 # Use minimum class accuracy as the criterion
-                current_metric = min([v['accuracy'] for v in class_accuracies.values()])
+                current_metric = sum([v['accuracy'] for v in class_accuracies.values()])
                 best_metric = self.best_combined_accuracy
 
                 # Print class-wise metrics
@@ -5055,7 +5055,7 @@ class DBNN(GPUDBNN):
                 for class_id, metrics in class_accuracies.items():
                     class_name = self.label_encoder.inverse_transform([class_id])[0]
                     print(f"\033[K  {class_name}: {metrics['accuracy']:.2%} ({metrics['correct']}/{metrics['n_samples']})")
-                print(f"\033[KMinimum class accuracy: {current_metric:.2%}")
+                print(f"\033[KClass-wise accuracy: {current_metric:.2%}")
             else:
                 # Original behavior - overall accuracy calculated on CPU
                 current_metric = (y_all_cpu == all_pred_classes_cpu).float().mean().item()
@@ -5068,7 +5068,8 @@ class DBNN(GPUDBNN):
                     print("\033[K" + f"{Colors.GREEN}Best minimum class accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
                     # Store the mean class accuracy as best_combined_accuracy
                     mean_class_acc = sum([v['accuracy'] for v in class_accuracies.values()]) / len(class_accuracies)
-                    self.best_combined_accuracy = mean_class_acc
+                    self.best_combined_accuracy = current_metric # maximise the classwise accuracies
+                    print(f"The mean class accuracy is {mean_class_acc}")
                 else:
                     print("\033[K" + f"{Colors.GREEN}Best combined accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
                     self.best_combined_accuracy = current_metric
