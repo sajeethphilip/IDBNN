@@ -343,10 +343,13 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+
+            # Modified header to indicate pseudo-labels when needed
             csv_writer.writerow([
-                'original_filename',  # Original filename without path
-                'filepath',          # Full path to the image
-                'target',            # Class label if available
+                'original_filename',
+                'filepath',
+                'label_type',  # New column indicating label source
+                'label_value', # Combined column for both true and predicted labels
                 'cluster_assignment',
                 'cluster_confidence'
             ] + feature_cols)
@@ -360,7 +363,6 @@ class PredictionManager:
 
             for filename in batch_files:
                 try:
-                    # Open image and apply transforms
                     with Image.open(filename) as img:
                         image = img.convert('RGB')
                         image_tensor = transform(image).unsqueeze(0).to(self.device)
@@ -378,7 +380,6 @@ class PredictionManager:
             with torch.no_grad():
                 output = self.model(batch_tensor)
 
-                # Handle different output formats
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -396,16 +397,25 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
-            # Write predictions to CSV with original filenames
+            # Write predictions to CSV
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
+                    # Determine label source and value
+                    if true_class == "unknown" or true_class == "":
+                        label_type = "predicted"
+                        label_value = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
+                    else:
+                        label_type = "true"
+                        label_value = true_class
+
                     row = [
-                        orig_name,       # Original filename
-                        filename,        # Full filepath
-                        true_class,      # Class label
+                        orig_name,        # Original filename
+                        filename,         # Full filepath
+                        label_type,      # Label source
+                        label_value,     # Actual label value (true or predicted)
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
@@ -900,7 +910,20 @@ class BaseAutoencoder(nn.Module):
         self._initialize_clustering(config)
 
 #--------------------------Distance Correlations ----------
+    def get_high_confidence_samples(self, dataloader, threshold=0.9):
+        """Identify high-confidence predictions for semi-supervised learning"""
+        self.eval()
+        confident_samples = []
 
+        with torch.no_grad():
+            for data, _ in dataloader:  # Note: ignoring true labels
+                output = self(data)
+                if 'cluster_probabilities' in output:
+                    probs, preds = output['cluster_probabilities'].max(1)
+                    mask = probs > threshold
+                    confident_samples.append((data[mask], preds[mask]))
+
+        return torch.cat(confident_samples) if confident_samples else None
     def _select_features_using_distance_correlation(self, features, labels, config):
         """Select features based on distance correlation criteria"""
         selector = DistanceCorrelationFeatureSelector(
