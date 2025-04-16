@@ -4281,8 +4281,8 @@ class DBNN(GPUDBNN):
             overall_acc = total_correct / total_samples
             print("\033[K" +"-" * (15 + 8 * n_classes + 10))
             color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
-            print("\033[K" +f"{Colors.BOLD}Overall Accuracy: {color}{overall_acc:.2%}{Colors.ENDC}")
-            print("\033[K" +f"Best Overall Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+            print("\033[K" +f"{Colors.BOLD} Accuracy (total correct fraction): {color}{overall_acc:.2%}{Colors.ENDC}")
+            print("\033[K" +f"Best Overall (Classwise) Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
         """Training loop with proper weight handling and enhanced progress tracking"""
