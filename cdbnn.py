@@ -2774,8 +2774,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
             model, train_loader, optimizer, loss_manager,
             config['training']['epochs'], 2, config,
             start_epoch=start_epoch,
-            prune_interval=config.get('pruning_interval', 10),
-            min_features=config.get('min_features', 32),
+            prune_interval=config.get('pruning_interval', 5),
+            min_features=config.get('min_features', 16),
             progress_bar=phase2_pbar,
             checkpoint_manager=checkpoint_manager
         )
@@ -2788,7 +2788,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
 
 def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       epochs, phase, config, start_epoch=0,
-                                      prune_interval=100, warmup_epochs=2,
+                                      prune_interval=10, warmup_epochs=2,
                                       min_features=32, progress_bar=None,
                                       checkpoint_manager=None):
     """Modified training phase with feature selection"""
