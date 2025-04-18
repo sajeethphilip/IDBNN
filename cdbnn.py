@@ -2822,8 +2822,8 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
             # Periodic pruning (after warmup)
             if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
                 active_features = model.prune_features(min_features=min_features)
-                logger.info(f"Phase {phase} - Epoch {epoch+1}: "
-                          f"Active features: {active_features}/{model.feature_dims}")
+                #logger.info(f"Phase {phase} - Epoch {epoch+1}: "
+                 #         f"Active features: {active_features}/{model.feature_dims}")
 
             running_loss += loss.item()
             batch_count += 1
