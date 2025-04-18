@@ -2736,55 +2736,67 @@ def train_model(model: nn.Module, train_loader: DataLoader,
 
     # Phase 1: Reconstruction
     if current_phase == 1:
-        logger.info("Phase 1: Pure reconstruction training")
-        model.set_training_phase(1)
-        optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'])
+        with tqdm(desc="Phase 1: Reconstruction Training", position=0) as pbar:
+            model.set_training_phase(1)
+            optimizer = optim.Adam(model.parameters(),
+                                 lr=config['model']['learning_rate'])
 
-        phase1_history = _train_phase_with_feature_selection(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 1, config,
-            start_epoch=start_epoch,
-            prune_interval=config.get('pruning_interval', 100),
-            warmup_epochs=config.get('warmup_epochs', 2)  # Don't prune immediately
-        )
-        history.update(phase1_history)
-        start_epoch = 0
+            phase1_history = _train_phase_with_feature_selection(
+                model, train_loader, optimizer, loss_manager,
+                config['training']['epochs'], 1, config,
+                start_epoch=start_epoch,
+                prune_interval=config.get('pruning_interval', 100),
+                warmup_epochs=config.get('warmup_epochs', 2),
+                progress_bar=pbar
+            )
+            history.update(phase1_history)
+            start_epoch = 0
 
     # Phase 2: Latent organization
     if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        model.set_training_phase(2)
-        optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'] * 0.1)  # Lower LR
+        with tqdm(desc="Phase 2: Latent Organization", position=0) as pbar:
+            model.set_training_phase(2)
+            optimizer = optim.Adam(model.parameters(),
+                                 lr=config['model']['learning_rate'] * 0.1)
 
-        phase2_history = _train_phase_with_feature_selection(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 2, config,
-            start_epoch=start_epoch if current_phase == 2 else 0,
-            prune_interval=config.get('pruning_interval', 50),  # More aggressive in phase 2
-            min_features=config.get('min_features', 32)
-        )
+            phase2_history = _train_phase_with_feature_selection(
+                model, train_loader, optimizer, loss_manager,
+                config['training']['epochs'], 2, config,
+                start_epoch=start_epoch if current_phase == 2 else 0,
+                prune_interval=config.get('pruning_interval', 50),
+                min_features=config.get('min_features', 32),
+                progress_bar=pbar
+            )
 
-        for key, val in phase2_history.items():
-            history[f"phase2_{key}"] = val
+            for key, val in phase2_history.items():
+                history[f"phase2_{key}"] = val
 
     return history
 
 def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       epochs, phase, config, start_epoch=0,
                                       prune_interval=100, warmup_epochs=2,
-                                      min_features=32):
+                                      min_features=32, progress_bar=None):
     """Modified training phase with feature selection"""
     history = defaultdict(list)
     device = next(model.parameters()).device
     prune_interval = config['training']['feature_selection']['dynamic_params'][f'phase{phase}']['pruning_interval']
 
-    for epoch in range(start_epoch, epochs):
+    # Create epoch progress bar if not provided
+    if progress_bar is None:
+        progress_bar = tqdm(range(start_epoch, epochs), desc=f"Phase {phase} Training")
+    else:
+        progress_bar.reset(total=epochs)
+        progress_bar.set_description(f"Phase {phase} Training")
+
+    for epoch in progress_bar:
         model.train()
         running_loss = 0.0
         batch_count = 0
 
-        for batch_idx, (data, labels) in enumerate(loader):
+        # Inner batch progress bar
+        batch_bar = tqdm(loader, desc=f"Batch Progress", leave=False)
+        for batch_idx, (data, labels) in enumerate(batch_bar):
             data, labels = data.to(device), labels.to(device)
 
             # Forward pass with feature masking
@@ -2822,24 +2834,23 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
             # Periodic pruning (after warmup)
             if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
                 active_features = model.prune_features(min_features=min_features)
-                #logger.info(f"Phase {phase} - Epoch {epoch+1}: "
-                 #         f"Active features: {active_features}/{model.feature_dims}")
+                batch_bar.set_postfix_str(f"Active Features: {active_features}/{model.feature_dims}")
 
             running_loss += loss.item()
             batch_count += 1
 
+            # Update batch progress
+            batch_bar.set_postfix(loss=loss.item())
+
         epoch_loss = running_loss / batch_count
         history[f'phase{phase}_loss'].append(epoch_loss)
 
-        # Phase-specific logging
-        if phase == 1:
-            logger.info(f'Phase 1 - Epoch {epoch+1}: Loss = {epoch_loss:.4f}')
-        else:
-            logger.info(f'Phase 2 - Epoch {epoch+1}: Loss = {epoch_loss:.4f}')
-            if model.use_kl_divergence:
-                history['phase2_cluster_quality'].append(
-                    latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
-                )
+        # Update epoch progress
+        progress_bar.set_postfix(epoch_loss=epoch_loss)
+        if phase == 2 and model.use_kl_divergence:
+            cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
+            history['phase2_cluster_quality'].append(cluster_quality)
+            progress_bar.set_postfix(epoch_loss=epoch_loss, cluster_quality=cluster_quality)
 
     return history
 
