@@ -4586,7 +4586,7 @@ class DatasetProcessor:
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
-                "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+                "visualization_dir": os.path.join(self.dataset_dir, "visualizations"),
                 "feature_analysis_dir": os.path.join(self.dataset_dir, "feature_analysis"),
                 "mask_history_file": "feature_masks.pt"
             }
