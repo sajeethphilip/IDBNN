@@ -820,6 +820,12 @@ class FeatureTracker:
         else:
             self.importance = self.decay * self.importance + (1-self.decay) * batch_importance
 
+    def update(self, batch_idx):
+        """Update feature importance tracking (called during training)"""
+        # This method can be used to perform periodic updates if needed
+        # Currently just a placeholder since record_gradients does the work
+        pass
+
     def get_importance(self):
         """Get normalized importance scores with bias correction"""
         if self.updates == 0:
