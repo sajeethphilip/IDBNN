@@ -4525,7 +4525,7 @@ class DatasetProcessor:
                 "early_stopping": {
                     "patience": 5,
                     "min_delta": 0.001
-                }
+                },
             # Add feature selection section
             "feature_selection": {
                 "method": "dynamic_gradients",  # Options: dynamic_gradients|static|hybrid
