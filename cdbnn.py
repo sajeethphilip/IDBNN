@@ -3694,7 +3694,7 @@ class DynamicAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
+            if current_size < 512:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
