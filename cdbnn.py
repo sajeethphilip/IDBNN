@@ -2791,76 +2791,117 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       prune_interval=10, warmup_epochs=1,
                                       min_features=32, progress_bar=None,
                                       checkpoint_manager=None):
-    """Training phase with enhanced progress display"""
+    """Training phase with robust progress display and error handling"""
     history = defaultdict(list)
     device = next(model.parameters()).device
     best_loss = float('inf')
     patience_counter = 0
-    current_features = model.feature_dims  # Track current feature count
+    current_features = model.feature_dims
+
+    # Initialize progress bar if not provided
+    if progress_bar is None:
+        progress_bar = tqdm(range(start_epoch, epochs),
+                          desc=f"Phase {phase}: {'Reconstruction' if phase == 1 else 'Clustering'}",
+                          position=0,
+                          bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE if phase == 1 else Colors.YELLOW, Colors.ENDC))
 
     for epoch in range(start_epoch, epochs):
         model.train()
         running_loss = 0.0
         batch_count = 0
 
-        # Batch progress bar
-        batch_pbar = tqdm(loader,
-                         desc=f"Epoch {epoch+1}/{epochs}",
-                         leave=False,
-                         bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE, Colors.ENDC))
+        try:
+            with tqdm(loader,
+                     desc=f"Epoch {epoch+1}/{epochs}",
+                     leave=False,
+                     bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE, Colors.ENDC)) as batch_pbar:
 
-        for batch_idx, (data, labels) in enumerate(batch_pbar):
-            # Training step (same as before)
-            # ...
+                for batch_idx, (data, labels) in enumerate(batch_pbar):
+                    data, labels = data.to(device), labels.to(device)
 
-            # Feature pruning
-            if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
-                current_features = model.prune_features(min_features=min_features)
+                    # Forward pass
+                    optimizer.zero_grad()
+                    output = model(data)
 
-                # Update feature display
-                batch_pbar.set_postfix_str(
-                    f"Features: {Colors.GREEN}{current_features}{Colors.ENDC}/" +
-                    f"{model.feature_dims} | " +
-                    f"Loss: {loss.item():.4f}"
-                )
+                    # Calculate loss
+                    if phase == 1:
+                        loss = F.mse_loss(output[1] if isinstance(output, tuple) else output['reconstruction'], data)
+                    else:
+                        loss_dict = loss_manager.calculate_loss(
+                            output['reconstruction'], data,
+                            config['dataset'].get('image_type', 'general')
+                        )
+                        loss = loss_dict['loss']
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(output['embedding'], labels)
+                            loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
+                                   F.kl_div(latent_info['cluster_probabilities'].log(),
+                                           latent_info['target_distribution'],
+                                           reduction='batchmean')
 
-        epoch_loss = running_loss / batch_count
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
+
+                    # Update tracking
+                    running_loss += loss.item()
+                    batch_count += 1
+
+                    # Feature pruning
+                    if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
+                        current_features = model.prune_features(min_features=min_features)
+                        batch_pbar.set_postfix_str(
+                            f"Ft: {Colors.GREEN}{current_features}{Colors.ENDC}/{model.feature_dims} | "
+                            f"Loss: {loss.item():.4f}"
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in epoch {epoch+1}: {str(e)}")
+            if batch_count == 0:  # Prevent division by zero
+                epoch_loss = float('inf')
+            continue
+
+        # Safely calculate epoch loss
+        epoch_loss = running_loss / batch_count if batch_count > 0 else float('inf')
         history[f'phase{phase}_loss'].append(epoch_loss)
 
         # Color-code loss improvement
-        loss_color = Colors.GREEN if epoch_loss < best_loss else Colors.RED
-        loss_display = f"{loss_color}{epoch_loss:.4f}{Colors.ENDC}"
+        loss_diff = best_loss - epoch_loss
+        loss_color = Colors.GREEN if loss_diff > 1e-6 else (Colors.RED if loss_diff < -1e-6 else Colors.YELLOW)
 
-        # Update main progress bar
-        if progress_bar is not None:
-            postfix = {
-                'loss': loss_display,
-                'features': f"{current_features}/{model.feature_dims}"
-            }
+        # Update progress
+        postfix = {
+            'loss': f"{loss_color}{epoch_loss:.4f}{Colors.ENDC}",
+            'features': f"{current_features}/{model.feature_dims}",
+            'Δ': f"{loss_color}{abs(loss_diff):.2e}{Colors.ENDC}" if abs(loss_diff) > 1e-6 else "0.00"
+        }
 
-            if phase == 2 and model.use_kl_divergence:
-                cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
-                history['phase2_cluster_quality'].append(cluster_quality)
-                postfix['cluster_q'] = f"{cluster_quality:.4f}"
+        if phase == 2 and model.use_kl_divergence:
+            cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
+            history['phase2_cluster_quality'].append(cluster_quality)
+            postfix['clst_q'] = f"{cluster_quality:.2f}"
 
-            progress_bar.set_postfix(postfix)
-            progress_bar.update(1)
-
-            # Update progress bar color based on phase
-            if phase == 1:
-                progress_bar.colour = 'blue'
-            else:
-                progress_bar.colour = 'yellow'
+        progress_bar.set_postfix(postfix)
+        progress_bar.update(1)
 
         # Early stopping check
-        if epoch_loss < best_loss - config['training']['early_stopping'].get('min_delta', 0.001):
+        if loss_diff > config['training']['early_stopping'].get('min_delta', 0.001):
             best_loss = epoch_loss
             patience_counter = 0
+            if checkpoint_manager:
+                checkpoint_manager.save_model_state(
+                    model=model,
+                    optimizer=optimizer,
+                    phase=phase,
+                    epoch=epoch,
+                    loss=epoch_loss,
+                    is_best=True
+                )
         else:
             patience_counter += 1
             if patience_counter >= config['training']['early_stopping'].get('patience', 5):
                 progress_bar.write(
-                    f"{Colors.YELLOW}Early stopping at epoch {epoch+1} " +
+                    f"{Colors.YELLOW}Early stopping at epoch {epoch+1} "
                     f"(best loss: {best_loss:.4f}){Colors.ENDC}"
                 )
                 break
