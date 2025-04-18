@@ -2721,7 +2721,7 @@ class ModelFactory:
 
         return model
 
-
+#---------------------------model train begins -----------------------------------------
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training with dynamic feature selection"""
@@ -2791,14 +2791,18 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       prune_interval=10, warmup_epochs=1,
                                       min_features=32, progress_bar=None,
                                       checkpoint_manager=None):
-    """Training phase with robust progress display and error handling"""
+    """Training phase with GPU optimization and device consistency"""
+    # Device setup
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    # Initialize trackers
     history = defaultdict(list)
-    device = next(model.parameters()).device
     best_loss = float('inf')
     patience_counter = 0
     current_features = model.feature_dims
 
-    # Initialize progress bar if not provided
+    # Progress bar setup
     if progress_bar is None:
         progress_bar = tqdm(range(start_epoch, epochs),
                           desc=f"Phase {phase}: {'Reconstruction' if phase == 1 else 'Clustering'}",
@@ -2817,33 +2821,38 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                      bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE, Colors.ENDC)) as batch_pbar:
 
                 for batch_idx, (data, labels) in enumerate(batch_pbar):
-                    data, labels = data.to(device), labels.to(device)
+                    # Ensure all data is on the correct device
+                    data = data.to(device, non_blocking=True)
+                    labels = labels.to(device, non_blocking=True)
 
-                    # Forward pass
-                    optimizer.zero_grad()
-                    output = model(data)
+                    # Forward pass with autocast for mixed precision
+                    with torch.cuda.amp.autocast(enabled=config['execution_flags']['mixed_precision']):
+                        output = model(data)
 
-                    # Calculate loss
-                    if phase == 1:
-                        loss = F.mse_loss(output[1] if isinstance(output, tuple) else output['reconstruction'], data)
-                    else:
-                        loss_dict = loss_manager.calculate_loss(
-                            output['reconstruction'], data,
-                            config['dataset'].get('image_type', 'general')
-                        )
-                        loss = loss_dict['loss']
-                        if model.use_kl_divergence:
-                            latent_info = model.organize_latent_space(output['embedding'], labels)
-                            loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
-                                   F.kl_div(latent_info['cluster_probabilities'].log(),
-                                           latent_info['target_distribution'],
-                                           reduction='batchmean')
+                        # Calculate loss
+                        if phase == 1:
+                            recon = output[1] if isinstance(output, tuple) else output['reconstruction']
+                            loss = F.mse_loss(recon, data)
+                        else:
+                            loss_dict = loss_manager.calculate_loss(
+                                output['reconstruction'], data,
+                                config['dataset'].get('image_type', 'general')
+                            )
+                            loss = loss_dict['loss']
+                            if model.use_kl_divergence:
+                                latent_info = model.organize_latent_space(output['embedding'], labels)
+                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
+                                       F.kl_div(latent_info['cluster_probabilities'].log(),
+                                               latent_info['target_distribution'],
+                                               reduction='batchmean')
 
                     # Backward pass
+                    optimizer.zero_grad(set_to_none=True)  # More memory efficient
                     loss.backward()
                     optimizer.step()
 
-                    # Update tracking
+                    # Sync and get loss value
+                    torch.cuda.synchronize()  # Ensure proper timing
                     running_loss += loss.item()
                     batch_count += 1
 
@@ -2852,61 +2861,82 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                         current_features = model.prune_features(min_features=min_features)
                         batch_pbar.set_postfix_str(
                             f"Ft: {Colors.GREEN}{current_features}{Colors.ENDC}/{model.feature_dims} | "
-                            f"Loss: {loss.item():.4f}"
+                            f"Loss: {loss.item():.4f} | "
+                            f"GPU: {torch.cuda.memory_allocated(device)/1e9:.2f}GB"
                         )
 
         except Exception as e:
             logger.error(f"Error in epoch {epoch+1}: {str(e)}")
-            if batch_count == 0:  # Prevent division by zero
+            if batch_count == 0:
                 epoch_loss = float('inf')
             continue
 
-        # Safely calculate epoch loss
-        epoch_loss = running_loss / batch_count if batch_count > 0 else float('inf')
+        # Calculate epoch loss
+        epoch_loss = running_loss / max(batch_count, 1)  # Prevent division by zero
+
+        # Update history and progress
         history[f'phase{phase}_loss'].append(epoch_loss)
+        update_progress(progress_bar, epoch_loss, best_loss, current_features,
+                       model.feature_dims, phase, model.use_kl_divergence,
+                       latent_info if phase == 2 and model.use_kl_divergence else None)
 
-        # Color-code loss improvement
-        loss_diff = best_loss - epoch_loss
-        loss_color = Colors.GREEN if loss_diff > 1e-6 else (Colors.RED if loss_diff < -1e-6 else Colors.YELLOW)
-
-        # Update progress
-        postfix = {
-            'loss': f"{loss_color}{epoch_loss:.4f}{Colors.ENDC}",
-            'features': f"{current_features}/{model.feature_dims}",
-            'Δ': f"{loss_color}{abs(loss_diff):.2e}{Colors.ENDC}" if abs(loss_diff) > 1e-6 else "0.00"
-        }
-
-        if phase == 2 and model.use_kl_divergence:
-            cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
-            history['phase2_cluster_quality'].append(cluster_quality)
-            postfix['clst_q'] = f"{cluster_quality:.2f}"
-
-        progress_bar.set_postfix(postfix)
-        progress_bar.update(1)
-
-        # Early stopping check
-        if loss_diff > config['training']['early_stopping'].get('min_delta', 0.001):
-            best_loss = epoch_loss
-            patience_counter = 0
-            if checkpoint_manager:
-                checkpoint_manager.save_model_state(
-                    model=model,
-                    optimizer=optimizer,
-                    phase=phase,
-                    epoch=epoch,
-                    loss=epoch_loss,
-                    is_best=True
-                )
-        else:
-            patience_counter += 1
-            if patience_counter >= config['training']['early_stopping'].get('patience', 5):
-                progress_bar.write(
-                    f"{Colors.YELLOW}Early stopping at epoch {epoch+1} "
-                    f"(best loss: {best_loss:.4f}){Colors.ENDC}"
-                )
-                break
+        # Early stopping and checkpointing
+        best_loss, patience_counter = handle_early_stopping(
+            epoch_loss, best_loss, patience_counter, config,
+            model, optimizer, phase, epoch, checkpoint_manager, progress_bar
+        )
+        if patience_counter >= config['training']['early_stopping'].get('patience', 5):
+            break
 
     return history
+
+def update_progress(progress_bar, epoch_loss, best_loss, current_features,
+                   total_features, phase, use_kl_divergence, latent_info):
+    """Helper function to update progress bar with GPU-aware metrics"""
+    loss_diff = best_loss - epoch_loss
+    loss_color = (Colors.GREEN if loss_diff > 1e-6
+                 else (Colors.RED if loss_diff < -1e-6 else Colors.YELLOW))
+
+    postfix = {
+        'loss': f"{loss_color}{epoch_loss:.4f}{Colors.ENDC}",
+        'features': f"{current_features}/{total_features}",
+        'Δ': f"{loss_color}{abs(loss_diff):.2e}{Colors.ENDC}",
+        'GPU': f"{torch.cuda.memory_allocated()/1e9:.2f}GB"
+    }
+
+    if phase == 2 and use_kl_divergence:
+        cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
+        postfix['clst_q'] = f"{cluster_quality:.2f}"
+
+    progress_bar.set_postfix(postfix)
+    progress_bar.update(1)
+
+def handle_early_stopping(epoch_loss, best_loss, patience_counter, config,
+                         model, optimizer, phase, epoch, checkpoint_manager, progress_bar):
+    """Manage early stopping and checkpointing"""
+    if epoch_loss < best_loss - config['training']['early_stopping'].get('min_delta', 0.001):
+        best_loss = epoch_loss
+        patience_counter = 0
+        if checkpoint_manager:
+            checkpoint_manager.save_model_state(
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                epoch=epoch,
+                loss=epoch_loss,
+                is_best=True
+            )
+    else:
+        patience_counter += 1
+        if patience_counter >= config['training']['early_stopping'].get('patience', 5):
+            progress_bar.write(
+                f"{Colors.YELLOW}Early stopping at epoch {epoch+1} "
+                f"(best loss: {best_loss:.4f}){Colors.ENDC}"
+            )
+
+    return best_loss, patience_counter
+
+#-----------------model_train_ends ----------------------
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
