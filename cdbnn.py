@@ -2733,73 +2733,82 @@ def train_model(model: nn.Module, train_loader: DataLoader,
     history = defaultdict(list)
     start_epoch = getattr(model, 'current_epoch', 0)
     current_phase = getattr(model, 'training_phase', 1)
+    checkpoint_manager = UnifiedCheckpoint(config)
 
     # Phase 1: Reconstruction
     if current_phase == 1:
-        with tqdm(desc="Phase 1: Reconstruction Training", position=0) as pbar:
-            model.set_training_phase(1)
-            optimizer = optim.Adam(model.parameters(),
-                                 lr=config['model']['learning_rate'])
+        model.set_training_phase(1)
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
 
-            phase1_history = _train_phase_with_feature_selection(
-                model, train_loader, optimizer, loss_manager,
-                config['training']['epochs'], 1, config,
-                start_epoch=start_epoch,
-                prune_interval=config.get('pruning_interval', 100),
-                warmup_epochs=config.get('warmup_epochs', 2),
-                progress_bar=pbar
-            )
-            history.update(phase1_history)
-            start_epoch = 0
+        # Initialize progress bar for phase 1
+        phase1_pbar = tqdm(range(start_epoch, config['training']['epochs']),
+                          desc="Phase 1: Reconstruction Training",
+                          position=0)
+
+        phase1_history = _train_phase_with_feature_selection(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch,
+            prune_interval=config.get('pruning_interval', 100),
+            warmup_epochs=config.get('warmup_epochs', 2),
+            progress_bar=phase1_pbar,
+            checkpoint_manager=checkpoint_manager
+        )
+        history.update(phase1_history)
+        start_epoch = 0
+        phase1_pbar.close()
 
     # Phase 2: Latent organization
     if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        with tqdm(desc="Phase 2: Latent Organization", position=0) as pbar:
-            model.set_training_phase(2)
-            optimizer = optim.Adam(model.parameters(),
-                                 lr=config['model']['learning_rate'] * 0.1)
+        model.set_training_phase(2)
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'] * 0.1)
 
-            phase2_history = _train_phase_with_feature_selection(
-                model, train_loader, optimizer, loss_manager,
-                config['training']['epochs'], 2, config,
-                start_epoch=start_epoch if current_phase == 2 else 0,
-                prune_interval=config.get('pruning_interval', 50),
-                min_features=config.get('min_features', 32),
-                progress_bar=pbar
-            )
+        # Initialize progress bar for phase 2
+        phase2_pbar = tqdm(range(start_epoch, config['training']['epochs']),
+                          desc="Phase 2: Latent Organization",
+                          position=0)
 
-            for key, val in phase2_history.items():
-                history[f"phase2_{key}"] = val
+        phase2_history = _train_phase_with_feature_selection(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch,
+            prune_interval=config.get('pruning_interval', 50),
+            min_features=config.get('min_features', 32),
+            progress_bar=phase2_pbar,
+            checkpoint_manager=checkpoint_manager
+        )
+
+        for key, val in phase2_history.items():
+            history[f"phase2_{key}"] = val
+        phase2_pbar.close()
 
     return history
 
 def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       epochs, phase, config, start_epoch=0,
                                       prune_interval=100, warmup_epochs=2,
-                                      min_features=32, progress_bar=None):
+                                      min_features=32, progress_bar=None,
+                                      checkpoint_manager=None):
     """Modified training phase with feature selection"""
     history = defaultdict(list)
     device = next(model.parameters()).device
-    prune_interval = config['training']['feature_selection']['dynamic_params'][f'phase{phase}']['pruning_interval']
+    best_loss = float('inf')
+    patience_counter = 0
 
-    # Create epoch progress bar if not provided
-    if progress_bar is None:
-        progress_bar = tqdm(range(start_epoch, epochs), desc=f"Phase {phase} Training")
-    else:
-        progress_bar.reset(total=epochs)
-        progress_bar.set_description(f"Phase {phase} Training")
-
-    for epoch in progress_bar:
+    for epoch in range(start_epoch, epochs):
         model.train()
         running_loss = 0.0
         batch_count = 0
 
-        # Inner batch progress bar
-        batch_bar = tqdm(loader, desc=f"Batch Progress", leave=False)
-        for batch_idx, (data, labels) in enumerate(batch_bar):
+        # Batch progress bar
+        batch_pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+
+        for batch_idx, (data, labels) in enumerate(batch_pbar):
             data, labels = data.to(device), labels.to(device)
 
-            # Forward pass with feature masking
+            # Forward pass
             optimizer.zero_grad()
             output = model(data)
 
@@ -2834,26 +2843,47 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
             # Periodic pruning (after warmup)
             if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
                 active_features = model.prune_features(min_features=min_features)
-                batch_bar.set_postfix_str(f"Active Features: {active_features}/{model.feature_dims}")
+                batch_pbar.set_postfix_str(f"Active Features: {active_features}/{model.feature_dims}")
 
             running_loss += loss.item()
             batch_count += 1
-
-            # Update batch progress
-            batch_bar.set_postfix(loss=loss.item())
+            batch_pbar.set_postfix(loss=loss.item())
 
         epoch_loss = running_loss / batch_count
         history[f'phase{phase}_loss'].append(epoch_loss)
 
-        # Update epoch progress
-        progress_bar.set_postfix(epoch_loss=epoch_loss)
-        if phase == 2 and model.use_kl_divergence:
-            cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
-            history['phase2_cluster_quality'].append(cluster_quality)
-            progress_bar.set_postfix(epoch_loss=epoch_loss, cluster_quality=cluster_quality)
+        # Update main progress bar
+        if progress_bar is not None:
+            postfix = {'loss': f'{epoch_loss:.4f}'}
+            if phase == 2 and model.use_kl_divergence:
+                cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
+                history['phase2_cluster_quality'].append(cluster_quality)
+                postfix['cluster_q'] = f'{cluster_quality:.4f}'
+            progress_bar.set_postfix(postfix)
+            progress_bar.update(1)
+
+        # Checkpoint and early stopping
+        is_best = epoch_loss < best_loss
+        if is_best:
+            best_loss = epoch_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        if checkpoint_manager:
+            checkpoint_manager.save_model_state(
+                model=model,
+                optimizer=optimizer,
+                phase=phase,
+                epoch=epoch,
+                loss=epoch_loss,
+                is_best=is_best
+            )
+
+        if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+            break
 
     return history
-
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
