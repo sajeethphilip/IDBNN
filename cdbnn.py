@@ -1032,30 +1032,44 @@ class BaseAutoencoder(nn.Module):
             # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
 
+            # Get feature mask from model if available
+            feature_mask = getattr(self, 'feature_mask', None)
+            if feature_mask is not None:
+                selected_indices = torch.where(feature_mask)[0].tolist()
+                logger.info(f"Using {len(selected_indices)} active features from feature mask")
+            else:
+                selected_indices = None
+
             # Process features based on mode
             if enable_adaptive:
                 # Adaptive mode - single combined output
                 features_df = self._prepare_features_dataframe(
                     train_features,
-                    dc_config if use_dc else None
+                    dc_config if use_dc else None,
+                    selected_indices=selected_indices
                 )
 
                 # Save features
                 features_df.to_csv(output_path, index=False)
                 logger.info(f"Saved features to {output_path} (adaptive mode)")
 
-                # Save metadata
+                # Save metadata and update conf file with selected features
                 feature_columns = [c for c in features_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
+
+                # Update conf file with selected features
+                self._update_conf_file_with_selected_features(output_dir, selected_indices)
             else:
                 # Non-adaptive mode - separate train/test files
                 train_df = self._prepare_features_dataframe(
                     train_features,
-                    dc_config if use_dc else None
+                    dc_config if use_dc else None,
+                    selected_indices=selected_indices
                 )
                 test_df = self._prepare_features_dataframe(
                     test_features,
-                    dc_config if use_dc else None
+                    dc_config if use_dc else None,
+                    selected_indices=selected_indices
                 )
 
                 # Save features
@@ -1067,24 +1081,74 @@ class BaseAutoencoder(nn.Module):
                 logger.info(f"Saved train features to {train_path}")
                 logger.info(f"Saved test features to {test_path}")
 
-                # Save metadata (using train features as reference)
+                # Save metadata and update conf file
                 feature_columns = [c for c in train_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
+                self._update_conf_file_with_selected_features(output_dir, selected_indices)
 
         except Exception as e:
             logger.error(f"Error in save_features: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
 
+    def _update_conf_file_with_selected_features(self, output_dir: str, selected_indices: Optional[List[int]] = None) -> None:
+        """Update the conf file to only include selected features"""
+        if selected_indices is None:
+            return  # No feature selection was performed
+
+        conf_path = os.path.join(output_dir, f"{self.config['dataset']['name']}.conf")
+        if not os.path.exists(conf_path):
+            logger.warning(f"Config file not found at {conf_path}")
+            return
+
+        try:
+            with open(conf_path, 'r') as f:
+                conf_data = json.load(f)
+
+            # Update feature columns in config
+            if 'column_names' in conf_data:
+                # Keep only the selected feature columns
+                all_features = [f for f in conf_data['column_names'] if f.startswith('feature_')]
+                selected_features = [all_features[i] for i in selected_indices if i < len(all_features)]
+
+                # Keep target column if it exists
+                other_columns = [c for c in conf_data['column_names'] if not c.startswith('feature_')]
+                conf_data['column_names'] = selected_features + other_columns
+
+            # Update feature count
+            if 'feature_count' in conf_data:
+                conf_data['feature_count'] = len(selected_indices)
+
+            # Add pruning information
+            if 'feature_selection' not in conf_data:
+                conf_data['feature_selection'] = {}
+
+            conf_data['feature_selection'].update({
+                'pruned_features': selected_indices,
+                'original_feature_count': self.feature_dims,
+                'pruned_feature_count': len(selected_indices)
+            })
+
+            # Save updated config
+            with open(conf_path, 'w') as f:
+                json.dump(conf_data, f, indent=4)
+
+            logger.info(f"Updated config file with {len(selected_indices)} selected features")
+
+        except Exception as e:
+            logger.error(f"Error updating config file: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
-                                  dc_config: Optional[Dict]) -> pd.DataFrame:
+                                  dc_config: Optional[Dict],
+                                  selected_indices: Optional[List[int]] = None) -> pd.DataFrame:
         """
-        Prepare DataFrame from features with optional distance correlation selection.
+        Prepare DataFrame from features with optional feature selection.
 
         Args:
             features: Dictionary containing 'embeddings', 'labels', etc.
             dc_config: Distance correlation config or None if disabled
+            selected_indices: List of indices of features to keep (from pruning)
 
         Returns:
             pd.DataFrame: Processed features with metadata
@@ -1101,13 +1165,28 @@ class BaseAutoencoder(nn.Module):
                 upper_threshold=dc_config['distance_correlation_upper'],
                 lower_threshold=dc_config['distance_correlation_lower']
             )
-            selected_indices, corr_values = selector.select_features(embeddings, labels)
+            dc_selected_indices, corr_values = selector.select_features(embeddings, labels)
+
+            # Combine with pruning selection if available
+            if selected_indices is not None:
+                # Get intersection of DC-selected and pruned features
+                final_indices = list(set(dc_selected_indices) & set(selected_indices))
+                if not final_indices:
+                    logger.warning("No overlap between DC-selected and pruned features, using pruned features")
+                    final_indices = selected_indices
+            else:
+                final_indices = dc_selected_indices
 
             # Store selected features with metadata
-            for new_idx, orig_idx in enumerate(selected_indices):
+            for new_idx, orig_idx in enumerate(final_indices):
                 data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
                 data[f'original_feature_idx_{new_idx}'] = orig_idx
                 data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
+        elif selected_indices is not None:
+            # Only use pruned features
+            for new_idx, orig_idx in enumerate(selected_indices):
+                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
+                data[f'original_feature_idx_{new_idx}'] = orig_idx
         else:
             # Store all features without selection
             for i in range(embeddings.shape[1]):
