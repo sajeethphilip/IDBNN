@@ -801,22 +801,36 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
         logger.info(f"Confusion matrix saved to {cm_path}")
 
 class FeatureTracker:
-    def __init__(self, num_features):
+    def __init__(self, num_features, decay=0.99):
         self.importance = torch.zeros(num_features)
+        self.raw_gradients = torch.zeros(num_features)
         self.updates = 0
-        self.decay = 0.99  # EMA decay factor
+        self.decay = decay
 
     def record_gradients(self, gradients):
+        """Record gradient magnitudes (called from backward hook)"""
         # gradients shape: (batch_size, feature_dims)
         batch_importance = gradients.abs().mean(dim=0).detach().cpu()
-        if self.updates == 0:
+        self.raw_gradients += batch_importance
+        self.updates += 1
+
+        # Update EMA
+        if self.updates == 1:
             self.importance = batch_importance
         else:
             self.importance = self.decay * self.importance + (1-self.decay) * batch_importance
-        self.updates += 1
 
     def get_importance(self):
-        return self.importance / (1 - self.decay**self.updates)  # Bias correction
+        """Get normalized importance scores with bias correction"""
+        if self.updates == 0:
+            return torch.zeros_like(self.importance)
+        return self.importance / (1 - self.decay**self.updates)
+
+    def get_raw_importance(self):
+        """Get unnormalized accumulated gradients"""
+        if self.updates == 0:
+            return torch.zeros_like(self.raw_gradients)
+        return self.raw_gradients / self.updates
 
 class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
@@ -2757,6 +2771,7 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
     """Modified training phase with feature selection"""
     history = defaultdict(list)
     device = next(model.parameters()).device
+    prune_interval = config['training']['feature_selection']['dynamic_params'][f'phase{phase}']['pruning_interval']
 
     for epoch in range(start_epoch, epochs):
         model.train()
