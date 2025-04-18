@@ -955,7 +955,7 @@ class BaseAutoencoder(nn.Module):
 
         # Dynamic pruning threshold
         self.feature_mask = torch.ones(feature_dims, dtype=torch.bool)
-        self.pruning_interval = config.get('pruning_interval', 100)
+        self.pruning_interval = config.get('pruning_interval', 10)
         self.min_features = config.get('min_features', 32)
 
 #--------------------------Distance Correlations ----------
@@ -4593,14 +4593,14 @@ class DatasetProcessor:
                 "method": "dynamic_gradients",  # Options: dynamic_gradients|static|hybrid
                 "dynamic_params": {
                     "phase1": {
-                        "pruning_interval": 100,  # Steps between pruning in phase 1
-                        "min_features": 64,       # Minimum features to keep
+                        "pruning_interval": 10,  # Steps between pruning in phase 1
+                        "min_features": 32,       # Minimum features to keep
                         "warmup_epochs": 2,       # Wait before first pruning
                         "importance_decay": 0.99  # EMA decay factor
                     },
                     "phase2": {
-                        "pruning_interval": 50,   # More frequent pruning
-                        "min_features": 32,       # More aggressive
+                        "pruning_interval": 5,   # More frequent pruning
+                        "min_features": 16,       # More aggressive
                         "importance_decay": 0.95  # Faster adaptation
                     }
                 },
