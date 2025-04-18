@@ -4551,6 +4551,7 @@ class DatasetProcessor:
                     "weight": 0.3,                # Mixing ratio with gradients
                     "update_interval": 200         # Steps between DC updates
                 }
+                },
             },
 
             "augmentation": {
