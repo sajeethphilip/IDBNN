@@ -3,6 +3,7 @@
 # Added distance correlations to filter the output features. April 12, 3:45 am
 # Fixed a bug in Prediction mode model loading April 14 2025 9:32 am
 #Finalised completely working module as on 15th April 2025
+#April 18th. Adding feature Pruning
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -799,6 +800,24 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
 
         logger.info(f"Confusion matrix saved to {cm_path}")
 
+class FeatureTracker:
+    def __init__(self, num_features):
+        self.importance = torch.zeros(num_features)
+        self.updates = 0
+        self.decay = 0.99  # EMA decay factor
+
+    def record_gradients(self, gradients):
+        # gradients shape: (batch_size, feature_dims)
+        batch_importance = gradients.abs().mean(dim=0).detach().cpu()
+        if self.updates == 0:
+            self.importance = batch_importance
+        else:
+            self.importance = self.decay * self.importance + (1-self.decay) * batch_importance
+        self.updates += 1
+
+    def get_importance(self):
+        return self.importance / (1 - self.decay**self.updates)  # Bias correction
+
 class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
 
@@ -909,7 +928,38 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
+        # Feature importance tracking
+        self.importance = torch.zeros(feature_dims)
+        self.importance_updates = 0
+        self.register_backward_hooks()
+
+        # Dynamic pruning threshold
+        self.feature_mask = torch.ones(feature_dims, dtype=torch.bool)
+        self.pruning_interval = config.get('pruning_interval', 100)
+        self.min_features = config.get('min_features', 32)
+
 #--------------------------Distance Correlations ----------
+
+    def register_backward_hooks(self):
+        def grad_hook(module, grad_input, grad_output):
+            if grad_output[0] is not None:
+                self.feature_tracker.record_gradients(grad_output[0])
+
+        self.hook = self.embedder.register_full_backward_hook(grad_hook)
+
+    def prune_features(self, min_features=32):
+        """Prune low-importance features"""
+        importance = self.feature_tracker.get_importance()
+        keep_indices = torch.argsort(importance, descending=True)[:max(
+            min_features,
+            int(self.feature_dims * (0.5 if self.training_phase == 1 else 0.7))
+        )]
+
+        self.feature_mask = torch.zeros(self.feature_dims, dtype=torch.bool)
+        self.feature_mask[keep_indices] = True
+        return len(keep_indices)
+
+
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
         """Identify high-confidence predictions for semi-supervised learning"""
         self.eval()
@@ -1495,7 +1545,13 @@ class BaseAutoencoder(nn.Module):
         for layer in self.encoder_layers:
             x = layer(x)
         x = x.view(x.size(0), -1)
-        return self.embedder(x)
+        x = self.embedder(x)
+
+        # Apply feature mask
+        if self.training:
+            x = x * self.feature_mask.to(x.device)
+
+        return x
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Basic decoding process"""
@@ -2646,58 +2702,123 @@ class ModelFactory:
         return model
 
 
-# Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
-    # Store dataset reference in model
-    model.set_dataset(train_loader.dataset)
+    """Two-phase training with dynamic feature selection"""
+    # Initialize feature tracking
+    if not hasattr(model, 'feature_tracker'):
+        model.feature_tracker = FeatureTracker(model.feature_dims)
+        model.register_backward_hooks()
 
     history = defaultdict(list)
-
-    # Initialize starting epoch and phase
     start_epoch = getattr(model, 'current_epoch', 0)
     current_phase = getattr(model, 'training_phase', 1)
 
-    # Phase 1: Pure reconstruction (if not already completed)
+    # Phase 1: Reconstruction
     if current_phase == 1:
-        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
+        logger.info("Phase 1: Pure reconstruction training")
         model.set_training_phase(1)
-        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
-
-        phase1_history = _train_phase(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 1, config,
-            start_epoch=start_epoch
-        )
-        history.update(phase1_history)
-
-        # Reset start_epoch for phase 2
-        start_epoch = 0
-    else:
-        logger.info("Phase 1 already completed, skipping")
-
-    # Phase 2: Latent space organization
-    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
-        if current_phase < 2:
-            logger.info("Starting Phase 2: Latent space organization")
-            model.set_training_phase(2)
-        else:
-            logger.info("Resuming Phase 2: Latent space organization")
-
-        # Lower learning rate for fine-tuning
         optimizer = optim.Adam(model.parameters(),
                              lr=config['model']['learning_rate'])
 
-        phase2_history = _train_phase(
+        phase1_history = _train_phase_with_feature_selection(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch,
+            prune_interval=config.get('pruning_interval', 100),
+            warmup_epochs=config.get('warmup_epochs', 2)  # Don't prune immediately
+        )
+        history.update(phase1_history)
+        start_epoch = 0
+
+    # Phase 2: Latent organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        model.set_training_phase(2)
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'] * 0.1)  # Lower LR
+
+        phase2_history = _train_phase_with_feature_selection(
             model, train_loader, optimizer, loss_manager,
             config['training']['epochs'], 2, config,
-            start_epoch=start_epoch if current_phase == 2 else 0
+            start_epoch=start_epoch if current_phase == 2 else 0,
+            prune_interval=config.get('pruning_interval', 50),  # More aggressive in phase 2
+            min_features=config.get('min_features', 32)
         )
 
-        # Merge histories
-        for key, value in phase2_history.items():
-            history[f"phase2_{key}"] = value
+        for key, val in phase2_history.items():
+            history[f"phase2_{key}"] = val
+
+    return history
+
+def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
+                                      epochs, phase, config, start_epoch=0,
+                                      prune_interval=100, warmup_epochs=2,
+                                      min_features=32):
+    """Modified training phase with feature selection"""
+    history = defaultdict(list)
+    device = next(model.parameters()).device
+
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        running_loss = 0.0
+        batch_count = 0
+
+        for batch_idx, (data, labels) in enumerate(loader):
+            data, labels = data.to(device), labels.to(device)
+
+            # Forward pass with feature masking
+            optimizer.zero_grad()
+            output = model(data)
+
+            # Phase-specific loss calculation
+            if phase == 1:
+                if isinstance(output, tuple):
+                    embedding, reconstruction = output
+                    loss = F.mse_loss(reconstruction, data)
+                else:
+                    loss = F.mse_loss(output['reconstruction'], data)
+            else:
+                loss_dict = loss_manager.calculate_loss(
+                    output['reconstruction'], data,
+                    config['dataset'].get('image_type', 'general')
+                )
+                loss = loss_dict['loss']
+
+                if model.use_kl_divergence:
+                    latent_info = model.organize_latent_space(output['embedding'], labels)
+                    loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
+                           F.kl_div(latent_info['cluster_probabilities'].log(),
+                                   latent_info['target_distribution'],
+                                   reduction='batchmean')
+
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+
+            # Feature importance tracking
+            model.feature_tracker.update(batch_idx)
+
+            # Periodic pruning (after warmup)
+            if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
+                active_features = model.prune_features(min_features=min_features)
+                logger.info(f"Phase {phase} - Epoch {epoch+1}: "
+                          f"Active features: {active_features}/{model.feature_dims}")
+
+            running_loss += loss.item()
+            batch_count += 1
+
+        epoch_loss = running_loss / batch_count
+        history[f'phase{phase}_loss'].append(epoch_loss)
+
+        # Phase-specific logging
+        if phase == 1:
+            logger.info(f'Phase 1 - Epoch {epoch+1}: Loss = {epoch_loss:.4f}')
+        else:
+            logger.info(f'Phase 2 - Epoch {epoch+1}: Loss = {epoch_loss:.4f}')
+            if model.use_kl_divergence:
+                history['phase2_cluster_quality'].append(
+                    latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
+                )
 
     return history
 
@@ -4405,7 +4526,33 @@ class DatasetProcessor:
                     "patience": 5,
                     "min_delta": 0.001
                 }
+            # Add feature selection section
+            "feature_selection": {
+                "method": "dynamic_gradients",  # Options: dynamic_gradients|static|hybrid
+                "dynamic_params": {
+                    "phase1": {
+                        "pruning_interval": 100,  # Steps between pruning in phase 1
+                        "min_features": 64,       # Minimum features to keep
+                        "warmup_epochs": 2,       # Wait before first pruning
+                        "importance_decay": 0.99  # EMA decay factor
+                    },
+                    "phase2": {
+                        "pruning_interval": 50,   # More frequent pruning
+                        "min_features": 32,       # More aggressive
+                        "importance_decay": 0.95  # Faster adaptation
+                    }
+                },
+                "static_params": {
+                    "initial_dims": feature_dims,  # From your existing calculation
+                    "fixed_dims": None             # Optional override
+                },
+                "distance_correlation": {
+                    "enabled": True,               # Use with your existing DC
+                    "weight": 0.3,                # Mixing ratio with gradients
+                    "update_interval": 200         # Steps between DC updates
+                }
             },
+
             "augmentation": {
                 "enabled": True,
                 "random_crop": {"enabled": True, "padding": 4},
@@ -4432,12 +4579,16 @@ class DatasetProcessor:
                 "distributed_training": False,
                 "debug_mode": False,
                 "use_previous_model": True,
-                "fresh_start": False
+                "fresh_start": False,
+                 "track_feature_importance": True,
+                "save_feature_masks": False
             },
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
                 "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+                "feature_analysis_dir": os.path.join(self.dataset_dir, "feature_analysis"),
+                "mask_history_file": "feature_masks.pt"
             }
         }
 
