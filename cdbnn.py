@@ -1583,7 +1583,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 512:
+            if current_size < 1024:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
