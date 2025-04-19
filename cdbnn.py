@@ -2803,11 +2803,12 @@ class ModelFactory:
 #---------------------------model train begins -----------------------------------------
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training with dynamic feature selection"""
-    # Initialize feature tracking
-    if not hasattr(model, 'feature_tracker'):
-        model.feature_tracker = FeatureTracker(model.feature_dims)
-        model.register_backward_hooks()
+    """Main training function that orchestrates both phases"""
+    # Initialize feature tracking if enabled
+    if config.get('feature_selection', {}).get('enabled', True):
+        if not hasattr(model, 'feature_tracker'):
+            model.feature_tracker = FeatureTracker(model.feature_dims)
+            model.register_backward_hooks()
 
     history = defaultdict(list)
     start_epoch = getattr(model, 'current_epoch', 0)
@@ -2818,50 +2819,46 @@ def train_model(model: nn.Module, train_loader: DataLoader,
     if current_phase == 1:
         model.set_training_phase(1)
         optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'])
-
-        # Initialize progress bar for phase 1
-        phase1_pbar = tqdm(range(start_epoch, config['training']['epochs']),
-                          desc="Phase 1: Reconstruction Training",
-                          position=0)
+                             lr=config['model']['autoencoder_config']['phase1_learning_rate'])
 
         phase1_history = _train_phase_with_feature_selection(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 1, config,
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            loss_manager=loss_manager,
+            epochs=config['training']['epochs'],
+            phase=1,
+            config=config,
             start_epoch=start_epoch,
-            prune_interval=config.get('pruning_interval', 10),
-            warmup_epochs=config.get('warmup_epochs', 10),
-            progress_bar=phase1_pbar,
+            progress_bar=tqdm(range(start_epoch, config['training']['epochs']),
+                            desc="Phase 1: Reconstruction Training"),
             checkpoint_manager=checkpoint_manager
         )
         history.update(phase1_history)
-        start_epoch = 0
-        phase1_pbar.close()
+        start_epoch = 0  # Reset for phase 2
 
     # Phase 2: Latent organization
-    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+    if config['model']['autoencoder_config'].get('enable_phase2', True):
         model.set_training_phase(2)
         optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'] * 0.1)
-
-        # Initialize progress bar for phase 2
-        phase2_pbar = tqdm(range(start_epoch, config['training']['epochs']),
-                          desc="Phase 2: Latent Organization",
-                          position=0)
+                             lr=config['model']['autoencoder_config']['phase2_learning_rate'])
 
         phase2_history = _train_phase_with_feature_selection(
-            model, train_loader, optimizer, loss_manager,
-            config['training']['epochs'], 2, config,
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            loss_manager=loss_manager,
+            epochs=config['training']['epochs'],
+            phase=2,
+            config=config,
             start_epoch=start_epoch,
-            prune_interval=config.get('pruning_interval', 5),
-            min_features=config.get('min_features', 16),
-            progress_bar=phase2_pbar,
+            progress_bar=tqdm(range(start_epoch, config['training']['epochs']),
+                            desc="Phase 2: Latent Organization"),
             checkpoint_manager=checkpoint_manager
         )
 
         for key, val in phase2_history.items():
             history[f"phase2_{key}"] = val
-        phase2_pbar.close()
 
     return history
 
