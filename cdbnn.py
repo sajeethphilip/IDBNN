@@ -4806,7 +4806,7 @@ class DatasetProcessor:
                 },
             # Add feature selection section
             "feature_selection": {
-                "enabled": False,  # Master switch
+                "enabled": True,  # Master switch
                 "method": "dynamic_gradients",  # Options: dynamic_gradients|static|hybrid
                 "dynamic_params": {
                     "phase1": {
@@ -4827,7 +4827,7 @@ class DatasetProcessor:
                     "fixed_dims": None             # Optional override
                 },
                 "distance_correlation": {
-                    "enabled": False,               # Use with your existing DC
+                    "enabled": True,               # Use with your existing DC
                     "weight": 0.3,                # Mixing ratio with gradients
                     "update_interval": 200         # Steps between DC updates
                 },
