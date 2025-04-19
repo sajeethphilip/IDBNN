@@ -4821,7 +4821,7 @@ class DatasetProcessor:
                         "importance_decay": 0.99  # Faster adaptation
                     }
                 },
-                "fallback_to_full": true
+                "fallback_to_full": true,
                 "static_params": {
                     "initial_dims": feature_dims,  # From your existing calculation
                     "fixed_dims": None             # Optional override
