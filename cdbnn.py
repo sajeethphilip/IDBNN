@@ -2801,6 +2801,70 @@ class ModelFactory:
         return model
 
 #---------------------------model train begins -----------------------------------------
+def train_model(model: nn.Module, train_loader: DataLoader,
+                config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
+    """Two-phase training with dynamic feature selection"""
+    # Initialize feature tracking
+    if not hasattr(model, 'feature_tracker'):
+        model.feature_tracker = FeatureTracker(model.feature_dims)
+        model.register_backward_hooks()
+
+    history = defaultdict(list)
+    start_epoch = getattr(model, 'current_epoch', 0)
+    current_phase = getattr(model, 'training_phase', 1)
+    checkpoint_manager = UnifiedCheckpoint(config)
+
+    # Phase 1: Reconstruction
+    if current_phase == 1:
+        model.set_training_phase(1)
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'])
+
+        # Initialize progress bar for phase 1
+        phase1_pbar = tqdm(range(start_epoch, config['training']['epochs']),
+                          desc="Phase 1: Reconstruction Training",
+                          position=0)
+
+        phase1_history = _train_phase_with_feature_selection(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch,
+            prune_interval=config.get('pruning_interval', 10),
+            warmup_epochs=config.get('warmup_epochs', 10),
+            progress_bar=phase1_pbar,
+            checkpoint_manager=checkpoint_manager
+        )
+        history.update(phase1_history)
+        start_epoch = 0
+        phase1_pbar.close()
+
+    # Phase 2: Latent organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        model.set_training_phase(2)
+        optimizer = optim.Adam(model.parameters(),
+                             lr=config['model']['learning_rate'] * 0.1)
+
+        # Initialize progress bar for phase 2
+        phase2_pbar = tqdm(range(start_epoch, config['training']['epochs']),
+                          desc="Phase 2: Latent Organization",
+                          position=0)
+
+        phase2_history = _train_phase_with_feature_selection(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch,
+            prune_interval=config.get('pruning_interval', 5),
+            min_features=config.get('min_features', 16),
+            progress_bar=phase2_pbar,
+            checkpoint_manager=checkpoint_manager
+        )
+
+        for key, val in phase2_history.items():
+            history[f"phase2_{key}"] = val
+        phase2_pbar.close()
+
+    return history
+
 def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
                                       epochs, phase, config, start_epoch=0,
                                       progress_bar=None, checkpoint_manager=None):
@@ -2938,110 +3002,6 @@ def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
         update_progress(progress_bar, epoch_loss, best_loss, current_features,
                       model.feature_dims, phase, model.use_kl_divergence,
                       latent_info if phase == 2 and model.use_kl_divergence else None)
-
-        # Early stopping and checkpointing
-        best_loss, patience_counter = handle_early_stopping(
-            epoch_loss, best_loss, patience_counter, config,
-            model, optimizer, phase, epoch, checkpoint_manager, progress_bar
-        )
-        if patience_counter >= config['training']['early_stopping'].get('patience', 5):
-            break
-
-    return history
-
-def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
-                                      epochs, phase, config, start_epoch=0,
-                                      prune_interval=10, warmup_epochs=10,
-                                      min_features=32, progress_bar=None,
-                                      checkpoint_manager=None):
-    """Training phase with GPU optimization and device consistency"""
-    # Device setup
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-
-    # Initialize trackers
-    history = defaultdict(list)
-    best_loss = float('inf')
-    patience_counter = 0
-    current_features = model.feature_dims
-
-    # Progress bar setup
-    if progress_bar is None:
-        progress_bar = tqdm(range(start_epoch, epochs),
-                          desc=f"Phase {phase}: {'Reconstruction' if phase == 1 else 'Clustering'}",
-                          position=0,
-                          bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE if phase == 1 else Colors.YELLOW, Colors.ENDC))
-
-    for epoch in range(start_epoch, epochs):
-        model.train()
-        running_loss = 0.0
-        batch_count = 0
-
-        try:
-            with tqdm(loader,
-                     desc=f"Epoch {epoch+1}/{epochs}",
-                     leave=False,
-                     bar_format="{l_bar}%s{bar}%s{r_bar}" % (Colors.BLUE, Colors.ENDC)) as batch_pbar:
-
-                for batch_idx, (data, labels) in enumerate(batch_pbar):
-                    # Ensure all data is on the correct device
-                    data = data.to(device, non_blocking=True)
-                    labels = labels.to(device, non_blocking=True)
-
-                    # Forward pass with autocast for mixed precision
-                    with torch.cuda.amp.autocast(enabled=config['execution_flags']['mixed_precision']):
-                        output = model(data)
-
-                        # Calculate loss
-                        if phase == 1:
-                            recon = output[1] if isinstance(output, tuple) else output['reconstruction']
-                            loss = F.mse_loss(recon, data)
-                        else:
-                            loss_dict = loss_manager.calculate_loss(
-                                output['reconstruction'], data,
-                                config['dataset'].get('image_type', 'general')
-                            )
-                            loss = loss_dict['loss']
-                            if model.use_kl_divergence:
-                                latent_info = model.organize_latent_space(output['embedding'], labels)
-                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
-                                       F.kl_div(latent_info['cluster_probabilities'].log(),
-                                               latent_info['target_distribution'],
-                                               reduction='batchmean')
-
-                    # Backward pass
-                    optimizer.zero_grad(set_to_none=True)  # More memory efficient
-                    loss.backward()
-                    optimizer.step()
-
-                    # Sync and get loss value
-                    torch.cuda.synchronize()  # Ensure proper timing
-                    running_loss += loss.item()
-                    batch_count += 1
-
-                    # Feature pruning
-                    if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs:
-                        current_features = model.prune_features(min_features=min_features)
-                        batch_pbar.set_postfix_str(
-                            f"Ft: {Colors.GREEN}{current_features}{Colors.ENDC}/{model.feature_dims} | "
-                            f"Loss: {loss.item():.4f} | "
-                            f"GPU: {torch.cuda.memory_allocated(device)/1e9:.2f}GB"
-                        )
-
-        except Exception as e:
-            logger.error(f"Error in epoch {epoch+1}: {str(e)}")
-            if batch_count == 0:
-                epoch_loss = float('inf')
-            continue
-
-        # Calculate epoch loss
-        epoch_loss = running_loss / max(batch_count, 1)  # Prevent division by zero
-
-        # Update history and progress
-        history[f'phase{phase}_loss'].append(epoch_loss)
-        update_progress(progress_bar, epoch_loss, best_loss, current_features,
-                       model.feature_dims, phase, model.use_kl_divergence,
-                       latent_info if phase == 2 and model.use_kl_divergence else None)
 
         # Early stopping and checkpointing
         best_loss, patience_counter = handle_early_stopping(
@@ -4818,10 +4778,11 @@ class DatasetProcessor:
                     "phase2": {
                         "pruning_interval": 5,   # More frequent pruning
                         "min_features": 16,       # More aggressive
+                        "warmup_epochs": 10,       # Wait before first pruning
                         "importance_decay": 0.99  # Faster adaptation
                     }
                 },
-                "fallback_to_full": True,
+
                 "static_params": {
                     "initial_dims": feature_dims,  # From your existing calculation
                     "fixed_dims": None             # Optional override
@@ -4831,7 +4792,7 @@ class DatasetProcessor:
                     "weight": 0.3,                # Mixing ratio with gradients
                     "update_interval": 200         # Steps between DC updates
                 },
-                "fallback_to_full": True
+                 "fallback_to_full": True  # If disabled, use all features
                 },
             },
 
