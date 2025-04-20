@@ -5784,7 +5784,6 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
 
         # Load configuration
         config_path = os.path.join(data_dir, f"{data_name}.json")
-        self.config_path=config_path
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
