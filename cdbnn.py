@@ -2625,7 +2625,6 @@ class ModelFactory:
         )
         feature_dims= config['model']['feature_dims']
 
-        logger.info(f"Main configuration saved: {config_path}")
         image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model with proper channel handling
