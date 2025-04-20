@@ -5724,12 +5724,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         data_name=args.data_name
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
-        fd= config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
-        config['model']['feature_dims']=feature_dims
-        # Get model type
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
+
         # Process dataset
         processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'))
         train_dir, test_dir = processor.process()
@@ -5745,6 +5740,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
+        fd= config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
+        config['model']['feature_dims']=feature_dims
+        # Get model type
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
