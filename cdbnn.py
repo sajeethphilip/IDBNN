@@ -2625,7 +2625,7 @@ class ModelFactory:
             config['dataset']['input_size'][1]
         )
         fd = config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions:{ fd}") or fd)
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
         config['model']['feature_dims']=feature_dims
         # Get model type
         with open(config_path, 'w') as f:
@@ -3026,7 +3026,7 @@ class ReconstructionManager:
             self.config['dataset']['input_size'][1]
         )
         fd = self.config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions:{ fd}") or fd)
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}] :") or fd)
         config['model']['feature_dims']=feature_dims
         # Get model type
         with open(self.config_path, 'w') as f:
