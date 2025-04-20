@@ -2627,6 +2627,7 @@ class ModelFactory:
         fd = config['model']['feature_dims']
         feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
         config['model']['feature_dims']=feature_dims
+        config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
         # Get model type
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
