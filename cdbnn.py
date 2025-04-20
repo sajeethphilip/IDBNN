@@ -1066,6 +1066,7 @@ class BaseAutoencoder(nn.Module):
             Dictionary with configuration parameters
         """
         config_path = os.path.join(output_dir, 'feature_selection_config.json')
+        self.config_path=config_path
         default_config = {
             'use_distance_correlation': True,
             'distance_correlation_upper': 0.85,
@@ -2623,9 +2624,13 @@ class ModelFactory:
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        feature_dims = config['model']['feature_dims']
-
+        fd = config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions:{ feature_dims}") or fd)
+        config['model']['feature_dims']=feature_dims
         # Get model type
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.info(f"Main configuration saved: {self.config_path}")
         image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model with proper channel handling
@@ -3020,7 +3025,14 @@ class ReconstructionManager:
             self.config['dataset']['input_size'][0],
             self.config['dataset']['input_size'][1]
         )
-        feature_dims = self.config['model']['feature_dims']
+        fd = self.config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions:{ feature_dims}") or fd)
+        config['model']['feature_dims']=feature_dims
+        # Get model type
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.info(f"Main configuration saved: {self.config_path}")
+        image_type = config['dataset'].get('image_type', 'general')
 
         # Set model configuration based on saved state
         self.config['model']['autoencoder_config']['enhancements'].update({
@@ -4618,6 +4630,7 @@ class DatasetProcessor:
         """Detect actual image properties but use config values if specified"""
         # Load existing config if available
         config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        self.config_path=config_path
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -5564,6 +5577,7 @@ def main():
         if args.mode == 'predict':
             # Load the config
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
+            self.config_path=config_path
             if not os.path.exists(config_path):
                 logger.error(f"Config file not found at {config_path}")
                 config_path = input("Enter path to config file: ").strip()
@@ -5772,6 +5786,7 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
 
         # Load configuration
         config_path = os.path.join(data_dir, f"{data_name}.json")
+        self.config_path=config_path
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
