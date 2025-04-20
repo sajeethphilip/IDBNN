@@ -5739,6 +5739,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Get model type
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
+            print("config updated")
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
