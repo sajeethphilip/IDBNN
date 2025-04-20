@@ -1066,7 +1066,6 @@ class BaseAutoencoder(nn.Module):
             Dictionary with configuration parameters
         """
         config_path = os.path.join(output_dir, 'feature_selection_config.json')
-        self.config_path=config_path
         default_config = {
             'use_distance_correlation': True,
             'distance_correlation_upper': 0.85,
