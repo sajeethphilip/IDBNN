@@ -2628,9 +2628,9 @@ class ModelFactory:
         feature_dims=int(input(f"Please specify the output feature dimensions:{ fd}") or fd)
         config['model']['feature_dims']=feature_dims
         # Get model type
-        with open(self.config_path, 'w') as f:
+        with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
-        logger.info(f"Main configuration saved: {self.config_path}")
+        logger.info(f"Main configuration saved: {config_path}")
         image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model with proper channel handling
