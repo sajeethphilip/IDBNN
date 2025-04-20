@@ -5568,7 +5568,6 @@ def main():
         if args.mode == 'predict':
             # Load the config
             config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
-            self.config_path=config_path
             if not os.path.exists(config_path):
                 logger.error(f"Config file not found at {config_path}")
                 config_path = input("Enter path to config file: ").strip()
