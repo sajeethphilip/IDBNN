@@ -4621,7 +4621,6 @@ class DatasetProcessor:
         """Detect actual image properties but use config values if specified"""
         # Load existing config if available
         config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        self.config_path=config_path
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 config = json.load(f)
