@@ -3521,7 +3521,7 @@ class DBNN(GPUDBNN):
         pair_batch_size = self._calculate_safe_batch_size(n_classes, n_bins)
         total_pairs = len(self.feature_pairs)
 
-        with tqdm(total=total_pairs, desc="Processing feature pairs") as pbar:
+        with tqdm(total=total_pairs, desc="Processing feature pairs",leave=False) as pbar:
             for batch_start in range(0, total_pairs, pair_batch_size):
                 batch_end = min(batch_start + pair_batch_size, total_pairs)
                 batch_pairs = self.feature_pairs[batch_start:batch_end]
@@ -3711,7 +3711,7 @@ class DBNN(GPUDBNN):
 
         # Initialize progress tracking
         n_pairs = len(self.feature_pairs)
-        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs")
+        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs",leave=False)
 
         # Pre-compute unique classes once
         unique_classes = torch.unique(labels)
@@ -4057,7 +4057,7 @@ class DBNN(GPUDBNN):
             all_predictions = []
             all_posteriors = []
 
-            with tqdm(total=n_batches, desc="Prediction batches") as pred_pbar:
+            with tqdm(total=n_batches, desc="Prediction batches",leave=False) as pred_pbar:
                 for i in range(0, len(X_tensor), batch_size):
                     batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
 
@@ -4307,7 +4307,7 @@ class DBNN(GPUDBNN):
 
 
         # Initialize progress bar for epochs
-        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs")
+        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs",leave=False)
 
         # Store current weights for prediction during training
         train_weights = self.current_W.clone() if self.current_W is not None else None
