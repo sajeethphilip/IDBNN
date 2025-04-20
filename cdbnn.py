@@ -2827,7 +2827,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             num_batches = len(train_loader)
 
             # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
