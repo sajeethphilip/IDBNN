@@ -505,6 +505,9 @@ def main():
     parser.add_argument('--feature-dims', type=int, default=128, help='Dimension of output features')
     parser.add_argument('--batch-size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'predict'],
+                       help='Operation mode: "train" or "predict"')
+
     args = parser.parse_args()
 
     # Initialize with either custom or default config
@@ -524,14 +527,29 @@ def main():
     model = ModelFactory.create_model(config)
     logger.info(f"Created {model.__class__.__name__} with {sum(p.numel() for p in model.parameters()):,} parameters")
 
-    # Data loading
+    if args.mode == 'train':
+        # Data loading for training
+        train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
+
+        # Training
+        trainer = TrainingManager(config)
+        history = trainer.train(model, train_loader)
+
+        # Save the trained model
+        torch.save(model.state_dict(), os.path.join(config['output']['model_dir'], 'final_model.pth'))
+        logger.info("Training complete! Model saved.")
+
+    elif args.mode == 'predict':
+        # Load the trained model
+        model_path = os.path.join(config['output']['model_dir'], 'final_model.pth')
+        if os.path.exists(model_path):
+            model.load_state_dict(torch.load(model_path, map_location=model.device))
+            logger.info(f"Loaded trained model from {model_path}")
+        else:
+            raise FileNotFoundError(f"No trained model found at {model_path}. Please train first or check path.")
+
+    # Feature extraction and saving (done for both modes)
     train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
-
-    # Training
-    trainer = TrainingManager(config)
-    history = trainer.train(model, train_loader)
-
-    # Feature extraction and saving
     extract_and_save_features(model, train_loader, test_loader, config, output_dir)
 
     # Generate configuration files
