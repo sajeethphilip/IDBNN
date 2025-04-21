@@ -808,11 +808,12 @@ class DatasetProcessor:
 
 class DynamicCNN(nn.Module):
     """Core feature extraction model with adaptive depth"""
-    def __init__(self, input_channels=3, feature_dim=128, min_size=8):
+    def __init__(self, input_channels=3, feature_dim=128, min_size=8, input_size=(64, 64)):
         super().__init__()
         self.feature_dim = feature_dim
         self.min_size = min_size
         self.input_channels = input_channels
+        self.input_size = input_size  # Store the input size
 
         # Initial conv block
         self.initial_conv = nn.Sequential(
@@ -826,17 +827,17 @@ class DynamicCNN(nn.Module):
         self.adaptive_blocks = nn.ModuleList()
         self._build_adaptive_blocks(32)
 
-        # Calculate flattened dimension after all conv blocks
-        self.flatten_dim = self._get_flatten_dim()
+        # Calculate flattened dimension
+        self.flatten_dim = self._calculate_flatten_dim()
+        print(f"Flatten dimension: {self.flatten_dim}")  # Debug print
 
         # Final projection
         self.fc = nn.Linear(self.flatten_dim, feature_dim)
 
     def _build_adaptive_blocks(self, in_channels):
         """Dynamically adds conv blocks based on input size"""
-        dummy = torch.zeros(1, self.input_channels, 64, 64)
-        x = self.initial_conv(dummy)
-        spatial_dim = x.shape[2]
+        # Calculate spatial dimension after initial conv
+        spatial_dim = self.input_size[0] // 2  # After maxpool
 
         while spatial_dim > self.min_size:
             out_channels = in_channels * 2
@@ -850,13 +851,13 @@ class DynamicCNN(nn.Module):
             spatial_dim = spatial_dim // 2
             in_channels = out_channels
 
-    def _get_flatten_dim(self):
-        """Calculates flattened dimension for FC layer"""
-        dummy = torch.zeros(1, self.input_channels, 64, 64)
+    def _calculate_flatten_dim(self):
+        """Calculates flattened dimension by running a dummy input"""
+        dummy = torch.zeros(1, self.input_channels, *self.input_size)
         x = self.initial_conv(dummy)
         for block in self.adaptive_blocks:
             x = block(x)
-        return torch.flatten(x, 1).shape[1]
+        return int(torch.flatten(x, 1).shape[1])
 
     def forward(self, x):
         x = self.initial_conv(x)
@@ -925,7 +926,8 @@ class DynamicFeatureExtractor(nn.Module):
         self.cnn = DynamicCNN(
             input_channels=input_shape[0],
             feature_dim=feature_dims,
-            min_size=8
+            min_size=8,
+            input_size=(input_shape[1], input_shape[2])  # Pass actual input size
         )
 
         # Loss function
