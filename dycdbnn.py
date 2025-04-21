@@ -812,9 +812,9 @@ class DynamicCNN(nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.min_size = min_size
-        self.input_channels = input_channels  # Store input channels
+        self.input_channels = input_channels
 
-        # Initial conv block - now uses input_channels
+        # Initial conv block
         self.initial_conv = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
@@ -826,14 +826,17 @@ class DynamicCNN(nn.Module):
         self.adaptive_blocks = nn.ModuleList()
         self._build_adaptive_blocks(32)
 
+        # Calculate flattened dimension after all conv blocks
+        self.flatten_dim = self._get_flatten_dim()
+
         # Final projection
-        self.fc = nn.Linear(self._get_flatten_dim(input_channels), feature_dim)
+        self.fc = nn.Linear(self.flatten_dim, feature_dim)
 
     def _build_adaptive_blocks(self, in_channels):
         """Dynamically adds conv blocks based on input size"""
-        # Create dummy input with correct number of channels
         dummy = torch.zeros(1, self.input_channels, 64, 64)
-        spatial_dim = self.initial_conv(dummy).shape[2]
+        x = self.initial_conv(dummy)
+        spatial_dim = x.shape[2]
 
         while spatial_dim > self.min_size:
             out_channels = in_channels * 2
@@ -847,9 +850,9 @@ class DynamicCNN(nn.Module):
             spatial_dim = spatial_dim // 2
             in_channels = out_channels
 
-    def _get_flatten_dim(self, input_channels):
+    def _get_flatten_dim(self):
         """Calculates flattened dimension for FC layer"""
-        dummy = torch.zeros(1, input_channels, 64, 64)
+        dummy = torch.zeros(1, self.input_channels, 64, 64)
         x = self.initial_conv(dummy)
         for block in self.adaptive_blocks:
             x = block(x)
