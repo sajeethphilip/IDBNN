@@ -1030,28 +1030,46 @@ class ModelFactory:
 # ----------------------------
 
 class TrainingManager:
-    """Handles model training with original checkpointing"""
+    """Handles model training with early stopping and progress tracking"""
 
     def __init__(self, config: Dict):
         self.config = config
         self.checkpoint_dir = config['training']['checkpoint_dir']
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.early_stopping = config['training'].get('early_stopping', {})
+        self.patience = self.early_stopping.get('patience', 5)
+        self.min_delta = self.early_stopping.get('min_delta', 0.001)
+        self.best_loss = float('inf')
+        self.patience_counter = 0
+        self.epoch = 0
 
-    def train(self, model: nn.Module, train_loader: DataLoader) -> Dict:
-        """Single-phase training with original logging"""
+    def train(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader = None) -> Dict:
         optimizer = optim.Adam(
             model.parameters(),
             lr=self.config['model']['learning_rate']
         )
 
-        history = {'loss': []}
-        best_loss = float('inf')
+        history = {
+            'train_loss': [],
+            'val_loss': [],
+            'epochs': 0
+        }
+
+        # Early stopping variables
+        best_model_state = None
+        early_stop = False
 
         for epoch in range(self.config['training']['epochs']):
+            self.epoch = epoch
             model.train()
             epoch_loss = 0.0
 
-            for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+            # Initialize progress bar
+            pbar = tqdm(train_loader,
+                       desc=f"Epoch {epoch + 1}/{self.config['training']['epochs']}",
+                       leave=True)
+
+            for inputs, labels in pbar:
                 inputs = inputs.to(model.device)
                 labels = labels.to(model.device)
 
@@ -1063,20 +1081,70 @@ class TrainingManager:
 
                 epoch_loss += loss.item()
 
-            avg_loss = epoch_loss / len(train_loader)
-            history['loss'].append(avg_loss)
+                # Update progress bar with current batch loss
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'patience': f"{self.patience_counter}/{self.patience}"
+                })
 
-            # Original checkpointing logic
-            if avg_loss < best_loss:
-                best_loss = avg_loss
+            # Calculate average epoch loss
+            avg_train_loss = epoch_loss / len(train_loader)
+            history['train_loss'].append(avg_train_loss)
+
+            # Validation phase
+            if val_loader:
+                val_loss = self._validate(model, val_loader)
+                history['val_loss'].append(val_loss)
+                current_loss = val_loss
+            else:
+                current_loss = avg_train_loss
+
+            # Early stopping check
+            if (self.best_loss - current_loss) > self.min_delta:
+                self.best_loss = current_loss
+                self.patience_counter = 0
+                best_model_state = model.state_dict()
+
+                # Save best model checkpoint
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'loss': avg_loss,
+                    'model_state_dict': best_model_state,
+                    'loss': self.best_loss,
                     'config': self.config
                 }, os.path.join(self.checkpoint_dir, 'best_model.pth'))
+            else:
+                self.patience_counter += 1
+                if self.patience_counter >= self.patience:
+                    early_stop = True
+                    print(f"\nEarly stopping triggered at epoch {epoch + 1}")
+                    break
+
+            # Update history
+            history['epochs'] = epoch + 1
+
+            # Print epoch summary
+            val_msg = f"val_loss: {val_loss:.4f}" if val_loader else ""
+            print(f"Epoch {epoch + 1} - train_loss: {avg_train_loss:.4f} {val_msg} "
+                  f"- patience: {self.patience_counter}/{self.patience}")
+
+        # Load best model before return
+        if best_model_state:
+            model.load_state_dict(best_model_state)
 
         return history
+
+    def _validate(self, model: nn.Module, val_loader: DataLoader) -> float:
+        model.eval()
+        val_loss = 0.0
+
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs = inputs.to(model.device)
+                labels = labels.to(model.device)
+                features = model.cnn(inputs)
+                val_loss += model.loss_fn(features, labels).item()
+
+        return val_loss / len(val_loader)
 
 # ----------------------------
 # 6. Prediction Manager
