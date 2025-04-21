@@ -39,6 +39,767 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+#------------------------
+# Helper Functions
+#-------------------------
+
+class DatasetProcessor:
+    SUPPORTED_FORMATS = {
+        'zip': zipfile.ZipFile,
+        'tar': tarfile.TarFile,
+        'tar.gz': tarfile.TarFile,
+        'tgz': tarfile.TarFile,
+        'gz': gzip.GzipFile,
+        'bz2': bz2.BZ2File,
+        'xz': lzma.LZMAFile
+    }
+
+    SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
+
+    def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
+                 output_dir: str = "data", config: Optional[Dict] = None):
+        self.datafile = datafile
+        self.datatype = datatype.lower()
+        self.output_dir = output_dir
+        self.config = config if config is not None else {}  # Initialize config
+
+        if self.datatype == 'torchvision':
+            self.dataset_name = self.datafile.lower()
+        else:
+            self.dataset_name = Path(self.datafile).stem.lower()
+
+        self.dataset_dir = os.path.join("data", self.dataset_name)
+        os.makedirs(self.dataset_dir, exist_ok=True)
+
+        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
+        self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
+
+    def _extract_archive(self, archive_path: str) -> str:
+        """Extract compressed archive to temporary directory"""
+        extract_dir = os.path.join(self.dataset_dir, 'temp_extract')
+        os.makedirs(extract_dir, exist_ok=True)
+
+        file_ext = Path(archive_path).suffix.lower()
+        if file_ext.startswith('.'):
+            file_ext = file_ext[1:]
+
+        if file_ext == 'zip':
+            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+        elif file_ext in ['tar', 'tgz'] or archive_path.endswith('tar.gz'):
+            with tarfile.open(archive_path, 'r:*') as tar_ref:
+                tar_ref.extractall(extract_dir)
+        elif file_ext == 'gz':
+            output_path = os.path.join(extract_dir, Path(archive_path).stem)
+            with gzip.open(archive_path, 'rb') as gz_file:
+                with open(output_path, 'wb') as out_file:
+                    shutil.copyfileobj(gz_file, out_file)
+        elif file_ext == 'bz2':
+            output_path = os.path.join(extract_dir, Path(archive_path).stem)
+            with bz2.open(archive_path, 'rb') as bz2_file:
+                with open(output_path, 'wb') as out_file:
+                    shutil.copyfileobj(bz2_file, out_file)
+        elif file_ext == 'xz':
+            output_path = os.path.join(extract_dir, Path(archive_path).stem)
+            with lzma.open(archive_path, 'rb') as xz_file:
+                with open(output_path, 'wb') as out_file:
+                    shutil.copyfileobj(xz_file, out_file)
+        else:
+            raise ValueError(f"Unsupported archive format: {file_ext}")
+
+        return extract_dir
+
+    def _process_data_path(self, data_path: str) -> str:
+        """Process input data path, handling compressed files if necessary"""
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"Data path not found: {data_path}")
+
+        file_ext = Path(data_path).suffix.lower()
+        if file_ext.startswith('.'):
+            file_ext = file_ext[1:]
+
+        # Check if it's a compressed file
+        if file_ext in self.SUPPORTED_FORMATS or data_path.endswith('tar.gz'):
+            logger.info(f"Extracting compressed file: {data_path}")
+            extract_dir = self._extract_archive(data_path)
+
+            # Find the main data directory
+            contents = os.listdir(extract_dir)
+            if len(contents) == 1 and os.path.isdir(os.path.join(extract_dir, contents[0])):
+                return os.path.join(extract_dir, contents[0])
+            return extract_dir
+
+        return data_path
+
+    def process(self) -> Tuple[str, Optional[str]]:
+        """Process dataset and return paths to train and test directories"""
+        if self.datatype == 'torchvision':
+            return self._process_torchvision()
+        else:
+            # Process the data path first
+            processed_path = self._process_data_path(self.datafile)
+            return self._process_custom(processed_path)
+
+    def _handle_existing_directory(self, path: str):
+        """Handle existing directory by either removing it or merging its contents."""
+        if os.path.exists(path):
+            response = input(f"The directory '{path}' already exists. Do you want to (R)emove it or (M)erge its contents? [R/M]: ").lower()
+            if response == 'r':
+                shutil.rmtree(path)
+                os.makedirs(path)
+            elif response == 'm':
+                # Merge contents (no action needed, as shutil.copytree will handle it with dirs_exist_ok=True)
+                pass
+            else:
+                raise ValueError("Invalid choice. Please choose 'R' to remove or 'M' to merge.")
+
+    def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
+        """Process custom dataset structure"""
+        train_dir = os.path.join(self.dataset_dir, "train")
+        test_dir = os.path.join(self.dataset_dir, "test")
+
+        # Access enable_adaptive from training_params
+        try:
+             enable_adaptive = self.config['model'].get('enable_adaptive', True)
+        except:
+            enable_adaptive = True
+            print(f"Enable Adaptive mode is set {enable_adaptive} in process custom")
+        # Check if dataset already has train/test structure
+        if os.path.isdir(os.path.join(data_path, "train")) and \
+           os.path.isdir(os.path.join(data_path, "test")):
+            # Check if adaptive_fit_predict is active
+            if enable_adaptive:
+                # Handle existing train directory
+                self._handle_existing_directory(train_dir)
+                # Merge train and test folders into a single train folder
+
+                # Copy train data
+                shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
+
+                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
+
+            else:
+                # Normal processing with separate train and test folders
+                if os.path.exists(train_dir):
+                    shutil.rmtree(train_dir)
+                if os.path.exists(test_dir):
+                    shutil.rmtree(test_dir)
+
+                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                shutil.copytree(os.path.join(data_path, "test"), test_dir)
+                return train_dir, test_dir
+        # Handle single directory with class subdirectories
+        if not os.path.isdir(data_path):
+            raise ValueError(f"Invalid dataset path: {data_path}")
+
+        class_dirs = [d for d in os.listdir(data_path)
+                     if os.path.isdir(os.path.join(data_path, d))]
+
+        if not class_dirs:
+            raise ValueError(f"No class directories found in {data_path}")
+
+        # Ask user about train/test split
+        response = input("Create train/test split? (y/n): ").lower()
+        if response == 'y':
+            test_size = float(input("Enter test size (0-1, default: 0.2): ") or "0.2")
+            return self._create_train_test_split(data_path, test_size)
+        else:
+            # Use all data for training
+            os.makedirs(train_dir, exist_ok=True)
+            for class_dir in class_dirs:
+                src = os.path.join(data_path, class_dir)
+                dst = os.path.join(train_dir, class_dir)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            return train_dir, None
+
+    def cleanup(self):
+        """Clean up temporary files"""
+        temp_dir = os.path.join(self.dataset_dir, 'temp_extract')
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+#------------------------
+    def get_transforms(self, config: Dict, is_train: bool = True) -> transforms.Compose:
+        """Get transforms based on configuration"""
+        transform_list = []
+
+        # Handle resolution and channel conversion first
+        target_size = tuple(config['dataset']['input_size'])
+        target_channels = config['dataset']['in_channels']
+
+        # Resolution adjustment
+        transform_list.append(transforms.Resize(target_size))
+
+        # Channel conversion
+        if target_channels == 1:
+            transform_list.append(transforms.Grayscale(num_output_channels=1))
+
+        # Training augmentations
+        if is_train and config.get('augmentation', {}).get('enabled', True):
+            aug_config = config['augmentation']
+            if aug_config.get('random_crop', {}).get('enabled', False):
+                transform_list.append(transforms.RandomCrop(target_size, padding=4))
+            if aug_config.get('horizontal_flip', {}).get('enabled', False):
+                transform_list.append(transforms.RandomHorizontalFlip())
+            if aug_config.get('color_jitter', {}).get('enabled', False):
+                transform_list.append(transforms.ColorJitter(
+                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1
+                ))
+
+        # Final transforms
+        transform_list.extend([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=config['dataset']['mean'],
+                               std=config['dataset']['std'])
+        ])
+
+        return transforms.Compose(transform_list)
+
+
+    def _generate_main_config(self, train_dir: str) -> Dict:
+        """Generate main configuration with all necessary parameters"""
+        input_size, in_channels = self._detect_image_properties(train_dir)
+        class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+        num_classes = len(class_dirs)
+
+        mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
+        std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
+        feature_dims = min(128, np.prod(input_size) // 4)
+
+        return {
+            "dataset": {
+                "name": self.dataset_name,
+                "type": self.datatype,
+                "in_channels": in_channels,
+                "num_classes": num_classes,
+                "input_size": list(input_size),
+                "mean": mean,
+                "std": std,
+                "resize_images": False,
+                "train_dir": train_dir,
+                "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
+            },
+             "model": {
+                "encoder_type": "autoenc",
+                'enable_adaptive': True,  # Default value
+                "feature_dims": feature_dims,
+                "learning_rate": 0.001,
+                "optimizer": {
+                    "type": "Adam",
+                    "weight_decay": 0.0001,
+                    "momentum": 0.9,
+                    "beta1": 0.9,
+                    "beta2": 0.999,
+                    "epsilon": 1e-08
+                },
+                "scheduler": {
+                    "type": "ReduceLROnPlateau",
+                    "factor": 0.1,
+                    "patience": 10,
+                    "min_lr": 1e-06,
+                    "verbose": True
+                },
+                "autoencoder_config": {
+                    "reconstruction_weight": 1.0,
+                    "feature_weight": 0.1,
+                    "convergence_threshold": 0.0001,
+                    "min_epochs": 10,
+                    "patience": 5,
+                    "enhancements": {
+                        "enabled": True,
+                        "use_kl_divergence": True,
+                        "use_class_encoding": False,
+                        "kl_divergence_weight": 0.5,
+                        "classification_weight": 0.5,
+                        "clustering_temperature": 1.0,
+                        "min_cluster_confidence": 0.7
+                    }
+                },
+                "loss_functions": {
+                    "structural": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "params": {
+                            "edge_weight": 1.0,
+                            "smoothness_weight": 0.5
+                        }
+                    },
+                    "color_enhancement": {
+                        "enabled": True,
+                        "weight": 0.8,
+                        "params": {
+                            "channel_weight": 0.5,
+                            "contrast_weight": 0.3
+                        }
+                    },
+                    "morphology": {
+                        "enabled": True,
+                        "weight": 0.6,
+                        "params": {
+                            "shape_weight": 0.7,
+                            "symmetry_weight": 0.3
+                        }
+                    },
+                    "detail_preserving": {
+                        "enabled": True,
+                        "weight": 0.8,
+                        "params": {
+                            "detail_weight": 1.0,
+                            "texture_weight": 0.8,
+                            "frequency_weight": 0.6
+                        }
+                    },
+                    "astronomical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "edge_preservation": True,
+                            "peak_preservation": True,
+                            "detail_preservation": True
+                        }
+                    },
+                    "medical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "boundary_preservation": True,
+                            "tissue_contrast": True,
+                            "local_structure": True
+                        }
+                    },
+                    "agricultural_pattern": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "texture_preservation": True,
+                            "damage_pattern": True,
+                            "color_consistency": True
+                        }
+                    }
+                },
+                "enhancement_modules": {
+                    "astronomical": {
+                        "enabled": True,
+                        "components": {
+                            "structure_preservation": True,
+                            "detail_preservation": True,
+                            "star_detection": True,
+                            "galaxy_features": True,
+                            "kl_divergence": True
+                        },
+                        "weights": {
+                            "detail_weight": 1.0,
+                            "structure_weight": 0.8,
+                            "edge_weight": 0.7
+                        }
+                    },
+                    "medical": {
+                        "enabled": True,
+                        "components": {
+                            "tissue_boundary": True,
+                            "lesion_detection": True,
+                            "contrast_enhancement": True,
+                            "subtle_feature_preservation": True
+                        },
+                        "weights": {
+                            "boundary_weight": 1.0,
+                            "lesion_weight": 0.8,
+                            "contrast_weight": 0.6
+                        }
+                    },
+                    "agricultural": {
+                        "enabled": True,
+                        "components": {
+                            "texture_analysis": True,
+                            "damage_detection": True,
+                            "color_anomaly": True,
+                            "pattern_enhancement": True,
+                            "morphological_features": True
+                        },
+                        "weights": {
+                            "texture_weight": 1.0,
+                            "damage_weight": 0.8,
+                            "pattern_weight": 0.7
+                        }
+                    }
+                }
+            },
+            "training": {
+                "batch_size": 128,
+                "epochs": 200,
+                "num_workers": min(4, os.cpu_count() or 1),
+                "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
+                "validation_split": 0.2,
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1,
+                "early_stopping": {
+                    "patience": 5,
+                    "min_delta": 0.001
+                }
+            },
+            "augmentation": {
+                "enabled": True,
+                "random_crop": {"enabled": True, "padding": 4},
+                "random_rotation": {"enabled": True, "degrees": 10},
+                "horizontal_flip": {"enabled": True, "probability": 0.5},
+                "vertical_flip": {"enabled": False},
+                "color_jitter": {
+                    "enabled": True,
+                    "brightness": 0.2,
+                    "contrast": 0.2,
+                    "saturation": 0.2,
+                    "hue": 0.1
+                },
+                "normalize": {
+                    "enabled": True,
+                    "mean": mean,
+                    "std": std
+                }
+            },
+            "execution_flags": {
+                "mode": "train_and_predict",
+                "use_gpu": torch.cuda.is_available(),
+                "mixed_precision": True,
+                "distributed_training": False,
+                "debug_mode": False,
+                "use_previous_model": True,
+                "fresh_start": False
+            },
+            "output": {
+                "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+                "model_dir": os.path.join(self.dataset_dir, "models"),
+                "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+            }
+        }
+
+    def _generate_dataset_conf(self, feature_dims: int) -> Dict:
+        """Generate dataset-specific configuration"""
+        return {
+            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+            "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
+            "separator": ",",
+            "has_header": True,
+            "target_column": "target",
+            "modelType": "Histogram",
+            "feature_group_size": 2,
+            "max_combinations": 10000,
+            "bin_sizes": [128],
+            "active_learning": {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.3,
+                "marginal_margin_threshold": 0.1,
+                "min_divergence": 0.1
+            },
+            "training_params": {
+                "trials": 100,
+                "epochs": 1000,
+                "learning_rate": 0.001,
+                "batch_size":128,
+                "test_fraction": 0.2,
+                "random_seed": 42,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "n_bins_per_dim": 21,
+                "enable_adaptive": True,
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.001,
+                "Save_training_epochs": True,
+                "training_save_path": "training_data",
+                "enable_vectorized": False,
+                "vectorization_warning_acknowledged": False,
+                "compute_device": "auto",
+                "use_interactive_kbd": False,
+                "class_preference": True
+            },
+            "execution_flags": {
+                "train": True,
+                "train_only": False,
+                "predict": True,
+                "fresh_start": False,
+                "use_previous_model": True,
+                "gen_samples": False
+            }
+        }
+
+    def _generate_dbnn_config(self, main_config: Dict) -> Dict:
+        """Generate DBNN-specific configuration"""
+        return {
+            "training_params": {
+                "trials": main_config['training']['epochs'],
+                "epochs": main_config['training']['epochs'],
+                "learning_rate": main_config['model']['learning_rate'],
+                "batch_size":128,
+                "test_fraction": 0.2,
+                "random_seed": 42,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_threshold": 0.9,
+                "cardinality_tolerance": 4,
+                "n_bins_per_dim": 128,
+                "enable_adaptive": True,
+                "invert_DBNN": main_config['training'].get('invert_DBNN', False),
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1,
+                "Save_training_epochs": False,
+                "training_save_path": os.path.join(self.dataset_dir, "training_data"),
+                "modelType": "Histogram",
+                "compute_device": "auto",
+                "class_preference": True
+            },
+            "execution_flags": {
+                "train": True,
+                "train_only": False,
+                "predict": True,
+                "fresh_start": False,
+                "use_previous_model": True,
+                "gen_samples": False
+            }
+        }
+
+    def generate_default_config(self, train_dir: str) -> Dict:
+        """Generate and manage all configuration files"""
+        os.makedirs(self.dataset_dir, exist_ok=True)
+        logger.info(f"Starting configuration generation for dataset: {self.dataset_name}")
+
+        # 1. Generate and handle main configuration (json)
+        logger.info("Generating main configuration...")
+        config = self._generate_main_config(train_dir)
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    existing_config = json.load(f)
+                    logger.info(f"Found existing main config, merging...")
+                    config = self._merge_configs(existing_config, config)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in {self.config_path}, using default template")
+
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.info(f"Main configuration saved: {self.config_path}")
+
+        # 2. Generate and handle dataset.conf using _generate_dataset_conf
+        logger.info("Generating dataset configuration...")
+        dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
+        if os.path.exists(self.conf_path):
+            try:
+                with open(self.conf_path, 'r') as f:
+                    existing_dataset_conf = json.load(f)
+                    logger.info(f"Found existing dataset config, merging...")
+                    dataset_conf = self._merge_configs(existing_dataset_conf, dataset_conf)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in {self.conf_path}, using default template")
+
+        with open(self.conf_path, 'w') as f:
+            json.dump(dataset_conf, f, indent=4)
+        logger.info(f"Dataset configuration saved: {self.conf_path}")
+
+        # 3. Generate and handle adaptive_dbnn.conf using _generate_dbnn_config
+        logger.info("Generating DBNN configuration...")
+        dbnn_config = self._generate_dbnn_config(config)
+        if os.path.exists(self.dbnn_conf_path):
+            try:
+                with open(self.dbnn_conf_path, 'r') as f:
+                    existing_dbnn_config = json.load(f)
+                    logger.info(f"Found existing DBNN config, merging...")
+                    dbnn_config = self._merge_configs(existing_dbnn_config, dbnn_config)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in {self.dbnn_conf_path}, using default template")
+
+        with open(self.dbnn_conf_path, 'w') as f:
+            json.dump(dbnn_config, f, indent=4)
+        logger.info(f"DBNN configuration saved: {self.dbnn_conf_path}")
+
+        # Return the main config for further use
+        return config
+
+    def _merge_configs(self, existing: Dict, default: Dict) -> Dict:
+        """Recursively merge configs, preserving existing values"""
+        result = existing.copy()
+        for key, value in default.items():
+            if key not in result:
+                result[key] = value
+            elif isinstance(value, dict) and isinstance(result[key], dict):
+                result[key] = self._merge_configs(result[key], value)
+        return result
+
+    def _ensure_required_configs(self, config: Dict) -> Dict:
+        """Ensure all required configurations exist"""
+        if 'loss_functions' not in config['model']:
+            config['model']['loss_functions'] = {}
+
+        if 'autoencoder' not in config['model']['loss_functions']:
+            config['model']['loss_functions']['autoencoder'] = {
+                'enabled': True,
+                'type': 'AutoencoderLoss',
+                'weight': 1.0,
+                'params': {
+                    'reconstruction_weight': 1.0,
+                    'feature_weight': 0.1
+                }
+            }
+
+        return config
+
+
+    def _detect_image_properties(self, folder_path: str) -> Tuple[Tuple[int, int], int]:
+        """Detect actual image properties but use config values if specified"""
+        # Load existing config if available
+        config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                if 'dataset' in config:
+                    dataset_config = config['dataset']
+                    if all(key in dataset_config for key in ['input_size', 'in_channels']):
+                        logger.info("Using image properties from config file")
+                        return (tuple(dataset_config['input_size']),
+                                dataset_config['in_channels'])
+
+        # Fall back to detection from files
+        size_counts = defaultdict(int)
+        channel_counts = defaultdict(int)
+        samples_checked = 0
+
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS):
+                    try:
+                        with Image.open(os.path.join(root, file)) as img:
+                            tensor = transforms.ToTensor()(img)
+                            height, width = tensor.shape[1], tensor.shape[2]
+                            channels = tensor.shape[0]
+
+                            size_counts[(width, height)] += 1
+                            channel_counts[channels] += 1
+                            samples_checked += 1
+
+                            if samples_checked >= 50:
+                                break
+                    except Exception as e:
+                        logger.warning(f"Could not process image {file}: {str(e)}")
+                        continue
+
+            if samples_checked >= 50:
+                break
+
+        if not size_counts:
+            raise ValueError(f"No valid images found in {folder_path}")
+
+        input_size = max(size_counts.items(), key=lambda x: x[1])[0]
+        in_channels = max(channel_counts.items(), key=lambda x: x[1])[0]
+
+        return input_size, in_channels
+
+
+    def _process_torchvision(self) -> Tuple[str, str]:
+        """Process torchvision dataset"""
+        dataset_name = self.datafile.upper()
+        if not hasattr(datasets, dataset_name):
+            raise ValueError(f"Torchvision dataset {dataset_name} not found")
+
+        # Setup paths in dataset-specific directory
+        train_dir = os.path.join(self.dataset_dir, "train")
+        test_dir = os.path.join(self.dataset_dir, "test")
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(test_dir, exist_ok=True)
+
+        # Download and process datasets
+        transform = transforms.ToTensor()
+
+        train_dataset = getattr(datasets, dataset_name)(
+            root=self.output_dir,
+            train=True,
+            download=True,
+            transform=transform
+        )
+
+        test_dataset = getattr(datasets, dataset_name)(
+            root=self.output_dir,
+            train=False,
+            download=True,
+            transform=transform
+        )
+
+        # Save images with class directories
+        def save_dataset_images(dataset, output_dir, split_name):
+            logger.info(f"Processing {split_name} split...")
+
+            class_to_idx = getattr(dataset, 'class_to_idx', None)
+            if class_to_idx:
+                idx_to_class = {v: k for k, v in class_to_idx.items()}
+
+            with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
+                for idx, (img, label) in enumerate(dataset):
+                    class_name = idx_to_class[label] if class_to_idx else str(label)
+                    class_dir = os.path.join(output_dir, class_name)
+                    os.makedirs(class_dir, exist_ok=True)
+
+                    if isinstance(img, torch.Tensor):
+                        img = transforms.ToPILImage()(img)
+
+                    img_path = os.path.join(class_dir, f"{idx}.png")
+                    img.save(img_path)
+                    pbar.update(1)
+
+        save_dataset_images(train_dataset, train_dir, "training")
+        save_dataset_images(test_dataset, test_dir, "test")
+
+        return train_dir, test_dir
+
+
+    def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
+        """Create train/test split from source directory"""
+        train_dir = os.path.join(self.dataset_dir, "train")
+        test_dir = os.path.join(self.dataset_dir, "test")
+
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(test_dir, exist_ok=True)
+
+        for class_name in tqdm(os.listdir(source_dir), desc="Processing classes"):
+            class_path = os.path.join(source_dir, class_name)
+            if not os.path.isdir(class_path):
+                continue
+
+            # Create class directories
+            train_class_dir = os.path.join(train_dir, class_name)
+            test_class_dir = os.path.join(test_dir, class_name)
+            os.makedirs(train_class_dir, exist_ok=True)
+            os.makedirs(test_class_dir, exist_ok=True)
+
+            # Get all image files
+            image_files = [f for f in os.listdir(class_path)
+                         if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)]
+
+            # Random split
+            random.shuffle(image_files)
+            split_idx = int((1 - test_size) * len(image_files))
+            train_files = image_files[:split_idx]
+            test_files = image_files[split_idx:]
+
+            # Copy files
+            for fname in train_files:
+                shutil.copy2(
+                    os.path.join(class_path, fname),
+                    os.path.join(train_class_dir, fname)
+                )
+
+            for fname in test_files:
+                shutil.copy2(
+                    os.path.join(class_path, fname),
+                    os.path.join(test_class_dir, fname)
+                )
+
+        return train_dir, test_dir
+
+
 # ----------------------------
 # 1. Dynamic CNN Model
 # ----------------------------
