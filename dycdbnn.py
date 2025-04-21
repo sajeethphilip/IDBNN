@@ -17,6 +17,7 @@ import json
 import csv
 from tqdm import tqdm
 from typing import Tuple, Dict, List, Optional
+import torch.nn.functional as F
 import logging
 from collections import defaultdict
 from pathlib import Path
