@@ -1544,12 +1544,26 @@ def generate_config_files(config, processor, output_dir):
         "max_combinations": 10000,
         "bin_sizes": [128],
         "training_params": {
-            "trials": 100,
-            "epochs": 1000,
-            "learning_rate": 0.001,
-            "batch_size": config['training']['batch_size'],
-            "enable_adaptive": True,
-            "invert_DBNN": config['training'].get('invert_DBNN', False)
+        "trials": 100,                # Default trials
+        "cardinality_threshold": 0.9,  # Default threshold
+        "minimum_training_accuracy": 0.95,
+        "cardinality_tolerance": 4,
+        "learning_rate": 0.001,
+        "random_seed": 42,
+        "epochs": 1000,
+        "test_fraction": 0.2,          # Default test fraction
+        "n_bins_per_dim": 21,
+        "enable_adaptive": True,
+        "compute_device": "auto",
+        "invert_DBNN": True,
+        "reconstruction_weight": 0.5,
+        "feedback_strength": 0.3,
+        "inverse_learning_rate": 0.001,
+        "save_plots": True,
+        "class_preference": True,
+        "batch_size": config['training']['batch_size'],
+        "enable_adaptive": True,
+        "invert_DBNN": config['training'].get('invert_DBNN', False)
         }
     }
 
