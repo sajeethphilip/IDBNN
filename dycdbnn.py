@@ -135,9 +135,10 @@ class DatasetProcessor:
     def process(self) -> Tuple[str, Optional[str]]:
         """Process dataset and return paths to train and test directories"""
         if self.datatype == 'torchvision':
+            # Only process as torchvision if explicitly specified
             return self._process_torchvision()
         else:
-            # Process the data path first
+            # Process as local path
             processed_path = self._process_data_path(self.datafile)
             return self._process_custom(processed_path)
 
@@ -1268,6 +1269,8 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'predict'],
                        help='Operation mode: "train" or "predict"')
+    parser.add_argument('--datatype', type=str, default='local', choices=['torchvision', 'local'],
+                       help='Dataset type: "torchvision" for built-in datasets or "local" for custom data')
 
     args = parser.parse_args()
 
@@ -1277,8 +1280,8 @@ def main():
     # Setup output directory structure
     output_dir = setup_output_directory(args, config)
 
-    # Dataset processing
-    processor = DatasetProcessor(args.data, config=config)
+    # Dataset processing - explicitly set datatype to local
+    processor = DatasetProcessor(args.data, datatype='local', config=config)
     train_dir, test_dir = processor.process()
 
     # Update config with dataset-specific parameters
