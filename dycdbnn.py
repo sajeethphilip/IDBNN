@@ -1067,7 +1067,7 @@ class TrainingManager:
             # Initialize progress bar
             pbar = tqdm(train_loader,
                        desc=f"Epoch {epoch + 1}/{self.config['training']['epochs']}",
-                       leave=True)
+                       leave=False)
 
             for inputs, labels in pbar:
                 inputs = inputs.to(model.device)
