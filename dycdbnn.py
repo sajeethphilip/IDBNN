@@ -811,8 +811,9 @@ class DynamicCNN(nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.min_size = min_size
+        self.input_channels = input_channels  # Store input channels
 
-        # Initial conv block
+        # Initial conv block - now uses input_channels
         self.initial_conv = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
@@ -829,7 +830,8 @@ class DynamicCNN(nn.Module):
 
     def _build_adaptive_blocks(self, in_channels):
         """Dynamically adds conv blocks based on input size"""
-        dummy = torch.zeros(1, in_channels, 64, 64)
+        # Create dummy input with correct number of channels
+        dummy = torch.zeros(1, self.input_channels, 64, 64)
         spatial_dim = self.initial_conv(dummy).shape[2]
 
         while spatial_dim > self.min_size:
