@@ -2,7 +2,7 @@
 # Dynamic CNN Integrated Version
 # Maintains original CSV/config outputs
 # ----------------------------
-
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
