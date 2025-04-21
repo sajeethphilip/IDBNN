@@ -2116,7 +2116,7 @@ class DBNN(GPUDBNN):
                 pickle.dump(train_indices, f)
             with open(os.path.join(epoch_dir, f'{self.model_type}_test_indices.pkl'), 'wb') as f:
                 pickle.dump(test_indices, f)
-            print("\033[K" +f"Saved epoch {epoch} data to {epoch_dir}")
+            #print("\033[K" +f"Saved epoch {epoch} data to {epoch_dir}")
         except Exception as e:
             print("\033[K" +f"Error saving epoch data: {str(e)}")
 
@@ -4213,7 +4213,7 @@ class DBNN(GPUDBNN):
             except:
                 pass
 
-    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None,header=None):
+    def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
         # Decode numeric labels back to original alphanumeric labels
         y_true_labels = self.label_encoder.inverse_transform(y_true)
         y_pred_labels = self.label_encoder.inverse_transform(y_pred)
@@ -4241,18 +4241,26 @@ class DBNN(GPUDBNN):
             if t in class_to_idx and p in class_to_idx:
                 cm[class_to_idx[t], class_to_idx[p]] += 1
 
+        # Calculate precision for each class
+        precision = []
+        for i in range(n_classes):
+            tp = cm[i, i]
+            fp = cm[:, i].sum() - tp
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            precision.append(prec)
+
         # Print confusion matrix with colors
-        print("\033[K" +f"{Colors.BOLD}Confusion Matrix and Class-wise Accuracy for [{header}]:{Colors.ENDC}")
-        print("\033[K" +f"{'Actual/Predicted':<15}", end='')
+        print("\033[K" + f"{Colors.BOLD}Confusion Matrix and Class-wise Metrics for [{header}]:{Colors.ENDC}")
+        print("\033[K" + f"{'Actual/Predicted':<15}", end='')
         for label in all_classes:
-            print("\033[K" +f"{str(label):<8}", end='')
-        print("\033[K" +"Accuracy")
-        print("\033[K" +"-" * (15 + 8 * n_classes + 10))
+            print("\033[K" + f"{str(label):<8}", end='')
+        print("\033[K" + "Accuracy  Precision")
+        print("\033[K" + "-" * (15 + 8 * n_classes + 20))
 
         # Print matrix with colors
         for i in range(n_classes):
             # Print actual class label
-            print("\033[K" +f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
+            print("\033[K" + f"{Colors.BOLD}{str(all_classes[i]):<15}{Colors.ENDC}", end='')
 
             # Print confusion matrix row
             for j in range(n_classes):
@@ -4262,27 +4270,59 @@ class DBNN(GPUDBNN):
                 else:
                     # Incorrect predictions in red
                     color = Colors.RED
-                print("\033[K" +f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
+                print("\033[K" + f"{color}{cm[i, j]:<8}{Colors.ENDC}", end='')
 
             # Print class accuracy with color based on performance
             acc = cm[i, i] / cm[i].sum() if cm[i].sum() > 0 else 0.0
             if acc >= 0.9:
-                color = Colors.GREEN
+                acc_color = Colors.GREEN
             elif acc >= 0.7:
-                color = Colors.YELLOW
+                acc_color = Colors.YELLOW
             else:
-                color = Colors.BLUE
-            print("\033[K" +f"{color}{acc:>7.2%}{Colors.ENDC}")
+                acc_color = Colors.BLUE
 
-        # Print overall accuracy
+            # Print class precision with color based on performance
+            prec = precision[i]
+            if prec >= 0.9:
+                prec_color = Colors.GREEN
+            elif prec >= 0.7:
+                prec_color = Colors.YELLOW
+            else:
+                prec_color = Colors.BLUE
+
+            print("\033[K" + f"{acc_color}{acc:>7.2%}{Colors.ENDC}  {prec_color}{prec:>8.2%}{Colors.ENDC}")
+
+        # Print precision row at the bottom
+        print("\033[K" + f"{Colors.BOLD}{'Precision':<15}{Colors.ENDC}", end='')
+        for j in range(n_classes):
+            tp = cm[j, j]
+            fp = cm[:, j].sum() - tp
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+
+            if prec >= 0.9:
+                prec_color = Colors.GREEN
+            elif prec >= 0.7:
+                prec_color = Colors.YELLOW
+            else:
+                prec_color = Colors.BLUE
+
+            print("\033[K" + f"{prec_color}{prec:>8.2%}{Colors.ENDC}", end='')
+        print("\033[K" + "")  # New line after precision row
+
+        # Print overall accuracy and precision
         total_correct = np.diag(cm).sum()
         total_samples = cm.sum()
         if total_samples > 0:
             overall_acc = total_correct / total_samples
-            print("\033[K" +"-" * (15 + 8 * n_classes + 10))
-            color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
-            print("\033[K" +f"{Colors.BOLD} Accuracy (total correct fraction): {color}{overall_acc:.2%}{Colors.ENDC}")
-            print("\033[K" +f"Best Overall (Classwise) Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
+            # Micro-averaged precision (same as accuracy in multi-class)
+            overall_prec = total_correct / total_samples
+
+            print("\033[K" + "-" * (15 + 8 * n_classes + 20))
+            acc_color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
+            prec_color = Colors.GREEN if overall_prec >= 0.9 else Colors.YELLOW if overall_prec >= 0.7 else Colors.BLUE
+            print("\033[K" + f"{Colors.BOLD}Overall Accuracy:{Colors.ENDC} {acc_color}{overall_acc:.2%}{Colors.ENDC}")
+            print("\033[K" + f"{Colors.BOLD}Overall Precision:{Colors.ENDC} {prec_color}{overall_prec:.2%}{Colors.ENDC}")
+            print("\033[K" + f"Best Overall (Classwise) Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
         """Training loop with proper weight handling and enhanced progress tracking"""
