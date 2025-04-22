@@ -1552,13 +1552,13 @@ def extract_and_save_features(model, train_loader, test_loader, config, output_d
         model.save_features(train_features, features_path)
 
 def generate_config_files(config, processor, output_dir):
-    """Generate all configuration files"""
-    # Main config
+    """Generate all configuration files with complete parameters"""
+    # Main config (json)
     config_path = os.path.join(output_dir, f"{config['dataset']['name']}.json")
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
 
-    # Dataset config
+    # Dataset config (.conf) - using processor's method with all original parameters
     dataset_conf = {
         "file_path": config['output']['features_file'],
         "column_names": [f"feature_{i}" for i in range(config['model']['feature_dims'])] + ["target"],
@@ -1569,33 +1569,88 @@ def generate_config_files(config, processor, output_dir):
         "feature_group_size": 2,
         "max_combinations": 10000,
         "bin_sizes": [128],
+        "active_learning": {
+            "tolerance": 1.0,
+            "cardinality_threshold_percentile": 95,
+            "strong_margin_threshold": 0.3,
+            "marginal_margin_threshold": 0.1,
+            "min_divergence": 0.1
+        },
         "training_params": {
-        "trials": 100,                # Default trials
-        "cardinality_threshold": 0.9,  # Default threshold
-        "minimum_training_accuracy": 0.95,
-        "cardinality_tolerance": 4,
-        "learning_rate": 0.001,
-        "random_seed": 42,
-        "epochs": 1000,
-        "test_fraction": 0.2,          # Default test fraction
-        "n_bins_per_dim": 21,
-        "enable_adaptive": True,
-        "compute_device": "auto",
-        "invert_DBNN": True,
-        "reconstruction_weight": 0.5,
-        "feedback_strength": 0.3,
-        "inverse_learning_rate": 0.001,
-        "save_plots": True,
-        "class_preference": True,
-        "batch_size": config['training']['batch_size'],
-        "enable_adaptive": True,
-        "invert_DBNN": config['training'].get('invert_DBNN', False)
+            "trials": 100,
+            "epochs": 1000,
+            "learning_rate": 0.001,
+            "batch_size": config['training']['batch_size'],
+            "test_fraction": 0.2,
+            "random_seed": 42,
+            "minimum_training_accuracy": 0.95,
+            "cardinality_threshold": 0.9,
+            "cardinality_tolerance": 4,
+            "n_bins_per_dim": 21,
+            "enable_adaptive": True,
+            "invert_DBNN": config['training'].get('invert_DBNN', False),
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.001,
+            "Save_training_epochs": True,
+            "training_save_path": "training_data",
+            "enable_vectorized": False,
+            "vectorization_warning_acknowledged": False,
+            "compute_device": "auto",
+            "use_interactive_kbd": False,
+            "class_preference": True
+        },
+        "execution_flags": {
+            "train": True,
+            "train_only": False,
+            "predict": True,
+            "fresh_start": False,
+            "use_previous_model": True,
+            "gen_samples": False
         }
     }
 
     conf_path = os.path.join(output_dir, f"{config['dataset']['name']}.conf")
     with open(conf_path, 'w') as f:
         json.dump(dataset_conf, f, indent=4)
+
+    # DBNN config (adaptive_dbnn.conf)
+    dbnn_config = {
+        "training_params": {
+            "trials": config['training']['epochs'],
+            "epochs": config['training']['epochs'],
+            "learning_rate": config['model']['learning_rate'],
+            "batch_size": config['training']['batch_size'],
+            "test_fraction": 0.2,
+            "random_seed": 42,
+            "minimum_training_accuracy": 0.95,
+            "cardinality_threshold": 0.9,
+            "cardinality_tolerance": 4,
+            "n_bins_per_dim": 128,
+            "enable_adaptive": True,
+            "invert_DBNN": config['training'].get('invert_DBNN', False),
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.1,
+            "Save_training_epochs": False,
+            "training_save_path": os.path.join(output_dir, "training_data"),
+            "modelType": "Histogram",
+            "compute_device": "auto",
+            "class_preference": True
+        },
+        "execution_flags": {
+            "train": True,
+            "train_only": False,
+            "predict": True,
+            "fresh_start": False,
+            "use_previous_model": True,
+            "gen_samples": False
+        }
+    }
+
+    dbnn_conf_path = os.path.join(output_dir, "adaptive_dbnn.conf")
+    with open(dbnn_conf_path, 'w') as f:
+        json.dump(dbnn_config, f, indent=4)
 
     logger.info(f"Configuration files saved to {output_dir}")
 
