@@ -1344,84 +1344,58 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'predict'],
-                      help='Operation mode: "train" or "predict"')
+                       help='Operation mode: "train" or "predict"')
     parser.add_argument('--datatype', type=str, default='local', choices=['torchvision', 'local'],
-                      help='Dataset type: "torchvision" for built-in datasets or "local" for custom data')
+                       help='Dataset type: "torchvision" for built-in datasets or "local" for custom data')
 
     args = parser.parse_args()
 
-    # Initialize dataset processor
-    processor = DatasetProcessor(args.data, datatype=args.datatype)
+    # Initialize with either custom or default config
+    config = initialize_config(args)
+
+    # Setup output directory structure
+    output_dir = setup_output_directory(args, config)
+
+    # Dataset processing - explicitly set datatype to local
+    processor = DatasetProcessor(args.data, datatype='local', config=config)
     train_dir, test_dir = processor.process()
 
-    # Generate default configuration using DatasetProcessor
-    config = processor.generate_default_config(train_dir)
+    # Update config with dataset-specific parameters
+    update_config_with_dataset_info(config, processor, train_dir)
 
-    # Override config parameters from command line arguments
-    config['model']['feature_dims'] = args.feature_dims
-    config['training']['batch_size'] = args.batch_size
-    config['training']['epochs'] = args.epochs
-
-    # Set output directory if specified
-    if args.output:
-        config['output']['features_file'] = os.path.join(args.output, f"{config['dataset']['name']}.csv")
-        config['output']['model_dir'] = os.path.join(args.output, "models")
-        config['output']['visualization_dir'] = os.path.join(args.output, "visualizations")
-        config['training']['checkpoint_dir'] = os.path.join(args.output, "checkpoints")
-
-    # Load custom config if provided (overriding defaults)
-    if args.config and os.path.exists(args.config):
-        with open(args.config, 'r') as f:
-            custom_config = json.load(f)
-        config = processor._merge_configs(config, custom_config)
-        logger.info(f"Merged custom configuration from {args.config}")
-
-    # Initialize model with the unified config
+    # Initialize model
     model = ModelFactory.create_model(config)
     logger.info(f"Created {model.__class__.__name__} with {sum(p.numel() for p in model.parameters()):,} parameters")
 
-    # Data loading
-    train_loader, val_loader = create_data_loaders(config, train_dir, test_dir)
-
     if args.mode == 'train':
-        # Training with early stopping
+        # Data loading for training
+        train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
+
+        # Training
         trainer = TrainingManager(config)
-        history = trainer.train(model, train_loader, val_loader)
+        history = trainer.train(model, train_loader)
 
-        # Save final model
-        final_model_path = os.path.join(config['output']['model_dir'], 'final_model.pth')
-        torch.save(model.state_dict(), final_model_path)
-        logger.info(f"Training complete! Model saved to {final_model_path}")
+        # Save the trained model
+        torch.save(model.state_dict(), os.path.join(config['output']['model_dir'], 'final_model.pth'))
+        logger.info("Training complete! Model saved.")
 
-        # Plot training history (removed self reference)
-        plot_training_history(history, config)
+    elif args.mode == 'predict':
+        # Load the trained model
+        model_path = os.path.join(config['output']['model_dir'], 'final_model.pth')
+        if os.path.exists(model_path):
+            model.load_state_dict(torch.load(model_path, map_location=model.device))
+            logger.info(f"Loaded trained model from {model_path}")
+        else:
+            raise FileNotFoundError(f"No trained model found at {model_path}. Please train first or check path.")
 
-    # Feature extraction for both train and predict modes
-    logger.info("Extracting features...")
-    features = model.extract_features(train_loader)
-    features_path = config['output']['features_file']
-    model.save_features(features, features_path)
-    logger.info(f"Features saved to {features_path}")
+    # Feature extraction and saving (done for both modes)
+    train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
+    extract_and_save_features(model, train_loader, test_loader, config, output_dir)
+
+    # Generate configuration files
+    generate_config_files(config, processor, output_dir)
 
     logger.info("Processing complete!")
-
-def plot_training_history(history: dict, config: dict):
-    """Plot training and validation loss curves"""
-    plt.figure(figsize=(10, 6))
-    plt.plot(history['train_loss'], label='Training Loss')
-    if 'val_loss' in history:
-        plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title('Training History')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-
-    # Save plot
-    os.makedirs(config['output']['visualization_dir'], exist_ok=True)
-    plot_path = os.path.join(config['output']['visualization_dir'], 'training_history.png')
-    plt.savefig(plot_path)
-    plt.close()
-    logger.info(f"Training history plot saved to {plot_path}")
 
 def initialize_config(args):
     """Initialize configuration from file or create default"""
@@ -1552,13 +1526,13 @@ def extract_and_save_features(model, train_loader, test_loader, config, output_d
         model.save_features(train_features, features_path)
 
 def generate_config_files(config, processor, output_dir):
-    """Generate all configuration files with complete parameters"""
-    # Main config (json)
+    """Generate all configuration files"""
+    # Main config
     config_path = os.path.join(output_dir, f"{config['dataset']['name']}.json")
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
 
-    # Dataset config (.conf) - using processor's method with all original parameters
+    # Dataset config
     dataset_conf = {
         "file_path": config['output']['features_file'],
         "column_names": [f"feature_{i}" for i in range(config['model']['feature_dims'])] + ["target"],
@@ -1569,88 +1543,33 @@ def generate_config_files(config, processor, output_dir):
         "feature_group_size": 2,
         "max_combinations": 10000,
         "bin_sizes": [128],
-        "active_learning": {
-            "tolerance": 1.0,
-            "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.3,
-            "marginal_margin_threshold": 0.1,
-            "min_divergence": 0.1
-        },
         "training_params": {
-            "trials": 100,
-            "epochs": 1000,
-            "learning_rate": 0.001,
-            "batch_size": config['training']['batch_size'],
-            "test_fraction": 0.2,
-            "random_seed": 42,
-            "minimum_training_accuracy": 0.95,
-            "cardinality_threshold": 0.9,
-            "cardinality_tolerance": 4,
-            "n_bins_per_dim": 21,
-            "enable_adaptive": True,
-            "invert_DBNN": config['training'].get('invert_DBNN', False),
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.001,
-            "Save_training_epochs": True,
-            "training_save_path": "training_data",
-            "enable_vectorized": False,
-            "vectorization_warning_acknowledged": False,
-            "compute_device": "auto",
-            "use_interactive_kbd": False,
-            "class_preference": True
-        },
-        "execution_flags": {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True,
-            "gen_samples": False
+        "trials": 100,                # Default trials
+        "cardinality_threshold": 0.9,  # Default threshold
+        "minimum_training_accuracy": 0.95,
+        "cardinality_tolerance": 4,
+        "learning_rate": 0.001,
+        "random_seed": 42,
+        "epochs": 1000,
+        "test_fraction": 0.2,          # Default test fraction
+        "n_bins_per_dim": 21,
+        "enable_adaptive": True,
+        "compute_device": "auto",
+        "invert_DBNN": True,
+        "reconstruction_weight": 0.5,
+        "feedback_strength": 0.3,
+        "inverse_learning_rate": 0.001,
+        "save_plots": True,
+        "class_preference": True,
+        "batch_size": config['training']['batch_size'],
+        "enable_adaptive": True,
+        "invert_DBNN": config['training'].get('invert_DBNN', False)
         }
     }
 
     conf_path = os.path.join(output_dir, f"{config['dataset']['name']}.conf")
     with open(conf_path, 'w') as f:
         json.dump(dataset_conf, f, indent=4)
-
-    # DBNN config (adaptive_dbnn.conf)
-    dbnn_config = {
-        "training_params": {
-            "trials": config['training']['epochs'],
-            "epochs": config['training']['epochs'],
-            "learning_rate": config['model']['learning_rate'],
-            "batch_size": config['training']['batch_size'],
-            "test_fraction": 0.2,
-            "random_seed": 42,
-            "minimum_training_accuracy": 0.95,
-            "cardinality_threshold": 0.9,
-            "cardinality_tolerance": 4,
-            "n_bins_per_dim": 128,
-            "enable_adaptive": True,
-            "invert_DBNN": config['training'].get('invert_DBNN', False),
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.1,
-            "Save_training_epochs": False,
-            "training_save_path": os.path.join(output_dir, "training_data"),
-            "modelType": "Histogram",
-            "compute_device": "auto",
-            "class_preference": True
-        },
-        "execution_flags": {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True,
-            "gen_samples": False
-        }
-    }
-
-    dbnn_conf_path = os.path.join(output_dir, "adaptive_dbnn.conf")
-    with open(dbnn_conf_path, 'w') as f:
-        json.dump(dbnn_config, f, indent=4)
 
     logger.info(f"Configuration files saved to {output_dir}")
 
