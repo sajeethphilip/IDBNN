@@ -6779,6 +6779,7 @@ def main():
 
     def process_single_dataset(dataset_name, conf_path, csv_path, mode=None):
         """Process a single dataset with given mode"""
+        input("Press Ctrl-C")
         try:
             # Load config
             config = load_or_create_config(conf_path)
@@ -6826,7 +6827,7 @@ def main():
                 dataset_name = get_dataset_name_from_path(args.file_path)
                 predictor = DBNN(dataset_name=dataset_name,mode='predict')
                 print(f"Processing {dataset_name} in predict mode")
-                input("Press Ctrl-C")
+
                 if predictor.load_model_for_prediction(dataset_name):
                     # Use either the provided CSV or default dataset CSV
                     input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
