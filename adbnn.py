@@ -6782,8 +6782,7 @@ def main():
         try:
             # Load config
             config = load_or_create_config(conf_path)
-            print(mode)
-            input("Press Ctrl-C")
+
 
             # Determine mode if not provided
             if not mode:
@@ -6793,7 +6792,7 @@ def main():
             print(f"\033[K{Colors.BOLD}Processing {dataset_name} in {mode} mode{Colors.ENDC}")
 
             # Create DBNN instance
-            model = DBNN(dataset_name=dataset_name,mode='train')
+            model = DBNN(dataset_name=dataset_name,mode=mode)
 
             if mode in ['train', 'train_predict']:
                 # Training phase
