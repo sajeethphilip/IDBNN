@@ -1344,56 +1344,64 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'predict'],
-                       help='Operation mode: "train" or "predict"')
+                      help='Operation mode: "train" or "predict"')
     parser.add_argument('--datatype', type=str, default='local', choices=['torchvision', 'local'],
-                       help='Dataset type: "torchvision" for built-in datasets or "local" for custom data')
+                      help='Dataset type: "torchvision" for built-in datasets or "local" for custom data')
 
     args = parser.parse_args()
 
-    # Initialize with either custom or default config
-    config = initialize_config(args)
-
-    # Setup output directory structure
-    output_dir = setup_output_directory(args, config)
-
-    # Dataset processing - explicitly set datatype to local
-    processor = DatasetProcessor(args.data, datatype='local', config=config)
+    # Initialize dataset processor
+    processor = DatasetProcessor(args.data, datatype=args.datatype)
     train_dir, test_dir = processor.process()
 
-    # Update config with dataset-specific parameters
-    update_config_with_dataset_info(config, processor, train_dir)
+    # Generate default configuration using DatasetProcessor
+    config = processor.generate_default_config(train_dir)
 
-    # Initialize model
+    # Override config parameters from command line arguments
+    config['model']['feature_dims'] = args.feature_dims
+    config['training']['batch_size'] = args.batch_size
+    config['training']['epochs'] = args.epochs
+
+    # Set output directory if specified
+    if args.output:
+        config['output']['features_file'] = os.path.join(args.output, f"{config['dataset']['name']}.csv")
+        config['output']['model_dir'] = os.path.join(args.output, "models")
+        config['output']['visualization_dir'] = os.path.join(args.output, "visualizations")
+        config['training']['checkpoint_dir'] = os.path.join(args.output, "checkpoints")
+
+    # Load custom config if provided (overriding defaults)
+    if args.config and os.path.exists(args.config):
+        with open(args.config, 'r') as f:
+            custom_config = json.load(f)
+        config = processor._merge_configs(config, custom_config)
+        logger.info(f"Merged custom configuration from {args.config}")
+
+    # Initialize model with the unified config
     model = ModelFactory.create_model(config)
     logger.info(f"Created {model.__class__.__name__} with {sum(p.numel() for p in model.parameters()):,} parameters")
 
+    # Data loading
+    train_loader, val_loader = create_data_loaders(config, train_dir, test_dir)
+
     if args.mode == 'train':
-        # Data loading for training
-        train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
-
-        # Training
+        # Training with early stopping
         trainer = TrainingManager(config)
-        history = trainer.train(model, train_loader)
+        history = trainer.train(model, train_loader, val_loader)
 
-        # Save the trained model
-        torch.save(model.state_dict(), os.path.join(config['output']['model_dir'], 'final_model.pth'))
-        logger.info("Training complete! Model saved.")
+        # Save final model
+        final_model_path = os.path.join(config['output']['model_dir'], 'final_model.pth')
+        torch.save(model.state_dict(), final_model_path)
+        logger.info(f"Training complete! Model saved to {final_model_path}")
 
-    elif args.mode == 'predict':
-        # Load the trained model
-        model_path = os.path.join(config['output']['model_dir'], 'final_model.pth')
-        if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path, map_location=model.device))
-            logger.info(f"Loaded trained model from {model_path}")
-        else:
-            raise FileNotFoundError(f"No trained model found at {model_path}. Please train first or check path.")
+        # Plot training history
+        self._plot_training_history(history, config)
 
-    # Feature extraction and saving (done for both modes)
-    train_loader, test_loader = create_data_loaders(config, train_dir, test_dir)
-    extract_and_save_features(model, train_loader, test_loader, config, output_dir)
-
-    # Generate configuration files
-    generate_config_files(config, processor, output_dir)
+    # Feature extraction for both train and predict modes
+    logger.info("Extracting features...")
+    features = model.extract_features(train_loader)
+    features_path = config['output']['features_file']
+    model.save_features(features, features_path)
+    logger.info(f"Features saved to {features_path}")
 
     logger.info("Processing complete!")
 
