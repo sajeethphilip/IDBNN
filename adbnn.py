@@ -6779,10 +6779,11 @@ def main():
 
     def process_single_dataset(dataset_name, conf_path, csv_path, mode=None):
         """Process a single dataset with given mode"""
-        input("Press Ctrl-C")
         try:
             # Load config
             config = load_or_create_config(conf_path)
+            print(mode)
+            input("Press Ctrl-C")
 
             # Determine mode if not provided
             if not mode:
