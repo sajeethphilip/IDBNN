@@ -145,9 +145,14 @@ class Colors:
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
-    def __init__(self, upper_threshold=0.85, lower_threshold=0.01):
-        self.upper_threshold = upper_threshold
-        self.lower_threshold = lower_threshold
+    def __init__(self, config: Dict):
+        self.enabled = config["feature_selection"]["use_distance_correlation"]
+        self.upper_threshold = config["feature_selection"]["distance_correlation_upper"]
+        self.lower_threshold = config["feature_selection"]["distance_correlation_lower"]
+
+    def select_features(self, features, labels):
+        if not self.enabled:
+            return list(range(features.shape[1])), np.zeros(features.shape[1])  # Return all features if disabled
 
     def calculate_distance_correlations(self, features, labels):
         """Calculate distance correlations between features and labels"""
@@ -944,7 +949,7 @@ class BaseAutoencoder(nn.Module):
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        Save features for training and test sets with distance correlation feature selection.
+        Save features for training and test sets with optional distance correlation feature selection.
         Handles both adaptive and non-adaptive modes with proper configuration.
 
         Args:
@@ -956,9 +961,26 @@ class BaseAutoencoder(nn.Module):
             output_dir = os.path.dirname(output_path)
             os.makedirs(output_dir, exist_ok=True)
 
-            # Load distance correlation config (with proper error handling)
-            dc_config = self._get_distance_correlation_config(output_dir)
+            # Load distance correlation config with proper defaults
+            dc_config = {
+                'use_distance_correlation': True,  # default enabled
+                'distance_correlation_upper': 0.85,
+                'distance_correlation_lower': 0.01
+            }
+
+            # Merge with any existing config
+            if hasattr(self, 'config') and 'feature_selection' in self.config:
+                dc_config.update(self.config['feature_selection'])
+
             use_dc = dc_config.get('use_distance_correlation', True)
+
+            # Log feature selection status
+            if use_dc:
+                logger.info("Distance correlation feature selection ENABLED")
+                logger.info(f"Upper threshold: {dc_config['distance_correlation_upper']}")
+                logger.info(f"Lower threshold: {dc_config['distance_correlation_lower']}")
+            else:
+                logger.info("Distance correlation feature selection DISABLED")
 
             # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
@@ -1006,7 +1028,6 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Error in save_features: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
-
 
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
@@ -4408,6 +4429,11 @@ class DatasetProcessor:
                     "patience": 5,
                     "min_delta": 0.001
                 }
+            },
+          "feature_selection": {
+            "use_distance_correlation": true,
+            "distance_correlation_upper": 0.85,
+            "distance_correlation_lower": 0.01
             },
             "augmentation": {
                 "enabled": True,
