@@ -145,10 +145,9 @@ class Colors:
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
-    def __init__(self, config: Dict):
-        self.enabled = config.get("use_distance_correlation", True)  # Use get with default
-        self.upper_threshold = config.get("distance_correlation_upper", 0.85)
-        self.lower_threshold = config.get("distance_correlation_lower", 0.01)
+    def __init__(self, upper_threshold=0.85, lower_threshold=0.01):
+        self.upper_threshold = upper_threshold
+        self.lower_threshold = lower_threshold
 
     def calculate_distance_correlations(self, features, labels):
         """Calculate distance correlations between features and labels"""
@@ -163,9 +162,6 @@ class DistanceCorrelationFeatureSelector:
 
     def select_features(self, features, labels):
         """Select features based on distance correlation criteria"""
-        if not self.enabled:
-            return list(range(features.shape[1])), np.zeros(features.shape[1])
-
         label_corrs = self.calculate_distance_correlations(features, labels)
 
         # Get indices of features that meet upper threshold
@@ -931,7 +927,11 @@ class BaseAutoencoder(nn.Module):
         return torch.cat(confident_samples) if confident_samples else None
     def _select_features_using_distance_correlation(self, features, labels, config):
         """Select features based on distance correlation criteria"""
-        selector = DistanceCorrelationFeatureSelector(config)  # Pass config dict
+        selector = DistanceCorrelationFeatureSelector(
+            upper_threshold=config['distance_correlation_upper'],
+            lower_threshold=config['distance_correlation_lower']
+        )
+
         selected_indices, corr_values = selector.select_features(features, labels)
 
         # Create new feature matrix with only selected features
@@ -944,7 +944,7 @@ class BaseAutoencoder(nn.Module):
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        Save features for training and test sets with optional distance correlation feature selection.
+        Save features for training and test sets with distance correlation feature selection.
         Handles both adaptive and non-adaptive modes with proper configuration.
 
         Args:
@@ -956,27 +956,9 @@ class BaseAutoencoder(nn.Module):
             output_dir = os.path.dirname(output_path)
             os.makedirs(output_dir, exist_ok=True)
 
-            # Load distance correlation config with proper defaults
-            dc_config = {
-                'use_distance_correlation': True,  # default enabled
-                'distance_correlation_upper': 0.85,
-                'distance_correlation_lower': 0.01
-            }
-
-            # Merge with any existing config
-            if hasattr(self, 'config') and 'feature_selection' in self.config:
-                dc_config.update(self.config['feature_selection'])
-
+            # Load distance correlation config (with proper error handling)
+            dc_config = self._get_distance_correlation_config(output_dir)
             use_dc = dc_config.get('use_distance_correlation', True)
-            # Then pass the config dict
-            selector = DistanceCorrelationFeatureSelector(dc_config)
-            # Log feature selection status
-            if use_dc:
-                logger.info("Distance correlation feature selection ENABLED")
-                logger.info(f"Upper threshold: {dc_config['distance_correlation_upper']}")
-                logger.info(f"Lower threshold: {dc_config['distance_correlation_lower']}")
-            else:
-                logger.info("Distance correlation feature selection DISABLED")
 
             # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
@@ -1025,6 +1007,7 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
 
+
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
         """
@@ -1045,8 +1028,11 @@ class BaseAutoencoder(nn.Module):
 
         # Apply feature selection if enabled
         if dc_config and dc_config.get('use_distance_correlation', True):
-            selector = DistanceCorrelationFeatureSelector(dc_config)  # Pass config dict
-            selected_indices, corr_values = selector.select_features(features, labels)
+            selector = DistanceCorrelationFeatureSelector(
+                upper_threshold=dc_config['distance_correlation_upper'],
+                lower_threshold=dc_config['distance_correlation_lower']
+            )
+            selected_indices, corr_values = selector.select_features(embeddings, labels)
 
             # Store selected features with metadata
             for new_idx, orig_idx in enumerate(selected_indices):
@@ -4423,7 +4409,6 @@ class DatasetProcessor:
                     "min_delta": 0.001
                 }
             },
-
             "augmentation": {
                 "enabled": True,
                 "random_crop": {"enabled": True, "padding": 4},
@@ -4456,12 +4441,7 @@ class DatasetProcessor:
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
                 "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
-            },
-             "feature_selection": {
-                "use_distance_correlation": True,
-                "distance_correlation_upper": 0.85,
-                "distance_correlation_lower": 0.01
-            },
+            }
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
@@ -4549,13 +4529,9 @@ class DatasetProcessor:
                 "fresh_start": False,
                 "use_previous_model": True,
                 "gen_samples": False
-            },
-            "feature_selection": {
-            "use_distance_correlation": True,
-            "distance_correlation_upper": 0.85,
-            "distance_correlation_lower": 0.01
-          },
+            }
         }
+
     def generate_default_config(self, train_dir: str) -> Dict:
         """Generate and manage all configuration files"""
         os.makedirs(self.dataset_dir, exist_ok=True)
