@@ -931,11 +931,7 @@ class BaseAutoencoder(nn.Module):
         return torch.cat(confident_samples) if confident_samples else None
     def _select_features_using_distance_correlation(self, features, labels, config):
         """Select features based on distance correlation criteria"""
-        selector = DistanceCorrelationFeatureSelector(
-            upper_threshold=config['distance_correlation_upper'],
-            lower_threshold=config['distance_correlation_lower']
-        )
-
+        selector = DistanceCorrelationFeatureSelector(config)  # Pass config dict
         selected_indices, corr_values = selector.select_features(features, labels)
 
         # Create new feature matrix with only selected features
@@ -972,7 +968,8 @@ class BaseAutoencoder(nn.Module):
                 dc_config.update(self.config['feature_selection'])
 
             use_dc = dc_config.get('use_distance_correlation', True)
-
+            # Then pass the config dict
+            selector = DistanceCorrelationFeatureSelector(dc_config)
             # Log feature selection status
             if use_dc:
                 logger.info("Distance correlation feature selection ENABLED")
@@ -1048,11 +1045,8 @@ class BaseAutoencoder(nn.Module):
 
         # Apply feature selection if enabled
         if dc_config and dc_config.get('use_distance_correlation', True):
-            selector = DistanceCorrelationFeatureSelector(
-                upper_threshold=dc_config['distance_correlation_upper'],
-                lower_threshold=dc_config['distance_correlation_lower']
-            )
-            selected_indices, corr_values = selector.select_features(embeddings, labels)
+            selector = DistanceCorrelationFeatureSelector(dc_config)  # Pass config dict
+            selected_indices, corr_values = selector.select_features(features, labels)
 
             # Store selected features with metadata
             for new_idx, orig_idx in enumerate(selected_indices):
