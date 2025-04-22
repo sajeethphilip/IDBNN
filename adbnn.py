@@ -4434,7 +4434,7 @@ class DBNN(GPUDBNN):
                 self.current_W = train_weights
 
                 # Training metrics
-                print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
+                #print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_pred_classes, train_posteriors = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_pred_classes == y_train.cpu()).float().mean()
                 train_loss = n_errors / n_samples
