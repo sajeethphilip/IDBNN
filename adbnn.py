@@ -1040,7 +1040,7 @@ class InvertibleDBNN(nn.Module):
         optimizer = optim.Adam(self.parameters(), lr=lr)
         criterion = nn.MSELoss()
 
-        for epoch in tqdm(range(epochs), desc="Training Inverse Model"):
+        for epoch in tqdm(range(epochs), desc="Training Inverse Model", leave=False):
             optimizer.zero_grad()
 
             # Forward pass
