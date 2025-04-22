@@ -4431,7 +4431,7 @@ class DatasetProcessor:
                 }
             },
           "feature_selection": {
-            "use_distance_correlation": true,
+            "use_distance_correlation": True,
             "distance_correlation_upper": 0.85,
             "distance_correlation_lower": 0.01
             },
