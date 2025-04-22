@@ -146,13 +146,9 @@ class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
     def __init__(self, config: Dict):
-        self.enabled = config["feature_selection"]["use_distance_correlation"]  or True
-        self.upper_threshold = config["feature_selection"]["distance_correlation_upper"] or 0.85
-        self.lower_threshold = config["feature_selection"]["distance_correlation_lower"] or 0.01
-
-    def select_features(self, features, labels):
-        if not self.enabled:
-            return list(range(features.shape[1])), np.zeros(features.shape[1])  # Return all features if disabled
+        self.enabled = config.get("use_distance_correlation", True)  # Use get with default
+        self.upper_threshold = config.get("distance_correlation_upper", 0.85)
+        self.lower_threshold = config.get("distance_correlation_lower", 0.01)
 
     def calculate_distance_correlations(self, features, labels):
         """Calculate distance correlations between features and labels"""
@@ -167,6 +163,9 @@ class DistanceCorrelationFeatureSelector:
 
     def select_features(self, features, labels):
         """Select features based on distance correlation criteria"""
+        if not self.enabled:
+            return list(range(features.shape[1])), np.zeros(features.shape[1])
+
         label_corrs = self.calculate_distance_correlations(features, labels)
 
         # Get indices of features that meet upper threshold
