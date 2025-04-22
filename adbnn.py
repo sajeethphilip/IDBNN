@@ -2937,6 +2937,12 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Input columns: {X.columns.tolist()}")
             DEBUG.log(f"Input dtypes:\n{X.dtypes}")
 
+            # In prediction mode, ensure we have all required features
+            required_features = self.feature_columns if hasattr(self, 'feature_columns') else X.columns
+            missing_features = set(required_features) - set(X.columns)
+            if missing_features and not predict_mode:
+                raise ValueError(f"Missing required features: {missing_features}")
+
             # Replace NA/NaN with -99999 and keep track of locations
             X = X.copy()
             self.nan_mask = X.isna()  # Store NaN locations using pandas' isna()
