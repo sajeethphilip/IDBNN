@@ -1393,8 +1393,8 @@ def main():
         torch.save(model.state_dict(), final_model_path)
         logger.info(f"Training complete! Model saved to {final_model_path}")
 
-        # Plot training history
-        self._plot_training_history(history, config)
+        # Plot training history (removed self reference)
+        plot_training_history(history, config)
 
     # Feature extraction for both train and predict modes
     logger.info("Extracting features...")
@@ -1404,6 +1404,24 @@ def main():
     logger.info(f"Features saved to {features_path}")
 
     logger.info("Processing complete!")
+
+def plot_training_history(history: dict, config: dict):
+    """Plot training and validation loss curves"""
+    plt.figure(figsize=(10, 6))
+    plt.plot(history['train_loss'], label='Training Loss')
+    if 'val_loss' in history:
+        plt.plot(history['val_loss'], label='Validation Loss')
+    plt.title('Training History')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Save plot
+    os.makedirs(config['output']['visualization_dir'], exist_ok=True)
+    plot_path = os.path.join(config['output']['visualization_dir'], 'training_history.png')
+    plt.savefig(plot_path)
+    plt.close()
+    logger.info(f"Training history plot saved to {plot_path}")
 
 def initialize_config(args):
     """Initialize configuration from file or create default"""
