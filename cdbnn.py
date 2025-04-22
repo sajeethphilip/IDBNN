@@ -146,9 +146,9 @@ class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
     def __init__(self, config: Dict):
-        self.enabled = config["feature_selection"]["use_distance_correlation"]
-        self.upper_threshold = config["feature_selection"]["distance_correlation_upper"]
-        self.lower_threshold = config["feature_selection"]["distance_correlation_lower"]
+        self.enabled = config["feature_selection"]["use_distance_correlation"]  or True
+        self.upper_threshold = config["feature_selection"]["distance_correlation_upper"] or 0.85
+        self.lower_threshold = config["feature_selection"]["distance_correlation_lower"] or 0.01
 
     def select_features(self, features, labels):
         if not self.enabled:
@@ -4430,11 +4430,7 @@ class DatasetProcessor:
                     "min_delta": 0.001
                 }
             },
-          "feature_selection": {
-            "use_distance_correlation": True,
-            "distance_correlation_upper": 0.85,
-            "distance_correlation_lower": 0.01
-            },
+
             "augmentation": {
                 "enabled": True,
                 "random_crop": {"enabled": True, "padding": 4},
@@ -4467,7 +4463,12 @@ class DatasetProcessor:
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
                 "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
-            }
+            },
+             "feature_selection": {
+                "use_distance_correlation": True,
+                "distance_correlation_upper": 0.85,
+                "distance_correlation_lower": 0.01
+            },
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
@@ -4555,9 +4556,13 @@ class DatasetProcessor:
                 "fresh_start": False,
                 "use_previous_model": True,
                 "gen_samples": False
-            }
+            },
+            "feature_selection": {
+            "use_distance_correlation": True,
+            "distance_correlation_upper": 0.85,
+            "distance_correlation_lower": 0.01
+          },
         }
-
     def generate_default_config(self, train_dir: str) -> Dict:
         """Generate and manage all configuration files"""
         os.makedirs(self.dataset_dir, exist_ok=True)
