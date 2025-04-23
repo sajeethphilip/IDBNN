@@ -285,7 +285,7 @@ class PredictionManager:
             saved_config['model'] = self.config['model'].copy()  # Use current model config
             logger.warning("Legacy checkpoint detected - using current model config")
 
-        saved_feature_dims = saved_config['model'].get('feature_dims', 128)  # Default fallback
+        saved_feature_dims = saved_config['model'].get('feature_dims', 4096)  # Default fallback
         current_feature_dims = self.config['model']['feature_dims']
 
         if saved_feature_dims != current_feature_dims:
