@@ -1489,7 +1489,7 @@ class BaseAutoencoder(nn.Module):
         logging.info(f"Layer sizes: {sizes}")
         return sizes
 
-    def _create_encoder_layers(self) -> nn.ModuleList:
+    def _create_encoder_layers_old(self) -> nn.ModuleList:
         """Create encoder layers"""
         layers = nn.ModuleList()
         in_channels = self.in_channels
@@ -1503,7 +1503,22 @@ class BaseAutoencoder(nn.Module):
             in_channels = size
 
         return layers
+    def _create_encoder_layers(self) -> nn.ModuleList:
+        """Create encoder layers with attention and multi-scale processing"""
+        layers = nn.ModuleList()
+        in_channels = self.in_channels
 
+        for size in self.layer_sizes:
+            layers.append(nn.Sequential(
+                nn.Conv2d(in_channels, size, 3, stride=2, padding=1),
+                ChannelAttention(size),  # New attention block
+                nn.BatchNorm2d(size),
+                nn.LeakyReLU(0.2),
+                MultiScaleBlock(size)    # New multi-scale processing
+            ))
+            in_channels = size
+
+        return layers
     def _create_embedder(self) -> nn.Sequential:
         """Create embedder layers"""
         return nn.Sequential(
@@ -1520,7 +1535,7 @@ class BaseAutoencoder(nn.Module):
             nn.LeakyReLU(0.2)
         )
 
-    def _create_decoder_layers(self) -> nn.ModuleList:
+    def _create_decoder_layers_old(self) -> nn.ModuleList:
         """Create decoder layers"""
         layers = nn.ModuleList()
         in_channels = self.layer_sizes[-1]
@@ -1532,6 +1547,26 @@ class BaseAutoencoder(nn.Module):
                     in_channels, out_channels,
                     kernel_size=3, stride=2, padding=1, output_padding=1
                 ),
+                nn.BatchNorm2d(out_channels) if i > 0 else nn.Identity(),
+                nn.LeakyReLU(0.2) if i > 0 else nn.Tanh()
+            ))
+            in_channels = out_channels
+
+        return layers
+
+    def _create_decoder_layers(self) -> nn.ModuleList:
+        """Create decoder layers with pixel shuffle and attention"""
+        layers = nn.ModuleList()
+        in_channels = self.layer_sizes[-1]
+
+        for i in range(len(self.layer_sizes)-1, -1, -1):
+            out_channels = self.in_channels if i == 0 else self.layer_sizes[i-1]
+
+            # Revised decoder block
+            layers.append(nn.Sequential(
+                nn.Conv2d(in_channels, out_channels*4, 3, padding=1),  # Prepare for shuffle
+                nn.PixelShuffle(2),  # Better than transposed conv
+                ChannelAttention(out_channels),  # New attention
                 nn.BatchNorm2d(out_channels) if i > 0 else nn.Identity(),
                 nn.LeakyReLU(0.2) if i > 0 else nn.Tanh()
             ))
@@ -1557,7 +1592,7 @@ class BaseAutoencoder(nn.Module):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+    def forward_old(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
         embedding = self.encode(x)
         if isinstance(embedding, tuple):
@@ -1584,6 +1619,30 @@ class BaseAutoencoder(nn.Module):
         else:
             # Return tuple format in phase 1
             return embedding, reconstruction
+
+    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass with skip connections and multi-scale fusion"""
+        # Enhanced encoding with skip connections
+        skips = []
+        for layer in self.encoder_layers:
+            x = layer(x)
+            skips.append(x)  # Store multi-scale features
+
+        # Bottleneck processing
+        embedding = self.embedder(x.view(x.size(0), -1))
+
+        # Enhanced decoding with skip connections
+        x = self.unembedder(embedding).view(-1, self.layer_sizes[-1],
+                                          self.final_spatial_dim, self.final_spatial_dim)
+        for idx, layer in enumerate(self.decoder_layers):
+            x = layer(torch.cat([x, skips[-(idx+1)]], dim=1))  # Feature fusion
+
+        reconstruction = x
+
+        # Original output logic remains
+        if self.training_phase == 2:
+            return {'embedding': embedding, 'reconstruction': reconstruction}
+        return embedding, reconstruction
 
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
@@ -1804,6 +1863,31 @@ class BaseAutoencoder(nn.Module):
 
         return output
 
+class EdgeLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.laplacian = KF.Laplacian(3)
+
+    def forward(self, pred, target):
+        return F.l1_loss(self.laplacian(pred), self.laplacian(target))
+
+class EnhancedLossManager:
+    def __init__(self, config: Dict):
+        super().__init__()
+        self.config = config
+        self.edge_loss = EdgeLoss()
+        # Rest of original initialization
+
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor,
+                      image_type: str) -> Dict[str, torch.Tensor]:
+        """Calculate loss with edge preservation term"""
+        base_loss = super().calculate_loss(reconstruction, target, image_type)
+
+        # Add edge-aware loss component
+        edge_weight = self.config['model'].get('edge_loss_weight', 0.5)
+        base_loss['loss'] += edge_weight * self.edge_loss(reconstruction, target)
+
+        return base_loss
 
 class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
     """Autoencoder specialized for astronomical imaging features"""
@@ -2521,6 +2605,36 @@ class EnhancedLossManager:
                 return {'loss': result}
             else:
                 return {'loss': torch.tensor(float(result), device=reconstruction.device)}
+
+class ChannelAttention(nn.Module):
+    """Channel-wise attention mechanism"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, channels//reduction, 1),
+            nn.ReLU(),
+            nn.Conv2d(channels//reduction, channels, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return x * self.conv(self.gap(x))
+
+class MultiScaleBlock(nn.Module):
+    """Parallel multi-scale convolution block"""
+    def __init__(self, channels):
+        super().__init__()
+        self.convs = nn.ModuleList([
+            nn.Conv2d(channels, channels//4, k, padding=k//2)
+            for k in [3, 5, 7]
+        ])
+        self.fusion = nn.Conv2d(channels//4*3, channels, 1)
+
+    def forward(self, x):
+        features = [conv(x) for conv in self.convs]
+        return self.fusion(torch.cat(features, dim=1)) + x
+
 
 
 class UnifiedCheckpoint:
@@ -4302,6 +4416,10 @@ class DatasetProcessor:
                 'enable_adaptive': True,  # Default value
                 "feature_dims": feature_dims,
                 "learning_rate": 0.001,
+                # New configuration parameters added here
+                "edge_loss_weight": 0.5,  # Controls edge preservation strength
+                "use_channel_attention": True,  # Enables attention blocks
+                "use_multiscale": True,  # Activates multi-scale processing
                 "optimizer": {
                     "type": "Adam",
                     "weight_decay": 0.0001,
@@ -4330,7 +4448,10 @@ class DatasetProcessor:
                         "kl_divergence_weight": 0.5,
                         "classification_weight": 0.5,
                         "clustering_temperature": 1.0,
-                        "min_cluster_confidence": 0.7
+                        "min_cluster_confidence": 0.7,
+                        # New enhancement controls
+                        "channel_attention": True,  # Fine-grained feature recalibration
+                        "multiscale_processing": True  # Multi-receptive field analysis
                     }
                 },
                 "loss_functions": {
@@ -4339,7 +4460,10 @@ class DatasetProcessor:
                         "weight": 1.0,
                         "params": {
                             "edge_weight": 1.0,
-                            "smoothness_weight": 0.5
+                            "smoothness_weight": 0.5,
+                            # New edge preservation parameters
+                            "laplacian_weight": 0.3,  # Edge sharpness control
+                            "frequency_band": [0.1, 0.9]  # Focus on mid-frequency details
                         }
                     },
                     "color_enhancement": {
