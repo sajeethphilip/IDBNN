@@ -280,6 +280,7 @@ class PredictionManager:
             raise ValueError("No suitable checkpoint state found with both KL divergence and class encoding")
 
         # Check feature dimension compatibility
+        saved_config = checkpoint['model_states'][state_key]['best']['config']
         if 'model' not in saved_config:
             saved_config['model'] = self.config['model'].copy()  # Use current model config
             logger.warning("Legacy checkpoint detected - using current model config")
