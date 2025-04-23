@@ -1555,22 +1555,28 @@ class BaseAutoencoder(nn.Module):
         return layers
 
     def _create_decoder_layers(self) -> nn.ModuleList:
-        """Create decoder layers with pixel shuffle and attention"""
+        """Create decoder layers with pixel shuffle and attention, accounting for skip connections"""
         layers = nn.ModuleList()
-        in_channels = self.layer_sizes[-1]
+        # Initialize previous_out_channels with the last encoder layer's size
+        previous_out_channels = self.layer_sizes[-1]
 
         for i in range(len(self.layer_sizes)-1, -1, -1):
+            # Current encoder skip connection's channels
+            encoder_skip_channels = self.layer_sizes[i]
+            # Input channels = previous decoder output + encoder skip channels
+            current_in_channels = previous_out_channels + encoder_skip_channels
+
             out_channels = self.in_channels if i == 0 else self.layer_sizes[i-1]
 
-            # Revised decoder block
             layers.append(nn.Sequential(
-                nn.Conv2d(in_channels, out_channels*4, 3, padding=1),  # Prepare for shuffle
-                nn.PixelShuffle(2),  # Better than transposed conv
-                ChannelAttention(out_channels),  # New attention
+                nn.Conv2d(current_in_channels, out_channels * 4, 3, padding=1),
+                nn.PixelShuffle(2),
+                ChannelAttention(out_channels),
                 nn.BatchNorm2d(out_channels) if i > 0 else nn.Identity(),
                 nn.LeakyReLU(0.2) if i > 0 else nn.Tanh()
             ))
-            in_channels = out_channels
+            # Update previous_out_channels for the next layer
+            previous_out_channels = out_channels
 
         return layers
 
