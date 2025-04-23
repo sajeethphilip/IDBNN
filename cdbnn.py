@@ -2607,14 +2607,15 @@ class EnhancedLossManager:
                 return {'loss': torch.tensor(float(result), device=reconstruction.device)}
 
 class ChannelAttention(nn.Module):
-    """Channel-wise attention mechanism"""
+    """Channel-wise attention mechanism with safe reduction"""
     def __init__(self, channels, reduction=16):
         super().__init__()
         self.gap = nn.AdaptiveAvgPool2d(1)
+        reduced_channels = max(1, channels // reduction)  # Ensure at least 1 channel
         self.conv = nn.Sequential(
-            nn.Conv2d(channels, channels//reduction, 1),
+            nn.Conv2d(channels, reduced_channels, 1),
             nn.ReLU(),
-            nn.Conv2d(channels//reduction, channels, 1),
+            nn.Conv2d(reduced_channels, channels, 1),
             nn.Sigmoid()
         )
 
@@ -3859,7 +3860,7 @@ class DynamicAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
+            if current_size < 1024:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
@@ -4420,6 +4421,8 @@ class DatasetProcessor:
                 "edge_loss_weight": 0.5,  # Controls edge preservation strength
                 "use_channel_attention": True,  # Enables attention blocks
                 "use_multiscale": True,  # Activates multi-scale processing
+                "min_channels": 16,  # Match min_channels from layer calculation
+                "attention_reduction": 8  # Reduced from 16 for safety
                 "optimizer": {
                     "type": "Adam",
                     "weight_decay": 0.0001,
