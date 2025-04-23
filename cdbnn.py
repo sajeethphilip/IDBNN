@@ -3,7 +3,7 @@
 # Added distance correlations to filter the output features. April 12, 3:45 am
 # Fixed a bug in Prediction mode model loading April 14 2025 9:32 am
 #Finalised completely working module as on 15th April 2025
-#April 18th. Adding feature Pruning
+# Feature Dimension can now be input during training instead of hardcoding to 128 April 30 11:13 PM
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -800,44 +800,6 @@ class GeneralEnhancementConfig(BaseEnhancementConfig):
 
         logger.info(f"Confusion matrix saved to {cm_path}")
 
-class FeatureTracker:
-    def __init__(self, num_features, decay=0.99):
-        self.importance = torch.zeros(num_features)
-        self.raw_gradients = torch.zeros(num_features)
-        self.updates = 0
-        self.decay = decay
-
-    def record_gradients(self, gradients):
-        """Record gradient magnitudes (called from backward hook)"""
-        # gradients shape: (batch_size, feature_dims)
-        batch_importance = gradients.abs().mean(dim=0).detach().cpu()
-        self.raw_gradients += batch_importance
-        self.updates += 1
-
-        # Update EMA
-        if self.updates == 1:
-            self.importance = batch_importance
-        else:
-            self.importance = self.decay * self.importance + (1-self.decay) * batch_importance
-
-    def update(self, batch_idx):
-        """Update feature importance tracking (called during training)"""
-        # This method can be used to perform periodic updates if needed
-        # Currently just a placeholder since record_gradients does the work
-        pass
-
-    def get_importance(self):
-        """Get normalized importance scores with bias correction"""
-        if self.updates == 0:
-            return torch.zeros_like(self.importance)
-        return self.importance / (1 - self.decay**self.updates)
-
-    def get_raw_importance(self):
-        """Get unnormalized accumulated gradients"""
-        if self.updates == 0:
-            return torch.zeros_like(self.raw_gradients)
-        return self.raw_gradients / self.updates
-
 class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
 
@@ -948,38 +910,7 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
-        # Feature importance tracking
-        self.importance = torch.zeros(feature_dims)
-        self.importance_updates = 0
-        self.register_backward_hooks()
-
-        # Dynamic pruning threshold
-        self.feature_mask = torch.ones(feature_dims, dtype=torch.bool)
-        self.pruning_interval = config.get('pruning_interval', 10)
-        self.min_features = config.get('min_features', 32)
-
 #--------------------------Distance Correlations ----------
-
-    def register_backward_hooks(self):
-        def grad_hook(module, grad_input, grad_output):
-            if grad_output[0] is not None:
-                self.feature_tracker.record_gradients(grad_output[0])
-
-        self.hook = self.embedder.register_full_backward_hook(grad_hook)
-
-    def prune_features(self, min_features=32):
-        """Prune low-importance features"""
-        importance = self.feature_tracker.get_importance()
-        keep_indices = torch.argsort(importance, descending=True)[:max(
-            min_features,
-            int(self.feature_dims * (0.5 if self.training_phase == 1 else 0.7))
-        )]
-
-        self.feature_mask = torch.zeros(self.feature_dims, dtype=torch.bool)
-        self.feature_mask[keep_indices] = True
-        return len(keep_indices)
-
-
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
         """Identify high-confidence predictions for semi-supervised learning"""
         self.eval()
@@ -1032,44 +963,30 @@ class BaseAutoencoder(nn.Module):
             # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
 
-            # Get feature mask from model if available
-            feature_mask = getattr(self, 'feature_mask', None)
-            if feature_mask is not None:
-                selected_indices = torch.where(feature_mask)[0].tolist()
-                logger.info(f"Using {len(selected_indices)} active features from feature mask")
-            else:
-                selected_indices = None
-
             # Process features based on mode
             if enable_adaptive:
                 # Adaptive mode - single combined output
                 features_df = self._prepare_features_dataframe(
                     train_features,
-                    dc_config if use_dc else None,
-                    selected_indices=selected_indices
+                    dc_config if use_dc else None
                 )
 
                 # Save features
                 features_df.to_csv(output_path, index=False)
                 logger.info(f"Saved features to {output_path} (adaptive mode)")
 
-                # Save metadata and update conf file with selected features
+                # Save metadata
                 feature_columns = [c for c in features_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
-
-                # Update conf file with selected features
-                self._update_conf_file_with_selected_features(output_dir, selected_indices)
             else:
                 # Non-adaptive mode - separate train/test files
                 train_df = self._prepare_features_dataframe(
                     train_features,
-                    dc_config if use_dc else None,
-                    selected_indices=selected_indices
+                    dc_config if use_dc else None
                 )
                 test_df = self._prepare_features_dataframe(
                     test_features,
-                    dc_config if use_dc else None,
-                    selected_indices=selected_indices
+                    dc_config if use_dc else None
                 )
 
                 # Save features
@@ -1081,74 +998,24 @@ class BaseAutoencoder(nn.Module):
                 logger.info(f"Saved train features to {train_path}")
                 logger.info(f"Saved test features to {test_path}")
 
-                # Save metadata and update conf file
+                # Save metadata (using train features as reference)
                 feature_columns = [c for c in train_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
-                self._update_conf_file_with_selected_features(output_dir, selected_indices)
 
         except Exception as e:
             logger.error(f"Error in save_features: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
 
-    def _update_conf_file_with_selected_features(self, output_dir: str, selected_indices: Optional[List[int]] = None) -> None:
-        """Update the conf file to only include selected features"""
-        if selected_indices is None:
-            return  # No feature selection was performed
-
-        conf_path = os.path.join(output_dir, f"{self.config['dataset']['name']}.conf")
-        if not os.path.exists(conf_path):
-            logger.warning(f"Config file not found at {conf_path}")
-            return
-
-        try:
-            with open(conf_path, 'r') as f:
-                conf_data = json.load(f)
-
-            # Update feature columns in config
-            if 'column_names' in conf_data:
-                # Keep only the selected feature columns
-                all_features = [f for f in conf_data['column_names'] if f.startswith('feature_')]
-                selected_features = [all_features[i] for i in selected_indices if i < len(all_features)]
-
-                # Keep target column if it exists
-                other_columns = [c for c in conf_data['column_names'] if not c.startswith('feature_')]
-                conf_data['column_names'] = selected_features + other_columns
-
-            # Update feature count
-            if 'feature_count' in conf_data:
-                conf_data['feature_count'] = len(selected_indices)
-
-            # Add pruning information
-            if 'feature_selection' not in conf_data:
-                conf_data['feature_selection'] = {}
-
-            conf_data['feature_selection'].update({
-                'pruned_features': selected_indices,
-                'original_feature_count': self.feature_dims,
-                'pruned_feature_count': len(selected_indices)
-            })
-
-            # Save updated config
-            with open(conf_path, 'w') as f:
-                json.dump(conf_data, f, indent=4)
-
-            logger.info(f"Updated config file with {len(selected_indices)} selected features")
-
-        except Exception as e:
-            logger.error(f"Error updating config file: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
-                                  dc_config: Optional[Dict],
-                                  selected_indices: Optional[List[int]] = None) -> pd.DataFrame:
+                                  dc_config: Optional[Dict]) -> pd.DataFrame:
         """
-        Prepare DataFrame from features with optional feature selection.
+        Prepare DataFrame from features with optional distance correlation selection.
 
         Args:
             features: Dictionary containing 'embeddings', 'labels', etc.
             dc_config: Distance correlation config or None if disabled
-            selected_indices: List of indices of features to keep (from pruning)
 
         Returns:
             pd.DataFrame: Processed features with metadata
@@ -1165,28 +1032,13 @@ class BaseAutoencoder(nn.Module):
                 upper_threshold=dc_config['distance_correlation_upper'],
                 lower_threshold=dc_config['distance_correlation_lower']
             )
-            dc_selected_indices, corr_values = selector.select_features(embeddings, labels)
-
-            # Combine with pruning selection if available
-            if selected_indices is not None:
-                # Get intersection of DC-selected and pruned features
-                final_indices = list(set(dc_selected_indices) & set(selected_indices))
-                if not final_indices:
-                    logger.warning("No overlap between DC-selected and pruned features, using pruned features")
-                    final_indices = selected_indices
-            else:
-                final_indices = dc_selected_indices
+            selected_indices, corr_values = selector.select_features(embeddings, labels)
 
             # Store selected features with metadata
-            for new_idx, orig_idx in enumerate(final_indices):
-                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = orig_idx
-                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
-        elif selected_indices is not None:
-            # Only use pruned features
             for new_idx, orig_idx in enumerate(selected_indices):
                 data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
                 data[f'original_feature_idx_{new_idx}'] = orig_idx
+                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
         else:
             # Store all features without selection
             for i in range(embeddings.shape[1]):
@@ -1644,13 +1496,7 @@ class BaseAutoencoder(nn.Module):
         for layer in self.encoder_layers:
             x = layer(x)
         x = x.view(x.size(0), -1)
-        x = self.embedder(x)
-
-        # Apply feature mask
-        if self.training:
-            x = x * self.feature_mask.to(x.device)
-
-        return x
+        return self.embedder(x)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Basic decoding process"""
@@ -2778,9 +2624,8 @@ class ModelFactory:
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        feature_dims = config['model']['feature_dims']
+        feature_dims= config['model']['feature_dims']
 
-        # Get model type
         image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model with proper channel handling
@@ -2800,263 +2645,62 @@ class ModelFactory:
 
         return model
 
-#---------------------------model train begins -----------------------------------------
+
+# Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Main training function that orchestrates both phases"""
-    # Initialize feature tracking if enabled
-    if config.get('feature_selection', {}).get('enabled', True):
-        if not hasattr(model, 'feature_tracker'):
-            model.feature_tracker = FeatureTracker(model.feature_dims)
-            model.register_backward_hooks()
+    """Two-phase training implementation with checkpoint handling"""
+    # Store dataset reference in model
+    model.set_dataset(train_loader.dataset)
 
     history = defaultdict(list)
+
+    # Initialize starting epoch and phase
     start_epoch = getattr(model, 'current_epoch', 0)
     current_phase = getattr(model, 'training_phase', 1)
-    checkpoint_manager = UnifiedCheckpoint(config)
 
-    # Phase 1: Reconstruction
+    # Phase 1: Pure reconstruction (if not already completed)
     if current_phase == 1:
+        logger.info("Starting/Resuming Phase 1: Pure reconstruction training")
         model.set_training_phase(1)
-        optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['autoencoder_config']['phase1_learning_rate'])
+        optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
 
-        phase1_history = _train_phase_with_feature_selection(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            loss_manager=loss_manager,
-            epochs=config['training']['epochs'],
-            phase=1,
-            config=config,
-            start_epoch=start_epoch,
-            progress_bar=tqdm(range(start_epoch, config['training']['epochs']),
-                            desc="Phase 1: Reconstruction Training"),
-            checkpoint_manager=checkpoint_manager
+        phase1_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 1, config,
+            start_epoch=start_epoch
         )
         history.update(phase1_history)
-        start_epoch = 0  # Reset for phase 2
 
-    # Phase 2: Latent organization
-    if config['model']['autoencoder_config'].get('enable_phase2', True):
-        model.set_training_phase(2)
+        # Reset start_epoch for phase 2
+        start_epoch = 0
+    else:
+        logger.info("Phase 1 already completed, skipping")
+
+    # Phase 2: Latent space organization
+    if config['model']['autoencoder_config']['enhancements'].get('enable_phase2', True):
+        if current_phase < 2:
+            logger.info("Starting Phase 2: Latent space organization")
+            model.set_training_phase(2)
+        else:
+            logger.info("Resuming Phase 2: Latent space organization")
+
+        # Lower learning rate for fine-tuning
         optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['autoencoder_config']['phase2_learning_rate'])
+                             lr=config['model']['learning_rate'])
 
-        phase2_history = _train_phase_with_feature_selection(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            loss_manager=loss_manager,
-            epochs=config['training']['epochs'],
-            phase=2,
-            config=config,
-            start_epoch=start_epoch,
-            progress_bar=tqdm(range(start_epoch, config['training']['epochs']),
-                            desc="Phase 2: Latent Organization"),
-            checkpoint_manager=checkpoint_manager
+        phase2_history = _train_phase(
+            model, train_loader, optimizer, loss_manager,
+            config['training']['epochs'], 2, config,
+            start_epoch=start_epoch if current_phase == 2 else 0
         )
 
-        for key, val in phase2_history.items():
-            history[f"phase2_{key}"] = val
+        # Merge histories
+        for key, value in phase2_history.items():
+            history[f"phase2_{key}"] = value
 
     return history
 
-def _train_phase_with_feature_selection(model, loader, optimizer, loss_manager,
-                                      epochs, phase, config, start_epoch=0,
-                                      progress_bar=None, checkpoint_manager=None):
-    """Training phase with enhanced feature selection control"""
-    # Device setup
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-
-    # Initialize trackers
-    history = defaultdict(list)
-    best_loss = float('inf')
-    best_accuracy = 0.0
-    patience_counter = 0
-    current_features = model.feature_dims
-
-    # Get feature selection config with safe defaults
-    fs_config = config.get('feature_selection', {})
-    feature_selection_enabled = fs_config.get('enabled', True)
-    phase_config = fs_config.get('dynamic_params', {}).get(f'phase{phase}', {})
-    phase_enabled = phase_config.get('enabled', True) and feature_selection_enabled
-
-    # Set parameters based on config or defaults
-    if phase_enabled:
-        prune_interval = phase_config.get('pruning_interval', 10 if phase == 1 else 5)
-        warmup_epochs = phase_config.get('warmup_epochs', 5 if phase == 1 else 3)
-        min_features = phase_config.get('min_features', 64 if phase == 1 else 32)
-        importance_decay = phase_config.get('importance_decay', 0.9 if phase == 1 else 0.85)
-        fallback_to_full = fs_config.get('fallback_to_full', True)
-
-        # Initialize feature tracker with configurable decay
-        if not hasattr(model, 'feature_tracker'):
-            model.feature_tracker = FeatureTracker(model.feature_dims, decay=importance_decay)
-    else:
-        # Disable feature selection
-        model.feature_mask = torch.ones(model.feature_dims, dtype=torch.bool)
-        prune_interval = float('inf')  # Never prune
-        logger.info(f"Feature selection disabled for phase {phase}")
-
-    # Progress bar setup
-    if progress_bar is None:
-        desc = f"Phase {phase}: {'Reconstruction' if phase == 1 else 'Clustering'}"
-        if phase_enabled:
-            desc += f" | FS: ON (min={min_features})"
-        progress_bar = tqdm(range(start_epoch, epochs), desc=desc, position=0)
-
-    for epoch in range(start_epoch, epochs):
-        model.train()
-        running_loss = 0.0
-        running_accuracy = 0.0
-        batch_count = 0
-
-        try:
-            with tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False) as batch_pbar:
-                for batch_idx, (data, labels) in enumerate(batch_pbar):
-                    data = data.to(device, non_blocking=True)
-                    labels = labels.to(device, non_blocking=True)
-
-                    # Forward pass
-                    with torch.cuda.amp.autocast(enabled=config['execution_flags']['mixed_precision']):
-                        output = model(data)
-
-                        # Calculate loss and accuracy
-                        if phase == 1:
-                            recon = output[1] if isinstance(output, tuple) else output['reconstruction']
-                            loss = F.mse_loss(recon, data)
-                            accuracy = 0.0  # No accuracy metric in phase 1
-                        else:
-                            loss_dict = loss_manager.calculate_loss(
-                                output['reconstruction'], data,
-                                config['dataset'].get('image_type', 'general')
-                            )
-                            loss = loss_dict['loss']
-                            if model.use_kl_divergence:
-                                latent_info = model.organize_latent_space(output['embedding'], labels)
-                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * \
-                                       F.kl_div(latent_info['cluster_probabilities'].log(),
-                                               latent_info['target_distribution'],
-                                               reduction='batchmean')
-
-                            # Calculate accuracy for phase 2
-                            if 'class_predictions' in output:
-                                accuracy = (output['class_predictions'] == labels).float().mean()
-                            else:
-                                accuracy = 0.0
-
-                    # Backward pass
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    optimizer.step()
-
-                    # Update trackers
-                    running_loss += loss.item()
-                    running_accuracy += accuracy.item() if phase == 2 else 0.0
-                    batch_count += 1
-
-                    # Feature pruning logic
-                    if (batch_idx + 1) % prune_interval == 0 and epoch >= warmup_epochs and phase_enabled:
-                        pre_prune_accuracy = running_accuracy / batch_count if phase == 2 else None
-
-                        # Perform pruning
-                        prev_features = current_features
-                        current_features = model.prune_features(min_features=min_features)
-
-                        # Accuracy check for phase 2
-                        if phase == 2 and pre_prune_accuracy > 0:
-                            post_prune_accuracy = (model(data)[1]['class_predictions'] == labels).float().mean().item()
-                            accuracy_drop = pre_prune_accuracy - post_prune_accuracy
-
-                            if accuracy_drop > 0.05 and fallback_to_full:  # Significant drop
-                                logger.warning(f"Accuracy drop {accuracy_drop:.2f} after pruning - reverting")
-                                model.feature_mask = torch.ones(model.feature_dims, dtype=torch.bool)
-                                current_features = model.feature_dims
-
-                        batch_pbar.set_postfix_str(
-                            f"Ft: {Colors.GREEN}{current_features}{Colors.ENDC}/{model.feature_dims} | "
-                            f"Loss: {loss.item():.4f} | "
-                            f"Acc: {accuracy.item():.2f}" if phase == 2 else ""
-                        )
-
-        except Exception as e:
-            logger.error(f"Error in epoch {epoch+1}: {str(e)}")
-            continue
-
-        # Calculate epoch metrics
-        epoch_loss = running_loss / max(batch_count, 1)
-        epoch_accuracy = running_accuracy / max(batch_count, 1) if phase == 2 else 0.0
-
-        # Update history
-        history[f'phase{phase}_loss'].append(epoch_loss)
-        if phase == 2:
-            history[f'phase{phase}_accuracy'].append(epoch_accuracy)
-            best_accuracy = max(best_accuracy, epoch_accuracy)
-
-        # Update progress
-        update_progress(progress_bar, epoch_loss, best_loss, current_features,
-                      model.feature_dims, phase, model.use_kl_divergence,
-                      latent_info if phase == 2 and model.use_kl_divergence else None)
-
-        # Early stopping and checkpointing
-        best_loss, patience_counter = handle_early_stopping(
-            epoch_loss, best_loss, patience_counter, config,
-            model, optimizer, phase, epoch, checkpoint_manager, progress_bar
-        )
-        if patience_counter >= config['training']['early_stopping'].get('patience', 5):
-            break
-
-    return history
-
-def update_progress(progress_bar, epoch_loss, best_loss, current_features,
-                   total_features, phase, use_kl_divergence, latent_info):
-    """Helper function to update progress bar with GPU-aware metrics"""
-    loss_diff = best_loss - epoch_loss
-    loss_color = (Colors.GREEN if loss_diff > 1e-6
-                 else (Colors.RED if loss_diff < -1e-6 else Colors.YELLOW))
-
-    postfix = {
-        'loss': f"{loss_color}{epoch_loss:.4f}{Colors.ENDC}",
-        'features': f"{current_features}/{total_features}",
-        'Δ': f"{loss_color}{abs(loss_diff):.2e}{Colors.ENDC}",
-        'GPU': f"{torch.cuda.memory_allocated()/1e9:.2f}GB"
-    }
-
-    if phase == 2 and use_kl_divergence:
-        cluster_quality = latent_info['cluster_probabilities'].max(dim=1)[0].mean().item()
-        postfix['clst_q'] = f"{cluster_quality:.2f}"
-
-    progress_bar.set_postfix(postfix)
-    progress_bar.update(1)
-
-def handle_early_stopping(epoch_loss, best_loss, patience_counter, config,
-                         model, optimizer, phase, epoch, checkpoint_manager, progress_bar):
-    """Manage early stopping and checkpointing"""
-    if epoch_loss < best_loss - config['training']['early_stopping'].get('min_delta', 0.001):
-        best_loss = epoch_loss
-        patience_counter = 0
-        if checkpoint_manager:
-            checkpoint_manager.save_model_state(
-                model=model,
-                optimizer=optimizer,
-                phase=phase,
-                epoch=epoch,
-                loss=epoch_loss,
-                is_best=True
-            )
-    else:
-        patience_counter += 1
-        if patience_counter >= config['training']['early_stopping'].get('patience', 5):
-            progress_bar.write(
-                f"{Colors.YELLOW}Early stopping at epoch {epoch+1} "
-                f"(best loss: {best_loss:.4f}){Colors.ENDC}"
-            )
-
-    return best_loss, patience_counter
-
-#-----------------model_train_ends ----------------------
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -3183,7 +2827,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             num_batches = len(train_loader)
 
             # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
@@ -3377,6 +3021,9 @@ class ReconstructionManager:
             self.config['dataset']['input_size'][1]
         )
         feature_dims = self.config['model']['feature_dims']
+
+        logger.info(f"Main configuration saved: {self.config_path}")
+        image_type = config['dataset'].get('image_type', 'general')
 
         # Set model configuration based on saved state
         self.config['model']['autoencoder_config']['enhancements'].update({
@@ -4050,7 +3697,7 @@ class DynamicAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 512:
+            if current_size < 128:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
@@ -4587,7 +4234,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+        feature_dims = min(2048, np.prod(input_size) // 4)
 
         return {
             "dataset": {
@@ -4760,39 +4407,8 @@ class DatasetProcessor:
                 "early_stopping": {
                     "patience": 5,
                     "min_delta": 0.001
-                },
-            # Add feature selection section
-            "feature_selection": {
-                "enabled": True,  # Master switch
-                "method": "dynamic_gradients",  # Options: dynamic_gradients|static|hybrid
-                "dynamic_params": {
-                    "phase1": {
-                        "pruning_interval": 10,  # Steps between pruning in phase 1
-                        "min_features": 32,       # Minimum features to keep
-                        "warmup_epochs": 10,       # Wait before first pruning
-                        "importance_decay": 0.99  # EMA decay factor
-                    },
-                    "phase2": {
-                        "pruning_interval": 5,   # More frequent pruning
-                        "min_features": 16,       # More aggressive
-                        "warmup_epochs": 10,       # Wait before first pruning
-                        "importance_decay": 0.99  # Faster adaptation
-                    }
-                },
-
-                "static_params": {
-                    "initial_dims": feature_dims,  # From your existing calculation
-                    "fixed_dims": None             # Optional override
-                },
-                "distance_correlation": {
-                    "enabled": True,               # Use with your existing DC
-                    "weight": 0.3,                # Mixing ratio with gradients
-                    "update_interval": 200         # Steps between DC updates
-                },
-                 "fallback_to_full": True  # If disabled, use all features
-                },
+                }
             },
-
             "augmentation": {
                 "enabled": True,
                 "random_crop": {"enabled": True, "padding": 4},
@@ -4819,16 +4435,12 @@ class DatasetProcessor:
                 "distributed_training": False,
                 "debug_mode": False,
                 "use_previous_model": True,
-                "fresh_start": False,
-                 "track_feature_importance": True,
-                "save_feature_masks": False
+                "fresh_start": False
             },
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
-                "visualization_dir": os.path.join(self.dataset_dir, "visualizations"),
-                "feature_analysis_dir": os.path.join(self.dataset_dir, "feature_analysis"),
-                "mask_history_file": "feature_masks.pt"
+                "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
             }
         }
 
@@ -6121,6 +5733,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
+        fd= config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
+        config['model']['feature_dims']=feature_dims
+        # Get model type
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
