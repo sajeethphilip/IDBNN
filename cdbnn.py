@@ -4422,7 +4422,7 @@ class DatasetProcessor:
                 "use_channel_attention": True,  # Enables attention blocks
                 "use_multiscale": True,  # Activates multi-scale processing
                 "min_channels": 16,  # Match min_channels from layer calculation
-                "attention_reduction": 8  # Reduced from 16 for safety
+                "attention_reduction": 8,  # Reduced from 16 for safety
                 "optimizer": {
                     "type": "Adam",
                     "weight_decay": 0.0001,
