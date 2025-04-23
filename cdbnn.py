@@ -279,50 +279,6 @@ class PredictionManager:
         if state_key is None:
             raise ValueError("No suitable checkpoint state found with both KL divergence and class encoding")
 
-        # Check feature dimension compatibility
-        saved_config = checkpoint['model_states'][state_key]['best']['config']
-        saved_feature_dims = saved_config['model']['feature_dims']
-        current_feature_dims = self.config['model']['feature_dims']
-
-        if saved_feature_dims != current_feature_dims:
-            logger.error(f"\n{Colors.RED}Critical configuration mismatch detected:{Colors.ENDC}")
-            logger.error(f" - Checkpoint feature dimensions: {saved_feature_dims}")
-            logger.error(f" - Current configuration feature dimensions: {current_feature_dims}")
-            logger.error("\nThis mismatch prevents the model from loading properly. Choose an action:")
-
-            while True:
-                choice = input(f"{Colors.YELLOW}[1] Delete checkpoint and start fresh\n"
-                             "[2] Exit to modify configuration\n"
-                             "Choice [1/2]: {Colors.ENDC}").strip()
-
-                if choice == '1':
-                    # Delete checkpoint and associated files
-                    files_to_remove = [
-                        checkpoint_path,
-                        os.path.join(self.config['training']['checkpoint_dir']),
-                        os.path.join(self.config['output']['features_file'])
-                    ]
-
-                    for f in files_to_remove:
-                        if os.path.exists(f):
-                            os.remove(f)
-                            logger.info(f"Removed: {f}")
-
-                    logger.info(f"{Colors.GREEN}Old checkpoints removed. Please restart the application "
-                               "with your current configuration to train a new model.{Colors.ENDC}")
-                    sys.exit(0)
-
-                elif choice == '2':
-                    logger.info(f"{Colors.BLUE}Exiting. Please either:\n"
-                              "1. Update your config's 'feature_dims' to match the checkpoint\n"
-                              "2. Remove the checkpoint manually\n"
-                              "3. Change your model architecture configuration{Colors.ENDC}")
-                    sys.exit(0)
-
-                else:
-                    logger.error("Invalid choice. Please enter 1 or 2")
-
-
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
 
         # Load the state dict
@@ -2871,7 +2827,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             num_batches = len(train_loader)
 
             # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
