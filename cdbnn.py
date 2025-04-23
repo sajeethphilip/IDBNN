@@ -4278,7 +4278,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+        feature_dims = min(4096, np.prod(input_size) // 4)
 
         return {
             "dataset": {
