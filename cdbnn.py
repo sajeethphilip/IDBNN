@@ -142,7 +142,33 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
+#-------------------------------------Feature Pruning Starts ----------------------
+class WeightEvolutionTracker:
+    def __init__(self, model, config):
+        self.model = model
+        self.warmup_epochs = config['pruning']['warmup_epochs']
+        self.prune_interval = config['pruning']['prune_interval']
+        self.weight_history = defaultdict(list)
+        self.pruned_weights = {}
 
+    def track_weights(self, epoch):
+        for name, param in self.model.named_parameters():
+            if 'conv' in name and 'weight' in name:
+                self.weight_history[name].append(param.data.abs().mean().item())
+
+class PruningAttentionGate(nn.Module):
+    def __init__(self, in_features):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(in_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.attention(x)
+#-------------------------------------Feature Pruning Ends ----------------------
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
@@ -958,6 +984,16 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
         # Initialize clustering parameters
         self._initialize_clustering(config)
+
+
+        # Add pruning components
+        self.pruning_tracker = WeightEvolutionTracker(self, config)
+        self.attention_gates = nn.ModuleDict()
+
+        # Initialize attention gates for each conv layer
+        for name, param in self.named_parameters():
+            if 'conv' in name and 'weight' in name:
+                self.attention_gates[name] = PruningAttentionGate(param.numel())
 
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
@@ -2594,6 +2630,10 @@ class UnifiedCheckpoint:
                     'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
                     'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') and isinstance(model.clustering_temperature, torch.Tensor) else 1.0
                 }
+            },
+            'pruning_state': {
+                'tracker': model.pruning_tracker.__dict__,
+                'attention_gates': model.attention_gates.state_dict()
             }
         }
 
@@ -2621,6 +2661,10 @@ class UnifiedCheckpoint:
         if state_key not in self.current_state['model_states']:
             logger.info(f"No existing state found for {state_key}")
             return None
+
+        if 'pruning_state' in checkpoint:
+            model.pruning_tracker.__dict__.update(checkpoint['pruning_state']['tracker'])
+            model.attention_gates.load_state_dict(checkpoint['pruning_state']['attention_gates'])
 
         # Get appropriate state
         state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
@@ -2850,10 +2894,41 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _train_phase(model: nn.Module, train_loader: DataLoader,
+def _apply_evolutionary_pruning(model: nn.Module, epoch: int, config: Dict):
+    if epoch < config['pruning']['warmup_epochs']:
+        return
+
+    # Calculate volatility scores
+    volatility = {}
+    for name, history in model.pruning_tracker.weight_history.items():
+        if len(history) >= config['pruning']['prune_interval']:
+            recent = history[-config['pruning']['prune_interval']:]
+            volatility[name] = np.std(recent) / (np.mean(recent) + 1e-9)
+
+    # Apply attention-guided pruning
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name in volatility and 'conv' in name and 'weight' in name:
+                # Get attention score
+                vol_tensor = torch.tensor([volatility[name]], device=param.device)
+                survival_prob = model.attention_gates[name](vol_tensor)
+
+                if survival_prob < config['pruning']['threshold']:
+                    # Store original weights before pruning
+                    model.pruning_tracker.pruned_weights[name] = {
+                        'weights': param.clone(),
+                        'epoch': epoch,
+                        'survival_prob': survival_prob.item()
+                    }
+                    param.data *= 0  # Soft pruning
+
+def _train_phase_old(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
     """Training logic for each phase with enhanced checkpoint handling"""
+
+    # Add pruning variables
+    pruning_enabled = phase == 2 and config['pruning']['enabled']
 
     history = defaultdict(list)
     device = next(model.parameters()).device
@@ -2874,6 +2949,9 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             model.train()
             running_loss = 0.0
             num_batches = len(train_loader)
+
+            # Track weights every epoch
+            model.pruning_tracker.track_weights(epoch)
 
             # Training loop
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
@@ -2905,6 +2983,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                         # Calculate base loss
                         loss_result = loss_manager.calculate_loss(reconstruction, data,
                                                                config['dataset'].get('image_type', 'general'))
+
                         loss = loss_result['loss']
 
                         # Add KL divergence loss if enabled
@@ -4485,6 +4564,16 @@ class DatasetProcessor:
                 "debug_mode": False,
                 "use_previous_model": True,
                 "fresh_start": False
+            },
+            'pruning': {
+                'enabled': True,
+                'warmup_epochs': 15,
+                'prune_interval': 5,
+                'threshold': 0.4,
+                'l1_lambda': 0.001,
+                'retention_rate': 0.15,
+                'regrowth_interval': 10
+                }
             },
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
