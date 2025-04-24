@@ -278,7 +278,7 @@ class DatasetConfig:
         "has_header": True,
         "likelihood_config": {
             "feature_group_size": 2,
-            "max_combinations": 100000,
+            "max_combinations": 90000000,
             "bin_sizes": [128]
         },
         "active_learning": {
