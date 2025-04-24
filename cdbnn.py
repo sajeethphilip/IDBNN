@@ -2922,6 +2922,153 @@ def _apply_evolutionary_pruning(model: nn.Module, epoch: int, config: Dict):
                     }
                     param.data *= 0  # Soft pruning
 
+def _train_phase(model: nn.Module, train_loader: DataLoader,
+                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for each phase with enhanced checkpoint handling and pruning integration"""
+
+    history = defaultdict(list)
+    device = next(model.parameters()).device
+    best_loss = float('inf')
+    min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
+    checkpoint_manager = UnifiedCheckpoint(config)
+    pruning_enabled = phase == 2 and config['pruning']['enabled']
+
+    # Pruning-related initialization
+    if pruning_enabled:
+        prune_interval = config['pruning']['prune_interval']
+        l1_lambda = config['pruning']['l1_lambda']
+        warmup_epochs = config['pruning']['warmup_epochs']
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            running_loss = 0.0
+            num_batches = len(train_loader)
+
+            if pruning_enabled:
+                # Track weight evolution before training steps
+                model.pruning_tracker.track_weights(epoch)
+
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
+            for batch_idx, (data, labels) in enumerate(pbar):
+                try:
+                    data = data.to(device)
+                    labels = labels.to(device)
+                    optimizer.zero_grad()
+
+                    # Forward pass
+                    if phase == 1:
+                        embeddings = model.encode(data)
+                        reconstruction = model.decode(embeddings[0] if isinstance(embeddings, tuple) else embeddings)
+                        loss = F.mse_loss(reconstruction, data)
+                    else:
+                        output = model(data)
+                        reconstruction = output['reconstruction'] if isinstance(output, dict) else output[1]
+
+                        # Base loss calculation
+                        loss_result = loss_manager.calculate_loss(
+                            reconstruction, data,
+                            config['dataset'].get('image_type', 'general')
+                        )
+                        loss = loss_result['loss']
+
+                        # Add L1 regularization for pruning
+                        if pruning_enabled and epoch >= warmup_epochs:
+                            l1_penalty = sum(
+                                p.abs().sum() for name, p in model.named_parameters()
+                                if 'conv' in name and 'weight' in name
+                            )
+                            loss += l1_lambda * l1_penalty
+
+                        # Add KL divergence and classification losses
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(
+                                output['embedding'] if isinstance(output, dict) else output[0],
+                                labels
+                            )
+                            if 'cluster_probabilities' in latent_info:
+                                kl_loss = F.kl_div(
+                                    latent_info['cluster_probabilities'].log(),
+                                    latent_info['target_distribution'],
+                                    reduction='batchmean'
+                                )
+                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+
+                        if model.use_class_encoding and hasattr(model, 'classifier'):
+                            class_logits = model.classifier(
+                                output['embedding'] if isinstance(output, dict) else output[0]
+                            )
+                            loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * \
+                                  F.cross_entropy(class_logits, labels)
+
+                    # Backward pass with gradient masking
+                    loss.backward()
+
+                    if pruning_enabled and epoch >= warmup_epochs:
+                        with torch.no_grad():
+                            for name, param in model.named_parameters():
+                                if name in model.pruning_tracker.pruned_weights:
+                                    param.grad *= 0
+
+                    optimizer.step()
+
+                    # Loss tracking and memory management
+                    loss_value = safe_get_scalar(loss)
+                    running_loss += loss_value
+                    current_avg_loss = running_loss / (batch_idx + 1)
+
+                    # Update progress bar
+                    color_status = {
+                        'loss': Colors.color_value(current_avg_loss, best_loss, False),
+                        'best': f"{best_loss:.4f}",
+                        'patience': patience_counter
+                    }
+                    pbar.set_postfix(color_status)
+
+                    del data, loss
+                    if phase == 2:
+                        del output
+                    torch.cuda.empty_cache()
+
+                except Exception as e:
+                    logger.error(f"Batch {batch_idx} error: {str(e)}\n{traceback.format_exc()}")
+                    continue
+
+            # Epoch post-processing
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
+            history[f'phase{phase}_loss'].append(avg_loss)
+
+            # Pruning application
+            if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
+                _apply_evolutionary_pruning(model, epoch, config)
+
+            # Checkpoint and early stopping
+            is_best = (best_loss - avg_loss) > min_thr
+            if is_best:
+                best_loss = avg_loss
+                patience_counter = 0
+                checkpoint_manager.save_model_state(
+                    model=model,
+                    optimizer=optimizer,
+                    phase=phase,
+                    epoch=epoch,
+                    loss=avg_loss,
+                    is_best=True
+                )
+            else:
+                patience_counter += 1
+
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+                logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                break
+
+    except Exception as e:
+        logger.error(f"Training phase {phase} error: {str(e)}\n{traceback.format_exc()}")
+        raise
+
+    return history
+
 def _train_phase_old(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
