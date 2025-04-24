@@ -2928,6 +2928,13 @@ def _apply_evolutionary_pruning(model, epoch, config):
     if epoch < model.pruning_tracker.warmup_epochs:
         return
 
+    # Create temporary validation set (20% of current batch)
+    val_size = int(0.2 * len(train_loader.dataset))
+    train_set, val_set = random_split(train_loader.dataset,
+                                    [len(train_loader.dataset) - val_size, val_size])
+    val_loader = DataLoader(val_set, batch_size=config['training']['batch_size'],
+                          shuffle=True, num_workers=config['training']['num_workers'])
+
     # Store original validation metrics
     val_acc = validate_model(model, val_loader)  # Implement validation function
     model.pruning_tracker.original_metrics = {'accuracy': val_acc}
@@ -3007,7 +3014,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
                     # Perform pruning with grafting check
-                    _apply_evolutionary_pruning(model, epoch, config)
+                    _apply_evolutionary_pruning(model, epoch, config, train_loader)
                     # Update feature count after pruning
                     model.pruning_tracker.update_feature_count(model)
                     # Adjust learning rate after pruning/grafting
@@ -3142,6 +3149,19 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     return history
 
+def validate_model(model: nn.Module, data_loader: DataLoader) -> float:
+    """Perform validation on a subset of training data"""
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for data, labels in data_loader:
+            data, labels = data.to(model.device), labels.to(model.device)
+            output = model(data)
+            preds = output['class_predictions'] if isinstance(output, dict) else output[0].argmax(1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return correct / total
 
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
