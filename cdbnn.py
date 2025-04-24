@@ -149,12 +149,29 @@ class WeightEvolutionTracker:
         self.warmup_epochs = config['pruning']['warmup_epochs']
         self.prune_interval = config['pruning']['prune_interval']
         self.weight_history = defaultdict(list)
-        self.pruned_weights = {}
+        self.pruned_weights = {}  # Stores pruned weights with metadata
+        self.original_metrics = None  # Stores pre-pruning validation metrics
+        self.current_importance = defaultdict(float)
 
     def track_weights(self, epoch):
+        # Track weights and compute normalized importance scores
         for name, param in self.model.named_parameters():
             if 'conv' in name and 'weight' in name:
-                self.weight_history[name].append(param.data.abs().mean().item())
+                weights = param.data.abs().cpu().numpy()
+                self.weight_history[name].append(weights)
+
+                # Compute relative importance (L1 norm)
+                self.current_importance[name] = np.mean(weights) / (np.std(weights) + 1e-9)
+
+    def store_pruned_weights(self, name, param, epoch):
+        # Store original weights with context
+        self.pruned_weights[name] = {
+            'weights': param.data.clone(),
+            'mask': (param.data != 0).float(),  # Track active positions
+            'prune_epoch': epoch,
+            'importance': self.current_importance[name],
+            'validation_accuracy': self.original_metrics['accuracy']
+        }
 
 class PruningAttentionGate(nn.Module):
     def __init__(self, in_features):
@@ -167,6 +184,7 @@ class PruningAttentionGate(nn.Module):
         )
 
     def forward(self, x):
+        # Input x should be the actual weight tensor (flattened)
         return self.attention(x)
 #-------------------------------------Feature Pruning Ends ----------------------
 class DistanceCorrelationFeatureSelector:
@@ -2894,33 +2912,54 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _apply_evolutionary_pruning(model: nn.Module, epoch: int, config: Dict):
-    if epoch < config['pruning']['warmup_epochs']:
+def _apply_evolutionary_pruning(model, epoch, config):
+    if epoch < model.pruning_tracker.warmup_epochs:
         return
 
-    # Calculate volatility scores
-    volatility = {}
-    for name, history in model.pruning_tracker.weight_history.items():
-        if len(history) >= config['pruning']['prune_interval']:
-            recent = history[-config['pruning']['prune_interval']:]
-            volatility[name] = np.std(recent) / (np.mean(recent) + 1e-9)
+    # Store original validation metrics
+    val_acc = validate_model(model, val_loader)  # Implement validation function
+    model.pruning_tracker.original_metrics = {'accuracy': val_acc}
 
-    # Apply attention-guided pruning
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if name in volatility and 'conv' in name and 'weight' in name:
-                # Get attention score
-                vol_tensor = torch.tensor([volatility[name]], device=param.device)
-                survival_prob = model.attention_gates[name](vol_tensor)
+    # Prune weights using attention gates with actual weight values
+    for name, param in model.named_parameters():
+        if 'conv' in name and 'weight' in name:
+            # Get flattened weights and pass to attention gate
+            flat_weights = param.data.view(-1)
+            survival_prob = model.attention_gates[name](flat_weights)
 
-                if survival_prob < config['pruning']['threshold']:
-                    # Store original weights before pruning
-                    model.pruning_tracker.pruned_weights[name] = {
-                        'weights': param.clone(),
-                        'epoch': epoch,
-                        'survival_prob': survival_prob.item()
-                    }
-                    param.data *= 0  # Soft pruning
+            # Create pruning mask
+            mask = (survival_prob > config['pruning']['threshold']).float()
+
+            # Store original weights before pruning
+            model.pruning_tracker.store_pruned_weights(name, param, epoch)
+
+            # Apply mask and disable gradients for pruned weights
+            param.data *= mask
+            param.register_hook(lambda grad: grad * mask)  # Stop gradient flow
+
+    # Validate after pruning
+    new_val_acc = validate_model(model, val_loader)
+
+    # Grafting condition
+    accuracy_drop = model.pruning_tracker.original_metrics['accuracy'] - new_val_acc
+    if accuracy_drop > config['pruning']['grafting_threshold']:
+        _restore_pruned_weights(model)
+        logger.info(f"Grafting triggered at epoch {epoch}, accuracy drop: {accuracy_drop:.2f}%")
+
+def _restore_pruned_weights(model):
+    for name, param in model.named_parameters():
+        if name in model.pruning_tracker.pruned_weights:
+            # Restore original weights and mask
+            stored = model.pruning_tracker.pruned_weights[name]
+            param.data.copy_(stored['weights'])
+
+            # Restore gradient flow for all weights
+            param.register_hook(lambda grad: grad)  # Remove previous mask
+
+            # Update importance tracking
+            model.pruning_tracker.current_importance[name] = stored['importance']
+
+    model.pruning_tracker.pruned_weights.clear()
 
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
@@ -2946,9 +2985,18 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             running_loss = 0.0
             num_batches = len(train_loader)
 
-            if pruning_enabled:
-                # Track weight evolution before training steps
-                model.pruning_tracker.track_weights(epoch)
+        if pruning_enabled and epoch >= warmup_epochs:
+            # Track weights with importance metrics
+            model.pruning_tracker.track_weights(epoch)
+
+            if epoch % prune_interval == 0:
+                # Perform pruning with grafting check
+                _apply_evolutionary_pruning(model, epoch, config)
+
+                # Adjust learning rate after pruning/grafting
+                lr = optimizer.param_groups[0]['lr']
+                optimizer.param_groups[0]['lr'] = lr * config['pruning']['lr_decay']
+
 
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
@@ -4566,6 +4614,11 @@ class DatasetProcessor:
                 'l1_lambda': 0.001,
                 'retention_rate': 0.15,
                 'regrowth_interval': 10
+                'grafting_threshold': 0.05,  # 5% accuracy drop tolerance
+                'lr_decay': 0.5,  # Learning rate reduction after pruning
+                'sparsity_weight': 0.01,  # Loss coefficient for attention gates
+                'min_importance': 0.1,  # Minimum importance for grafting consideration
+                'regrowth_epochs': 5  # Epochs between pruning attempts
                 },
 
             "output": {
