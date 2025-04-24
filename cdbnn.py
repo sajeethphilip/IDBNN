@@ -281,7 +281,11 @@ class PredictionManager:
 
         # Check feature dimension compatibility
         saved_config = checkpoint['model_states'][state_key]['best']['config']
-        saved_feature_dims = saved_config['model']['feature_dims']
+        if 'model' not in saved_config:
+            saved_config['model'] = self.config['model'].copy()  # Use current model config
+            logger.warning("Legacy checkpoint detected - using current model config")
+
+        saved_feature_dims = saved_config['model'].get('feature_dims', 4096)  # Default fallback
         current_feature_dims = self.config['model']['feature_dims']
 
         if saved_feature_dims != current_feature_dims:
@@ -4278,7 +4282,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(2048, np.prod(input_size) // 4)
+        feature_dims = min(4096, np.prod(input_size) // 4)
 
         return {
             "dataset": {
