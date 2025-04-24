@@ -35,10 +35,12 @@ When predicting data with known labels, you also get
 
 ![image](https://github.com/user-attachments/assets/c2fd1ac1-c025-4237-bb68-e15f96a4aa99)
 
+# The Feature Extractor
+
+![image](https://github.com/user-attachments/assets/2e1a02c9-f66a-4585-b5ba-a90d366058fa)
 
 
-
-# What is Difference Boosting Neural Network?
+# What is the Difference Boosting Neural Network?
 
 Information is in the differences and not in the details. That is the key concept behind the Nov 2000 paper on  Boosting the differences: A fast Bayesian classifier neural network (https://doi.org/10.3233/IDA-2000-4602). It is an extension to the basic nonparametric Bayesian Probability estimate for classification.
 Though it extends the Bayesian concept of likelihood and posterior probability, the two have some fundamental differences. In the Bayesian concept, prior is the prejudice about the outcome before any observation is done and, in most implementations, is taken as a constant value to represent the belief in the outcome. In DBNN, it is a variable that is constantly updated during the learning process. Logically, the belief gets updated as information accumulates. So, in DBNN, the likelihood or evidence may remain the same, but to maximise the accuracy of the prediction, the prior belief is updated iteratively. In Neural Network terminology, this prior belief becomes the weights.
