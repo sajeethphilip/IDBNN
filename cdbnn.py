@@ -2924,7 +2924,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _apply_evolutionary_pruning(model: nn.Module, epoch: int, config: Dict, val_loader: DataLoader):
+def _apply_evolutionary_pruning(model, epoch, config):
     if epoch < model.pruning_tracker.warmup_epochs:
         return
 
@@ -2973,24 +2973,6 @@ def _restore_pruned_weights(model):
 
     model.pruning_tracker.pruned_weights.clear()
 
-def get_validation_loader(config: Dict) -> DataLoader:
-    """Get validation dataset loader"""
-    val_dir = config['dataset']['val_dir']
-    transform = get_transforms(config['dataset'])
-
-    val_dataset = CustomImageDataset(
-        data_dir=val_dir,
-        transform=transform,
-        config=config
-    )
-
-    return DataLoader(
-        val_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=False,
-        num_workers=config['training']['num_workers']
-    )
-
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
@@ -3003,7 +2985,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     checkpoint_manager = UnifiedCheckpoint(config)
     pruning_enabled = phase == 2 and config['pruning']['enabled']
     patience_counter = 0
-    val_loader = get_validation_loader(config)  # Implement based on your data setup
 
     # Pruning-related initialization
     if pruning_enabled:
@@ -3026,7 +3007,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
                     # Perform pruning with grafting check
-                    _apply_evolutionary_pruning(model, epoch, config, val_loader)
+                    _apply_evolutionary_pruning(model, epoch, config)
                     # Update feature count after pruning
                     model.pruning_tracker.update_feature_count(model)
                     # Adjust learning rate after pruning/grafting
@@ -3161,27 +3142,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     return history
 
-def validate_model(model: nn.Module, val_loader: DataLoader) -> float:
-    """Calculate validation accuracy"""
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for data, labels in val_loader:
-            data = data.to(model.device)
-            labels = labels.to(model.device)
-
-            output = model(data)
-            if isinstance(output, dict):
-                preds = output.get('class_predictions', output['cluster_assignments'])
-            else:
-                preds = output[0].argmax(dim=1)
-
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    return correct / total
 
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
