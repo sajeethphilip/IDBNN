@@ -152,6 +152,8 @@ class WeightEvolutionTracker:
         self.pruned_weights = {}  # Stores pruned weights with metadata
         self.original_metrics = None  # Stores pre-pruning validation metrics
         self.current_importance = defaultdict(float)
+        self.active_features = config['model']['feature_dims']  # Initial count
+        self.feature_history = []  # Track feature count over time
 
     def track_weights(self, epoch):
         # Track weights and compute normalized importance scores
@@ -172,6 +174,16 @@ class WeightEvolutionTracker:
             'importance': self.current_importance[name],
             'validation_accuracy': self.original_metrics['accuracy']
         }
+
+    def update_feature_count(self, model):
+        """Calculate current active features using weight masks"""
+        total_active = 0
+        for name, param in model.named_parameters():
+            if 'embedder' in name and 'weight' in name:  # Focus on embedding layer
+                mask = (param.data != 0).float()
+                total_active += mask.sum().item()
+        self.active_features = int(total_active)
+        self.feature_history.append(self.active_features)
 
 class PruningAttentionGate(nn.Module):
     def __init__(self, in_features):
@@ -2973,11 +2985,14 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     checkpoint_manager = UnifiedCheckpoint(config)
     pruning_enabled = phase == 2 and config['pruning']['enabled']
     patience_counter = 0
+
     # Pruning-related initialization
     if pruning_enabled:
         prune_interval = config['pruning']['prune_interval']
         l1_lambda = config['pruning']['l1_lambda']
         warmup_epochs = config['pruning']['warmup_epochs']
+        # Initialize feature count
+        model.pruning_tracker.update_feature_count(model)
 
     try:
         for epoch in range(start_epoch, epochs):
@@ -2985,20 +3000,25 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             running_loss = 0.0
             num_batches = len(train_loader)
 
-            if pruning_enabled and epoch >= warmup_epochs:
-                # Track weights with importance metrics
-                model.pruning_tracker.track_weights(epoch)
+            if pruning_enabled:
+                if epoch >= warmup_epochs:
+                    # Track weights with importance metrics
+                    model.pruning_tracker.track_weights(epoch)
 
-                if epoch % prune_interval == 0:
+                if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
                     # Perform pruning with grafting check
                     _apply_evolutionary_pruning(model, epoch, config)
-
+                    # Update feature count after pruning
+                    model.pruning_tracker.update_feature_count(model)
                     # Adjust learning rate after pruning/grafting
                     lr = optimizer.param_groups[0]['lr']
                     optimizer.param_groups[0]['lr'] = lr * config['pruning']['lr_decay']
 
+            # Initialize progress bar with feature count
+            pbar = tqdm(train_loader,
+                        desc=f"Phase {phase} - Epoch {epoch+1} | Features: {model.pruning_tracker.active_features}",
+                        leave=False)
 
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
@@ -3061,6 +3081,10 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                     optimizer.step()
 
+                    # Update feature count display every 10 batches
+                    if batch_idx % 10 == 0 and pruning_enabled:
+                        model.pruning_tracker.update_feature_count(model)
+
                     # Loss tracking and memory management
                     loss_value = safe_get_scalar(loss)
                     running_loss += loss_value
@@ -3070,6 +3094,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     color_status = {
                         'loss': Colors.color_value(current_avg_loss, best_loss, False),
                         'best': f"{best_loss:.4f}",
+                        'features': model.pruning_tracker.active_features,
                         'patience': patience_counter
                     }
                     pbar.set_postfix(color_status)
@@ -3087,9 +3112,9 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
-            # Pruning application
-            if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
-                _apply_evolutionary_pruning(model, epoch, config)
+            # Final feature count update at end of epoch
+            if pruning_enabled:
+                model.pruning_tracker.update_feature_count(model)
 
             # Checkpoint and early stopping
             is_best = (best_loss - avg_loss) > min_thr
