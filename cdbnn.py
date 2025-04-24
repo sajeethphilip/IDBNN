@@ -299,7 +299,7 @@ class PredictionManager:
                     # Delete checkpoint and associated files
                     files_to_remove = [
                         checkpoint_path,
-                        os.path.join(self.config['training']['checkpoint_dir'],
+                        os.path.join(self.config['training']['checkpoint_dir']),
                         os.path.join(self.config['output']['features_file'])
                     ]
 
