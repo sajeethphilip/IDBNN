@@ -2985,17 +2985,17 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             running_loss = 0.0
             num_batches = len(train_loader)
 
-        if pruning_enabled and epoch >= warmup_epochs:
-            # Track weights with importance metrics
-            model.pruning_tracker.track_weights(epoch)
+            if pruning_enabled and epoch >= warmup_epochs:
+                # Track weights with importance metrics
+                model.pruning_tracker.track_weights(epoch)
 
-            if epoch % prune_interval == 0:
-                # Perform pruning with grafting check
-                _apply_evolutionary_pruning(model, epoch, config)
+                if epoch % prune_interval == 0:
+                    # Perform pruning with grafting check
+                    _apply_evolutionary_pruning(model, epoch, config)
 
-                # Adjust learning rate after pruning/grafting
-                lr = optimizer.param_groups[0]['lr']
-                optimizer.param_groups[0]['lr'] = lr * config['pruning']['lr_decay']
+                    # Adjust learning rate after pruning/grafting
+                    lr = optimizer.param_groups[0]['lr']
+                    optimizer.param_groups[0]['lr'] = lr * config['pruning']['lr_decay']
 
 
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
