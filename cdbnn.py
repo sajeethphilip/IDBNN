@@ -2933,7 +2933,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
     checkpoint_manager = UnifiedCheckpoint(config)
     pruning_enabled = phase == 2 and config['pruning']['enabled']
-
+    patience_counter = 0
     # Pruning-related initialization
     if pruning_enabled:
         prune_interval = config['pruning']['prune_interval']
