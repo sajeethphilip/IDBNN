@@ -4613,7 +4613,7 @@ class DatasetProcessor:
                 'threshold': 0.4,
                 'l1_lambda': 0.001,
                 'retention_rate': 0.15,
-                'regrowth_interval': 10
+                'regrowth_interval': 10,
                 'grafting_threshold': 0.05,  # 5% accuracy drop tolerance
                 'lr_decay': 0.5,  # Learning rate reduction after pruning
                 'sparsity_weight': 0.01,  # Loss coefficient for attention gates
