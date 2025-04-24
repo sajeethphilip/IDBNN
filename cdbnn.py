@@ -4502,7 +4502,7 @@ class DatasetProcessor:
             "target_column": "target",
             "modelType": "Histogram",
             "feature_group_size": 2,
-            "max_combinations": 10000,
+            "max_combinations": 9000000,
             "bin_sizes": [128],
             "active_learning": {
                 "tolerance": 1.0,
