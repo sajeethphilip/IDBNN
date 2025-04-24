@@ -4573,8 +4573,8 @@ class DatasetProcessor:
                 'l1_lambda': 0.001,
                 'retention_rate': 0.15,
                 'regrowth_interval': 10
-                }
-            },
+                },
+
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
