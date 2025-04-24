@@ -19,6 +19,7 @@ import traceback
 import argparse
 import torch.nn as nn
 import torch.optim as optim
+from dcor import distance_correlation
 from torch.utils.data import DataLoader, Dataset, ConcatDataset
 import torch.nn.functional as F
 import torchvision
@@ -156,7 +157,7 @@ class DistanceCorrelationFeatureSelector:
 
         # Calculate correlation with labels
         for i in range(n_features):
-            label_corrs[i] = 1 - correlation(features[:, i], labels)
+            label_corrs[i] = distance_correlation(features[:, i], labels)
 
         return label_corrs
 
