@@ -3,6 +3,7 @@
 # Added distance correlations to filter the output features. April 12, 3:45 am
 # Fixed a bug in Prediction mode model loading April 14 2025 9:32 am
 #Finalised completely working module as on 15th April 2025
+# Feature Dimension can now be input during training instead of hardcoding to 128 April 30 11:13 PM
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -277,6 +278,50 @@ class PredictionManager:
 
         if state_key is None:
             raise ValueError("No suitable checkpoint state found with both KL divergence and class encoding")
+
+        # Check feature dimension compatibility
+        saved_config = checkpoint['model_states'][state_key]['best']['config']
+        saved_feature_dims = saved_config['model']['feature_dims']
+        current_feature_dims = self.config['model']['feature_dims']
+
+        if saved_feature_dims != current_feature_dims:
+            logger.error(f"\n{Colors.RED}Critical configuration mismatch detected:{Colors.ENDC}")
+            logger.error(f" - Checkpoint feature dimensions: {saved_feature_dims}")
+            logger.error(f" - Current configuration feature dimensions: {current_feature_dims}")
+            logger.error("\nThis mismatch prevents the model from loading properly. Choose an action:")
+
+            while True:
+                choice = input(f"{Colors.YELLOW}[1] Delete checkpoint and start fresh\n"
+                             "[2] Exit to modify configuration\n"
+                             "Choice [1/2]: {Colors.ENDC}").strip()
+
+                if choice == '1':
+                    # Delete checkpoint and associated files
+                    files_to_remove = [
+                        checkpoint_path,
+                        os.path.join(self.config['training']['checkpoint_dir'],
+                        os.path.join(self.config['output']['features_file'])
+                    ]
+
+                    for f in files_to_remove:
+                        if os.path.exists(f):
+                            os.remove(f)
+                            logger.info(f"Removed: {f}")
+
+                    logger.info(f"{Colors.GREEN}Old checkpoints removed. Please restart the application "
+                               "with your current configuration to train a new model.{Colors.ENDC}")
+                    sys.exit(0)
+
+                elif choice == '2':
+                    logger.info(f"{Colors.BLUE}Exiting. Please either:\n"
+                              "1. Update your config's 'feature_dims' to match the checkpoint\n"
+                              "2. Remove the checkpoint manually\n"
+                              "3. Change your model architecture configuration{Colors.ENDC}")
+                    sys.exit(0)
+
+                else:
+                    logger.error("Invalid choice. Please enter 1 or 2")
+
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
 
@@ -1434,7 +1479,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
+            if current_size < 1024:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
@@ -2623,9 +2668,8 @@ class ModelFactory:
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        feature_dims = config['model']['feature_dims']
+        feature_dims= config['model']['feature_dims']
 
-        # Get model type
         image_type = config['dataset'].get('image_type', 'general')
 
         # Create appropriate model with proper channel handling
@@ -2827,7 +2871,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             num_batches = len(train_loader)
 
             # Training loop
-            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
@@ -3021,6 +3065,9 @@ class ReconstructionManager:
             self.config['dataset']['input_size'][1]
         )
         feature_dims = self.config['model']['feature_dims']
+
+        logger.info(f"Main configuration saved: {self.config_path}")
+        image_type = config['dataset'].get('image_type', 'general')
 
         # Set model configuration based on saved state
         self.config['model']['autoencoder_config']['enhancements'].update({
@@ -4231,7 +4278,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+        feature_dims = min(2048, np.prod(input_size) // 4)
 
         return {
             "dataset": {
@@ -5730,6 +5777,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
+        fd= config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
+        config['model']['feature_dims']=feature_dims
+        # Get model type
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
