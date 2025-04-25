@@ -451,6 +451,7 @@ def create_default_config(name, data_dir, resize=None):
             "batch_size": 32,
             "test_fraction": 0.2,
             "random_seed": 42,
+            "max_epochs": 1000,  # Absolute maximum epochs to run
             "patience": 20,  # Number of epochs to wait without improvement
             "early_stopping_metric": "loss", # "accuracy",  # or "loss"
             "early_stopping_mode": "min"  # "max" for accuracy, "min" for loss
