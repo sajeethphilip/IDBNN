@@ -178,14 +178,20 @@ class WeightEvolutionTracker:
         }
 
     def update_feature_count(self, model):
-        """Calculate current active features using weight masks"""
-        total_active = 0
+        """Correctly count active latent features"""
+        active_features = 0
+        # Get the actual latent dimension parameter
         for name, param in model.named_parameters():
-            if 'embedder' in name and 'weight' in name:  # Focus on embedding layer
+            if 'embedder' in name and 'weight' in name:
+                # Check which output features (latent dims) have any active connections
+                # Weight shape: [out_features, in_features]
                 mask = (param.data != 0).float()
-                total_active += mask.sum().item()
-        self.active_features = int(total_active)
+                active_features = (mask.sum(dim=1) > 0).sum().item()  # Count rows with any non-zero values
+                break  # Only count once
+
+        self.active_features = active_features
         self.feature_history.append(self.active_features)
+
 
 class PruningAttentionGate(nn.Module):
     def __init__(self, in_features):
