@@ -798,7 +798,7 @@ def main():
             torch.save(model.state_dict(), model_path)
 
             # Save config
-            config_path = os.path.join(save_dir, f"{config['dataset']['name']}.conf")
+            config_path = os.path.join(save_dir, f"{config['dataset']['name']}.json")
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
 
