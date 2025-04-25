@@ -354,7 +354,7 @@ def train(model, train_loader, val_loader, config, device):
 
     # Extract features from training set
     train_features, train_labels, train_paths = extract_features(model, train_loader, device)
-
+    train_labels = [full_dataset.classes[idx] for idx in train_label_indices]  # Convert to class names
     # Create CSV file path
     csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}_features.csv")
 
@@ -514,8 +514,11 @@ def predict(model, loader, device):
         torch.cat(predictions).numpy()
     )
 
-def save_features_to_csv(features, labels, paths, csv_path):
-    """Save features with labels and paths to CSV"""
+# --------------------------
+# Modified Training Feature Saving
+# --------------------------
+def save_features_to_csv(features, labels, paths, csv_path, class_names=None):
+    """Save features with original class names during training"""
     # Convert features to list of lists
     feature_list = features.tolist() if isinstance(features, np.ndarray) else features
 
@@ -526,7 +529,8 @@ def save_features_to_csv(features, labels, paths, csv_path):
     })
 
     # Add feature columns
-    feature_df = pd.DataFrame(feature_list, columns=[f'feature_{i}' for i in range(len(feature_list[0]))])
+    feature_df = pd.DataFrame(feature_list,
+                            columns=[f'feature_{i}' for i in range(len(feature_list[0]))])
     df = pd.concat([df, feature_df], axis=1)
 
     # Save to CSV
@@ -918,8 +922,8 @@ def main():
             # Save results
             output_dir = os.path.dirname(args.output) if '/' in args.output else '.'
             os.makedirs(output_dir, exist_ok=True)
-
-            save_predictions(features, paths, predictions, args.output)
+            training_csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
+            save_predictions(features, paths, args.output, training_csv_path)
             print(f"Predictions saved to {args.output}")
 
         except Exception as e:
@@ -1026,15 +1030,28 @@ def predict(model, loader, device):
         torch.cat(predictions).numpy()
     )
 
-def save_predictions(features, paths, predictions, output_path):
-    """Save predictions to CSV with features"""
-    df = pd.DataFrame({
-        'image_path': paths,
-        'prediction': predictions,
-        'features': [f.tolist() for f in features]
-    })
-    df.to_csv(output_path, index=False)
+# --------------------------
+# Modified Prediction Saving
+# --------------------------
+def save_predictions(features, paths, output_path, training_csv_path):
+    """Save predictions with dummy labels and matching training format"""
+    # Load training CSV structure
 
+    train_df = pd.read_csv(training_csv_path, nrows=1)
+    feature_columns = [col for col in train_df.columns if col.startswith('feature_')]
+
+    # Create prediction DataFrame
+    pred_df = pd.DataFrame({
+        'path': paths,
+        'label': ['dummy_label'] * len(paths)
+    })
+
+    # Ensure feature order matches training data
+    feature_df = pd.DataFrame(features, columns=feature_columns)
+    pred_df = pd.concat([pred_df, feature_df], axis=1)
+
+    # Save with same column order as training data
+    pred_df[train_df.columns].to_csv(output_path, index=False)
 
 if __name__ == '__main__':
     main()
