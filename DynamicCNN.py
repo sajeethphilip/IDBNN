@@ -504,33 +504,40 @@ def extract_features(model, loader, device):
 # Configuration Management
 # --------------------------
 def find_class_root(start_dir):
-    """Finds the deepest directory containing immediate subdirectories with images."""
+    """Finds the directory containing immediate subdirectories with images (class folders)."""
     from collections import deque
-    queue = deque([start_dir])
-    deepest_root = None
+
+    # BFS to find the directory with class subfolders
+    queue = deque([(start_dir, 0)])
+    best_candidate = (start_dir, 0)  # (path, depth)
 
     while queue:
-        current_dir = queue.popleft()
-        has_valid_subdirs = False
+        current_dir, depth = queue.popleft()
 
-        for subdir in os.listdir(current_dir):
-            subdir_path = os.path.join(current_dir, subdir)
-            if not os.path.isdir(subdir_path):
+        # Check if current_dir has valid class subdirectories
+        class_subdirs = []
+        for entry in os.listdir(current_dir):
+            entry_path = os.path.join(current_dir, entry)
+            if not os.path.isdir(entry_path):
                 continue
 
-            # Check if any image exists in the subdirectory or its children
-            for root, _, files in os.walk(subdir_path):
-                if any(is_image_file(os.path.join(root, f)) for f in files):
-                    has_valid_subdirs = True
-                    break
+            # Check if subdirectory contains images
+            if any(is_image_file(os.path.join(entry_path, f))
+                   for f in os.listdir(entry_path)):
+                class_subdirs.append(entry_path)
 
-            if has_valid_subdirs:
-                deepest_root = current_dir
-                # Add subdirectories to explore deeper levels
-                queue.extend([os.path.join(current_dir, d) for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d))])
-                break  # Process deeper levels first
+        # Update best candidate if deeper and valid
+        if class_subdirs and depth >= best_candidate[1]:
+            best_candidate = (current_dir, depth)
 
-    return deepest_root
+        # Add subdirectories to queue
+        for entry in os.listdir(current_dir):
+            entry_path = os.path.join(current_dir, entry)
+            if os.path.isdir(entry_path):
+                queue.append((entry_path, depth + 1))
+
+    return best_candidate[0] if best_candidate[0] != start_dir else None
+
 def create_default_config(name, data_dir, resize=None):
     # Automatically determine name from data directory if not provided
     if name == 'dataset':
@@ -579,16 +586,15 @@ def create_default_config(name, data_dir, resize=None):
 
 
         # Identify valid class directories within data_root
-        class_dirs = []
-        for entry in os.listdir(data_root):
-            entry_path = os.path.join(data_root, entry)
-            if not os.path.isdir(entry_path):
-                continue
-            # Check if any images exist in this class directory
-            for root, _, files in os.walk(entry_path):
-                if any(is_image_file(os.path.join(root, f)) for f in files):
-                    class_dirs.append(entry_path)
-                    break
+         # Get class directories
+        class_dirs = [
+            os.path.join(data_root, d)
+            for d in os.listdir(data_root)
+            if os.path.isdir(os.path.join(data_root, d)) and
+               any(is_image_file(os.path.join(data_root, d, f))
+                   for f in os.listdir(os.path.join(data_root, d)))
+        ]
+
 
         if not class_dirs:
             raise ValueError(f"No valid class directories found in {data_dir}")
