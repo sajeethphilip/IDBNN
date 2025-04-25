@@ -371,6 +371,67 @@ def train(model, train_loader, val_loader, config, device):
         json.dump(config, f, indent=2)
 
     print(f"Artifacts generated:\n- {csv_path}\n- {config_path}")
+    # Create .conf file
+    conf_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.conf")
+    num_features = train_features.shape[1]
+    column_names = [f'feature_{i}' for i in range(num_features)] + ['label']
+
+    conf_data = {
+        "file_path": csv_path,
+        "column_names": column_names,
+        "separator": ",",
+        "has_header": True,
+        "target_column": "label",
+        "modelType": "Histogram",
+        "feature_group_size": 2,
+        "max_combinations": 10000,
+        "bin_sizes": [128],
+        "active_learning": {
+            "tolerance": 1.0,
+            "cardinality_threshold_percentile": 95,
+            "strong_margin_threshold": 0.3,
+            "marginal_margin_threshold": 0.1,
+            "min_divergence": 0.1
+        },
+        "training_params": {
+            "trials": 100,
+            "epochs": 1000,
+            "learning_rate": 0.001,
+            "batch_size": 128,
+            "test_fraction": 0.2,
+            "random_seed": 42,
+            "minimum_training_accuracy": 0.95,
+            "cardinality_threshold": 0.9,
+            "cardinality_tolerance": 4,
+            "n_bins_per_dim": 21,
+            "enable_adaptive": True,
+            "invert_DBNN": True,
+            "reconstruction_weight": 0.5,
+            "feedback_strength": 0.3,
+            "inverse_learning_rate": 0.001,
+            "Save_training_epochs": True,
+            "training_save_path": "training_data",
+            "enable_vectorized": False,
+            "vectorization_warning_acknowledged": False,
+            "compute_device": "auto",
+            "use_interactive_kbd": False,
+            "class_preference": True
+        },
+        "execution_flags": {
+            "train": True,
+            "train_only": False,
+            "predict": True,
+            "fresh_start": False,
+            "use_previous_model": True,
+            "gen_samples": False
+        }
+    }
+
+    with open(conf_path, 'w') as f:
+        json.dump(conf_data, f, indent=2)
+
+    print(f"- {conf_path}")
+
     return best_metric
 
 def validate(model, val_loader, device):
