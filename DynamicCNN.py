@@ -624,8 +624,8 @@ def create_default_config(name, data_dir, resize=None):
             "random_seed": 42,
             "max_epochs": 1000,  # Absolute maximum epochs to run
             "patience": 20,  # Number of epochs to wait without improvement
-            "early_stopping_metric": "loss",
-            "early_stopping_mode": "min"
+            "early_stopping_metric": "accuracy", #accuracy, loss
+            "early_stopping_mode": "max" # min,max
         }
     }
 
