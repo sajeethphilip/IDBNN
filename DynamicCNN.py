@@ -504,32 +504,28 @@ def extract_features(model, loader, device):
 # Configuration Management
 # --------------------------
 def find_dataset_root(data_dir):
-    from collections import deque
+    current_dir = os.path.abspath(data_dir)
 
-    queue = deque([data_dir])
-
-    while queue:
-        current_dir = queue.popleft()
-
-        # Check if current_dir has subdirectories that contain images (class directories)
+    while True:
+        # Check if current_dir contains valid class directories
         class_candidates = []
         for entry in os.listdir(current_dir):
             entry_path = os.path.join(current_dir, entry)
             if os.path.isdir(entry_path):
-                # Check if the entry contains any images
+                # Check if the subdirectory contains images
                 if any(is_image_file(os.path.join(entry_path, f)) for f in os.listdir(entry_path)):
                     class_candidates.append(entry_path)
 
         if class_candidates:
-            return current_dir
+            return current_dir  # Found dataset root
 
-        # Enqueue subdirectories to continue searching
-        for entry in os.listdir(current_dir):
-            entry_path = os.path.join(current_dir, entry)
-            if os.path.isdir(entry_path):
-                queue.append(entry_path)
+        # Move up one directory level
+        parent_dir = os.path.dirname(current_dir)
+        if parent_dir == current_dir:  # Reached filesystem root
+            break
+        current_dir = parent_dir
 
-    raise ValueError(f"No valid dataset structure found in {data_dir}. Required structure: a directory containing subdirectories with images.")
+    raise ValueError(f"No valid dataset structure found in {data_dir} or its parents. Required structure: a directory containing subdirectories with images.")
 
 def create_default_config(name, data_dir, resize=None):
     # Automatically determine name from data directory if not provided
