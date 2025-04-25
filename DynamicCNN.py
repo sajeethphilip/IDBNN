@@ -503,6 +503,34 @@ def extract_features(model, loader, device):
 # --------------------------
 # Configuration Management
 # --------------------------
+def find_class_root(start_dir):
+    """Finds the deepest directory containing immediate subdirectories with images."""
+    from collections import deque
+    queue = deque([start_dir])
+    deepest_root = None
+
+    while queue:
+        current_dir = queue.popleft()
+        has_valid_subdirs = False
+
+        for subdir in os.listdir(current_dir):
+            subdir_path = os.path.join(current_dir, subdir)
+            if not os.path.isdir(subdir_path):
+                continue
+
+            # Check if any image exists in the subdirectory or its children
+            for root, _, files in os.walk(subdir_path):
+                if any(is_image_file(os.path.join(root, f)) for f in files):
+                    has_valid_subdirs = True
+                    break
+
+            if has_valid_subdirs:
+                deepest_root = current_dir
+                # Add subdirectories to explore deeper levels
+                queue.extend([os.path.join(current_dir, d) for d in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, d))])
+                break  # Process deeper levels first
+
+    return deepest_root
 def create_default_config(name, data_dir, resize=None):
     # Automatically determine name from data directory if not provided
     if name == 'dataset':
@@ -541,21 +569,26 @@ def create_default_config(name, data_dir, resize=None):
     }
 
     try:
-        # First check if current directory contains images directly
-        if any(is_image_file(os.path.join(data_dir, f)) for f in os.listdir(data_dir)):
-            # If contains images, backtrack to parent directory
-            parent_dir = os.path.dirname(data_dir)
-            print(f"Backtracking to parent directory: {parent_dir}")
-            data_dir = parent_dir
-            config['dataset']['train_dir'] = parent_dir
+        # Find the appropriate data root with class directories
+        data_root = find_class_root(data_dir)
+        if not data_root:
+            raise ValueError("No directory found with subdirectories containing images.")
 
-        # Now find class directories in the current data_dir
+        config['dataset']['train_dir'] = data_root
+        config['dataset']['name'] = os.path.basename(data_root)
+
+
+        # Identify valid class directories within data_root
         class_dirs = []
-        for entry in os.listdir(data_dir):
-            entry_path = os.path.join(data_dir, entry)
-            if os.path.isdir(entry_path):
-                if any(is_image_file(os.path.join(entry_path, f)) for f in os.listdir(entry_path)):
+        for entry in os.listdir(data_root):
+            entry_path = os.path.join(data_root, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            # Check if any images exist in this class directory
+            for root, _, files in os.walk(entry_path):
+                if any(is_image_file(os.path.join(root, f)) for f in files):
                     class_dirs.append(entry_path)
+                    break
 
         if not class_dirs:
             raise ValueError(f"No valid class directories found in {data_dir}")
