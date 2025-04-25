@@ -4699,7 +4699,7 @@ class DatasetProcessor:
                 "fresh_start": False
             },
             'pruning': {
-                'enabled': True,
+                'enabled': False,
                 'warmup_epochs': 15,
                 'prune_interval': 5,
                 'threshold': 0.4,
