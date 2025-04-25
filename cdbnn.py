@@ -3012,7 +3012,7 @@ def validate_model(model: nn.Module, val_loader: DataLoader) -> float:
             # Handle different output types
             if isinstance(output, dict):
                 if 'class_predictions' in output:  # Classification
-                    preds = output['class_predictions'].argmax(1)
+                    preds = output['class_predictions']
                 elif 'cluster_assignments' in output:  # Clustering
                     preds = output['cluster_assignments']
                 else:
