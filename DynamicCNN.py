@@ -34,7 +34,43 @@ class CustomDataset(Dataset):
             self.samples = self._load_prediction_samples()
 
     def _find_classes(self):
-        classes = [d.name for d in os.scandir(self.root_dir) if d.is_dir()]
+        # Step 1: Find the first directory containing images
+        image_dir = None
+        for root, _, files in os.walk(self.root_dir):
+            for file in files:
+                if self._is_valid_file(os.path.join(root, file)):
+                    image_dir = root
+                    break
+            if image_dir is not None:
+                break
+
+        if image_dir is None:
+            raise FileNotFoundError(f"No images found in {self.root_dir}")
+
+        # Step 2: Get parent directory
+        parent_dir = os.path.dirname(image_dir)
+
+        # Step 3: Collect subdirectories of parent_dir that contain images
+        classes = []
+        for entry in os.scandir(parent_dir):
+            if entry.is_dir():
+                # Check if this subdirectory contains any images
+                has_images = False
+                for root_sub, _, files_sub in os.walk(entry.path):
+                    for file_sub in files_sub:
+                        if self._is_valid_file(os.path.join(root_sub, file_sub)):
+                            has_images = True
+                            break
+                    if has_images:
+                        classes.append(entry.name)
+                        break
+
+        if not classes:
+            raise FileNotFoundError(f"No valid class directories found in {parent_dir}")
+
+        # Update root_dir to parent_dir to reflect the correct dataset structure
+        self.root_dir = parent_dir
+
         classes.sort()
         class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
         return classes, class_to_idx
