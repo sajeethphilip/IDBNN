@@ -653,7 +653,7 @@ def parse_arguments():
     parser.add_argument('mode', choices=['train', 'predict'], help='Operation mode')
     parser.add_argument('input', help='Input path (directory/archive/torchvision name)')
     parser.add_argument('--config', help='Custom config file path')
-    parser.add_argument('--name',default ='', type=str, help='Dataset name for config')
+    parser.add_argument('--name',default =None, type=str, help='Dataset name for config')
     parser.add_argument('--resize', nargs=2, type=int, help='Resize dimensions W H')
     parser.add_argument('--output', default='predictions.csv', help='Output path for predictions')
     return parser.parse_args()
@@ -672,7 +672,7 @@ def main():
         config = create_default_config(args.name, data_dir, args.resize)
 
     # Create model directory
-    if config['dataset']['name']==''
+    if config['dataset']['name']==None:
     config['dataset']['name'] = config['dataset']['input'].split('/')[-1]
     model_dir = os.path.join("data", config['dataset']['name'], "Model")
     os.makedirs(model_dir, exist_ok=True)
