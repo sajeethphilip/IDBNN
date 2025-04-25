@@ -147,17 +147,22 @@ class DynamicCNN(nn.Module):
 # --------------------------
 # Training Utilities
 # --------------------------
-def kl_divergence_loss(features, labels):
+def kl_divergence_loss(features, labels, eps=1e-6):
     unique_labels = torch.unique(labels)
     if len(unique_labels) < 2:
         return torch.tensor(0.0, device=features.device)
+
+    # Normalize features to stabilize variance
+    features = F.normalize(features, p=2, dim=1)  # L2 normalization
 
     class_stats = []
     for lbl in unique_labels:
         mask = labels == lbl
         cls_feat = features[mask]
+        if cls_feat.size(0) == 0:
+            continue
         mean = cls_feat.mean(dim=0)
-        var = cls_feat.var(dim=0, unbiased=False) + 1e-8  # Prevent division by zero
+        var = cls_feat.var(dim=0, unbiased=False) + eps  # Increased epsilon
         class_stats.append((mean, var))
 
     kl_loss = 0.0
@@ -167,9 +172,9 @@ def kl_divergence_loss(features, labels):
             mean_i, var_i = class_stats[i]
             mean_j, var_j = class_stats[j]
 
-            # KL divergence between two Gaussians
-            kl = 0.5 * (torch.sum(torch.log(var_j) - torch.sum(torch.log(var_i))))
-            kl += 0.5 * torch.sum((var_i + (mean_i - mean_j)**2) / var_j)
+            # KL divergence with stability
+            kl = 0.5 * (torch.sum(torch.log(var_j + eps) - torch.log(var_i + eps)))
+            kl += 0.5 * torch.sum((var_i + (mean_i - mean_j)**2) / (var_j + eps))
             kl -= 0.5 * mean_i.size(0)
 
             kl_loss += kl
@@ -182,7 +187,7 @@ from tqdm import tqdm
 def train(model, train_loader, val_loader, config, device):
     optimizer = torch.optim.Adam(model.parameters(),
                                lr=config['training_params']['learning_rate'])
-    criterion = nn.CrossEntropyLoss()
+    #criterion = nn.CrossEntropyLoss()
 
     best_metric = 0
     patience_counter = 0
@@ -224,7 +229,19 @@ def train(model, train_loader, val_loader, config, device):
             optimizer.zero_grad()
             outputs, features = model(inputs)
 
-            ce_loss = criterion(outputs, labels)
+            # Custom CE loss calculation (per-class mean)
+            per_sample_loss = F.cross_entropy(outputs, labels, reduction='none')
+            unique_labels = torch.unique(labels)
+            if len(unique_labels) == 0:
+                ce_loss = torch.tensor(0.0, device=device)
+            else:
+                class_losses = []
+                for lbl in unique_labels:
+                    mask = (labels == lbl)
+                    class_loss = per_sample_loss[mask].mean()
+                    class_losses.append(class_loss)
+                ce_loss = torch.mean(torch.stack(class_losses))
+
             kl_loss = kl_divergence_loss(features, labels)
             loss = ce_loss + config['training_params']['kl_weight'] * kl_loss
 
@@ -248,7 +265,7 @@ def train(model, train_loader, val_loader, config, device):
         metrics['tr_acc'] = 100 * correct / total
 
         # Validation phase
-        val_acc, val_loss = validate(model, val_loader, criterion, device)
+        val_acc, val_loss = validate(model, val_loader, device)  # Removed criterion
         metrics['val_loss'] = val_loss
         metrics['val_acc'] = val_acc
 
@@ -303,7 +320,7 @@ def train(model, train_loader, val_loader, config, device):
     print(f"Artifacts generated:\n- {csv_path}\n- {config_path}")
     return best_metric
 
-def validate(model, val_loader, criterion, device):
+def validate(model, val_loader, device):
     model.eval()
     total_loss = 0.0
     correct = 0
@@ -320,7 +337,19 @@ def validate(model, val_loader, criterion, device):
             inputs, labels = inputs.to(device), labels.to(device)
             outputs, _ = model(inputs)
 
-            loss = criterion(outputs, labels)
+            # Custom CE loss calculation (same as in training)
+            per_sample_loss = F.cross_entropy(outputs, labels, reduction='none')
+            unique_labels = torch.unique(labels)
+            if len(unique_labels) == 0:
+                loss = torch.tensor(0.0, device=device)
+            else:
+                class_losses = []
+                for lbl in unique_labels:
+                    mask = (labels == lbl)
+                    class_loss = per_sample_loss[mask].mean()
+                    class_losses.append(class_loss)
+                loss = torch.mean(torch.stack(class_losses))
+
             total_loss += loss.item()
 
             _, predicted = torch.max(outputs.data, 1)
