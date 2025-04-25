@@ -309,7 +309,7 @@ def train(model, train_loader, val_loader, config, device):
         metrics['val_acc'] = val_acc
 
         # Early stopping logic
-        current_metric = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else -val_loss
+        current_metric = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else  val_loss
         if metric=='loss':
             if current_metric < best_metric:
                 best_metric = current_metric
