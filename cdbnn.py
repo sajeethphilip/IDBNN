@@ -2924,11 +2924,9 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-def _apply_evolutionary_pruning(model, epoch, config):
-    if epoch < model.pruning_tracker.warmup_epochs:
-        return
-
-    # Create temporary validation set (20% of current batch)
+def _apply_evolutionary_pruning(model, epoch, config, train_loader):
+    """Pruning with integrated cross-validation"""
+    # Create validation subset from training data
     val_size = int(0.2 * len(train_loader.dataset))
     train_set, val_set = random_split(train_loader.dataset,
                                     [len(train_loader.dataset) - val_size, val_size])
@@ -2936,25 +2934,18 @@ def _apply_evolutionary_pruning(model, epoch, config):
                           shuffle=True, num_workers=config['training']['num_workers'])
 
     # Store original validation metrics
-    val_acc = validate_model(model, val_loader)  # Implement validation function
+    val_acc = validate_model(model, val_loader)
     model.pruning_tracker.original_metrics = {'accuracy': val_acc}
 
-    # Prune weights using attention gates with actual weight values
+    # Perform pruning (existing code)
     for name, param in model.named_parameters():
         if 'conv' in name and 'weight' in name:
-            # Get flattened weights and pass to attention gate
             flat_weights = param.data.view(-1)
             survival_prob = model.attention_gates[name](flat_weights)
-
-            # Create pruning mask
             mask = (survival_prob > config['pruning']['threshold']).float()
-
-            # Store original weights before pruning
             model.pruning_tracker.store_pruned_weights(name, param, epoch)
-
-            # Apply mask and disable gradients for pruned weights
             param.data *= mask
-            param.register_hook(lambda grad: grad * mask)  # Stop gradient flow
+            param.register_hook(lambda grad: grad * mask)
 
     # Validate after pruning
     new_val_acc = validate_model(model, val_loader)
