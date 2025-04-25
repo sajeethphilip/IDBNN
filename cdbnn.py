@@ -20,6 +20,8 @@ import argparse
 import torch.nn as nn
 import torch.optim as optim
 from dcor import distance_correlation
+from torch.utils.data import random_split, SubsetRandomSampler
+from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, Dataset, ConcatDataset
 import torch.nn.functional as F
 import torchvision
@@ -2924,37 +2926,98 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
+from torch.utils.data import random_split, SubsetRandomSampler
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
 def _apply_evolutionary_pruning(model, epoch, config, train_loader):
-    """Pruning with integrated cross-validation"""
-    # Create validation subset from training data
-    val_size = int(0.2 * len(train_loader.dataset))
-    train_set, val_set = random_split(train_loader.dataset,
-                                    [len(train_loader.dataset) - val_size, val_size])
-    val_loader = DataLoader(val_set, batch_size=config['training']['batch_size'],
-                          shuffle=True, num_workers=config['training']['num_workers'])
+    """Perform pruning with validation and user feedback"""
+    try:
+        # Create validation subset from training data
+        logger.info("\n" + "="*60)
+        logger.info(f"Starting pruning process at epoch {epoch+1}")
+        logger.info("Creating temporary validation set from 20% of training data...")
 
-    # Store original validation metrics
-    val_acc = validate_model(model, val_loader)
-    model.pruning_tracker.original_metrics = {'accuracy': val_acc}
+        val_size = int(0.2 * len(train_loader.dataset))
+        train_set, val_set = random_split(train_loader.dataset,
+                                        [len(train_loader.dataset) - val_size, val_size])
+        val_loader = DataLoader(val_set, batch_size=config['training']['batch_size'],
+                              shuffle=True, num_workers=config['training']['num_workers'])
 
-    # Perform pruning (existing code)
-    for name, param in model.named_parameters():
-        if 'conv' in name and 'weight' in name:
-            flat_weights = param.data.view(-1)
-            survival_prob = model.attention_gates[name](flat_weights)
-            mask = (survival_prob > config['pruning']['threshold']).float()
-            model.pruning_tracker.store_pruned_weights(name, param, epoch)
-            param.data *= mask
-            param.register_hook(lambda grad: grad * mask)
+        # Validate before pruning
+        logger.info("Validating model before pruning...")
+        original_acc = validate_model(model, val_loader)
+        logger.info(f"Pre-pruning validation accuracy: {original_acc:.2%}")
+        model.pruning_tracker.original_metrics = {'accuracy': original_acc}
 
-    # Validate after pruning
-    new_val_acc = validate_model(model, val_loader)
+        # Perform pruning
+        logger.info("Applying pruning to convolutional layers...")
+        total_pruned = 0
+        for name, param in model.named_parameters():
+            if 'conv' in name and 'weight' in name:
+                original_features = (param.data != 0).sum().item()
 
-    # Grafting condition
-    accuracy_drop = model.pruning_tracker.original_metrics['accuracy'] - new_val_acc
-    if accuracy_drop > config['pruning']['grafting_threshold']:
-        _restore_pruned_weights(model)
-        logger.info(f"Grafting triggered at epoch {epoch}, accuracy drop: {accuracy_drop:.2f}%")
+                # Pruning logic
+                flat_weights = param.data.view(-1)
+                survival_prob = model.attention_gates[name](flat_weights)
+                mask = (survival_prob > config['pruning']['threshold']).float()
+
+                # Track pruning
+                pruned_features = original_features - mask.sum().item()
+                total_pruned += pruned_features
+                logger.info(f"Layer {name}: Pruned {pruned_features} features")
+
+                model.pruning_tracker.store_pruned_weights(name, param, epoch)
+                param.data *= mask
+                param.register_hook(lambda grad: grad * mask)
+
+        # Validate after pruning
+        logger.info("Validating pruned model...")
+        new_acc = validate_model(model, val_loader)
+        accuracy_drop = original_acc - new_acc
+        logger.info(f"Post-pruning validation accuracy: {new_acc:.2%} (Δ: {-accuracy_drop:.2%})")
+
+        # Grafting decision
+        if accuracy_drop > config['pruning']['grafting_threshold']:
+            logger.warning(f"Significant accuracy drop detected ({accuracy_drop:.2%}), grafting back weights...")
+            _restore_pruned_weights(model)
+            logger.info("Original weights restored for pruned layers")
+        else:
+            logger.info(f"Pruning successful. Total features removed: {total_pruned}")
+            logger.info(f"Current active features: {model.pruning_tracker.active_features}")
+
+        logger.info("="*60 + "\n")
+
+    except Exception as e:
+        logger.error(f"Pruning failed at epoch {epoch}: {str(e)}")
+        raise
+
+def validate_model(model: nn.Module, val_loader: DataLoader) -> float:
+    """Enhanced validation with support for both classification and clustering"""
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for data, labels in val_loader:
+            data, labels = data.to(model.device), labels.to(model.device)
+            output = model(data)
+
+            # Handle different output types
+            if isinstance(output, dict):
+                if 'class_predictions' in output:  # Classification
+                    preds = output['class_predictions'].argmax(1)
+                elif 'cluster_assignments' in output:  # Clustering
+                    preds = output['cluster_assignments']
+                else:
+                    raise ValueError("No valid predictions in model output")
+            else:
+                preds = output[0].argmax(1)  # Default to first output
+
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    return correct / total if total > 0 else 0.0
 
 def _restore_pruned_weights(model):
     for name, param in model.named_parameters():
@@ -3140,19 +3203,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     return history
 
-def validate_model(model: nn.Module, data_loader: DataLoader) -> float:
-    """Perform validation on a subset of training data"""
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for data, labels in data_loader:
-            data, labels = data.to(model.device), labels.to(model.device)
-            output = model(data)
-            preds = output['class_predictions'] if isinstance(output, dict) else output[0].argmax(1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-    return correct / total
 
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
