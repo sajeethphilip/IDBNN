@@ -188,8 +188,11 @@ def train(model, train_loader, val_loader, config, device):
     optimizer = torch.optim.Adam(model.parameters(),
                                lr=config['training_params']['learning_rate'])
     #criterion = nn.CrossEntropyLoss()
-
-    best_metric = 0
+    metric=config['training_params']['early_stopping_metric']
+    if metric=='loss':
+        best_metric =float('inf')
+    else:
+        best_metric = 0
     patience_counter = 0
     early_stop = False
     metrics = {
@@ -271,16 +274,30 @@ def train(model, train_loader, val_loader, config, device):
 
         # Early stopping logic
         current_metric = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else -val_loss
-        if current_metric > best_metric:
-            best_metric = current_metric
-            metrics['best_metric'] = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), f"data/{config['dataset']['name']}/best_model.pth")
+        if metric=='loss':
+            if current_metric < best_metric:
+                best_metric = current_metric
+                metrics['best_metric'] = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else val_loss
+                patience_counter = 0
+                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/best_model.pth")
+            else:
+                patience_counter += 1
+                if patience_counter >= config['training_params']['patience']:
+                    early_stop = True
+                    progress_bar.set_postfix_str("Early stopping triggered", refresh=True)
+
         else:
-            patience_counter += 1
-            if patience_counter >= config['training_params']['patience']:
-                early_stop = True
-                progress_bar.set_postfix_str("Early stopping triggered", refresh=True)
+
+            if current_metric > best_metric:
+                best_metric = current_metric
+                metrics['best_metric'] = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else val_loss
+                patience_counter = 0
+                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/best_model.pth")
+            else:
+                patience_counter += 1
+                if patience_counter >= config['training_params']['patience']:
+                    early_stop = True
+                    progress_bar.set_postfix_str("Early stopping triggered", refresh=True)
 
         # Update progress bar
         progress_bar.set_postfix({k: f"{v:.4f}" if isinstance(v, float) else v
