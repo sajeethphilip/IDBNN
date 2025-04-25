@@ -315,7 +315,7 @@ def train(model, train_loader, val_loader, config, device):
                 best_metric = current_metric
                 metrics['best_metric'] = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else val_loss
                 patience_counter = 0
-                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/best_model.pth")
+                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/Model/best_model.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= config['training_params']['patience']:
@@ -328,7 +328,7 @@ def train(model, train_loader, val_loader, config, device):
                 best_metric = current_metric
                 metrics['best_metric'] = val_acc if config['training_params']['early_stopping_metric'] == 'accuracy' else val_loss
                 patience_counter = 0
-                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/best_model.pth")
+                torch.save(model.state_dict(), f"data/{config['dataset']['name']}/Model/best_model.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= config['training_params']['patience']:
@@ -350,7 +350,7 @@ def train(model, train_loader, val_loader, config, device):
     print("\nGenerating final artifacts...")
 
     # Load best model for feature extraction
-    model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/best_model.pth"))
+    model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
 
     # Extract features from training set
     train_features, train_labels, train_paths = extract_features(model, train_loader, device)
