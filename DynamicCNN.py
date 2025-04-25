@@ -673,7 +673,7 @@ def main():
 
     # Create model directory
     if config['dataset']['name']==None:
-    config['dataset']['name'] = config['dataset']['input'].split('/')[-1]
+        config['dataset']['name'] = config['dataset']['input'].split('/')[-1]
     model_dir = os.path.join("data", config['dataset']['name'], "Model")
     os.makedirs(model_dir, exist_ok=True)
 
