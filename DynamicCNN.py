@@ -503,40 +503,33 @@ def extract_features(model, loader, device):
 # --------------------------
 # Configuration Management
 # --------------------------
-def find_class_root(start_dir):
-    """Finds the directory containing immediate subdirectories with images (class folders)."""
+def find_dataset_root(data_dir):
     from collections import deque
 
-    # BFS to find the directory with class subfolders
-    queue = deque([(start_dir, 0)])
-    best_candidate = (start_dir, 0)  # (path, depth)
+    queue = deque([data_dir])
 
     while queue:
-        current_dir, depth = queue.popleft()
+        current_dir = queue.popleft()
 
-        # Check if current_dir has valid class subdirectories
-        class_subdirs = []
-        for entry in os.listdir(current_dir):
-            entry_path = os.path.join(current_dir, entry)
-            if not os.path.isdir(entry_path):
-                continue
-
-            # Check if subdirectory contains images
-            if any(is_image_file(os.path.join(entry_path, f))
-                   for f in os.listdir(entry_path)):
-                class_subdirs.append(entry_path)
-
-        # Update best candidate if deeper and valid
-        if class_subdirs and depth >= best_candidate[1]:
-            best_candidate = (current_dir, depth)
-
-        # Add subdirectories to queue
+        # Check if current_dir has subdirectories that contain images (class directories)
+        class_candidates = []
         for entry in os.listdir(current_dir):
             entry_path = os.path.join(current_dir, entry)
             if os.path.isdir(entry_path):
-                queue.append((entry_path, depth + 1))
+                # Check if the entry contains any images
+                if any(is_image_file(os.path.join(entry_path, f)) for f in os.listdir(entry_path)):
+                    class_candidates.append(entry_path)
 
-    return best_candidate[0] if best_candidate[0] != start_dir else None
+        if class_candidates:
+            return current_dir
+
+        # Enqueue subdirectories to continue searching
+        for entry in os.listdir(current_dir):
+            entry_path = os.path.join(current_dir, entry)
+            if os.path.isdir(entry_path):
+                queue.append(entry_path)
+
+    raise ValueError(f"No valid dataset structure found in {data_dir}. Required structure: a directory containing subdirectories with images.")
 
 def create_default_config(name, data_dir, resize=None):
     # Automatically determine name from data directory if not provided
@@ -570,40 +563,33 @@ def create_default_config(name, data_dir, resize=None):
             "random_seed": 42,
             "max_epochs": 1000,  # Absolute maximum epochs to run
             "patience": 20,  # Number of epochs to wait without improvement
-            "early_stopping_metric": "loss", # "accuracy",  # or "loss"
-            "early_stopping_mode": "min"  # "max" for accuracy, "min" for loss
+            "early_stopping_metric": "loss",
+            "early_stopping_mode": "min"
         }
     }
 
     try:
-        # Find the appropriate data root with class directories
-        data_root = find_class_root(data_dir)
-        if not data_root:
-            raise ValueError("No directory found with subdirectories containing images.")
+        # Find the dataset root directory that contains subdirectories with images
+        dataset_root = find_dataset_root(data_dir)
+        config['dataset']['name'] = os.path.basename(dataset_root)
+        config['dataset']['train_dir'] = dataset_root
 
-        config['dataset']['train_dir'] = data_root
-        config['dataset']['name'] = os.path.basename(data_root)
-
-
-        # Identify valid class directories within data_root
-         # Get class directories
-        class_dirs = [
-            os.path.join(data_root, d)
-            for d in os.listdir(data_root)
-            if os.path.isdir(os.path.join(data_root, d)) and
-               any(is_image_file(os.path.join(data_root, d, f))
-                   for f in os.listdir(os.path.join(data_root, d)))
-        ]
-
+        # Get class directories
+        class_dirs = []
+        for entry in os.listdir(dataset_root):
+            entry_path = os.path.join(dataset_root, entry)
+            if os.path.isdir(entry_path):
+                # Check if this directory has images
+                if any(is_image_file(os.path.join(entry_path, f)) for f in os.listdir(entry_path)):
+                    class_dirs.append(entry_path)
 
         if not class_dirs:
-            raise ValueError(f"No valid class directories found in {data_dir}")
+            raise ValueError(f"No valid class directories found in {dataset_root}")
 
-        # Initialize dataset with found class directories
         config['dataset']['num_classes'] = len(class_dirs)
 
         # Image statistics analysis
-        size_channels = analyze_images(data_dir, [os.path.basename(d) for d in class_dirs])
+        size_channels = analyze_images(dataset_root, [os.path.basename(d) for d in class_dirs])
         sizes = [sc[0] for sc in size_channels]
         channels = [sc[1] for sc in size_channels]
 
@@ -630,33 +616,21 @@ def create_default_config(name, data_dir, resize=None):
             transforms.Resize(config['dataset']['input_size']),
             transforms.ToTensor()
         ])
-        stats_dataset = CustomDataset(data_dir, transform=transform)
+        stats_dataset = CustomDataset(dataset_root, transform=transform)
         mean, std = calculate_dataset_stats(stats_dataset)
         config['dataset']['mean'] = mean
         config['dataset']['std'] = std
 
         # Create output directory structure
-        output_dir = os.path.join("data", name)
+        output_dir = os.path.join("data", config['dataset']['name'])
         os.makedirs(output_dir, exist_ok=True)
 
     except Exception as e:
         raise RuntimeError(f"Configuration creation failed: {str(e)}\n"
                           f"Required structure:\n"
-                          f"1. Either:\n"
-                          f"{os.path.dirname(data_dir)}/\n"
-                          f"├── {os.path.basename(data_dir)}/  # Contains images directly\n"
-                          f"│   ├── image1.jpg\n"
-                          f"│   └── ...\n\n"
-                          f"2. Or:\n"
-                          f"{data_dir}/\n"
-                          f"├── Class1/  # Contains images\n"
-                          f"│   ├── image1.jpg\n"
-                          f"│   └── ...\n"
-                          f"└── Class2/  # Contains images\n"
-                          f"    ├── image2.jpg\n"
-                          f"    └── ...") from e
+                          f"Input directory should contain a subdirectory (dataset root) with subdirectories (classes) that have images.") from e
 
-    config['dataset']['model_path'] = os.path.join("data", name, "Model", "best_model.pth")
+    config['dataset']['model_path'] = os.path.join("data", config['dataset']['name'], "Model", "best_model.pth")
     return config
 
 
