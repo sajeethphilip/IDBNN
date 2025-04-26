@@ -176,7 +176,7 @@ class CustomDataset(Dataset):
 # Model Components
 # --------------------------
 class DynamicCNN(nn.Module):
-    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32):
+    def __init__(self, in_channels, num_classes, depth=7, initial_filters=32):
         super().__init__()
         self.layers = nn.ModuleList()
         current_channels = in_channels
@@ -723,7 +723,7 @@ def create_default_config(name, data_dir, resize=None):
             "train_dir": data_dir,
         },
         "model": {
-            "depth": 3,
+            "depth": 7,
             "initial_filters": 32,
             "adaptive_layers": True
         },
