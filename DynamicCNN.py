@@ -21,12 +21,16 @@ import torchvision.transforms as transforms
 # Dataset Handling Components
 # --------------------------
 class CustomDataset(Dataset):
-    def __init__(self, root_dir, transform=None, target_size=None, mode='train'):
+    def __init__(self, root_dir, transform=None, target_size=None, mode='train', class_metadata=None):
         self.root_dir = root_dir
         self.transform = transform
         self.target_size = target_size
         self.mode = mode
-
+        self.class_metadata = class_metadata
+        # Add this for prediction mode
+        if mode == 'predict' and class_metadata:
+            self.known_classes = set(class_metadata['classes'])
+            self.class_to_idx = class_metadata['class_to_idx']
         if mode in ['train', 'val']:
             self.classes, self.class_to_idx = self._find_classes()
             self.samples = self._make_dataset()
@@ -89,11 +93,32 @@ class CustomDataset(Dataset):
         return instances
 
     def _load_prediction_samples(self):
-        if os.path.isfile(self.root_dir):
-            return [self.root_dir]
-        return [os.path.join(self.root_dir, f)
-                for f in os.listdir(self.root_dir)
-                if self._is_valid_file(os.path.join(self.root_dir, f))]
+        samples = []
+        for root, _, files in os.walk(self.root_dir):
+            for fname in files:
+                path = os.path.join(root, fname)
+                if self._is_valid_file(path):
+                    # Determine label from path structure
+                    label = self._find_label_from_path(path)
+                    samples.append((path, label))
+        return samples
+
+    def _find_label_from_path(self, path):
+        if not self.class_metadata:
+            return "dummy_label"
+
+        # Check all parent directories for known classes
+        current_dir = os.path.dirname(path)
+        while True:
+            dir_name = os.path.basename(current_dir)
+            if dir_name in self.known_classes:
+                return dir_name
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:  # Reached root
+                break
+            current_dir = parent_dir
+
+        return "dummy_label"
 
     def _is_valid_file(self, path):
         valid_extensions = ('.png', '.jpg', '.jpeg', '.dcm', '.fits', '.fit')
@@ -220,7 +245,7 @@ def kl_divergence_loss(features, labels, eps=1e-6):
 
 from tqdm import tqdm
 
-def train(model, train_loader, val_loader, config, device):
+def train(model, train_loader, val_loader, config, device, full_dataset):
     optimizer = torch.optim.Adam(model.parameters(),
                                lr=config['training_params']['learning_rate'])
     #criterion = nn.CrossEntropyLoss()
@@ -348,6 +373,14 @@ def train(model, train_loader, val_loader, config, device):
 
     progress_bar.close()
     print("\nGenerating final artifacts...")
+
+     class_metadata = {
+        "classes": full_dataset.classes,
+        "class_to_idx": full_dataset.class_to_idx
+    }
+    metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+    with open(metadata_path, 'w') as f:
+        json.dump(class_metadata, f, indent=2)
 
     # Load best model for feature extraction
     model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
@@ -538,7 +571,6 @@ def save_features_to_csv(features, labels, paths, csv_path, class_names=None):
     print(f"Saved features to {csv_path} ({len(df)} rows)")
 
 def extract_features(model, loader, device):
-    """Enhanced feature extraction with progress bar"""
     model.eval()
     features = []
     labels = []
@@ -549,11 +581,11 @@ def extract_features(model, loader, device):
                    bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}")
 
         for batch in iter:
-            if len(batch) == 3:  # (inputs, labels, paths)
+            if len(batch) == 3:  # Training/validation mode
                 inputs, lbls, pths = batch
-            else:  # (inputs, paths)
+            else:  # Prediction mode (path, label)
                 inputs, pths = batch
-                lbls = [-1]*len(pths)
+                lbls = [item[1] for item in loader.dataset.samples]  # Get actual labels
 
             inputs = inputs.to(device)
             _, feats = model(inputs)
@@ -562,9 +594,7 @@ def extract_features(model, loader, device):
             labels.extend(lbls)
             paths.extend(pths)
 
-            iter.set_postfix({"processed": f"{len(paths)}/{len(loader.dataset)}"})
-
-    return np.concatenate(features), np.array(labels), paths
+    return np.concatenate(features), labels, paths
 # --------------------------
 # Configuration Management
 # --------------------------
@@ -852,7 +882,7 @@ def main():
             print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
 
             # Train the model
-            train(model, train_loader, val_loader, config, device)
+            train(model, train_loader, val_loader, config, device, full_dataset)
 
             # Save final artifacts
             save_dir = f"data/{config['dataset']['name']}"
@@ -880,6 +910,9 @@ def main():
 
     elif args.mode == 'predict':
         try:
+            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+            with open(metadata_path) as f:
+                class_metadata = json.load(f)
             # Load model
             model = DynamicCNN(
                 in_channels=config['dataset']['in_channels'],
@@ -906,7 +939,8 @@ def main():
             pred_dataset = CustomDataset(
                 data_dir,
                 transform=transform,
-                mode='predict'
+                mode='predict',
+                class_metadata=class_metadata
             )
             pred_loader = DataLoader(
                 pred_dataset,
@@ -923,7 +957,7 @@ def main():
             output_dir = os.path.dirname(args.output) if '/' in args.output else '.'
             os.makedirs(output_dir, exist_ok=True)
             training_csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
-            save_predictions(features, paths, args.output, training_csv_path)
+            save_predictions(features, paths, args.output, config)
             print(f"Predictions saved to {args.output}")
 
         except Exception as e:
@@ -1033,25 +1067,31 @@ def predict(model, loader, device):
 # --------------------------
 # Modified Prediction Saving
 # --------------------------
-def save_predictions(features, paths, output_path, training_csv_path):
-    """Save predictions with dummy labels and matching training format"""
+def save_predictions(features, paths, labels, output_path, config):
+    """Save predictions with proper labels and training-compatible format"""
     # Load training CSV structure
-
-    train_df = pd.read_csv(training_csv_path, nrows=1)
-    feature_columns = [col for col in train_df.columns if col.startswith('feature_')]
+    train_csv = os.path.join("data", config['dataset']['name'],
+                           f"{config['dataset']['name']}_features.csv")
+    train_df = pd.read_csv(train_csv, nrows=1)
 
     # Create prediction DataFrame
-    pred_df = pd.DataFrame({
+    df = pd.DataFrame({
         'path': paths,
-        'label': ['dummy_label'] * len(paths)
+        'label': labels
     })
 
-    # Ensure feature order matches training data
-    feature_df = pd.DataFrame(features, columns=feature_columns)
-    pred_df = pd.concat([pred_df, feature_df], axis=1)
+    # Add features with matching column order
+    feature_cols = [c for c in train_df.columns if c.startswith('feature_')]
+    feature_df = pd.DataFrame(features, columns=feature_cols)
+    df = pd.concat([df, feature_df], axis=1)
 
-    # Save with same column order as training data
-    pred_df[train_df.columns].to_csv(output_path, index=False)
+    # Reorder columns to match training data
+    df = df[train_df.columns]
+
+    # Save results
+    df.to_csv(output_path, index=False)
+    print(f"Saved predictions to {output_path} ({len(df)} rows)")
+
 
 if __name__ == '__main__':
     main()
