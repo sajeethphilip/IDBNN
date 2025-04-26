@@ -1078,7 +1078,7 @@ def main():
             output_dir = os.path.dirname(args.output) if '/' in args.output else '.'
             os.makedirs(output_dir, exist_ok=True)
             training_csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
-            save_predictions(features, paths, args.output, config)
+            save_predictions(features, paths, predictions,args.output, config)
             print(f"Predictions saved to {args.output}")
 
         except Exception as e:
