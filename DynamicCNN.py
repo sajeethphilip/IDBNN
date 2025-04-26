@@ -352,7 +352,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     # Try to load existing model
     if os.path.exists(model_path):
         print(f"🔁 Found existing model at {model_path}, loading weights")
-        model.load_state_dict(torch.load(model_path
+        model.load_state_dict(torch.load(model_path))
         prune_features(model, threshold=0.1)  # Prune existing model immediately
 
     # Metadata handling
