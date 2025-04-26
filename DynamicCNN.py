@@ -525,8 +525,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
         json.dump(class_metadata, f, indent=2)
 
     # Load best model for feature extraction
-    checkpoint = torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth")
-    model.load_state_dict(checkpoint['state_dict'])  # Extract state_dict from checkpoint
+    model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
     print("\nApplying final feature pruning...")
     prune_features(model, threshold=0.1)
 
@@ -538,8 +537,11 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Save pruned model version
     pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
-    # With: (save only state_dict for compatibility)
-    torch.save(model.state_dict(), pruned_model_path)  # Save raw state_dict
+    torch.save({
+        'state_dict': model.state_dict(),
+        'prune_threshold': final_threshold,
+        'config': config
+    }, pruned_model_path)
     print(f"💾 Saved pruned model to {pruned_model_path}")
 
     # Extract features from training set
@@ -1097,9 +1099,8 @@ def main():
             os.makedirs(save_dir, exist_ok=True)
 
             # Save model
-            pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
-            model.load_state_dict(torch.load(pruned_model_path))  # Load pruned version
-            torch.save(model.state_dict(), pruned_model_path)  # Overwrite with final version
+            model_path = os.path.join(save_dir, "model.pth")
+            torch.save(model.state_dict(), model_path)
 
             # Save config
             config_path = os.path.join(save_dir, f"{config['dataset']['name']}.json")
@@ -1140,11 +1141,11 @@ def main():
                 input_size=config['dataset']['input_size']  # Critical for depth calculation
             ).to(device)
 
-            model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
+            model_path = f"data/{config['dataset']['name']}/model.pth"
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model not found at {model_path}")
 
-            model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/pruned_model.pth"))
+            model.load_state_dict(torch.load(model_path))
             model.eval()
             print("Model loaded successfully")
 
