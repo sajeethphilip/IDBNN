@@ -461,6 +461,14 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
         metrics['tr_loss'] = total_loss / len(train_loader)
         metrics['tr_acc'] = 100 * correct / total
 
+        # Add periodic pruning during training
+        if config['training_params'].get('prune_during_training', False):
+            if epoch % 5 == 0:  # Prune every 5 epochs
+                current_threshold = prune_features(model,
+                                                 threshold=config['model'].get('prune_threshold', 'auto'),
+                                                 verbose=True)
+                config['model']['actual_prune_threshold'] = float(current_threshold)
+
         # Validation phase
         val_acc, val_loss = validate(model, val_loader, device)  # Removed criterion
         metrics['val_loss'] = val_loss
@@ -522,7 +530,11 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Save pruned model version
     pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
-    torch.save(model.state_dict(), pruned_model_path)
+    torch.save({
+        'state_dict': model.state_dict(),
+        'prune_threshold': final_threshold,
+        'config': config
+    }, pruned_model_path)
     print(f"💾 Saved pruned model to {pruned_model_path}")
 
     # Extract features from training set
@@ -610,18 +622,36 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     return best_metric
 
-def prune_features(model, threshold=0.1):
-    """Zero out features with magnitudes below `threshold` with verification"""
-    print(f"\n🔪 Pruning features with threshold {threshold}")
+def prune_features(model, threshold='auto', verbose=True):
+    """Prune features with dynamic threshold adjustment"""
     with torch.no_grad():
         for name, param in model.bottleneck.named_parameters():
             if "weight" in name:
-                initial_nonzero = torch.sum(torch.abs(param) > 1e-6).item()
-                mask = (torch.abs(param) > threshold).float()
+                # Calculate dynamic threshold if needed
+                if threshold == 'auto':
+                    abs_weights = torch.abs(param.data)
+                    threshold = torch.quantile(abs_weights, 0.25)  # Prune bottom 25%
+
+                # Calculate pruning statistics
+                original_nonzero = torch.sum(abs_weights > 1e-6).item()
+                mask = (abs_weights > threshold).float()
+
+                # Apply pruning
                 param.data *= mask
-                final_nonzero = torch.sum(torch.abs(param) > 1e-6).item()
-                print(f"Pruned {name}: {initial_nonzero} → {final_nonzero} weights "
-                      f"({final_nonzero/initial_nonzero:.1%} remaining)")
+
+                # Calculate post-pruning stats
+                new_nonzero = torch.sum(torch.abs(param.data) > 1e-6).item()
+                sparsity = 1 - new_nonzero / original_nonzero if original_nonzero > 0 else 0
+
+                if verbose:
+                    print(f"\n🔧 Pruning {name}:")
+                    print(f"   Threshold: {threshold:.4f}")
+                    print(f"   Weights: {original_nonzero} → {new_nonzero}")
+                    print(f"   Sparsity: {sparsity:.1%}")
+                    print(f"   Shape: {param.shape}")
+
+                return threshold  # Return actual threshold used
+
 
 def validate(model, val_loader, device):
     model.eval()
@@ -800,7 +830,10 @@ def create_default_config(name, data_dir, resize=None):
         "model": {
             "depth": 3,
             "initial_filters": 32,
-            "adaptive_layers": True
+            "adaptive_layers": True,
+            'prune_threshold': 'auto',  # Can be float or 'auto'
+            'prune_during_training': True,
+            'target_sparsity': 0.75,  # 75% weights pruned
         },
         "training_params": {
             "trials": 100,
