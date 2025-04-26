@@ -713,16 +713,17 @@ def extract_features(model, loader, device):
         for batch in iter:
             if len(batch) == 3:  # Training/validation mode
                 inputs, lbls, pths = batch
-                # Convert indices to class names using dataset's class mapping
-                class_names = [loader.dataset.dataset.classes[idx] for idx in lbls.tolist()]
-                labels.extend(class_names)
+                # Get all 3 outputs but only keep features
+                _, feats, _ = model(inputs)  # Added third unpack value
+                labels.extend(lbls.tolist())
             else:  # Prediction mode
                 inputs, pths = batch
+                inputs = inputs.to(device)
+                _, feats, _ = model(inputs)  # Added third unpack value
                 lbls = [item[1] for item in loader.dataset.samples]
                 labels.extend(lbls)
 
-            inputs = inputs.to(device)
-            _, feats = model(inputs)
+
 
             features.append(feats.cpu().numpy())
             paths.extend(pths)
