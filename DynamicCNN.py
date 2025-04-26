@@ -142,7 +142,6 @@ class CustomDataset(Dataset):
             img = self._load_image(path)
             if self.transform:
                 img = self.transform(img)
-                print(path)
             return img, path
 
     def _load_image(self, path):
