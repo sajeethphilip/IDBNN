@@ -374,7 +374,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     progress_bar.close()
     print("\nGenerating final artifacts...")
 
-     class_metadata = {
+    class_metadata = {
         "classes": full_dataset.classes,
         "class_to_idx": full_dataset.class_to_idx
     }
