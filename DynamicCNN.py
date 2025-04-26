@@ -353,8 +353,8 @@ def train(model, train_loader, val_loader, config, device):
     model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
 
     # Extract features from training set
-    train_features, train_labels, train_paths = extract_features(model, train_loader, device)
-    train_labels = [full_dataset.classes[idx] for idx in train_label_indices]  # Convert to class names
+    train_features, train_label_indices, train_paths = extract_features(model, train_loader, device)
+    train_labels = [full_dataset.classes[idx] for idx in train_label_indices]  # Convert to class na
     # Create CSV file path
     csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}_features.csv")
 
