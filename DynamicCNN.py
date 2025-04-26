@@ -467,8 +467,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
 
     # Extract features from training set
-    train_features, train_label_indices, train_paths = extract_features(model, train_loader, device)
-    train_labels = [full_dataset.classes[idx] for idx in train_label_indices]  # Convert to class na
+    train_features, train_labels, train_paths = extract_features(model, train_loader, device)
     # Create CSV file path
     csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
 
@@ -664,11 +663,12 @@ def extract_features(model, loader, device):
         for batch in iter:
             if len(batch) == 3:  # Training/validation mode
                 inputs, lbls, pths = batch
-                # Convert tensor labels to integers
-                labels.extend(lbls.tolist())
-            else:  # Prediction mode (path, label)
+                # Convert indices to class names using dataset's class mapping
+                class_names = [loader.dataset.dataset.classes[idx] for idx in lbls.tolist()]
+                labels.extend(class_names)
+            else:  # Prediction mode
                 inputs, pths = batch
-                lbls = [item[1] for item in loader.dataset.samples]  # Get actual labels
+                lbls = [item[1] for item in loader.dataset.samples]
                 labels.extend(lbls)
 
             inputs = inputs.to(device)
@@ -1161,15 +1161,23 @@ def predict(model, loader, device):
 # --------------------------
 def save_predictions(features, paths, labels, output_path, config):
     """Save predictions with proper labels and training-compatible format"""
+    # Load class metadata
+    metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    # Convert numeric labels to class names
+    class_names = [metadata['classes'][label] for label in labels]
+
     # Load training CSV structure
     train_csv = os.path.join("data", config['dataset']['name'],
                            f"{config['dataset']['name']}.csv")
     train_df = pd.read_csv(train_csv, nrows=1)
 
-    # Create prediction DataFrame
+    # Create prediction DataFrame with actual class names
     df = pd.DataFrame({
         'path': paths,
-        'label': labels
+        'label': class_names  # Use class names instead of numeric labels
     })
 
     # Add features with matching column order
