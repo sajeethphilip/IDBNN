@@ -1099,8 +1099,9 @@ def main():
             os.makedirs(save_dir, exist_ok=True)
 
             # Save model
-            model_path = os.path.join(save_dir, "model.pth")
-            torch.save(model.state_dict(), model_path)
+            pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
+            model.load_state_dict(torch.load(pruned_model_path))  # Load pruned version
+            torch.save(model.state_dict(), pruned_model_path)  # Overwrite with final version
 
             # Save config
             config_path = os.path.join(save_dir, f"{config['dataset']['name']}.json")
@@ -1141,7 +1142,7 @@ def main():
                 input_size=config['dataset']['input_size']  # Critical for depth calculation
             ).to(device)
 
-            model_path = f"data/{config['dataset']['name']}/model.pth"
+            model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model not found at {model_path}")
 
