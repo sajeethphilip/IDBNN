@@ -135,7 +135,10 @@ class CustomDataset(Dataset):
                 img = self.transform(img)
             return img, target, path
         else:
-            path = self.samples[index]
+            try:
+                path, target = self.samples[index]
+            except:
+                path = self.samples[index]
             img = self._load_image(path)
             if self.transform:
                 img = self.transform(img)
