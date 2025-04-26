@@ -175,14 +175,29 @@ class CustomDataset(Dataset):
 # --------------------------
 # Model Components
 # --------------------------
+def calculate_max_depth(H, W):
+    """Calculate maximum layers before spatial collapse."""
+    max_depth = 0
+    current_H, current_W = H, W
+    while current_H >= 2 and current_W >= 2:  # Ensure at least 2x2 after pooling
+        current_H = current_H // 2  # MaxPool2d(2) reduces size
+        current_W = current_W // 2
+        max_depth += 1
+    return max_depth
+
 class DynamicCNN(nn.Module):
-    def __init__(self, in_channels, num_classes, depth=5, initial_filters=32):
+    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28)):
         super().__init__()
         self.layers = nn.ModuleList()
         current_channels = in_channels
 
+        # Automatically calculate and limit depth
+        H, W = input_size
+        self.max_depth = calculate_max_depth(H, W)
+        self.depth = min(depth, self.max_depth)  # Use smaller of config vs max
+
         # Dynamic convolutional layers
-        for i in range(depth):
+        for i in range(self.depth):
             out_channels = initial_filters * (2 ** i)
             self.layers.append(nn.Sequential(
                 nn.Conv2d(current_channels, out_channels, 3, padding=1),
@@ -196,6 +211,9 @@ class DynamicCNN(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Linear(current_channels, num_classes)
         self.feature_dim = current_channels
+        # Warn if depth was reduced
+        if self.depth < depth:
+            print(f"⚠️ Adjusted depth from {depth} to {self.depth} for input size {input_size}")
 
     def forward(self, x):
         for layer in self.layers:
@@ -723,7 +741,7 @@ def create_default_config(name, data_dir, resize=None):
             "train_dir": data_dir,
         },
         "model": {
-            "depth": 5,
+            "depth": 3,
             "initial_filters": 32,
             "adaptive_layers": True
         },
@@ -778,6 +796,11 @@ def create_default_config(name, data_dir, resize=None):
             if not size_counts:
                 raise ValueError("Could not determine image sizes from dataset")
             config['dataset']['input_size'] = list(max(size_counts.items(), key=lambda x: x[1])[0])
+        # Calculate max depth based on input size
+        H, W = config['dataset']['input_size']
+        max_depth = calculate_max_depth(H, W)
+        # Update config with auto-calculated depth
+        config['model']['depth'] = max_depth  # Override user-provided depth
 
         # Determine color channels
         channel_counts = defaultdict(int)
@@ -906,7 +929,8 @@ def main():
         in_channels=config['dataset']['in_channels'],
         num_classes=config['dataset']['num_classes'],
         depth=config['model']['depth'],
-        initial_filters=config['model']['initial_filters']
+        initial_filters=config['model']['initial_filters'],
+        input_size=config['dataset']['input_size']  # Critical for depth calculation
     ).to(device)
 
     # Load existing model if available
@@ -957,7 +981,8 @@ def main():
                 in_channels=config['dataset']['in_channels'],
                 num_classes=config['dataset']['num_classes'],
                 depth=config['model']['depth'],
-                initial_filters=config['model']['initial_filters']
+                initial_filters=config['model']['initial_filters'],
+                input_size=config['dataset']['input_size']  # Critical for depth calculation
             ).to(device)
 
             # Print model summary
@@ -1010,7 +1035,8 @@ def main():
                 in_channels=config['dataset']['in_channels'],
                 num_classes=config['dataset']['num_classes'],
                 depth=config['model']['depth'],
-                initial_filters=config['model']['initial_filters']
+                initial_filters=config['model']['initial_filters'],
+                input_size=config['dataset']['input_size']  # Critical for depth calculation
             ).to(device)
 
             model_path = f"data/{config['dataset']['name']}/model.pth"
