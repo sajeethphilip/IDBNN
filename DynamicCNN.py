@@ -352,7 +352,9 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     # Try to load existing model
     if os.path.exists(model_path):
         print(f"🔁 Found existing model at {model_path}, loading weights")
-        model.load_state_dict(torch.load(model_path))
+        model.load_state_dict(torch.load(model_path
+        prune_features(model, threshold=0.1)  # Prune existing model immediately
+
     # Metadata handling
     existing_metadata = load_metadata(config)
 
@@ -515,6 +517,13 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Load best model for feature extraction
     model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
+    print("\nApplying final feature pruning...")
+    prune_features(model, threshold=0.1)
+
+    # Save pruned model version
+    pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
+    torch.save(model.state_dict(), pruned_model_path)
+    print(f"💾 Saved pruned model to {pruned_model_path}")
 
     # Extract features from training set
     train_features, train_labels, train_paths = extract_features(model, train_loader, device)
@@ -528,12 +537,16 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     config['file_path'] = csv_path
     config['column_names'] = ['path', 'label'] + [f'feature_{i}' for i in range(train_features.shape[1])]
 
+   # Update config to use pruned model
+    config['dataset']['model_path'] = pruned_model_path
+
     # Save final config
     config_path = os.path.join("data", config['dataset']['name'], "config.json")
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
 
     print(f"Artifacts generated:\n- {csv_path}\n- {config_path}")
+
     # Create .conf file
     conf_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.conf")
     num_features = train_features.shape[1]
@@ -596,6 +609,19 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     print(f"- {conf_path}")
 
     return best_metric
+
+def prune_features(model, threshold=0.1):
+    """Zero out features with magnitudes below `threshold` with verification"""
+    print(f"\n🔪 Pruning features with threshold {threshold}")
+    with torch.no_grad():
+        for name, param in model.bottleneck.named_parameters():
+            if "weight" in name:
+                initial_nonzero = torch.sum(torch.abs(param) > 1e-6).item()
+                mask = (torch.abs(param) > threshold).float()
+                param.data *= mask
+                final_nonzero = torch.sum(torch.abs(param) > 1e-6).item()
+                print(f"Pruned {name}: {initial_nonzero} → {final_nonzero} weights "
+                      f"({final_nonzero/initial_nonzero:.1%} remaining)")
 
 def validate(model, val_loader, device):
     model.eval()
