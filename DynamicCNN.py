@@ -713,17 +713,15 @@ def extract_features(model, loader, device):
         for batch in iter:
             if len(batch) == 3:  # Training/validation mode
                 inputs, lbls, pths = batch
-                # Get all 3 outputs but only keep features
-                _, feats, _ = model(inputs)  # Added third unpack value
+                inputs = inputs.to(device)  # Move inputs to the device
+                _, feats, _ = model(inputs)
                 labels.extend(lbls.tolist())
             else:  # Prediction mode
                 inputs, pths = batch
                 inputs = inputs.to(device)
-                _, feats, _ = model(inputs)  # Added third unpack value
+                _, feats, _ = model(inputs)
                 lbls = [item[1] for item in loader.dataset.samples]
                 labels.extend(lbls)
-
-
 
             features.append(feats.cpu().numpy())
             paths.extend(pths)
