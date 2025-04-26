@@ -1141,7 +1141,8 @@ def main():
                 input_size=config['dataset']['input_size']  # Critical for depth calculation
             ).to(device)
 
-            model_path = f"data/{config['dataset']['name']}/model.pth"
+            #model_path = f"data/{config['dataset']['name']}/model.pth"
+            model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model not found at {model_path}")
 
