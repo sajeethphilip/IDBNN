@@ -612,7 +612,7 @@ def validate(model, val_loader, device):
 
         for inputs, labels, _ in val_iter:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs, _ = model(inputs)
+            outputs, _,_ = model(inputs)
 
             # Custom CE loss calculation (same as in training)
             per_sample_loss = F.cross_entropy(outputs, labels, reduction='none')
@@ -657,11 +657,11 @@ def predict(model, loader, device):
             if len(batch) == 2:  # Predict mode returns (image, path)
                 inputs, batch_paths = batch
                 inputs = inputs.to(device)
-                outputs, feats = model(inputs)
+                outputs, feats,_ = model(inputs)
             else:
                 inputs, _, batch_paths = batch
                 inputs = inputs.to(device)
-                outputs, feats = model(inputs)
+                outputs, feats,_ = model(inputs)
 
             features.append(feats.cpu())
             paths.extend(batch_paths)
