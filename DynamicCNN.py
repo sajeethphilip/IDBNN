@@ -1027,7 +1027,7 @@ def main():
                 current_version = str(os.path.getmtime(pred_dataset.root_dir))
                 if metadata['dataset_version'] != current_version:
                     print("⚠️ Warning: Prediction data directory modified since training")
-
+            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
             with open(metadata_path) as f:
                 class_metadata = json.load(f)
             # Load model
