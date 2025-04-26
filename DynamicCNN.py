@@ -664,15 +664,17 @@ def extract_features(model, loader, device):
         for batch in iter:
             if len(batch) == 3:  # Training/validation mode
                 inputs, lbls, pths = batch
+                # Convert tensor labels to integers
+                labels.extend(lbls.tolist())
             else:  # Prediction mode (path, label)
                 inputs, pths = batch
                 lbls = [item[1] for item in loader.dataset.samples]  # Get actual labels
+                labels.extend(lbls)
 
             inputs = inputs.to(device)
             _, feats = model(inputs)
 
             features.append(feats.cpu().numpy())
-            labels.extend(lbls)
             paths.extend(pths)
 
     return np.concatenate(features), labels, paths
