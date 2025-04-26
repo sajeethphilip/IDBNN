@@ -244,8 +244,73 @@ def kl_divergence_loss(features, labels, eps=1e-6):
     return kl_loss / n_pairs if n_pairs > 0 else torch.tensor(0.0)
 
 from tqdm import tqdm
+# --------------------------
+# Metadata Management Utilities
+# --------------------------
+def get_metadata_path(config):
+    return os.path.join("data", config['dataset']['name'], "class_metadata.json")
+
+def validate_metadata(metadata, dataset):
+    """Check if existing metadata matches current dataset structure"""
+    current_classes = dataset.classes
+    current_mapping = dataset.class_to_idx
+
+    # Check class count and names
+    if metadata['classes'] != current_classes:
+        return False
+
+    # Check index mappings
+    if metadata['class_to_idx'] != current_mapping:
+        return False
+
+    return True
+
+def save_metadata(config, dataset):
+    metadata_path = get_metadata_path(config)
+    os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+
+    metadata = {
+        "classes": dataset.classes,
+        "class_to_idx": dataset.class_to_idx,
+        "dataset_version": str(os.path.getmtime(dataset.root_dir))  # Directory modification timestamp
+    }
+
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    return metadata
+
+def load_metadata(config):
+    metadata_path = get_metadata_path(config)
+    if not os.path.exists(metadata_path):
+        return None
+
+    with open(metadata_path, 'r') as f:
+        return json.load(f)
 
 def train(model, train_loader, val_loader, config, device, full_dataset):
+    # Metadata handling
+    existing_metadata = load_metadata(config)
+
+    if existing_metadata:
+        # Validate against current dataset
+        is_valid = validate_metadata(existing_metadata, full_dataset)
+
+        # Additional validation using directory modification time
+        current_version = str(os.path.getmtime(full_dataset.root_dir))
+        if existing_metadata.get('dataset_version') != current_version:
+            is_valid = False
+
+        if not is_valid:
+            print("⚠️ Existing metadata outdated. Generating new version.")
+            metadata = save_metadata(config, full_dataset)
+        else:
+            print("✅ Using existing validated metadata")
+            metadata = existing_metadata
+    else:
+        print("🆕 Creating new class metadata")
+        metadata = save_metadata(config, full_dataset)
+
+
     optimizer = torch.optim.Adam(model.parameters(),
                                lr=config['training_params']['learning_rate'])
     #criterion = nn.CrossEntropyLoss()
@@ -910,7 +975,16 @@ def main():
 
     elif args.mode == 'predict':
         try:
-            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+            metadata = load_metadata(config)
+            if not metadata:
+                raise RuntimeError("❌ Cannot predict - no training metadata exists")
+
+            # Verify dataset version if available
+            if 'dataset_version' in metadata:
+                current_version = str(os.path.getmtime(pred_dataset.root_dir))
+                if metadata['dataset_version'] != current_version:
+                    print("⚠️ Warning: Prediction data directory modified since training")
+
             with open(metadata_path) as f:
                 class_metadata = json.load(f)
             # Load model
