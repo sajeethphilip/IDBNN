@@ -1146,7 +1146,8 @@ def main():
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model not found at {model_path}")
 
-            model.load_state_dict(torch.load(model_path))
+            checkpoint = torch.load(model_path)
+            model.load_state_dict(checkpoint['state_dict'])
             model.eval()
             print("Model loaded successfully")
 
