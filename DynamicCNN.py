@@ -189,7 +189,10 @@ def calculate_max_depth(H, W):
     return max_depth
 
 class DynamicCNN(nn.Module):
-    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28)):
+    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
+            bottleneck_dim=None,  # New: Target feature dimension
+            sparsity_weight=0.01   # New: Weight for L1 regularization
+            ):
         super().__init__()
         self.layers = nn.ModuleList()
         current_channels = in_channels
@@ -212,8 +215,18 @@ class DynamicCNN(nn.Module):
 
         # Adaptive components
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(current_channels, num_classes)
-        self.feature_dim = current_channels
+        # Feature bottleneck (add this after adaptive pooling)
+        self.bottleneck = nn.Sequential(
+            nn.Linear(current_channels, bottleneck_dim) if bottleneck_dim else nn.Identity(),
+            nn.BatchNorm1d(bottleneck_dim) if bottleneck_dim else nn.Identity(),
+            nn.ReLU(inplace=True)
+        )
+        self.classifier = nn.Linear(bottleneck_dim if bottleneck_dim else current_channels, num_classes)
+
+        # Sparsity regularization
+        self.sparsity_weight = sparsity_weight
+        self.feature_dim = bottleneck_dim if bottleneck_dim else current_channels
+
         # Warn if depth was reduced
         if self.depth < depth:
             print(f"⚠️ Adjusted depth from {depth} to {self.depth} for input size {input_size}")
@@ -222,9 +235,16 @@ class DynamicCNN(nn.Module):
         for layer in self.layers:
             x = layer(x)
         x = self.adaptive_pool(x)
-        features = x.view(x.size(0), -1)
-        logits = self.classifier(features)
-        return logits, features
+        x = x.view(x.size(0), -1)
+
+        # Apply bottleneck
+        x = self.bottleneck(x)
+
+        # Sparsity: Add L1 penalty to bottleneck output
+        sparsity_loss = torch.norm(x, p=1, dim=1).mean() * self.sparsity_weight
+
+        logits = self.classifier(x)
+        return logits, x, sparsity_loss  # Return sparsity loss
 
 # --------------------------
 # Training Utilities
@@ -279,6 +299,14 @@ def get_model_path(config):
 # --------------------------
 def get_metadata_path(config):
     return os.path.join("data", config['dataset']['name'], "class_metadata.json")
+
+def prune_features(model, threshold=0.1):
+    """Zero out features with magnitudes below `threshold`."""
+    with torch.no_grad():
+        for name, param in model.bottleneck.named_parameters():
+            if "weight" in name:
+                mask = (torch.abs(param) > threshold).float()
+                param.data *= mask
 
 def validate_metadata(metadata, dataset):
     """Check if existing metadata matches current dataset structure"""
@@ -393,7 +421,8 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
             inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
-            outputs, features = model(inputs)
+            # Forward pass
+            outputs, features, sparsity_loss = model(inputs)
 
             # Custom CE loss calculation (per-class mean)
             per_sample_loss = F.cross_entropy(outputs, labels, reduction='none')
@@ -409,7 +438,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
                 ce_loss = torch.mean(torch.stack(class_losses))
 
             kl_loss = kl_divergence_loss(features, labels)
-            loss = ce_loss + config['training_params']['kl_weight'] * kl_loss
+            loss = ce_loss + config['training_params']['kl_weight'] * kl_loss+ sparsity_loss
 
             loss.backward()
             optimizer.step()
@@ -831,6 +860,11 @@ def create_default_config(name, data_dir, resize=None):
                           f"Input directory should contain a subdirectory (dataset root) with subdirectories (classes) that have images.") from e
 
     config['dataset']['model_path'] = os.path.join("data", config['dataset']['name'], "Model", "best_model.pth")
+
+    # Auto-set bottleneck dimension (e.g., 10% of original features)
+    original_dim = initial_filters * (2 ** (config['model']['depth'] - 1))
+    config['model']['bottleneck_dim'] = max(16, original_dim // 10)  # Adjust as needed
+
     return config
 
 
