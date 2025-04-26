@@ -389,7 +389,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     train_features, train_label_indices, train_paths = extract_features(model, train_loader, device)
     train_labels = [full_dataset.classes[idx] for idx in train_label_indices]  # Convert to class na
     # Create CSV file path
-    csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}_features.csv")
+    csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
 
     # Save to CSV
     save_features_to_csv(train_features, train_labels, train_paths, csv_path)
@@ -1071,7 +1071,7 @@ def save_predictions(features, paths, labels, output_path, config):
     """Save predictions with proper labels and training-compatible format"""
     # Load training CSV structure
     train_csv = os.path.join("data", config['dataset']['name'],
-                           f"{config['dataset']['name']}_features.csv")
+                           f"{config['dataset']['name']}.csv")
     train_df = pd.read_csv(train_csv, nrows=1)
 
     # Create prediction DataFrame
