@@ -862,6 +862,7 @@ def create_default_config(name, data_dir, resize=None):
     config['dataset']['model_path'] = os.path.join("data", config['dataset']['name'], "Model", "best_model.pth")
 
     # Auto-set bottleneck dimension (e.g., 10% of original features)
+    initial_filters=config['model']['initial_filters'],
     original_dim = initial_filters * (2 ** (config['model']['depth'] - 1))
     config['model']['bottleneck_dim'] = max(16, original_dim // 10)  # Adjust as needed
 
