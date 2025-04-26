@@ -501,6 +501,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
                     early_stop = True
                     progress_bar.set_postfix_str("Early stopping triggered", refresh=True)
 
+
         # Update progress bar
         progress_bar.set_postfix({k: f"{v:.4f}" if isinstance(v, float) else v
                                 for k, v in metrics.items()})
@@ -527,6 +528,12 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
     print("\nApplying final feature pruning...")
     prune_features(model, threshold=0.1)
+
+    # Final pruning and saving
+    print("\n🏁 Final model pruning:")
+    final_threshold = prune_features(model,
+                                   threshold=config['model'].get('prune_threshold', 'auto'),
+                                   verbose=True)
 
     # Save pruned model version
     pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
