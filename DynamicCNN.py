@@ -1193,24 +1193,30 @@ def find_data_root(directory):
     return None
 
 def predict(model, loader, device):
-    """Run prediction on data loader"""
     model.eval()
     features = []
     paths = []
     predictions = []
 
     with torch.no_grad():
-        for batch in loader:
-            if len(batch) == 2:  # Predict mode returns (image, path)
-                images, batch_paths = batch
-                images = images.to(device)
-                logits, feats = model(images)
-            else:
-                raise ValueError("Unexpected batch format")
+        pred_iter = tqdm(loader,
+                        desc="Predicting",
+                        bar_format="{l_bar}{bar:20}{r_bar}{bar:-20b}",
+                        postfix={"processed": "0"})
 
-            features.append(feats.cpu())
-            paths.extend(batch_paths)
-            predictions.append(torch.argmax(logits, dim=1).cpu())
+        for batch in pred_iter:
+            if len(batch) == 2:  # Predict mode returns (image, path)
+                inputs, batch_paths = batch
+                inputs = inputs.to(device)
+                outputs, feats, _ = model(inputs)  # <-- Add third unpack value
+                paths.extend(batch_paths)
+                predictions.append(torch.argmax(outputs, 1).cpu())
+
+                features.append(feats.cpu())
+
+            pred_iter.set_postfix({
+                "processed": f"{len(paths)}/{len(loader.dataset)}"
+            })
 
     return (
         torch.cat(features).numpy(),
