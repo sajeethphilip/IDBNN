@@ -525,7 +525,8 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
         json.dump(class_metadata, f, indent=2)
 
     # Load best model for feature extraction
-    model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth"))
+    checkpoint = torch.load(f"data/{config['dataset']['name']}/Model/best_model.pth")
+    model.load_state_dict(checkpoint['state_dict'])  # Extract state_dict from checkpoint
     print("\nApplying final feature pruning...")
     prune_features(model, threshold=0.1)
 
@@ -537,11 +538,8 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Save pruned model version
     pruned_model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
-    torch.save({
-        'state_dict': model.state_dict(),
-        'prune_threshold': final_threshold,
-        'config': config
-    }, pruned_model_path)
+    # With: (save only state_dict for compatibility)
+    torch.save(model.state_dict(), pruned_model_path)  # Save raw state_dict
     print(f"💾 Saved pruned model to {pruned_model_path}")
 
     # Extract features from training set
@@ -1146,7 +1144,7 @@ def main():
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model not found at {model_path}")
 
-            model.load_state_dict(torch.load(model_path))
+            model.load_state_dict(torch.load(f"data/{config['dataset']['name']}/Model/pruned_model.pth"))
             model.eval()
             print("Model loaded successfully")
 
