@@ -245,6 +245,15 @@ def kl_divergence_loss(features, labels, eps=1e-6):
 
 from tqdm import tqdm
 # --------------------------
+# Model Path Management
+# --------------------------
+def get_model_dir(config):
+    return os.path.join("data", config['dataset']['name'], "Model")
+
+def get_model_path(config):
+    return os.path.join(get_model_dir(config), "best_model.pth")
+
+# --------------------------
 # Metadata Management Utilities
 # --------------------------
 def get_metadata_path(config):
@@ -288,6 +297,13 @@ def load_metadata(config):
         return json.load(f)
 
 def train(model, train_loader, val_loader, config, device, full_dataset):
+    model_dir = get_model_dir(config)
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = get_model_path(config)
+    # Try to load existing model
+    if os.path.exists(model_path):
+        print(f"🔁 Found existing model at {model_path}, loading weights")
+        model.load_state_dict(torch.load(model_path))
     # Metadata handling
     existing_metadata = load_metadata(config)
 
@@ -893,7 +909,7 @@ def main():
 
     # Load existing model if available
     if os.path.exists(config['dataset']['model_path']):
-        print(f"Loading existing model from {config['dataset']['model_path']}")
+        print(f"🔁 Loading existing model from {config['dataset']['model_path']}")
         model.load_state_dict(torch.load(config['dataset']['model_path']))
 
     if args.mode == 'train':
