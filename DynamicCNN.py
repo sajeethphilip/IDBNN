@@ -1216,6 +1216,7 @@ def main():
                 json.dump(config, f, indent=2)
 
             # Save CSV with features
+            metadata = load_metadata(config)
             features, labels, paths = extract_features(model, train_loader, device)
             csv_path = os.path.join(save_dir, f"{config['dataset']['name']}.csv")
             save_features_to_csv(features, labels, paths, csv_path,class_metadata=metadata)
