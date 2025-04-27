@@ -930,17 +930,15 @@ def create_default_config(name, data_dir, resize=None):
         "model": {
             "type": "jnet",  # 'cnn' or 'jnet'
             "cnn_params": {
-                "depth": 3,
-                "initial_filters": 32,
                 "bottleneck_dim": None,
                 "sparsity_weight": 0.01
             },
             "jnet_params": {
-                "depth": 3,
-                "initial_filters": 32,
                 "skip_connections": True,
                 "reduced_dim": 128
             },
+            "depth": 3,
+            "initial_filters": 32
         },
         "training_params": {
             "trials": 100,
