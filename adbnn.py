@@ -5957,11 +5957,9 @@ class DBNN(GPUDBNN):
                 # Calculate metrics
                 metrics['accuracy'] = accuracy_score(y_true_np, y_pred_np)
                 metrics['classification_report'] = classification_report(
-                    y_true_np,
-                    y_pred_np,
-                    target_names=self.label_encoder.classes_
-                    if hasattr(self.label_encoder, 'classes_')
-                    else None
+                    y_true, y_pred,
+                    output_dict=True,
+                    target_names=[str(cls) for cls in self.label_encoder.classes_]
                 )
                 metrics['confusion_matrix'] = confusion_matrix(y_true_np, y_pred_np).tolist()
 
