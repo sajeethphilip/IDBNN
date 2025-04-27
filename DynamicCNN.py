@@ -375,6 +375,7 @@ def get_model_path(config):
 def get_metadata_path(config):
     return os.path.join("data", config['dataset']['name'], "class_metadata.json")
 
+
 def prune_features(model, threshold='auto', verbose=True):
     """Prune features with dynamic threshold adjustment"""
     with torch.no_grad():
