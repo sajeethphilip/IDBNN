@@ -77,7 +77,6 @@ class CustomDataset(Dataset):
 
         classes.sort()
         class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
-        print(class_to_idx, classes)
         return classes, class_to_idx
 
     def _make_dataset(self):
