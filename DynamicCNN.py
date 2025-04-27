@@ -941,7 +941,7 @@ def create_default_config(name, data_dir, resize=None):
                 "skip_connections": True,
                 "reduced_dim": 128
             },
-        }
+        },
         "training_params": {
             "trials": 100,
             "epochs": 100,
