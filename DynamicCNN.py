@@ -821,7 +821,7 @@ def predict(model, loader, device):
 def save_features_to_csv(features, labels, paths, csv_path, class_metadata=None):
     """Save features with original class names using class metadata"""
     # Convert numerical labels to class names if metadata exists
-    if class_metadata:
+    if class_metadata not None:
         idx_to_class = {v: k for k, v in class_metadata['class_to_idx'].items()}
         str_labels = [idx_to_class[label] for label in labels]
     else:
