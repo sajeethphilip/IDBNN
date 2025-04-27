@@ -1218,10 +1218,7 @@ class GPUDBNN:
         self.config = DatasetConfig.load_config(self.dataset_name)
         self.data = self._load_dataset()
 
-        # Convert target to string before encoding
-        self.data[self.target_column] = self.data[self.target_column].astype(str)
         self.target_column = self.config['target_column']
-
         if self.target_column not in self.data.columns:
             raise ValueError(
                 f"Target column '{self.target_column}' not found in dataset.\n"
@@ -1229,7 +1226,7 @@ class GPUDBNN:
             )
 
         # Fit label encoder and other fresh components
-        self.label_encoder.fit(self.data[self.target_column].astype(str))
+        self.label_encoder.fit(self.data[self.target_column])
         self.scaler = StandardScaler()
         self.feature_pairs = None
         self.likelihood_params = None
@@ -1600,9 +1597,6 @@ class DBNN(GPUDBNN):
         """Preprocess data and split into training and testing sets."""
         # Load dataset
         self.data = self._load_dataset()
-
-        # Convert target column to string type
-        self.data[self.target_column] = self.data[self.target_column].astype(str)
 
         # Preprocess features and target
         predict_mode = True if self.mode=='predict' else False
