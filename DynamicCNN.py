@@ -1135,14 +1135,14 @@ def main():
             input_size=config['dataset']['input_size'],
             **config['model']['jnet_params']
         ).to(device)
-        else:
-            model = DynamicCNN(
-                in_channels=config['dataset']['in_channels'],
-                num_classes=config['dataset']['num_classes'],
-                depth=config['model']['depth'],
-                initial_filters=config['model']['initial_filters'],
-                input_size=config['dataset']['input_size']  # Critical for depth calculation
-            ).to(device)
+    else:
+        model = DynamicCNN(
+            in_channels=config['dataset']['in_channels'],
+            num_classes=config['dataset']['num_classes'],
+            depth=config['model']['depth'],
+            initial_filters=config['model']['initial_filters'],
+            input_size=config['dataset']['input_size']  # Critical for depth calculation
+        ).to(device)
 
     # Load existing model if available
     if os.path.exists(config['dataset']['model_path']):
