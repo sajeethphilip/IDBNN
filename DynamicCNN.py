@@ -378,31 +378,36 @@ def get_metadata_path(config):
 def prune_features(model, threshold='auto', verbose=True):
     """Prune features with dynamic threshold adjustment"""
     with torch.no_grad():
-        actual_threshold = None
         for name, param in model.bottleneck.named_parameters():
-            if "0.weight" in name:  # Target only the Linear layer's weights
+            if "weight" in name:
+                # Always calculate absolute weights first
+                abs_weights = torch.abs(param.data)  # <-- Moved outside conditionals
+
                 # Calculate dynamic threshold if needed
                 if threshold == 'auto':
-                    abs_weights = torch.abs(param.data)
-                    threshold_val = torch.quantile(abs_weights, 0.25)  # Prune bottom 25%
+                    threshold_val = torch.quantile(abs_weights, 0.25)
                 else:
                     threshold_val = threshold
 
+                # Calculate pruning statistics
+                original_nonzero = torch.sum(abs_weights > 1e-6).item()
+                mask = (abs_weights > threshold_val).float()
+
                 # Apply pruning
-                mask = (torch.abs(param.data) > threshold_val).float()
-                original_nonzero = torch.sum(mask).item()
                 param.data *= mask
-                new_nonzero = torch.sum(mask).item()
-                sparsity = 1 - (new_nonzero / original_nonzero) if original_nonzero > 0 else 0
+
+                # Calculate post-pruning stats
+                new_nonzero = torch.sum(torch.abs(param.data) > 1e-6).item()
+                sparsity = 1 - new_nonzero / original_nonzero if original_nonzero > 0 else 0
 
                 if verbose:
                     print(f"\n🔧 Pruning {name}:")
                     print(f"   Threshold: {threshold_val:.4f}")
                     print(f"   Weights: {original_nonzero} → {new_nonzero}")
                     print(f"   Sparsity: {sparsity:.1%}")
+                    print(f"   Shape: {param.shape}")
 
-                actual_threshold = threshold_val
-        return actual_threshold  # Return after processing all targeted layers
+                return threshold_val  # Return actual threshold used
 
 def validate_metadata(metadata, dataset):
     """Check if existing metadata matches current dataset structure"""
