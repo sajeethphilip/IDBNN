@@ -196,7 +196,8 @@ class DynamicJNet(nn.Module):
         self.decoder_upsample = nn.ModuleList()
         self.decoder_convs = nn.ModuleList()
         self.skip_connections = skip_connections
-        self.depth = depth
+        H, W = input_size
+        self.depth = calculate_max_depth(H, W)
 
         # Encoder
         current_channels = in_channels
