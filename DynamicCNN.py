@@ -188,6 +188,76 @@ def calculate_max_depth(H, W):
         max_depth += 1
     return max_depth
 
+class DynamicJNet(nn.Module):
+    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32,
+                input_size=(224,224), skip_connections=True, reduced_dim=128):
+        super().__init__()
+        self.encoder = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+        self.skip_connections = skip_connections
+        self.depth = depth
+
+        # Encoder
+        current_channels = in_channels
+        for i in range(depth):
+            out_channels = initial_filters * (2 ** i)
+            self.encoder.append(nn.Sequential(
+                nn.Conv2d(current_channels, out_channels, 3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2)
+            ))
+            current_channels = out_channels
+
+        # Bottleneck (J-Net specific)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(current_channels, reduced_dim, 3, padding=1),
+            nn.BatchNorm2d(reduced_dim),
+            nn.ReLU(inplace=True)
+        )
+
+        # Decoder with dynamic skip connections
+        current_channels = reduced_dim
+        for i in reversed(range(depth-1)):  # One less layer than encoder
+            out_channels = initial_filters * (2 ** i)
+            if skip_connections:
+                decoder_in = current_channels + out_channels  # Add skip channel
+            else:
+                decoder_in = current_channels
+
+            self.decoder.append(nn.Sequential(
+                nn.Conv2d(decoder_in, out_channels, 3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.Upsample(scale_factor=2)
+            ))
+            current_channels = out_channels
+
+        # Final classifier
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(current_channels, num_classes)
+
+    def forward(self, x):
+        skip_features = []
+
+        # Encoder path
+        for layer in self.encoder:
+            x = layer(x)
+            skip_features.append(x)  # Store for skips
+
+        # Bottleneck
+        x = self.bottleneck(x)
+
+        # Decoder path
+        for i, layer in enumerate(self.decoder):
+            if self.skip_connections and i < len(skip_features)-1:
+                x = torch.cat([x, skip_features[-(i+2)]], dim=1)
+            x = layer(x)
+
+        # Classification
+        x = self.adaptive_pool(x).squeeze()
+        return self.classifier(x), x, 0  # Maintain interface compatibility
+
 class DynamicCNN(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
             bottleneck_dim=None,  # New: Target feature dimension
@@ -856,7 +926,12 @@ def create_default_config(name, data_dir, resize=None):
             "train_dir": data_dir,
         },
         "model": {
-            "depth": 3,
+         "type": "jnet",  # 'cnn' or 'jnet'
+        "jnet_params": {
+            "skip_connections": True,
+            "reduced_dim": 128
+        },
+           "depth": 3,
             "initial_filters": 32,
             "adaptive_layers": True,
             'prune_threshold': 'auto',  # Can be float or 'auto'
@@ -1020,6 +1095,8 @@ def calculate_dataset_stats(dataset):
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Dynamic CNN Training/Prediction')
     parser.add_argument('mode', choices=['train', 'predict'], help='Operation mode')
+    parser.add_argument('--model-type', choices=['cnn', 'jnet'],
+                   default='jnet', help='Model architecture selection')
     parser.add_argument('input', help='Input path (directory/archive/torchvision name)')
     parser.add_argument('--config', help='Custom config file path')
     parser.add_argument('--name',default ='dataset', type=str, help='Dataset name for config')
@@ -1048,13 +1125,24 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Model initialization
-    model = DynamicCNN(
-        in_channels=config['dataset']['in_channels'],
-        num_classes=config['dataset']['num_classes'],
-        depth=config['model']['depth'],
-        initial_filters=config['model']['initial_filters'],
-        input_size=config['dataset']['input_size']  # Critical for depth calculation
-    ).to(device)
+
+    if config['model']['type'] == 'jnet':
+        model = DynamicJNet(
+            in_channels=config['dataset']['in_channels'],
+            num_classes=config['dataset']['num_classes'],
+            depth=config['model']['depth'],
+            initial_filters=config['model']['initial_filters'],
+            input_size=config['dataset']['input_size'],
+            **config['model']['jnet_params']
+        ).to(device)
+        else:
+            model = DynamicCNN(
+                in_channels=config['dataset']['in_channels'],
+                num_classes=config['dataset']['num_classes'],
+                depth=config['model']['depth'],
+                initial_filters=config['model']['initial_filters'],
+                input_size=config['dataset']['input_size']  # Critical for depth calculation
+            ).to(device)
 
     # Load existing model if available
     if os.path.exists(config['dataset']['model_path']):
@@ -1100,13 +1188,23 @@ def main():
             )
 
             # Initialize model
-            model = DynamicCNN(
-                in_channels=config['dataset']['in_channels'],
-                num_classes=config['dataset']['num_classes'],
-                depth=config['model']['depth'],
-                initial_filters=config['model']['initial_filters'],
-                input_size=config['dataset']['input_size']  # Critical for depth calculation
-            ).to(device)
+            if config['model']['type'] == 'jnet':
+                model = DynamicJNet(
+                    in_channels=config['dataset']['in_channels'],
+                    num_classes=config['dataset']['num_classes'],
+                    depth=config['model']['depth'],
+                    initial_filters=config['model']['initial_filters'],
+                    input_size=config['dataset']['input_size'],
+                    **config['model']['jnet_params']
+                ).to(device)
+            else:
+                model = DynamicCNN(
+                    in_channels=config['dataset']['in_channels'],
+                    num_classes=config['dataset']['num_classes'],
+                    depth=config['model']['depth'],
+                    initial_filters=config['model']['initial_filters'],
+                    input_size=config['dataset']['input_size']  # Critical for depth calculation
+                ).to(device)
 
             # Print model summary
             print(f"Model architecture:\n{model}")
@@ -1154,13 +1252,23 @@ def main():
             with open(metadata_path) as f:
                 class_metadata = json.load(f)
             # Load model
-            model = DynamicCNN(
-                in_channels=config['dataset']['in_channels'],
-                num_classes=config['dataset']['num_classes'],
-                depth=config['model']['depth'],
-                initial_filters=config['model']['initial_filters'],
-                input_size=config['dataset']['input_size']  # Critical for depth calculation
-            ).to(device)
+            if config['model']['type'] == 'jnet':
+                model = DynamicJNet(
+                    in_channels=config['dataset']['in_channels'],
+                    num_classes=config['dataset']['num_classes'],
+                    depth=config['model']['depth'],
+                    initial_filters=config['model']['initial_filters'],
+                    input_size=config['dataset']['input_size'],
+                    **config['model']['jnet_params']
+                ).to(device)
+            else:
+                model = DynamicCNN(
+                    in_channels=config['dataset']['in_channels'],
+                    num_classes=config['dataset']['num_classes'],
+                    depth=config['model']['depth'],
+                    initial_filters=config['model']['initial_filters'],
+                    input_size=config['dataset']['input_size']  # Critical for depth calculation
+                ).to(device)
 
             #model_path = f"data/{config['dataset']['name']}/model.pth"
             model_path = f"data/{config['dataset']['name']}/Model/pruned_model.pth"
