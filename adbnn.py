@@ -1222,7 +1222,7 @@ class GPUDBNN:
         self.data[self.target_column] = self.data[self.target_column].astype(str)
         self.target_column = self.config['target_column']
 
-       if self.target_column not in self.data.columns:
+        if self.target_column not in self.data.columns:
             raise ValueError(
                 f"Target column '{self.target_column}' not found in dataset.\n"
                 f"Available columns: {list(self.data.columns)}"
