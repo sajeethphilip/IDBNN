@@ -193,7 +193,8 @@ class DynamicJNet(nn.Module):
                 input_size=(224,224), skip_connections=True, reduced_dim=128):
         super().__init__()
         self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
+        self.decoder_upsample = nn.ModuleList()
+        self.decoder_convs = nn.ModuleList()
         self.skip_connections = skip_connections
         self.depth = depth
 
@@ -209,7 +210,7 @@ class DynamicJNet(nn.Module):
             ))
             current_channels = out_channels
 
-        # Bottleneck (J-Net specific)
+        # Bottleneck
         self.bottleneck = nn.Sequential(
             nn.Conv2d(current_channels, reduced_dim, 3, padding=1),
             nn.BatchNorm2d(reduced_dim),
@@ -220,16 +221,17 @@ class DynamicJNet(nn.Module):
         current_channels = reduced_dim
         for i in reversed(range(depth-1)):  # One less layer than encoder
             out_channels = initial_filters * (2 ** i)
+            self.decoder_upsample.append(nn.Upsample(scale_factor=2))
+
             if skip_connections:
-                decoder_in = current_channels + out_channels  # Add skip channel
+                decoder_in = current_channels + initial_filters * (2 ** i)  # Add skip channels
             else:
                 decoder_in = current_channels
 
-            self.decoder.append(nn.Sequential(
+            self.decoder_convs.append(nn.Sequential(
                 nn.Conv2d(decoder_in, out_channels, 3, padding=1),
                 nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True),
-                nn.Upsample(scale_factor=2)
+                nn.ReLU(inplace=True)
             ))
             current_channels = out_channels
 
@@ -249,14 +251,15 @@ class DynamicJNet(nn.Module):
         x = self.bottleneck(x)
 
         # Decoder path
-        for i, layer in enumerate(self.decoder):
+        for i in range(len(self.decoder_upsample)):
+            x = self.decoder_upsample[i](x)  # Upsample first
             if self.skip_connections and i < len(skip_features)-1:
-                x = torch.cat([x, skip_features[-(i+2)]], dim=1)
-            x = layer(x)
+                x = torch.cat([x, skip_features[-(i+2)]], dim=1)  # Concatenate after upsampling
+            x = self.decoder_convs[i](x)  # Apply conv layers
 
         # Classification
         x = self.adaptive_pool(x).squeeze()
-        return self.classifier(x), x, 0  # Maintain interface compatibility
+        return self.classifier(x), x, 0
 
 class DynamicCNN(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
