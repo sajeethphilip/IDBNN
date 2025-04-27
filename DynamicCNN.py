@@ -1432,7 +1432,7 @@ def save_predictions(features, paths, labels, output_path, config):
         'path': paths,
         'label': class_names
     })
-
+    print(df)
     # Add features with matching column order
     feature_cols = [c for c in train_df.columns if c.startswith('feature_')]
     feature_df = pd.DataFrame(features, columns=feature_cols)
