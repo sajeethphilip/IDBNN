@@ -5962,7 +5962,11 @@ class DBNN(GPUDBNN):
                     target_names=[str(cls) for cls in self.label_encoder.classes_]
                 )
                 metrics['confusion_matrix'] = confusion_matrix(y_true_np, y_pred_np).tolist()
-
+                # For saving as string
+                metrics['classification_report_str'] =classification_report(
+                    y_true, y_pred,
+                    target_names=[str(cls) for cls in self.label_encoder.classes_]
+                )
                 # Print colored confusion matrix
                 if hasattr(self.label_encoder, 'classes_'):
                     self.print_colored_confusion_matrix(
@@ -5977,7 +5981,7 @@ class DBNN(GPUDBNN):
                 # Save metrics if output path exists
                 if output_path:
                     with open(metrics_path, 'w') as f:
-                        f.write(metrics['classification_report'])
+                        f.write(metrics['classification_report_str'])
                     print(f"{Colors.GREEN}Metrics saved to {metrics_path}{Colors.ENDC}")
 
             return {
