@@ -411,15 +411,16 @@ def prune_features(model, threshold='auto', verbose=True):
                 return threshold_val  # Return actual threshold used
 
 def validate_metadata(metadata, dataset):
-    """Check if existing metadata matches current dataset structure"""
-    current_classes = dataset.classes
+    """Check if metadata matches current dataset structure"""
+    # Get current mappings
+    current_classes = sorted(dataset.class_to_idx.keys())  # Ensure sorted comparison
     current_mapping = dataset.class_to_idx
 
-    # Check class count and names
+    # Check if metadata classes match sorted current classes
     if metadata['classes'] != current_classes:
         return False
 
-    # Check index mappings
+    # Check if class_to_idx matches exactly
     if metadata['class_to_idx'] != current_mapping:
         return False
 
@@ -429,10 +430,12 @@ def save_metadata(config, dataset):
     metadata_path = get_metadata_path(config)
     os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
 
+    # Generate sorted class list from class_to_idx keys
+    sorted_classes = sorted(dataset.class_to_idx.keys())
     metadata = {
-        "classes": dataset.classes,
-        "class_to_idx": dataset.class_to_idx,
-        "dataset_version": str(os.path.getmtime(dataset.root_dir))  # Directory modification timestamp
+        "classes": sorted_classes,
+        "class_to_idx": dataset.class_to_idx,  # Directly use the dataset's mapping
+        "dataset_version": str(os.path.getmtime(dataset.root_dir))
     }
 
     with open(metadata_path, 'w') as f:
@@ -652,7 +655,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
 
     # Save to CSV
-    save_features_to_csv(train_features, train_labels, train_paths, csv_path)
+    save_features_to_csv(train_features, train_labels, train_paths, csv_path, class_metadata=metadata)
 
     # Update config with CSV info
     config['file_path'] = csv_path
@@ -814,20 +817,24 @@ def predict(model, loader, device):
 # --------------------------
 # Modified Training Feature Saving
 # --------------------------
-def save_features_to_csv(features, labels, paths, csv_path, class_names=None):
-    """Save features with original class names during training"""
-    # Convert features to list of lists
-    feature_list = features.tolist() if isinstance(features, np.ndarray) else features
+def save_features_to_csv(features, labels, paths, csv_path, class_metadata=None):
+    """Save features with original class names using class metadata"""
+    # Convert numerical labels to class names if metadata exists
+    if class_metadata:
+        idx_to_class = {v: k for k, v in class_metadata['class_to_idx'].items()}
+        str_labels = [idx_to_class[label] for label in labels]
+    else:
+        str_labels = labels  # Fallback to numerical labels
 
     # Create DataFrame
     df = pd.DataFrame({
         'path': paths,
-        'label': labels
+        'label': str_labels
     })
 
     # Add feature columns
-    feature_df = pd.DataFrame(feature_list,
-                            columns=[f'feature_{i}' for i in range(len(feature_list[0]))])
+    feature_df = pd.DataFrame(features.tolist() if isinstance(features, np.ndarray) else features,
+                            columns=[f'feature_{i}' for i in range(features.shape[1])])
     df = pd.concat([df, feature_df], axis=1)
 
     # Save to CSV
@@ -1406,24 +1413,24 @@ def predict(model, loader, device):
 # Modified Prediction Saving
 # --------------------------
 def save_predictions(features, paths, labels, output_path, config):
-    """Save predictions with proper labels and training-compatible format"""
+    """Save predictions using class metadata"""
     # Load class metadata
     metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
     with open(metadata_path) as f:
         metadata = json.load(f)
 
     # Convert numeric labels to class names
-    class_names = [metadata['classes'][label] for label in labels]
+    idx_to_class = {v: k for k, v in metadata['class_to_idx'].items()}
+    class_names = [idx_to_class[label] for label in labels]
 
     # Load training CSV structure
-    train_csv = os.path.join("data", config['dataset']['name'],
-                           f"{config['dataset']['name']}.csv")
+    train_csv = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
     train_df = pd.read_csv(train_csv, nrows=1)
 
-    # Create prediction DataFrame with actual class names
+    # Create prediction DataFrame with class names
     df = pd.DataFrame({
         'path': paths,
-        'label': class_names  # Use class names instead of numeric labels
+        'label': class_names
     })
 
     # Add features with matching column order
