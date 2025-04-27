@@ -359,10 +359,12 @@ from tqdm import tqdm
 # Model Path Management
 # --------------------------
 def get_model_dir(config):
-    return os.path.join("data", config['dataset']['name'], "Model")
+   return os.path.join("data", config['dataset']['name'],
+                      f"Model_{config['model']['type']}")
 
 def get_model_path(config):
-    return os.path.join(get_model_dir(config), "best_model.pth")
+    model_type = config['model']['type']
+    return os.path.join(get_model_dir(config), f"best_{model_type}.pth")
 
 # --------------------------
 # Metadata Management Utilities
@@ -926,18 +928,20 @@ def create_default_config(name, data_dir, resize=None):
             "train_dir": data_dir,
         },
         "model": {
-         "type": "jnet",  # 'cnn' or 'jnet'
-        "jnet_params": {
-            "skip_connections": True,
-            "reduced_dim": 128
-        },
-           "depth": 3,
-            "initial_filters": 32,
-            "adaptive_layers": True,
-            'prune_threshold': 'auto',  # Can be float or 'auto'
-            'prune_during_training': True,
-            'target_sparsity': 0.75,  # 75% weights pruned
-        },
+            "type": "jnet",  # 'cnn' or 'jnet'
+            "cnn_params": {
+                "depth": 3,
+                "initial_filters": 32,
+                "bottleneck_dim": None,
+                "sparsity_weight": 0.01
+            },
+            "jnet_params": {
+                "depth": 3,
+                "initial_filters": 32,
+                "skip_connections": True,
+                "reduced_dim": 128
+            },
+
         "training_params": {
             "trials": 100,
             "epochs": 100,
@@ -1093,9 +1097,9 @@ def calculate_dataset_stats(dataset):
 # Main Execution
 # --------------------------
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='Dynamic CNN Training/Prediction')
+    parser = argparse.ArgumentParser(description='Dynamic CNN/J-Net Training/Prediction')
     parser.add_argument('mode', choices=['train', 'predict'], help='Operation mode')
-    parser.add_argument('--model-type', choices=['cnn', 'jnet'],
+    parser.add_argument('--model_type', choices=['cnn', 'jnet'],
                    default='jnet', help='Model architecture selection')
     parser.add_argument('input', help='Input path (directory/archive/torchvision name)')
     parser.add_argument('--config', help='Custom config file path')
@@ -1123,7 +1127,8 @@ def main():
 
     # Device setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    if args.model_type:
+        config['model']['type'] = args.model_type
     # Model initialization
 
     if config['model']['type'] == 'jnet':
