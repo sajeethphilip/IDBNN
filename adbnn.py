@@ -6458,7 +6458,7 @@ def load_or_create_config(config_path: str) -> dict:
 
 
     # Update global variables based on the configuration file
-    global Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+    global predict_mode, Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
 
     # Update Train_device based on the compute_device setting in the configuration file
     Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
