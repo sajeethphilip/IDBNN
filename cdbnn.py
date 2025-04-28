@@ -156,6 +156,7 @@ class WeightEvolutionTracker:
         self.current_importance = defaultdict(float)
         self.active_features = config['model']['feature_dims']  # Initial count
         self.feature_history = []  # Track feature count over time
+        self.active_indices = list(range(config['model']['feature_dims']))  # Track active feature indices
 
     def track_weights(self, epoch):
         # Track weights and compute normalized importance scores
@@ -178,18 +179,16 @@ class WeightEvolutionTracker:
         }
 
     def update_feature_count(self, model):
-        """Correctly count active latent features"""
-        active_features = 0
-        # Get the actual latent dimension parameter
+        """Update active feature indices based on non-zero weights in the embedder layer."""
+        active_indices = []
         for name, param in model.named_parameters():
             if 'embedder' in name and 'weight' in name:
-                # Check which output features (latent dims) have any active connections
-                # Weight shape: [out_features, in_features]
                 mask = (param.data != 0).float()
-                active_features = (mask.sum(dim=1) > 0).sum().item()  # Count rows with any non-zero values
-                break  # Only count once
-
-        self.active_features = active_features
+                active_mask = (mask.sum(dim=1) > 0)
+                active_indices = torch.where(active_mask)[0].tolist()
+                self.active_features = len(active_indices)
+                self.active_indices = active_indices  # Store indices
+                break
         self.feature_history.append(self.active_features)
 
 
@@ -1134,40 +1133,60 @@ class BaseAutoencoder(nn.Module):
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
         """
-        Prepare DataFrame from features with optional distance correlation selection.
+        Prepare DataFrame from features with metadata about active/selected features.
 
         Args:
             features: Dictionary containing 'embeddings', 'labels', etc.
             dc_config: Distance correlation config or None if disabled
 
         Returns:
-            pd.DataFrame: Processed features with metadata
+            pd.DataFrame: Processed features with metadata including all features,
+                          active status, and selection status
         """
         data = {}
 
         # Convert features to numpy
         embeddings = features['embeddings'].cpu().numpy()
         labels = features.get('labels', torch.zeros(len(embeddings))).cpu().numpy()
+        num_features = embeddings.shape[1]
 
-        # Apply feature selection if enabled
+        # 1. Include ALL features in the CSV (pruned and active)
+        for i in range(num_features):
+            data[f'feature_{i}'] = embeddings[:, i]
+
+        # 2. Add active/pruned status from pruning tracker
+        active_indices = self.pruning_tracker.active_indices
+        data['is_active'] = [i in active_indices for i in range(num_features)]
+
+        # 3. Initialize selection status column
+        data['is_selected'] = [False] * num_features  # Default to not selected
+
+        # 4. Apply feature selection only on active features if enabled
         if dc_config and dc_config.get('use_distance_correlation', True):
+            # Get embeddings for active features only
+            embeddings_active = embeddings[:, active_indices]
+
+            # Perform feature selection on active features
             selector = DistanceCorrelationFeatureSelector(
                 upper_threshold=dc_config['distance_correlation_upper'],
                 lower_threshold=dc_config['distance_correlation_lower']
             )
-            selected_indices, corr_values = selector.select_features(embeddings, labels)
+            selected_active_indices, corr_values = selector.select_features(embeddings_active, labels)
 
-            # Store selected features with metadata
-            for new_idx, orig_idx in enumerate(selected_indices):
-                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = orig_idx
-                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
+            # Map back to original feature indices
+            selected_original_indices = [active_indices[i] for i in selected_active_indices]
+
+            # Update selection status and add correlations
+            for idx, orig_idx in enumerate(selected_original_indices):
+                data['is_selected'][orig_idx] = True
+                data[f'feature_{orig_idx}_correlation'] = corr_values[idx]
         else:
-            # Store all features without selection
-            for i in range(embeddings.shape[1]):
-                data[f'feature_{i}'] = embeddings[:, i]
+            # If no selection, mark all active features as selected
+            for idx in active_indices:
+                data['is_selected'][idx] = True
+                data[f'feature_{idx}_correlation'] = 1.0  # Default correlation value
 
-        # Add labels and metadata
+        # 5. Add labels and metadata
         if 'class_names' in features:
             data['target'] = features['class_names']
         else:
@@ -1177,7 +1196,6 @@ class BaseAutoencoder(nn.Module):
             data['filename'] = features['filenames']
 
         return pd.DataFrame(data)
-
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -1212,17 +1230,7 @@ class BaseAutoencoder(nn.Module):
 
     def generate_configuration(self, features_path: str,
                              output_dir: str = None) -> str:
-        """
-        Generate final .conf configuration file from extracted features.
-        Should be called after save_features().
-
-        Args:
-            features_path: Path to saved features CSV
-            output_dir: Optional output directory (default: same as features)
-
-        Returns:
-            Path to generated .conf file
-        """
+        """Generate final .conf file using only selected active features"""
         try:
             if output_dir is None:
                 output_dir = os.path.dirname(features_path)
@@ -1230,41 +1238,35 @@ class BaseAutoencoder(nn.Module):
 
             # Load features and metadata
             features_df = pd.read_csv(features_path)
-            metadata_path = os.path.join(output_dir, 'feature_selection_metadata.json')
 
-            # Get config settings
-            dc_config = self._get_distance_correlation_config(output_dir)
-            use_dc = dc_config.get('use_distance_correlation', True)
+            # Filter for selected features
+            selected_features = features_df.loc[features_df['is_selected'] == True]
 
-            # Prepare base configuration
+            # Prepare configuration data
             config = {
                 'dataset': self.config['dataset']['name'],
-                'feature_count': len([c for c in features_df.columns
-                                     if c.startswith('feature_')]),
+                'feature_count': len(selected_features),
+                'active_feature_count': sum(features_df['is_active']),
+                'selected_feature_count': len(selected_features),
                 'generated_at': datetime.now().isoformat(),
                 'feature_selection': {
-                    'method': 'distance_correlation' if use_dc else 'none',
-                    'parameters': dc_config if use_dc else {}
+                    'method': 'distance_correlation' if self.config['model'].get('use_distance_correlation') else 'none',
+                    'parameters': self.config.get('distance_correlation', {}),
+                    'selected_features': []
                 }
             }
 
-            # Add feature-specific info if selection was used
-            if use_dc and os.path.exists(metadata_path):
-                with open(metadata_path, 'r') as f:
-                    metadata = json.load(f)
-                config['feature_selection'].update({
-                    'original_feature_count': metadata['original_feature_count'],
-                    'selected_features': [
-                        {'name': col, 'original_index': features_df[f'original_feature_idx_{i}'][0],
-                         'correlation': features_df[f'feature_{i}_correlation'][0]}
-                        for i, col in enumerate([c for c in features_df.columns
-                                               if c.startswith('feature_')])
-                    ]
+            # Add selected feature details
+            for idx in selected_features.index:
+                orig_idx = features_df.at[idx, 'original_feature_idx']
+                config['feature_selection']['selected_features'].append({
+                    'name': f'feature_{idx}',
+                    'original_index': orig_idx,
+                    'correlation': features_df.at[idx, f'feature_{orig_idx}_correlation']
                 })
 
             # Save .conf file
-            conf_path = os.path.join(output_dir,
-                                    f"{self.config['dataset']['name']}.conf")
+            conf_path = os.path.join(output_dir, f"{self.config['dataset']['name']}.conf")
             with open(conf_path, 'w') as f:
                 json.dump(config, f, indent=4)
 
