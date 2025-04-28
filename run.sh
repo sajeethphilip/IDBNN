@@ -18,7 +18,7 @@ git pull
 case $mode in
   "fresh")
     echo "Cleaning..."
-    rm -rf "data/${data_name}/Model/"
+    rm -rf "data/${data_name}/"
     rm -rf Model/*"${data_name}"_*
     ;;&
   "train" | "all"| "fresh")
