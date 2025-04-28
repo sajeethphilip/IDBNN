@@ -3,6 +3,9 @@
 # Prompt for data name
 read -p "Enter data name (e.g., galaxies): " data_name
 
+# Prompt for data path
+read -p "Enter data path (e.g., Data/galaxies): " data_path
+
 # Prompt for mode (train/predict/all)
 read -p "Enter mode (train/predict/all/fresh): " mode
 
@@ -15,18 +18,18 @@ git pull
 case $mode in
   "fresh")
     echo "Cleaning..."
-    rm -rf "data/${data_name}/Model/"
+    rm -rf "data/${data_name}/"
     rm -rf Model/*"${data_name}"_*
     ;;&
   "train" | "all"| "fresh")
-    
+
     echo "Running training..."
-    python DynamicCNN.py train "$data_name"
+    python DynamicCNN.py train "$data_path" --name "$data_name"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
     ;;&  # Continue to next case (executes predict if mode is "all")
   "predict" | "all" | "fresh")
     echo "Running prediction..."
-    python DynamicCNN.py predict "$data_name"
+    python DynamicCNN.py predict "$data_name" --name "$data_name"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict
     ;;
   *)

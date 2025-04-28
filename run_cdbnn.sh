@@ -16,11 +16,11 @@ git pull
 case $mode in
   "fresh")
     echo "Cleaning..."
-    rm -rf "data/${data_name}/Model/"
+    rm -rf "data/${data_name}/"
     rm -rf Model/*"${data_name}"_*
     ;;&
   "train" | "all"| "fresh")
-    
+
     echo "Running training..."
     python cdbnn.py --mode train --data_name "$data_name" --input_path "$input_path"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
