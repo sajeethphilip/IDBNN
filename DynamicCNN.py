@@ -667,7 +667,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Update config with CSV info
     config['file_path'] = csv_path
-    config['column_names'] = ['filepath', 'label'] + [f'feature_{i}' for i in range(train_features.shape[1])]
+    config['column_names'] = ['filepath', 'target'] + [f'feature_{i}' for i in range(train_features.shape[1])]
 
    # Update config to use pruned model
     config['dataset']['model_path'] = pruned_model_path
@@ -682,14 +682,14 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
     # Create .conf file
     conf_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.conf")
     num_features = train_features.shape[1]
-    column_names = [f'feature_{i}' for i in range(num_features)] + ['label']
+    column_names = [f'feature_{i}' for i in range(num_features)] + ['target']
 
     conf_data = {
         "file_path": csv_path,
         "column_names": column_names,
         "separator": ",",
         "has_header": True,
-        "target_column": "label",
+        "target_column": "target",
         "modelType": "Histogram",
         "feature_group_size": 2,
         "max_combinations": 10000,
@@ -837,7 +837,7 @@ def save_features_to_csv(features, labels, paths, csv_path, class_metadata=None)
     # Create DataFrame
     df = pd.DataFrame({
         'filepath': paths,
-        'label': str_labels
+        'target': str_labels
     })
 
     # Add feature columns
@@ -1439,7 +1439,7 @@ def save_predictions(features, paths, labels, output_path, config):
     # Create prediction DataFrame with class names
     df = pd.DataFrame({
         'filepath': paths,
-        'label': class_names
+        'target': class_names
     })
     # Add features with matching column order
     feature_cols = [c for c in train_df.columns if c.startswith('feature_')]
