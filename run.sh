@@ -24,12 +24,12 @@ case $mode in
   "train" | "all"| "fresh")
 
     echo "Running training..."
-    python DynamicCNN.py train "$data_path"
+    python DynamicCNN.py train "$data_path" --name "$data_name"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
     ;;&  # Continue to next case (executes predict if mode is "all")
   "predict" | "all" | "fresh")
     echo "Running prediction..."
-    python DynamicCNN.py predict "$data_name"
+    python DynamicCNN.py predict "$data_name" --name "$data_name"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict
     ;;
   *)
