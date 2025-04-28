@@ -667,7 +667,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
     # Update config with CSV info
     config['file_path'] = csv_path
-    config['column_names'] = ['path', 'label'] + [f'feature_{i}' for i in range(train_features.shape[1])]
+    config['column_names'] = ['filepath', 'label'] + [f'feature_{i}' for i in range(train_features.shape[1])]
 
    # Update config to use pruned model
     config['dataset']['model_path'] = pruned_model_path
@@ -836,7 +836,7 @@ def save_features_to_csv(features, labels, paths, csv_path, class_metadata=None)
 
     # Create DataFrame
     df = pd.DataFrame({
-        'path': paths,
+        'filepath': paths,
         'label': str_labels
     })
 
@@ -1438,7 +1438,7 @@ def save_predictions(features, paths, labels, output_path, config):
 
     # Create prediction DataFrame with class names
     df = pd.DataFrame({
-        'path': paths,
+        'filepath': paths,
         'label': class_names
     })
     print(df)
