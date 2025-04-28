@@ -18,7 +18,7 @@ case $mode in
     rm -rf "data/${data_name}/Model/"
     rm -rf Model/*"${data_name}"_*
     ;;&
-  "train" | "all")
+  "train" | "all"| "fresh")
     
     echo "Running training..."
     python DynamicCNN.py train "$data_name"
