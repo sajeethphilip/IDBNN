@@ -25,7 +25,7 @@ case $mode in
     python cdbnn.py --mode train --data_name "$data_name" --input_path "$input_path"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
     ;;&  # Continue to next case (executes predict if mode is "all")
-  "predict" | "all")
+  "predict" | "all" | "fresh")
     echo "Running prediction..."
     python cdbnn.py --mode predict --data_name "$data_name" --input_path "$input_path"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict
