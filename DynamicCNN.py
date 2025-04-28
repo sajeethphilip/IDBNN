@@ -187,8 +187,86 @@ def calculate_max_depth(H, W):
         current_W = current_W // 2
         max_depth += 1
     return max_depth
-
 class DynamicJNet(nn.Module):
+    def __init__(self, in_channels, num_classes, depth=3, initial_filters=32,
+                input_size=(224,224), skip_connections=True, reduced_dim=128):
+        super().__init__()
+        self.encoder = nn.ModuleList()
+        self.decoder_convs = nn.ModuleList()
+        self.skip_connections = skip_connections
+        self.depth = depth
+        self.input_size = input_size
+
+        # Precompute encoder spatial sizes
+        self.encoder_spatial_sizes = []
+        current_H, current_W = input_size
+        self.encoder_spatial_sizes.append((current_H, current_W))
+
+        # Encoder
+        current_channels = in_channels
+        for i in range(depth):
+            out_channels = initial_filters * (2 ** i)
+            self.encoder.append(nn.Sequential(
+                nn.Conv2d(current_channels, out_channels, 3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2)
+            ))
+            current_channels = out_channels
+            current_H = current_H // 2
+            current_W = current_W // 2
+            self.encoder_spatial_sizes.append((current_H, current_W))
+
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(current_channels, reduced_dim, 3, padding=1),
+            nn.BatchNorm2d(reduced_dim),
+            nn.ReLU(inplace=True)
+        )
+
+        # Decoder with dynamic skip connections
+        current_channels = reduced_dim
+        for i in reversed(range(depth-1)):  # One less layer than encoder
+            out_channels = initial_filters * (2 ** i)
+            if skip_connections:
+                decoder_in = current_channels + initial_filters * (2 ** i)
+            else:
+                decoder_in = current_channels
+            self.decoder_convs.append(nn.Sequential(
+                nn.Conv2d(decoder_in, out_channels, 3, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True)
+            ))
+            current_channels = out_channels
+
+        # Final classifier
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(current_channels, num_classes)
+
+    def forward(self, x):
+        skip_features = []
+
+        # Encoder path
+        for layer in self.encoder:
+            x = layer(x)
+            skip_features.append(x)
+
+        # Bottleneck
+        x = self.bottleneck(x)
+
+        # Decoder path
+        for i in range(len(self.decoder_convs)):
+            target_size = self.encoder_spatial_sizes[-(i+2)]
+            x = F.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
+            if self.skip_connections and i < len(skip_features)-1:
+                x = torch.cat([x, skip_features[-(i+2)]], dim=1)
+            x = self.decoder_convs[i](x)
+
+        # Classification
+        x = self.adaptive_pool(x).squeeze()
+        return self.classifier(x), x, 0
+
+class oldDynamicJNet(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32,
                 input_size=(224,224), skip_connections=True, reduced_dim=128):
         super().__init__()
