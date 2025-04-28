@@ -16,7 +16,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
-
+#---------------------Fully Functional version : April 28 7:42 am---------------------------------------------
+#---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
+#-------------------------------------------------------------------------------------------------------------------------------
 # --------------------------
 # Dataset Handling Components
 # --------------------------
