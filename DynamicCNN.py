@@ -1408,9 +1408,13 @@ def main():
 
     elif args.mode == 'predict':
         try:
-            metadata = load_metadata(config)
-            if not metadata:
-                raise RuntimeError("❌ Cannot predict - no training metadata exists")
+            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+            if not os.path.exists(metadata_path):
+                raise RuntimeError(f"❌ No training metadata found at {metadata_path}\n"
+                                  "Please train a model first before prediction")
+
+            with open(metadata_path) as f:
+                class_metadata = json.load(f)
 
             # Verify dataset version if available
             if 'dataset_version' in metadata:
