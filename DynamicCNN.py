@@ -482,16 +482,13 @@ def load_metadata(config):
 # --------------------------
 def calculate_confusion_weights(confusion_matrix):
     """Calculate class weights based on confusion patterns"""
-    # Convert to probabilities
+    # Add device-aware operations
+    device = confusion_matrix.device
     row_sums = confusion_matrix.sum(dim=1, keepdim=True)
-    row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # Avoid division by zero
+    row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
     normalized = confusion_matrix / row_sums
-
-    # Calculate confusion weights (emphasize classes with high confusion)
-    weights = 1.0 - torch.diag(normalized)  # 1 - diagonal accuracy
-    weights = weights / weights.sum() * weights.numel()  # Normalize while preserving magnitude
-
-    return weights
+    weights = 1.0 - torch.diag(normalized)
+    return (weights / weights.sum() * weights.numel()).to(device)
 
 def train(model, train_loader, val_loader, config, device, full_dataset):
     model_dir = get_model_dir(config)
@@ -561,7 +558,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
 
         # Training phase
         num_classes = len(full_dataset.classes)  # Get actual number of classes
-        confusion_matrix = torch.zeros(num_classes, num_classes)
+        confusion_matrix = torch.zeros(num_classes, num_classes, device=device)
         model.train()
         total_loss, correct, total = 0.0, 0, 0
         train_iter = tqdm(train_loader,
@@ -611,7 +608,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
             })
 
         # Auto-adjust KL weights for confused classes
-        class_kl_weights = calculate_confusion_weights(confusion_matrix)
+        class_kl_weights = calculate_confusion_weights(confusion_matrix).to(device)
         loss = ce_loss + (class_kl_weights[labels] * kl_loss).mean() + sparsity_loss
 
         # Calculate epoch metrics
