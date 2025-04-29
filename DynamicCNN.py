@@ -924,8 +924,16 @@ def extract_features(model, loader, device):
 # --------------------------
 def find_dataset_root(data_dir):
     current_dir = os.path.abspath(data_dir)
-
     while True:
+        try:
+            entries = os.listdir(current_dir)
+        except PermissionError:
+            print(f"⚠️ Permission denied accessing {current_dir}, moving up...")
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+            continue
         # Check if current_dir contains valid class directories
         class_candidates = []
         for entry in os.listdir(current_dir):
