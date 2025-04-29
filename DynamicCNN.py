@@ -964,17 +964,42 @@ def analyze_class_separability(root_dir, classes):
 
 def analyze_stroke_complexity(root_dir, classes):
     """Detect if classes require diagonal/curve features"""
+    # Define diagonal kernel mask (45° and 135° directions)
+    diagonal_kernel_mask = np.array([
+        [1, 0, -1],
+        [0, 0, 0],
+        [-1, 0, 1]
+    ], dtype=np.float32)
+
+    edge_threshold = 1000  # Adjust based on empirical testing
     results = {'needs_diagonal_kernels': False}
 
     for cls in classes:
-        sample_path = os.path.join(root_dir, cls, os.listdir(os.path.join(root_dir, cls))[0])
-        img = Image.open(sample_path).convert('L')
+        class_dir = os.path.join(root_dir, cls)
+        if not os.path.isdir(class_dir):
+            continue
 
-        # Simple diagonal line detection
-        edges = cv2.Canny(np.array(img), 50, 150)
-        diagonal_edges = np.sum(edges * diagonal_kernel_mask)  # Predefined diagonal mask
-        if diagonal_edges > edge_threshold:
-            results['needs_diagonal_kernels'] = True
+        sample_file = os.listdir(class_dir)[0]
+        sample_path = os.path.join(class_dir, sample_file)
+
+        try:
+            img = Image.open(sample_path).convert('L')
+            img_array = np.array(img)
+
+            # Edge detection with Canny
+            edges = cv2.Canny(img_array, 50, 150)
+
+            # Calculate diagonal edges using convolution
+            diagonal_edges = cv2.filter2D(edges, -1, diagonal_kernel_mask)
+            diagonal_score = np.sum(np.abs(diagonal_edges))
+
+            if diagonal_score > edge_threshold:
+                results['needs_diagonal_kernels'] = True
+                break  # No need to check other samples if found
+
+        except Exception as e:
+            print(f"Error processing {sample_path}: {str(e)}")
+            continue
 
     return results
 
