@@ -9,6 +9,11 @@ read -p "Enter data path (e.g., Data/galaxies): " data_path
 # Prompt for mode (train/predict/all)
 read -p "Enter mode (train/predict/all/fresh): " mode
 
+# Prompt for Feature extractor model (Jnet/CNN)
+read -p "Enter Feature Extractor model (Jnet/cnn): " FEmodel
+
+# Prompt for Feature DBNN model (Jnet/CNN)
+read -p "Enter DBNN model (Histogram/Gaussian): " DBNNmodel
 
 
 # Git pull
@@ -24,12 +29,12 @@ case $mode in
   "train" | "all"| "fresh")
 
     echo "Running training..."
-    python DynamicCNN.py train "$data_path" --name "$data_name"
+    python DynamicCNN.py train "$data_path" --name "$data_name" --model_type "$FEmodel"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
     ;;&  # Continue to next case (executes predict if mode is "all")
   "predict" | "all" | "fresh")
     echo "Running prediction..."
-    python DynamicCNN.py predict "$data_name" --name "$data_name"
+    python DynamicCNN.py predict "$data_path" --name "$data_name" --model_type "$FEmodel"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict
     ;;
   *)
