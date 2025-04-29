@@ -21,6 +21,7 @@ import torchvision.transforms as transforms
 #---------------------Fully Functional version : April 28 7:42 am---------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 # updated and made suitable for different types and sizes of data. April 29 7:44 pm
+# udated 8:56 pm
 #-------------------------------------------------------------------------------------------------------------------------------
 # --------------------------
 # Dataset Handling Components
