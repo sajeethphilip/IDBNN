@@ -1396,7 +1396,9 @@ def main():
                 json.dump(config, f, indent=2)
 
             # Save CSV with features
-            metadata = load_metadata(config)
+            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
+            with open(metadata_path) as f:
+                    class_metadata = json.load(f)  # This is the correctly loaded variable
             features, labels, paths = extract_features(model, train_loader, device)
             csv_path = os.path.join(save_dir, f"{config['dataset']['name']}.csv")
             save_features_to_csv(features, labels, paths, csv_path,class_metadata=metadata)
@@ -1418,13 +1420,11 @@ def main():
                 class_metadata = json.load(f)
 
             # Verify dataset version if available
-            if 'dataset_version' in metadata:
+            if 'dataset_version' in class_metadata:
                 current_version = str(os.path.getmtime(pred_dataset.root_dir))
                 if metadata['dataset_version'] != current_version:
                     print("⚠️ Warning: Prediction data directory modified since training")
-            metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
-            with open(metadata_path) as f:
-                class_metadata = json.load(f)
+
             # Load model
             if config['model']['type'] == 'jnet':
                 model = DynamicJNet(
