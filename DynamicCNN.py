@@ -477,6 +477,22 @@ def load_metadata(config):
     with open(metadata_path, 'r') as f:
         return json.load(f)
 
+# --------------------------
+# Training Utilities (Add this new function)
+# --------------------------
+def calculate_confusion_weights(confusion_matrix):
+    """Calculate class weights based on confusion patterns"""
+    # Convert to probabilities
+    row_sums = confusion_matrix.sum(dim=1, keepdim=True)
+    row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)  # Avoid division by zero
+    normalized = confusion_matrix / row_sums
+
+    # Calculate confusion weights (emphasize classes with high confusion)
+    weights = 1.0 - torch.diag(normalized)  # 1 - diagonal accuracy
+    weights = weights / weights.sum() * weights.numel()  # Normalize while preserving magnitude
+
+    return weights
+
 def train(model, train_loader, val_loader, config, device, full_dataset):
     model_dir = get_model_dir(config)
     os.makedirs(model_dir, exist_ok=True)
