@@ -1094,7 +1094,8 @@ def create_default_config(name, data_dir, resize=None):
     try:
         # Find the dataset root directory that contains subdirectories with images
         dataset_root = find_dataset_root(data_dir)
-        config['dataset']['name'] = os.path.basename(dataset_root)
+        if config['dataset']['name'] == 'dataset':
+            config['dataset']['name'] = os.path.basename(dataset_root)
         config['dataset']['train_dir'] = dataset_root
 
         # Get class directories
