@@ -15,7 +15,7 @@ import torch
 from tqdm import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
-import F.cosine_similarity as cosine_similarity
+import torch.nn.functional.cosine_similarity as cosine_similarity
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 #---------------------Fully Functional version : April 28 7:42 am---------------------------------------------
