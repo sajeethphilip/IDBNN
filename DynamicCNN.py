@@ -945,7 +945,7 @@ def analyze_class_separability(root_dir, classes):
 
     return separability
 
- def analyze_stroke_complexity(root_dir, classes):
+def analyze_stroke_complexity(root_dir, classes):
     """Detect if classes require diagonal/curve features"""
     results = {'needs_diagonal_kernels': False}
 
@@ -972,7 +972,7 @@ def calculate_adaptive_bottleneck(num_classes, feature_dim, separability):
     else:
         return max(min_dim, int(feature_dim * 0.2))
 
- def create_transforms(config, stroke_analysis):
+def create_transforms(config, stroke_analysis):
     transforms_list = []
 
     if stroke_analysis['needs_diagonal_kernels']:
