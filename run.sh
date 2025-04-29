@@ -10,7 +10,7 @@ read -p "Enter data path (e.g., Data/galaxies): " data_path
 read -p "Enter mode (train/predict/all/fresh): " mode
 
 # Prompt for Feature extractor model (Jnet/CNN)
-read -p "Enter Feature Extractor model (Jnet/cnn): " FEmodel
+read -p "Enter Feature Extractor model (jnet/cnn): " FEmodel
 
 # Prompt for Feature DBNN model (Jnet/CNN)
 read -p "Enter DBNN model (Histogram/Gaussian): " DBNNmodel
