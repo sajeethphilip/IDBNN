@@ -15,7 +15,6 @@ import torch
 from tqdm import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.functional.cosine_similarity as cosine_similarity
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 #---------------------Fully Functional version : April 28 7:42 am---------------------------------------------
@@ -952,7 +951,7 @@ def analyze_class_separability(root_dir, classes):
 
     # Compare all class pairs
     for (cls1, feats1), (cls2, feats2) in combinations(feats_per_class.items(), 2):
-        separability[f"{cls1}-{cls2}"] = cosine_similarity([feats1], [feats2])[0][0]
+        separability[f"{cls1}-{cls2}"] = F.cosine_similarity([feats1], [feats2])[0][0]
 
     return separability
 
