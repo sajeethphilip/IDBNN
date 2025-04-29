@@ -1161,6 +1161,9 @@ def create_default_config(name, data_dir, resize=None):
         if stroke_analysis['needs_diagonal_kernels']:
             config['model']['initial_kernel_type'] = 'diagonal_enhanced'
 
+        # Auto-set bottleneck dimension (e.g., 10% of original features)
+        original_dim = config['model']['initial_filters'] * (2 ** (config['model']['depth'] - 1))
+
         # New: Adaptive Bottleneck
         config['model']['bottleneck_dim'] = calculate_adaptive_bottleneck(
             num_classes=len(classes),
@@ -1174,9 +1177,6 @@ def create_default_config(name, data_dir, resize=None):
 
     config['dataset']['model_path'] = os.path.join("data", config['dataset']['name'], "Model", "best_model.pth")
 
-    # Auto-set bottleneck dimension (e.g., 10% of original features)
-    original_dim = config['model']['initial_filters'] * (2 ** (config['model']['depth'] - 1))
-    config['model']['bottleneck_dim'] = max(16, original_dim // 10)
 
     return config
 
