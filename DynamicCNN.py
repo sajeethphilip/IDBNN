@@ -928,6 +928,15 @@ def find_dataset_root(data_dir):
 
     raise ValueError(f"No valid dataset structure found in {data_dir} or its parents. Required structure: a directory containing subdirectories with images.")
 
+def extract_low_level_features(img_path):
+    """Simplified feature extractor using basic image properties"""
+    try:
+        img = Image.open(img_path).convert('L')  # Convert to grayscale
+        img = img.resize((32, 32))  # Standardize size
+        return np.array(img).flatten()  # Use raw pixels as features
+    except:
+        return np.zeros(32*32)  # Fallback for corrupted images
+
 def analyze_class_separability(root_dir, classes):
     """Measure initial feature distance between classes"""
     separability = defaultdict(float)
