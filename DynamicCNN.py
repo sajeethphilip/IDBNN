@@ -544,6 +544,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
         metrics['patience'] = config['training_params']['patience'] - patience_counter
 
         # Training phase
+        num_classes = len(full_dataset.classes)  # Get actual number of classes
         confusion_matrix = torch.zeros(num_classes, num_classes)
         model.train()
         total_loss, correct, total = 0.0, 0, 0
