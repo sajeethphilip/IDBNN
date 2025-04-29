@@ -946,12 +946,18 @@ def analyze_class_separability(root_dir, classes):
     # Extract raw features from first 100 samples per class
     for cls in classes:
         samples = [os.path.join(root_dir, cls, f) for f in os.listdir(os.path.join(root_dir, cls))[:100]]
-        feats = [extract_low_level_features(img) for img in samples]  # Implement basic HOG/edge features
-        feats_per_class[cls] = np.mean(feats, axis=0)
+        feats = [extract_low_level_features(img) for img in samples]
+        feats_per_class[cls] = np.mean(feats, axis=0)  # Mean feature vector per class
 
-    # Compare all class pairs
+    # Compare all class pairs using PyTorch's cosine similarity
     for (cls1, feats1), (cls2, feats2) in combinations(feats_per_class.items(), 2):
-        separability[f"{cls1}-{cls2}"] = F.cosine_similarity([feats1], [feats2])[0][0]
+        # Convert numpy arrays to tensors and flatten
+        t1 = torch.tensor(feats1.flatten(), dtype=torch.float32)
+        t2 = torch.tensor(feats2.flatten(), dtype=torch.float32)
+
+        # Calculate cosine similarity
+        similarity = F.cosine_similarity(t1.unsqueeze(0), t2.unsqueeze(0), dim=1).item()
+        separability[f"{cls1}-{cls2}"] = similarity
 
     return separability
 
