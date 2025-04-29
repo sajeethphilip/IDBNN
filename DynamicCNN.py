@@ -1096,6 +1096,20 @@ def create_default_config(name, data_dir, resize=None):
         output_dir = os.path.join("data", config['dataset']['name'])
         os.makedirs(output_dir, exist_ok=True)
 
+        # Get class names from directory structure
+        class_dirs = []
+        classes = []  # <-- Initialize classes list
+        for entry in os.listdir(dataset_root):
+            entry_path = os.path.join(dataset_root, entry)
+            if os.path.isdir(entry_path):
+                if any(is_image_file(os.path.join(entry_path, f)) for f in os.listdir(entry_path)):
+                    class_dirs.append(entry_path)
+                    classes.append(entry)  # <-- Store class names
+
+        if not class_dirs:
+            raise ValueError(f"No valid class directories found in {dataset_root}")
+
+
         # New: Class Separability Analysis
         separability_scores = analyze_class_separability(dataset_root, classes)
         config['training_params']['kl_weight'] = 1.0 - min(separability_scores.values())
