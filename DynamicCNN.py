@@ -278,6 +278,10 @@ class DynamicCNN(nn.Module):
         self.layers = nn.ModuleList()
         current_channels = in_channels
 
+        # Add kernel adaptation
+        if config['model']['initial_kernel_type'] == 'diagonal_enhanced':
+            self._initialize_diagonal_kernels()
+
         # Automatically calculate and limit depth
         H, W = input_size
         self.max_depth = calculate_max_depth(H, W)
@@ -326,6 +330,19 @@ class DynamicCNN(nn.Module):
 
         logits = self.classifier(x)
         return logits, x, sparsity_loss  # Return sparsity loss
+
+    def _initialize_diagonal_kernels(self):
+        """Custom kernel init for diagonal feature detection"""
+        with torch.no_grad():
+            for layer in self.layers:
+                if isinstance(layer[0], nn.Conv2d):
+                    # Create diagonal edge detectors
+                    diagonal_filter = torch.tensor([
+                        [-1, 0, 1],
+                        [-2, 0, 2],
+                        [-1, 0, 1]
+                    ], dtype=torch.float32).repeat(1, 1, 1, 1)
+                    layer[0].weight.data = diagonal_filter
 
 # --------------------------
 # Training Utilities
@@ -525,6 +542,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
         metrics['patience'] = config['training_params']['patience'] - patience_counter
 
         # Training phase
+        confusion_matrix = torch.zeros(num_classes, num_classes)
         model.train()
         total_loss, correct, total = 0.0, 0, 0
         train_iter = tqdm(train_loader,
@@ -561,6 +579,9 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
             # Update metrics
             total_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
+            for t, p in zip(labels.view(-1), predicted.view(-1)):
+                confusion_matrix[t.long(), p.long()] += 1
+
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
@@ -569,6 +590,10 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
                 'acc': f"{(predicted == labels).sum().item()/labels.size(0)*100:.2f}%",
                 'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
             })
+
+        # Auto-adjust KL weights for confused classes
+        class_kl_weights = calculate_confusion_weights(confusion_matrix)
+        loss = ce_loss + (class_kl_weights[labels] * kl_loss).mean() + sparsity_loss
 
         # Calculate epoch metrics
         metrics['tr_loss'] = total_loss / len(train_loader)
@@ -903,6 +928,67 @@ def find_dataset_root(data_dir):
 
     raise ValueError(f"No valid dataset structure found in {data_dir} or its parents. Required structure: a directory containing subdirectories with images.")
 
+def analyze_class_separability(root_dir, classes):
+    """Measure initial feature distance between classes"""
+    separability = defaultdict(float)
+    feats_per_class = {}
+
+    # Extract raw features from first 100 samples per class
+    for cls in classes:
+        samples = [os.path.join(root_dir, cls, f) for f in os.listdir(os.path.join(root_dir, cls))[:100]]
+        feats = [extract_low_level_features(img) for img in samples]  # Implement basic HOG/edge features
+        feats_per_class[cls] = np.mean(feats, axis=0)
+
+    # Compare all class pairs
+    for (cls1, feats1), (cls2, feats2) in combinations(feats_per_class.items(), 2):
+        separability[f"{cls1}-{cls2}"] = cosine_similarity([feats1], [feats2])[0][0]
+
+    return separability
+
+ def analyze_stroke_complexity(root_dir, classes):
+    """Detect if classes require diagonal/curve features"""
+    results = {'needs_diagonal_kernels': False}
+
+    for cls in classes:
+        sample_path = os.path.join(root_dir, cls, os.listdir(os.path.join(root_dir, cls))[0])
+        img = Image.open(sample_path).convert('L')
+
+        # Simple diagonal line detection
+        edges = cv2.Canny(np.array(img), 50, 150)
+        diagonal_edges = np.sum(edges * diagonal_kernel_mask)  # Predefined diagonal mask
+        if diagonal_edges > edge_threshold:
+            results['needs_diagonal_kernels'] = True
+
+    return results
+
+def calculate_adaptive_bottleneck(num_classes, feature_dim, separability):
+    """Set bottleneck size based on class complexity"""
+    min_dim = 64
+    max_dim = 512
+
+    # If any class pair has high similarity, increase bottleneck
+    if min(separability.values()) > 0.7:  # Highly similar classes
+        return min(max_dim, int(feature_dim * 0.8))
+    else:
+        return max(min_dim, int(feature_dim * 0.2))
+
+ def create_transforms(config, stroke_analysis):
+    transforms_list = []
+
+    if stroke_analysis['needs_diagonal_kernels']:
+        transforms_list += [
+            transforms.RandomRotation(15),
+            transforms.RandomPerspective(distortion_scale=0.2)
+        ]
+
+    transforms_list += [
+        transforms.Resize(config['dataset']['input_size']),
+        transforms.ToTensor(),
+        transforms.Normalize(config['dataset']['mean'], config['dataset']['std'])
+    ]
+
+    return transforms.Compose(transforms_list)
+
 def create_default_config(name, data_dir, resize=None):
     # Automatically determine name from data directory if not provided
     if name == 'dataset':
@@ -1010,6 +1096,21 @@ def create_default_config(name, data_dir, resize=None):
         output_dir = os.path.join("data", config['dataset']['name'])
         os.makedirs(output_dir, exist_ok=True)
 
+        # New: Class Separability Analysis
+        separability_scores = analyze_class_separability(dataset_root, classes)
+        config['training_params']['kl_weight'] = 1.0 - min(separability_scores.values())
+
+        # New: Shape Complexity Detection
+        stroke_analysis = analyze_stroke_complexity(dataset_root, classes)
+        if stroke_analysis['needs_diagonal_kernels']:
+            config['model']['initial_kernel_type'] = 'diagonal_enhanced'
+
+        # New: Adaptive Bottleneck
+        config['model']['bottleneck_dim'] = calculate_adaptive_bottleneck(
+            num_classes=len(classes),
+            feature_dim=original_dim,
+            separability=separability_scores
+        )
     except Exception as e:
         raise RuntimeError(f"Configuration creation failed: {str(e)}\n"
                           f"Required structure:\n"
