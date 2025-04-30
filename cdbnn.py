@@ -4,6 +4,7 @@
 # Fixed a bug in Prediction mode model loading April 14 2025 9:32 am
 #Finalised completely working module as on 15th April 2025
 # Feature Dimension can now be input during training instead of hardcoding to 128 April 30 11:13 PM
+# Last updated with configurable data_name on May 1 1:07 am
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
