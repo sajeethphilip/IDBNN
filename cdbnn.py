@@ -5,6 +5,7 @@
 #Finalised completely working module as on 15th April 2025
 # Feature Dimension can now be input during training instead of hardcoding to 128 April 30 11:13 PM
 # Last updated with configurable data_name on May 1 1:07 am
+# Infinite training loop added May 1 1:30 am
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
