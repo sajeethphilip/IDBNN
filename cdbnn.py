@@ -4295,20 +4295,23 @@ class DatasetProcessor:
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
-        self.config = config if config is not None else {}  # Initialize config
+        self.config = config or {}
 
-        # Determine dataset name from config if available
-        if 'dataset' in self.config and 'name' in self.config['dataset']:
+        # Determine dataset name hierarchy
+        if self.config.get('dataset', {}).get('name'):
+            # 1. Priority to config-defined name
             self.dataset_name = self.config['dataset']['name'].lower()
+        elif any(x in datafile.lower() for x in ('train', 'test')):
+            # 2. Extract parent directory if path contains train/test
+            self.dataset_name = os.path.basename(os.path.dirname(datafile)).lower()
         else:
-            if self.datatype == 'torchvision':
-                self.dataset_name = self.datafile.lower()
-            else:
-                self.dataset_name = Path(self.datafile).stem.lower()
+            # 3. Fallback to folder name or file stem
+            self.dataset_name = os.path.splitext(os.path.basename(datafile))[0].lower()
 
         self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
+        # Important paths
         self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
         self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
@@ -4380,78 +4383,58 @@ class DatasetProcessor:
             return self._process_custom(processed_path)
 
     def _handle_existing_directory(self, path: str):
-        """Handle existing directory by either removing it or merging its contents."""
+        """Smart directory handling with user feedback"""
         if os.path.exists(path):
-            response = input(f"The directory '{path}' already exists. Do you want to (R)emove it or (M)erge its contents? [R/M]: ").lower()
-            if response == 'r':
+            print(f"Existing directory detected: {path}")
+            choice = input("[R]emove, [M]erge, or [K]eep? (R/M/K): ").lower()
+            if choice == 'r':
                 shutil.rmtree(path)
                 os.makedirs(path)
-            elif response == 'm':
-                # Merge contents (no action needed, as shutil.copytree will handle it with dirs_exist_ok=True)
+            elif choice == 'm':
+                # Keep existing files, merge with new ones
                 pass
+            elif choice == 'k':
+                raise FileExistsError("User chose to keep existing directory")
             else:
-                raise ValueError("Invalid choice. Please choose 'R' to remove or 'M' to merge.")
+                raise ValueError("Invalid directory handling choice")
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
-        """Process custom dataset structure"""
+        """Process custom dataset structure with flexible path handling"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
-        # Access enable_adaptive from training_params
-        try:
-             enable_adaptive = self.config['model'].get('enable_adaptive', True)
-        except:
-            enable_adaptive = True
-            print(f"Enable Adaptive mode is set {enable_adaptive} in process custom")
-        # Check if dataset already has train/test structure
-        if os.path.isdir(os.path.join(data_path, "train")) and \
-           os.path.isdir(os.path.join(data_path, "test")):
-            # Check if adaptive_fit_predict is active
-            if enable_adaptive:
-                # Handle existing train directory
-                self._handle_existing_directory(train_dir)
-                # Merge train and test folders into a single train folder
+        # Clean existing directories if needed
+        self._handle_existing_directory(train_dir)
+        self._handle_existing_directory(test_dir)
 
-                # Copy train data
-                shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
+        # Check for existing train/test subdirectories
+        input_train = os.path.join(data_path, "train")
+        input_test = os.path.join(data_path, "test")
 
-                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
+        if os.path.isdir(input_train) or os.path.isdir(input_test):
+            # Copy existing train/test structure
+            if os.path.isdir(input_train):
+                shutil.copytree(input_train, train_dir, dirs_exist_ok=True)
+            if os.path.isdir(input_test):
+                shutil.copytree(input_test, test_dir, dirs_exist_ok=True)
+            return train_dir, test_dir if os.path.isdir(test_dir) else None
 
-            else:
-                # Normal processing with separate train and test folders
-                if os.path.exists(train_dir):
-                    shutil.rmtree(train_dir)
-                if os.path.exists(test_dir):
-                    shutil.rmtree(test_dir)
-
-                shutil.copytree(os.path.join(data_path, "train"), train_dir)
-                shutil.copytree(os.path.join(data_path, "test"), test_dir)
-                return train_dir, test_dir
         # Handle single directory with class subdirectories
-        if not os.path.isdir(data_path):
-            raise ValueError(f"Invalid dataset path: {data_path}")
-
         class_dirs = [d for d in os.listdir(data_path)
                      if os.path.isdir(os.path.join(data_path, d))]
 
         if not class_dirs:
-            raise ValueError(f"No class directories found in {data_path}")
+            raise ValueError(f"No valid class directories in {data_path}")
 
-        # Ask user about train/test split
-        response = input("Create train/test split? (y/n): ").lower()
+        # Automatically create train/test split
+        response = input(f"Create train/test split for {self.dataset_name}? (y/n) [y]: ").lower() or 'y'
         if response == 'y':
-            test_size = float(input("Enter test size (0-1, default: 0.2): ") or "0.2")
+            test_size = float(input("Test size (0-1, default 0.2): ") or 0.2)
             return self._create_train_test_split(data_path, test_size)
-        else:
-            # Use all data for training
-            os.makedirs(train_dir, exist_ok=True)
-            for class_dir in class_dirs:
-                src = os.path.join(data_path, class_dir)
-                dst = os.path.join(train_dir, class_dir)
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            return train_dir, None
+
+        # Use all data for training
+        shutil.copytree(data_path, train_dir, dirs_exist_ok=True)
+        return train_dir, None
 
     def cleanup(self):
         """Clean up temporary files"""
@@ -5009,46 +4992,32 @@ class DatasetProcessor:
 
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
-        """Create train/test split from source directory"""
+        """Create standardized train/test split in dataset directory"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
-        os.makedirs(train_dir, exist_ok=True)
-        os.makedirs(test_dir, exist_ok=True)
-
-        for class_name in tqdm(os.listdir(source_dir), desc="Processing classes"):
+        for class_name in os.listdir(source_dir):
             class_path = os.path.join(source_dir, class_name)
             if not os.path.isdir(class_path):
                 continue
 
             # Create class directories
-            train_class_dir = os.path.join(train_dir, class_name)
-            test_class_dir = os.path.join(test_dir, class_name)
-            os.makedirs(train_class_dir, exist_ok=True)
-            os.makedirs(test_class_dir, exist_ok=True)
+            os.makedirs(os.path.join(train_dir, class_name), exist_ok=True)
+            os.makedirs(os.path.join(test_dir, class_name), exist_ok=True)
 
-            # Get all image files
-            image_files = [f for f in os.listdir(class_path)
-                         if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)]
+            # Split files
+            files = [f for f in os.listdir(class_path)
+                    if f.lower().endswith(('png', 'jpg', 'jpeg', 'bmp'))]
+            random.shuffle(files)
+            split_idx = int(len(files) * (1 - test_size))
 
-            # Random split
-            random.shuffle(image_files)
-            split_idx = int((1 - test_size) * len(image_files))
-            train_files = image_files[:split_idx]
-            test_files = image_files[split_idx:]
-
-            # Copy files
-            for fname in train_files:
-                shutil.copy2(
-                    os.path.join(class_path, fname),
-                    os.path.join(train_class_dir, fname)
-                )
-
-            for fname in test_files:
-                shutil.copy2(
-                    os.path.join(class_path, fname),
-                    os.path.join(test_class_dir, fname)
-                )
+            # Copy files to train/test
+            for f in files[:split_idx]:
+                shutil.copy2(os.path.join(class_path, f),
+                           os.path.join(train_dir, class_name, f))
+            for f in files[split_idx:]:
+                shutil.copy2(os.path.join(class_path, f),
+                           os.path.join(test_dir, class_name, f))
 
         return train_dir, test_dir
 
