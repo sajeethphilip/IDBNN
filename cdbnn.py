@@ -3878,13 +3878,16 @@ class StructurePreservingAutoencoder(DynamicAutoencoder):
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_dir: str, transform=None, csv_file: Optional[str] = None,
-                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None):
+                 target_size: int = 256, overlap: float = 0.5, config: Optional[Dict] = None,
+                 data_name: Optional[str] = None):
         self.data_dir = data_dir
         self.transform = transform
-         # Load config
         self.config = config if config is not None else {}
-        if  self.config.get('resize_images',False):
-             size=256
+        self.data_name = data_name.lower() if data_name else None
+
+        # Handle target size configuration
+        if self.config.get('resize_images', False):
+            size = 256
         else:
             input_cfg = self.config.get('dataset', {})
             size = input_cfg.get('input_size', 256)
@@ -3899,35 +3902,72 @@ class CustomImageDataset(Dataset):
         self.overlap = overlap
         self.image_files = []
         self.labels = []
-        self.file_indices = []  # Store file indices
-        self.filenames = []  # Initialize filenames list
+        self.file_indices = []
+        self.filenames = []
         self.label_encoder = {}
         self.reverse_encoder = {}
-        self.preprocessed_images = []  # Store preprocessed images or paths
+        self.preprocessed_images = []
 
+        # Determine valid class directories (only those containing images)
+        valid_classes = []
+        for entry in os.listdir(data_dir):
+            entry_path = os.path.join(data_dir, entry)
+            if os.path.isdir(entry_path):
+                # Check if directory contains image files
+                has_images = any(
+                    fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+                    for fname in os.listdir(entry_path)
+                )
+                if has_images:
+                    valid_classes.append(entry)
 
-        self.resize_images = self.config.get('resize_images', False)  # Default to False
+        # Use either custom data_name or folder name
+        if not self.data_name:
+            if self.config.get('dataset'):
+                self.data_name = self.config['dataset'].get('name', 'dataset')
+            else:
+                self.data_name = os.path.basename(os.path.normpath(data_dir)).lower() or 'dataset'
+
+        # Create label mappings only for valid classes
+        valid_classes = sorted(valid_classes)
+        for idx, class_name in enumerate(valid_classes):
+            self.label_encoder[class_name] = idx
+            self.reverse_encoder[idx] = class_name
+
+        # Collect images from valid classes
+        for class_idx, class_name in enumerate(valid_classes):
+            class_dir = os.path.join(data_dir, class_name)
+            image_list = [
+                fname for fname in os.listdir(class_dir)
+                if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+            ]
+
+            for img_name in image_list:
+                self.image_files.append(os.path.join(class_dir, img_name))
+                self.labels.append(class_idx)
+                self.filenames.append(img_name)
+                self.file_indices.append(len(self.image_files) - 1)
+
+        # Fallback to CSV if no directory structure found
+        if csv_file and os.path.exists(csv_file) and not self.image_files:
+            self.data = pd.read_csv(csv_file)
+            # Add CSV processing logic here if needed
+
+        # Final configuration fallbacks
+        if not self.data_name:
+            self.data_name = 'dataset'
+
+        self.resize_images = self.config.get('resize_images', False)
         if self.resize_images:
             self.target_size = 256
-        if csv_file and os.path.exists(csv_file):
-            self.data = pd.read_csv(csv_file)
-        else:
-            unique_labels = sorted(os.listdir(data_dir))
-            for idx, label in enumerate(unique_labels):
-                self.label_encoder[label] = idx
-                self.reverse_encoder[idx] = label
 
-            for class_name in unique_labels:
-                class_dir = os.path.join(data_dir, class_name)
-                if os.path.isdir(class_dir):
-                    for img_name in os.listdir(class_dir):
-                        if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                            self.image_files.append(os.path.join(class_dir, img_name))
-                            self.labels.append(self.label_encoder[class_name])
-                            self.file_indices.append(len(self.image_files) - 1)  # Assign unique index
-                            self.filenames.append(img_name)  # Populate filenames list
+        # Update config with determined name
+        if self.config:
+            if 'dataset' not in self.config:
+                self.config['dataset'] = {}
+            self.config['dataset']['name'] = self.data_name
 
-        # Preprocess all images during initialization
+        # Preprocess all images
         self._preprocess_all_images()
 
     def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
@@ -4025,16 +4065,26 @@ class DatasetProcessor:
     SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
 
     def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
-                 output_dir: str = "data", config: Optional[Dict] = None):
+                 output_dir: str = "data", config: Optional[Dict] = None,
+                 data_name: Optional[str] = None):  # Add data_name parameter
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
-        self.config = config if config is not None else {}  # Initialize config
+        self.config = config if config is not None else {}
 
-        if self.datatype == 'torchvision':
-            self.dataset_name = self.datafile.lower()
+        # Determine dataset name
+        if data_name:
+            self.dataset_name = data_name.lower()
         else:
-            self.dataset_name = Path(self.datafile).stem.lower()
+            if self.datatype == 'torchvision':
+                self.dataset_name = self.datafile.lower()
+            else:
+                # Handle both files and directories
+                path_obj = Path(self.datafile)
+                if path_obj.is_dir():
+                    self.dataset_name = path_obj.name.lower()
+                else:
+                    self.dataset_name = path_obj.stem.lower() or 'dataset'
 
         self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
@@ -5277,6 +5327,10 @@ def get_interactive_args():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
     args = argparse.Namespace()
+    # Add data_name prompt
+    default_name = last_args.get('data_name') if last_args else None
+    data_name = input(f"Enter dataset name (leave empty to auto-detect) [{default_name}]: ").strip()
+    args.data_name = data_name or default_name
 
     # Get mode (train/reconstruct/predict)
     while True:
@@ -5668,7 +5722,7 @@ def parse_arguments():
     # Main arguments
     parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
                        default='predict', help='Operation mode')
-    parser.add_argument('--data_name', dest='data_name', default='mnist',
+    parser.add_argument('--data_name', dest='data_name', default='dataset',
                        help='Name of the dataset')
     parser.add_argument('--data_type', dest='data_type', default='custom',
                        help='custom or torchvision dataset')
@@ -5719,7 +5773,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'))
+        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'),data_name=args.data_name)
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
