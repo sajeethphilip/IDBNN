@@ -3,7 +3,7 @@
 # Added distance correlations to filter the output features. April 12, 3:45 am
 # Fixed a bug in Prediction mode model loading April 14 2025 9:32 am
 #Finalised completely working module as on 15th April 2025
-# Feature Dimension can now be input during training instead of hardcoding to 128 April 20 11:13 PM
+# Feature Dimension can now be input during training instead of hardcoding to 128 April 30 11:13 PM
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
@@ -19,9 +19,6 @@ import traceback
 import argparse
 import torch.nn as nn
 import torch.optim as optim
-from dcor import distance_correlation
-from torch.utils.data import random_split, SubsetRandomSampler
-from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, Dataset, ConcatDataset
 import torch.nn.functional as F
 import torchvision
@@ -144,68 +141,7 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
-#-------------------------------------Feature Pruning Starts ----------------------
-class WeightEvolutionTracker:
-    def __init__(self, model, config):
-        self.model = model
-        self.warmup_epochs = config['pruning']['warmup_epochs']
-        self.prune_interval = config['pruning']['prune_interval']
-        self.weight_history = defaultdict(list)
-        self.pruned_weights = {}  # Stores pruned weights with metadata
-        self.original_metrics = None  # Stores pre-pruning validation metrics
-        self.current_importance = defaultdict(float)
-        self.active_features = config['model']['feature_dims']  # Initial count
-        self.feature_history = []  # Track feature count over time
-        self.active_indices = list(range(config['model']['feature_dims']))  # Track active feature indices
 
-    def track_weights(self, epoch):
-        # Track weights and compute normalized importance scores
-        for name, param in self.model.named_parameters():
-            if 'conv' in name and 'weight' in name:
-                weights = param.data.abs().cpu().numpy()
-                self.weight_history[name].append(weights)
-
-                # Compute relative importance (L1 norm)
-                self.current_importance[name] = np.mean(weights) / (np.std(weights) + 1e-9)
-
-    def store_pruned_weights(self, name, param, epoch):
-        # Store original weights with context
-        self.pruned_weights[name] = {
-            'weights': param.data.clone(),
-            'mask': (param.data != 0).float(),  # Track active positions
-            'prune_epoch': epoch,
-            'importance': self.current_importance[name],
-            'validation_accuracy': self.original_metrics['accuracy']
-        }
-
-    def update_feature_count(self, model):
-        """Update active feature indices based on non-zero weights in the embedder layer."""
-        active_indices = []
-        for name, param in model.named_parameters():
-            if 'embedder' in name and 'weight' in name:
-                mask = (param.data != 0).float()
-                active_mask = (mask.sum(dim=1) > 0)
-                active_indices = torch.where(active_mask)[0].tolist()
-                self.active_features = len(active_indices)
-                self.active_indices = active_indices  # Store indices
-                break
-        self.feature_history.append(self.active_features)
-
-
-class PruningAttentionGate(nn.Module):
-    def __init__(self, in_features):
-        super().__init__()
-        self.attention = nn.Sequential(
-            nn.Linear(in_features, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        # Input x should be the actual weight tensor (flattened)
-        return self.attention(x)
-#-------------------------------------Feature Pruning Ends ----------------------
 class DistanceCorrelationFeatureSelector:
     """Helper class to select features based on distance correlation criteria"""
 
@@ -220,7 +156,7 @@ class DistanceCorrelationFeatureSelector:
 
         # Calculate correlation with labels
         for i in range(n_features):
-            label_corrs[i] = distance_correlation(features[:, i], labels)
+            label_corrs[i] = 1 - correlation(features[:, i], labels)
 
         return label_corrs
 
@@ -264,9 +200,6 @@ class PredictionManager:
         """
 
         self.config = config
-        self.dataset_name = config['dataset']['name']
-        self.checkpoint_dir = os.path.join('data', self.dataset_name, 'checkpoints')
-
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
@@ -345,54 +278,6 @@ class PredictionManager:
 
         if state_key is None:
             raise ValueError("No suitable checkpoint state found with both KL divergence and class encoding")
-
-        # Check feature dimension compatibility
-        saved_config = checkpoint['model_states'][state_key]['best']['config']
-        if 'model' not in saved_config:
-            saved_config['model'] = self.config['model'].copy()  # Use current model config
-            logger.warning("Legacy checkpoint detected - using current model config")
-
-        saved_feature_dims = saved_config['model'].get('feature_dims', 4096)  # Default fallback
-        current_feature_dims = self.config['model']['feature_dims']
-
-        if saved_feature_dims != current_feature_dims:
-            logger.error(f"\n{Colors.RED}Critical configuration mismatch detected:{Colors.ENDC}")
-            logger.error(f" - Checkpoint feature dimensions: {saved_feature_dims}")
-            logger.error(f" - Current configuration feature dimensions: {current_feature_dims}")
-            logger.error("\nThis mismatch prevents the model from loading properly. Choose an action:")
-
-            while True:
-                choice = input(f"{Colors.YELLOW}[1] Delete checkpoint and start fresh\n"
-                             "[2] Exit to modify configuration\n"
-                             "Choice [1/2]: {Colors.ENDC}").strip()
-
-                if choice == '1':
-                    # Delete checkpoint and associated files
-                    files_to_remove = [
-                        checkpoint_path,
-                        os.path.join(self.config['training']['checkpoint_dir']),
-                        os.path.join(self.config['output']['features_file'])
-                    ]
-
-                    for f in files_to_remove:
-                        if os.path.exists(f):
-                            os.remove(f)
-                            logger.info(f"Removed: {f}")
-
-                    logger.info(f"{Colors.GREEN}Old checkpoints removed. Please restart the application "
-                               "with your current configuration to train a new model.{Colors.ENDC}")
-                    sys.exit(0)
-
-                elif choice == '2':
-                    logger.info(f"{Colors.BLUE}Exiting. Please either:\n"
-                              "1. Update your config's 'feature_dims' to match the checkpoint\n"
-                              "2. Remove the checkpoint manually\n"
-                              "3. Change your model architecture configuration{Colors.ENDC}")
-                    sys.exit(0)
-
-                else:
-                    logger.error("Invalid choice. Please enter 1 or 2")
-
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
 
@@ -1025,16 +910,6 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
-
-        # Add pruning components
-        self.pruning_tracker = WeightEvolutionTracker(self, config)
-        self.attention_gates = nn.ModuleDict()
-
-        # Initialize attention gates for each conv layer
-        for name, param in self.named_parameters():
-            if 'conv' in name and 'weight' in name:
-                self.attention_gates[name] = PruningAttentionGate(param.numel())
-
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
         """Identify high-confidence predictions for semi-supervised learning"""
@@ -1136,60 +1011,40 @@ class BaseAutoencoder(nn.Module):
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
         """
-        Prepare DataFrame from features with metadata about active/selected features.
+        Prepare DataFrame from features with optional distance correlation selection.
 
         Args:
             features: Dictionary containing 'embeddings', 'labels', etc.
             dc_config: Distance correlation config or None if disabled
 
         Returns:
-            pd.DataFrame: Processed features with metadata including all features,
-                          active status, and selection status
+            pd.DataFrame: Processed features with metadata
         """
         data = {}
 
         # Convert features to numpy
         embeddings = features['embeddings'].cpu().numpy()
         labels = features.get('labels', torch.zeros(len(embeddings))).cpu().numpy()
-        num_features = embeddings.shape[1]
 
-        # 1. Include ALL features in the CSV (pruned and active)
-        for i in range(num_features):
-            data[f'feature_{i}'] = embeddings[:, i]
-
-        # 2. Add active/pruned status from pruning tracker
-        active_indices = self.pruning_tracker.active_indices
-        data['is_active'] = [i in active_indices for i in range(num_features)]
-
-        # 3. Initialize selection status column
-        data['is_selected'] = [False] * num_features  # Default to not selected
-
-        # 4. Apply feature selection only on active features if enabled
+        # Apply feature selection if enabled
         if dc_config and dc_config.get('use_distance_correlation', True):
-            # Get embeddings for active features only
-            embeddings_active = embeddings[:, active_indices]
-
-            # Perform feature selection on active features
             selector = DistanceCorrelationFeatureSelector(
                 upper_threshold=dc_config['distance_correlation_upper'],
                 lower_threshold=dc_config['distance_correlation_lower']
             )
-            selected_active_indices, corr_values = selector.select_features(embeddings_active, labels)
+            selected_indices, corr_values = selector.select_features(embeddings, labels)
 
-            # Map back to original feature indices
-            selected_original_indices = [active_indices[i] for i in selected_active_indices]
-
-            # Update selection status and add correlations
-            for idx, orig_idx in enumerate(selected_original_indices):
-                data['is_selected'][orig_idx] = True
-                data[f'feature_{orig_idx}_correlation'] = corr_values[idx]
+            # Store selected features with metadata
+            for new_idx, orig_idx in enumerate(selected_indices):
+                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
+                data[f'original_feature_idx_{new_idx}'] = orig_idx
+                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
         else:
-            # If no selection, mark all active features as selected
-            for idx in active_indices:
-                data['is_selected'][idx] = True
-                data[f'feature_{idx}_correlation'] = 1.0  # Default correlation value
+            # Store all features without selection
+            for i in range(embeddings.shape[1]):
+                data[f'feature_{i}'] = embeddings[:, i]
 
-        # 5. Add labels and metadata
+        # Add labels and metadata
         if 'class_names' in features:
             data['target'] = features['class_names']
         else:
@@ -1199,6 +1054,7 @@ class BaseAutoencoder(nn.Module):
             data['filename'] = features['filenames']
 
         return pd.DataFrame(data)
+
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -1233,7 +1089,17 @@ class BaseAutoencoder(nn.Module):
 
     def generate_configuration(self, features_path: str,
                              output_dir: str = None) -> str:
-        """Generate final .conf file using only selected active features"""
+        """
+        Generate final .conf configuration file from extracted features.
+        Should be called after save_features().
+
+        Args:
+            features_path: Path to saved features CSV
+            output_dir: Optional output directory (default: same as features)
+
+        Returns:
+            Path to generated .conf file
+        """
         try:
             if output_dir is None:
                 output_dir = os.path.dirname(features_path)
@@ -1241,35 +1107,41 @@ class BaseAutoencoder(nn.Module):
 
             # Load features and metadata
             features_df = pd.read_csv(features_path)
+            metadata_path = os.path.join(output_dir, 'feature_selection_metadata.json')
 
-            # Filter for selected features
-            selected_features = features_df.loc[features_df['is_selected'] == True]
+            # Get config settings
+            dc_config = self._get_distance_correlation_config(output_dir)
+            use_dc = dc_config.get('use_distance_correlation', True)
 
-            # Prepare configuration data
+            # Prepare base configuration
             config = {
                 'dataset': self.config['dataset']['name'],
-                'feature_count': len(selected_features),
-                'active_feature_count': sum(features_df['is_active']),
-                'selected_feature_count': len(selected_features),
+                'feature_count': len([c for c in features_df.columns
+                                     if c.startswith('feature_')]),
                 'generated_at': datetime.now().isoformat(),
                 'feature_selection': {
-                    'method': 'distance_correlation' if self.config['model'].get('use_distance_correlation') else 'none',
-                    'parameters': self.config.get('distance_correlation', {}),
-                    'selected_features': []
+                    'method': 'distance_correlation' if use_dc else 'none',
+                    'parameters': dc_config if use_dc else {}
                 }
             }
 
-            # Add selected feature details
-            for idx in selected_features.index:
-                orig_idx = features_df.at[idx, 'original_feature_idx']
-                config['feature_selection']['selected_features'].append({
-                    'name': f'feature_{idx}',
-                    'original_index': orig_idx,
-                    'correlation': features_df.at[idx, f'feature_{orig_idx}_correlation']
+            # Add feature-specific info if selection was used
+            if use_dc and os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                config['feature_selection'].update({
+                    'original_feature_count': metadata['original_feature_count'],
+                    'selected_features': [
+                        {'name': col, 'original_index': features_df[f'original_feature_idx_{i}'][0],
+                         'correlation': features_df[f'feature_{i}_correlation'][0]}
+                        for i, col in enumerate([c for c in features_df.columns
+                                               if c.startswith('feature_')])
+                    ]
                 })
 
             # Save .conf file
-            conf_path = os.path.join(output_dir, f"{self.config['dataset']['name']}.conf")
+            conf_path = os.path.join(output_dir,
+                                    f"{self.config['dataset']['name']}.conf")
             with open(conf_path, 'w') as f:
                 json.dump(config, f, indent=4)
 
@@ -2673,10 +2545,6 @@ class UnifiedCheckpoint:
                     'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
                     'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') and isinstance(model.clustering_temperature, torch.Tensor) else 1.0
                 }
-            },
-            'pruning_state': {
-                'tracker': model.pruning_tracker.__dict__,
-                'attention_gates': model.attention_gates.state_dict()
             }
         }
 
@@ -2704,10 +2572,6 @@ class UnifiedCheckpoint:
         if state_key not in self.current_state['model_states']:
             logger.info(f"No existing state found for {state_key}")
             return None
-
-        if 'pruning_state' in checkpoint:
-            model.pruning_tracker.__dict__.update(checkpoint['pruning_state']['tracker'])
-            model.attention_gates.load_state_dict(checkpoint['pruning_state']['attention_gates'])
 
         # Get appropriate state
         state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
@@ -2937,134 +2801,24 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
     return metrics
 
-from torch.utils.data import random_split, SubsetRandomSampler
-from sklearn.model_selection import StratifiedKFold
-import numpy as np
-
-def _apply_evolutionary_pruning(model, epoch, config, train_loader):
-    """Perform pruning with validation and user feedback"""
-    try:
-        # Create validation subset from training data
-        logger.info("\n" + "="*60)
-        logger.info(f"Starting pruning process at epoch {epoch+1}")
-        logger.info("Creating temporary validation set from 20% of training data...")
-
-        val_size = int(0.2 * len(train_loader.dataset))
-        train_set, val_set = random_split(train_loader.dataset,
-                                        [len(train_loader.dataset) - val_size, val_size])
-        val_loader = DataLoader(val_set, batch_size=config['training']['batch_size'],
-                              shuffle=True, num_workers=config['training']['num_workers'])
-
-        # Validate before pruning
-        logger.info("Validating model before pruning...")
-        original_acc = validate_model(model, val_loader)
-        logger.info(f"Pre-pruning validation accuracy: {original_acc:.2%}")
-        model.pruning_tracker.original_metrics = {'accuracy': original_acc}
-
-        # Perform pruning
-        logger.info("Applying pruning to convolutional layers...")
-        total_pruned = 0
-        for name, param in model.named_parameters():
-            if 'conv' in name and 'weight' in name:
-                original_features = (param.data != 0).sum().item()
-
-                # Pruning logic
-                flat_weights = param.data.view(-1)
-                survival_prob = model.attention_gates[name](flat_weights)
-                mask = (survival_prob > config['pruning']['threshold']).float()
-
-                # Track pruning
-                pruned_features = original_features - mask.sum().item()
-                total_pruned += pruned_features
-                logger.info(f"Layer {name}: Pruned {pruned_features} features")
-
-                model.pruning_tracker.store_pruned_weights(name, param, epoch)
-                param.data *= mask
-                param.register_hook(lambda grad: grad * mask)
-
-        # Validate after pruning
-        logger.info("Validating pruned model...")
-        new_acc = validate_model(model, val_loader)
-        accuracy_drop = original_acc - new_acc
-        logger.info(f"Post-pruning validation accuracy: {new_acc:.2%} (Δ: {-accuracy_drop:.2%})")
-
-        # Grafting decision
-        if accuracy_drop > config['pruning']['grafting_threshold']:
-            logger.warning(f"Significant accuracy drop detected ({accuracy_drop:.2%}), grafting back weights...")
-            _restore_pruned_weights(model)
-            logger.info("Original weights restored for pruned layers")
-        else:
-            logger.info(f"Pruning successful. Total features removed: {total_pruned}")
-            logger.info(f"Current active features: {model.pruning_tracker.active_features}")
-
-        logger.info("="*60 + "\n")
-
-    except Exception as e:
-        logger.error(f"Pruning failed at epoch {epoch}: {str(e)}")
-        raise
-
-def validate_model(model: nn.Module, val_loader: DataLoader) -> float:
-    """Enhanced validation with support for both classification and clustering"""
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for data, labels in val_loader:
-            data, labels = data.to(model.device), labels.to(model.device)
-            output = model(data)
-
-            # Handle different output types
-            if isinstance(output, dict):
-                if 'class_predictions' in output:  # Classification
-                    preds = output['class_predictions']
-                elif 'cluster_assignments' in output:  # Clustering
-                    preds = output['cluster_assignments']
-                else:
-                    raise ValueError("No valid predictions in model output")
-            else:
-                preds = output[0].argmax(1)  # Default to first output
-
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    return correct / total if total > 0 else 0.0
-
-def _restore_pruned_weights(model):
-    for name, param in model.named_parameters():
-        if name in model.pruning_tracker.pruned_weights:
-            # Restore original weights and mask
-            stored = model.pruning_tracker.pruned_weights[name]
-            param.data.copy_(stored['weights'])
-
-            # Restore gradient flow for all weights
-            param.register_hook(lambda grad: grad)  # Remove previous mask
-
-            # Update importance tracking
-            model.pruning_tracker.current_importance[name] = stored['importance']
-
-    model.pruning_tracker.pruned_weights.clear()
-
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic for each phase with enhanced checkpoint handling and pruning integration"""
+    """Training logic for each phase with enhanced checkpoint handling"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
+    # Initialize with model-specific best loss
     best_loss = float('inf')
-    min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
+    min_thr= float(config['model']['autoencoder_config']["convergence_threshold"])
+    # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
-    pruning_enabled = phase == 2 and config['pruning']['enabled']
-    patience_counter = 0
 
-    # Pruning-related initialization
-    if pruning_enabled:
-        prune_interval = config['pruning']['prune_interval']
-        l1_lambda = config['pruning']['l1_lambda']
-        warmup_epochs = config['pruning']['warmup_epochs']
-        # Initialize feature count
-        model.pruning_tracker.update_feature_count(model)
+    # Get model-specific best loss if exists
+    model_specific_best = checkpoint_manager.get_best_loss(phase, model)
+    if model_specific_best is not None:
+        best_loss = model_specific_best
+    patience_counter = 0
 
     try:
         for epoch in range(start_epoch, epochs):
@@ -3072,124 +2826,100 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             running_loss = 0.0
             num_batches = len(train_loader)
 
-            if pruning_enabled:
-                if epoch >= warmup_epochs:
-                    # Track weights with importance metrics
-                    model.pruning_tracker.track_weights(epoch)
-
-                if pruning_enabled and (epoch % prune_interval == 0) and (epoch >= warmup_epochs):
-                    # Perform pruning with grafting check
-                    _apply_evolutionary_pruning(model, epoch, config, train_loader)
-                    # Update feature count after pruning
-                    model.pruning_tracker.update_feature_count(model)
-                    # Adjust learning rate after pruning/grafting
-                    lr = optimizer.param_groups[0]['lr']
-                    optimizer.param_groups[0]['lr'] = lr * config['pruning']['lr_decay']
-
-            # Initialize progress bar with feature count
-            pbar = tqdm(train_loader,
-                        desc=f"Phase {phase} - Epoch {epoch+1} | Features: {model.pruning_tracker.active_features}",
-                        leave=False)
-
+            # Training loop
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
                     data = data.to(device)
                     labels = labels.to(device)
+
+                    # Zero gradients
                     optimizer.zero_grad()
 
                     # Forward pass
                     if phase == 1:
+                        # Phase 1: Only reconstruction
                         embeddings = model.encode(data)
-                        reconstruction = model.decode(embeddings[0] if isinstance(embeddings, tuple) else embeddings)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+                        reconstruction = model.decode(embeddings)
                         loss = F.mse_loss(reconstruction, data)
                     else:
+                        # Phase 2: Include clustering and classification
                         output = model(data)
-                        reconstruction = output['reconstruction'] if isinstance(output, dict) else output[1]
+                        if isinstance(output, dict):
+                            reconstruction = output['reconstruction']
+                            embedding = output['embedding']
+                        else:
+                            embedding, reconstruction = output
 
-                        # Base loss calculation
-                        loss_result = loss_manager.calculate_loss(
-                            reconstruction, data,
-                            config['dataset'].get('image_type', 'general')
-                        )
+                        # Calculate base loss
+                        loss_result = loss_manager.calculate_loss(reconstruction, data,
+                                                               config['dataset'].get('image_type', 'general'))
                         loss = loss_result['loss']
 
-                        # Add L1 regularization for pruning
-                        if pruning_enabled and epoch >= warmup_epochs:
-                            l1_penalty = sum(
-                                p.abs().sum() for name, p in model.named_parameters()
-                                if 'conv' in name and 'weight' in name
-                            )
-                            loss += l1_lambda * l1_penalty
-
-                        # Add KL divergence and classification losses
+                        # Add KL divergence loss if enabled
                         if model.use_kl_divergence:
-                            latent_info = model.organize_latent_space(
-                                output['embedding'] if isinstance(output, dict) else output[0],
-                                labels
-                            )
-                            if 'cluster_probabilities' in latent_info:
+                            latent_info = model.organize_latent_space(embedding, labels)
+                            kl_weight = config['model']['autoencoder_config']['enhancements']['kl_divergence_weight']
+                            if isinstance(latent_info, dict) and 'cluster_probabilities' in latent_info:
                                 kl_loss = F.kl_div(
                                     latent_info['cluster_probabilities'].log(),
                                     latent_info['target_distribution'],
                                     reduction='batchmean'
                                 )
-                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+                                loss += kl_weight * kl_loss
 
+                        # Add classification loss if enabled
                         if model.use_class_encoding and hasattr(model, 'classifier'):
-                            class_logits = model.classifier(
-                                output['embedding'] if isinstance(output, dict) else output[0]
-                            )
-                            loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * \
-                                  F.cross_entropy(class_logits, labels)
+                            class_weight = config['model']['autoencoder_config']['enhancements']['classification_weight']
+                            class_logits = model.classifier(embedding)
+                            class_loss = F.cross_entropy(class_logits, labels)
+                            loss += class_weight * class_loss
 
-                    # Backward pass with gradient masking
+                    # Backward pass and optimization
                     loss.backward()
-
-                    if pruning_enabled and epoch >= warmup_epochs:
-                        with torch.no_grad():
-                            for name, param in model.named_parameters():
-                                if name in model.pruning_tracker.pruned_weights:
-                                    param.grad *= 0
-
                     optimizer.step()
 
-                    # Update feature count display every 10 batches
-                    if batch_idx % 10 == 0 and pruning_enabled:
-                        model.pruning_tracker.update_feature_count(model)
-
-                    # Loss tracking and memory management
+                    # Get loss value safely
                     loss_value = safe_get_scalar(loss)
                     running_loss += loss_value
-                    current_avg_loss = running_loss / (batch_idx + 1)
 
                     # Update progress bar
-                    color_status = {
-                        'loss': Colors.color_value(current_avg_loss, best_loss, False),
-                        'best': f"{best_loss:.4f}",
-                        'features': model.pruning_tracker.active_features,
-                        'patience': patience_counter
-                    }
-                    pbar.set_postfix(color_status)
+                    current_avg_loss = running_loss / (batch_idx + 1)
+                    if current_avg_loss < best_loss:
 
+                        pbar.set_postfix({
+                            'loss': f'{Colors.GREEN}{current_avg_loss:.4f}{Colors.ENDC}',
+                            'best': f'{Colors.YELLOW}{best_loss:.4f}{Colors.ENDC}',
+                            'patience': f'{Colors.GREEN}{patience_counter}{Colors.ENDC}'
+                        })
+                    else:
+                        pbar.set_postfix({
+                            'loss': f'{Colors.RED}{current_avg_loss:.4f}{Colors.ENDC}',
+                            'best': f'{Colors.YELLOW}{best_loss:.4f}{Colors.ENDC}',
+                            'patience': f'{Colors.RED}{patience_counter+1}{Colors.ENDC}'
+                        })
+
+
+                    # Memory cleanup
                     del data, loss
                     if phase == 2:
                         del output
                     torch.cuda.empty_cache()
 
                 except Exception as e:
-                    logger.error(f"Batch {batch_idx} error: {str(e)}\n{traceback.format_exc()}")
+                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
 
-            # Epoch post-processing
+            # Calculate epoch average loss
             avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
-            # Final feature count update at end of epoch
-            if pruning_enabled:
-                model.pruning_tracker.update_feature_count(model)
-
             # Checkpoint and early stopping
-            is_best = (best_loss - avg_loss) > min_thr
+            is_best =  (best_loss - avg_loss) >min_thr
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -3205,11 +2935,15 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 patience_counter += 1
 
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
-                logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
+            #logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
+
     except Exception as e:
-        logger.error(f"Training phase {phase} error: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Error in training phase {phase}: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
     return history
@@ -4295,23 +4029,16 @@ class DatasetProcessor:
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
-        self.config = config or {}
+        self.config = config if config is not None else {}  # Initialize config
 
-        # Determine dataset name hierarchy
-        if self.config.get('dataset', {}).get('name'):
-            # 1. Priority to config-defined name
-            self.dataset_name = self.config['dataset']['name'].lower()
-        elif any(x in datafile.lower() for x in ('train', 'test')):
-            # 2. Extract parent directory if path contains train/test
-            self.dataset_name = os.path.basename(os.path.dirname(datafile)).lower()
+        if self.datatype == 'torchvision':
+            self.dataset_name = self.datafile.lower()
         else:
-            # 3. Fallback to folder name or file stem
-            self.dataset_name = os.path.splitext(os.path.basename(datafile))[0].lower()
+            self.dataset_name = Path(self.datafile).stem.lower()
 
         self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        # Important paths
         self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
         self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
@@ -4383,58 +4110,78 @@ class DatasetProcessor:
             return self._process_custom(processed_path)
 
     def _handle_existing_directory(self, path: str):
-        """Smart directory handling with user feedback"""
+        """Handle existing directory by either removing it or merging its contents."""
         if os.path.exists(path):
-            print(f"Existing directory detected: {path}")
-            choice = input("[R]emove, [M]erge, or [K]eep? (R/M/K): ").lower()
-            if choice == 'r':
+            response = input(f"The directory '{path}' already exists. Do you want to (R)emove it or (M)erge its contents? [R/M]: ").lower()
+            if response == 'r':
                 shutil.rmtree(path)
                 os.makedirs(path)
-            elif choice == 'm':
-                # Keep existing files, merge with new ones
+            elif response == 'm':
+                # Merge contents (no action needed, as shutil.copytree will handle it with dirs_exist_ok=True)
                 pass
-            elif choice == 'k':
-                raise FileExistsError("User chose to keep existing directory")
             else:
-                raise ValueError("Invalid directory handling choice")
+                raise ValueError("Invalid choice. Please choose 'R' to remove or 'M' to merge.")
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
-        """Process custom dataset structure with flexible path handling"""
+        """Process custom dataset structure"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
-        # Clean existing directories if needed
-        self._handle_existing_directory(train_dir)
-        self._handle_existing_directory(test_dir)
+        # Access enable_adaptive from training_params
+        try:
+             enable_adaptive = self.config['model'].get('enable_adaptive', True)
+        except:
+            enable_adaptive = True
+            print(f"Enable Adaptive mode is set {enable_adaptive} in process custom")
+        # Check if dataset already has train/test structure
+        if os.path.isdir(os.path.join(data_path, "train")) and \
+           os.path.isdir(os.path.join(data_path, "test")):
+            # Check if adaptive_fit_predict is active
+            if enable_adaptive:
+                # Handle existing train directory
+                self._handle_existing_directory(train_dir)
+                # Merge train and test folders into a single train folder
 
-        # Check for existing train/test subdirectories
-        input_train = os.path.join(data_path, "train")
-        input_test = os.path.join(data_path, "test")
+                # Copy train data
+                shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
 
-        if os.path.isdir(input_train) or os.path.isdir(input_test):
-            # Copy existing train/test structure
-            if os.path.isdir(input_train):
-                shutil.copytree(input_train, train_dir, dirs_exist_ok=True)
-            if os.path.isdir(input_test):
-                shutil.copytree(input_test, test_dir, dirs_exist_ok=True)
-            return train_dir, test_dir if os.path.isdir(test_dir) else None
+                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
 
+            else:
+                # Normal processing with separate train and test folders
+                if os.path.exists(train_dir):
+                    shutil.rmtree(train_dir)
+                if os.path.exists(test_dir):
+                    shutil.rmtree(test_dir)
+
+                shutil.copytree(os.path.join(data_path, "train"), train_dir)
+                shutil.copytree(os.path.join(data_path, "test"), test_dir)
+                return train_dir, test_dir
         # Handle single directory with class subdirectories
+        if not os.path.isdir(data_path):
+            raise ValueError(f"Invalid dataset path: {data_path}")
+
         class_dirs = [d for d in os.listdir(data_path)
                      if os.path.isdir(os.path.join(data_path, d))]
 
         if not class_dirs:
-            raise ValueError(f"No valid class directories in {data_path}")
+            raise ValueError(f"No class directories found in {data_path}")
 
-        # Automatically create train/test split
-        response = input(f"Create train/test split for {self.dataset_name}? (y/n) [y]: ").lower() or 'y'
+        # Ask user about train/test split
+        response = input("Create train/test split? (y/n): ").lower()
         if response == 'y':
-            test_size = float(input("Test size (0-1, default 0.2): ") or 0.2)
+            test_size = float(input("Enter test size (0-1, default: 0.2): ") or "0.2")
             return self._create_train_test_split(data_path, test_size)
-
-        # Use all data for training
-        shutil.copytree(data_path, train_dir, dirs_exist_ok=True)
-        return train_dir, None
+        else:
+            # Use all data for training
+            os.makedirs(train_dir, exist_ok=True)
+            for class_dir in class_dirs:
+                src = os.path.join(data_path, class_dir)
+                dst = os.path.join(train_dir, class_dir)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            return train_dir, None
 
     def cleanup(self):
         """Clean up temporary files"""
@@ -4487,7 +4234,7 @@ class DatasetProcessor:
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(4096, np.prod(input_size) // 4)
+        feature_dims = min(128, np.prod(input_size) // 4)
 
         return {
             "dataset": {
@@ -4690,21 +4437,6 @@ class DatasetProcessor:
                 "use_previous_model": True,
                 "fresh_start": False
             },
-            'pruning': {
-                'enabled': False,
-                'warmup_epochs': 15,
-                'prune_interval': 5,
-                'threshold': 0.4,
-                'l1_lambda': 0.001,
-                'retention_rate': 0.15,
-                'regrowth_interval': 10,
-                'grafting_threshold': 0.05,  # 5% accuracy drop tolerance
-                'lr_decay': 0.5,  # Learning rate reduction after pruning
-                'sparsity_weight': 0.01,  # Loss coefficient for attention gates
-                'min_importance': 0.1,  # Minimum importance for grafting consideration
-                'regrowth_epochs': 5  # Epochs between pruning attempts
-                },
-
             "output": {
                 "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
                 "model_dir": os.path.join(self.dataset_dir, "models"),
@@ -4722,7 +4454,7 @@ class DatasetProcessor:
             "target_column": "target",
             "modelType": "Histogram",
             "feature_group_size": 2,
-            "max_combinations": 9000000,
+            "max_combinations": 10000,
             "bin_sizes": [128],
             "active_learning": {
                 "tolerance": 1.0,
@@ -4992,32 +4724,46 @@ class DatasetProcessor:
 
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
-        """Create standardized train/test split in dataset directory"""
+        """Create train/test split from source directory"""
         train_dir = os.path.join(self.dataset_dir, "train")
         test_dir = os.path.join(self.dataset_dir, "test")
 
-        for class_name in os.listdir(source_dir):
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(test_dir, exist_ok=True)
+
+        for class_name in tqdm(os.listdir(source_dir), desc="Processing classes"):
             class_path = os.path.join(source_dir, class_name)
             if not os.path.isdir(class_path):
                 continue
 
             # Create class directories
-            os.makedirs(os.path.join(train_dir, class_name), exist_ok=True)
-            os.makedirs(os.path.join(test_dir, class_name), exist_ok=True)
+            train_class_dir = os.path.join(train_dir, class_name)
+            test_class_dir = os.path.join(test_dir, class_name)
+            os.makedirs(train_class_dir, exist_ok=True)
+            os.makedirs(test_class_dir, exist_ok=True)
 
-            # Split files
-            files = [f for f in os.listdir(class_path)
-                    if f.lower().endswith(('png', 'jpg', 'jpeg', 'bmp'))]
-            random.shuffle(files)
-            split_idx = int(len(files) * (1 - test_size))
+            # Get all image files
+            image_files = [f for f in os.listdir(class_path)
+                         if f.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS)]
 
-            # Copy files to train/test
-            for f in files[:split_idx]:
-                shutil.copy2(os.path.join(class_path, f),
-                           os.path.join(train_dir, class_name, f))
-            for f in files[split_idx:]:
-                shutil.copy2(os.path.join(class_path, f),
-                           os.path.join(test_dir, class_name, f))
+            # Random split
+            random.shuffle(image_files)
+            split_idx = int((1 - test_size) * len(image_files))
+            train_files = image_files[:split_idx]
+            test_files = image_files[split_idx:]
+
+            # Copy files
+            for fname in train_files:
+                shutil.copy2(
+                    os.path.join(class_path, fname),
+                    os.path.join(train_class_dir, fname)
+                )
+
+            for fname in test_files:
+                shutil.copy2(
+                    os.path.join(class_path, fname),
+                    os.path.join(test_class_dir, fname)
+                )
 
         return train_dir, test_dir
 
