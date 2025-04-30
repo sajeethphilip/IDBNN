@@ -264,6 +264,9 @@ class PredictionManager:
         """
 
         self.config = config
+        self.dataset_name = config['dataset']['name']
+        self.checkpoint_dir = os.path.join('data', self.dataset_name, 'checkpoints')
+
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
@@ -4294,10 +4297,14 @@ class DatasetProcessor:
         self.output_dir = output_dir
         self.config = config if config is not None else {}  # Initialize config
 
-        if self.datatype == 'torchvision':
-            self.dataset_name = self.datafile.lower()
+        # Determine dataset name from config if available
+        if 'dataset' in self.config and 'name' in self.config['dataset']:
+            self.dataset_name = self.config['dataset']['name'].lower()
         else:
-            self.dataset_name = Path(self.datafile).stem.lower()
+            if self.datatype == 'torchvision':
+                self.dataset_name = self.datafile.lower()
+            else:
+                self.dataset_name = Path(self.datafile).stem.lower()
 
         self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
