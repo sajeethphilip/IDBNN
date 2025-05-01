@@ -2936,7 +2936,9 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     )
                 else:
                     patience_counter += 1
-
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+                    logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
+                    break
                 #logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
         except Exception as e:
@@ -2944,9 +2946,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             logger.error(f"Error type: {type(e).__name__}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
-        if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
-                logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
-                break
+
 
     return history
 
