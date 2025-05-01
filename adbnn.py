@@ -1488,7 +1488,7 @@ class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
 
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
-                 dataset_name: Optional[str] = None,mode=None):
+                 dataset_name: Optional[str] = None, mode=None, model_type: Optional[str] = None):
 
         """
         Initialize DBNN with configuration
@@ -1532,7 +1532,7 @@ class DBNN(GPUDBNN):
             random_state=config.random_seed,
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
-            model_type=config.model_type,  # Pass model type from config
+            model_type=model_type if model_type is not None else config.model_type,
             mode=self.mode
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
@@ -6702,6 +6702,8 @@ def main():
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
                        required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
     parser.add_argument('--interactive', action='store_true', help="Enable interactive mode to modify settings.")
+    parser.add_argument('--model-type', type=str, choices=['Histogram', 'Gaussian'],
+                        help='Override model type (Histogram/Gaussian)')
     args = parser.parse_args()
     processor = DatasetProcessor()
 
