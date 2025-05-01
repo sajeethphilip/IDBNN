@@ -2658,9 +2658,17 @@ class DBNN(GPUDBNN):
                         self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
                     )
                 elif self.model_type == "Gaussian":
-                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
-                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
-                    )
+                    # Ensure Gaussian parameters exist
+                    if self.gaussian_params is None:
+                        self.gaussian_params = self._compute_gaussian_params(X_train, y_train)
+
+                    # Explicitly rebuild likelihood_params structure
+                    self.likelihood_params = {
+                        'means': self.gaussian_params['means'],
+                        'covs': self.gaussian_params['covs'],
+                        'classes': self.gaussian_params['classes'],
+                        'feature_pairs': self.feature_pairs
+                    }
                 DEBUG.log(" Likelihood parameters computed")
 
             # Initialize weights if needed
