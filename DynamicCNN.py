@@ -1320,7 +1320,7 @@ def main():
             num_classes=config['dataset']['num_classes'],
             depth=config['model']['depth'],
             initial_filters=config['model']['initial_filters'],
-            input_size=config['dataset']['input_size']  # Critical for depth calculation
+            input_size=config['dataset']['input_size'],  # Critical for depth calculation
             initial_kernel_type=config['model'].get('initial_kernel_type', 'standard')
         ).to(device)
 
