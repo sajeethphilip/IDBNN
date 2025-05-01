@@ -30,12 +30,12 @@ case $mode in
 
     echo "Running training..."
     python DynamicCNN.py train "$data_path" --name "$data_name" --model_type "$FEmodel"
-    python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train
+    python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train --model_type "$DBNNmodel"
     ;;&  # Continue to next case (executes predict if mode is "all")
   "predict" | "all" | "fresh")
     echo "Running prediction..."
     python DynamicCNN.py predict "$data_path" --name "$data_name" --model_type "$FEmodel"
-    python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict
+    python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict --model_type "$DBNNmodel"
     ;;
   *)
     echo "Invalid mode. Choose 'train', 'predict', or 'all'"
