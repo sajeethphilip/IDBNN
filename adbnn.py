@@ -1572,7 +1572,8 @@ class DBNN(GPUDBNN):
         # After preprocessing and splitting data, compute Gaussian params if needed
         if self.model_type == "Gaussian":
             # Compute Gaussian parameters using training data
-            self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
+            if  self.gaussian_params ==None:
+                self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
             self.likelihood_params = {
                 'means': self.gaussian_params['means'],
                 'covs': self.gaussian_params['covs'],
