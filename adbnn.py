@@ -3724,80 +3724,72 @@ class DBNN(GPUDBNN):
 
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized Gaussian likelihood computation with precomputed feature pairs and Gaussian parameters"""
+        """Compute Gaussian likelihoods and return posteriors with parameters"""
         DEBUG.log(" Starting _compute_pairwise_likelihood_parallel_std")
-        print("\033[K" +"Computing Gaussian likelihoods...")
-        # Generate feature pairs if they don't exist
+        print("\033[K" + "Computing Gaussian likelihoods...")
+
+        # Generate feature pairs if needed
         if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
-            self._generate_feature_combinations(feature_dims)
-        # Input validation and preparation
-        dataset = torch.as_tensor(dataset, device=self.device).contiguous()
-        labels = torch.as_tensor(labels, device=self.device).contiguous()
-
-        # Initialize progress tracking
-        n_pairs = len(self.feature_pairs)
-        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs",leave=False)
-
-        # Pre-compute unique classes once
-        unique_classes = torch.unique(labels)
-        n_classes = len(unique_classes)
-
-        # Use precomputed feature pairs and Gaussian parameters
-        if not hasattr(self, 'feature_pairs') or not hasattr(self, 'gaussian_params'):
             self.feature_pairs = self._generate_feature_combinations(
                 feature_dims,
-                self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
             ).to(self.device)
+
+        # Compute Gaussian parameters if not already done
+        if not hasattr(self, 'gaussian_params'):
             self.gaussian_params = self._compute_gaussian_params(dataset, labels)
 
-        # Ensure gaussian_params is not None
-        if self.gaussian_params is None:
-            raise ValueError("gaussian_params is not initialized. Ensure _compute_gaussian_params is called before this method.")
-        # Pre-allocate storage arrays
-        log_likelihoods = torch.zeros((len(dataset), n_classes), device=self.device)
+        # Extract parameters
+        unique_classes = self.gaussian_params['classes']
+        n_classes = len(unique_classes)
+        n_samples = len(dataset)
 
-        # Process each feature group
-        for pair_idx, pair in enumerate(self.feature_pairs):
+        # Initialize storage
+        log_likelihoods = torch.zeros((n_samples, n_classes), device=self.device)
+
+        # Precompute normalization constants
+        log_2pi = torch.log(torch.tensor(2 * np.pi, device=self.device))
+
+        # Process each feature pair
+        for pair_idx, pair in enumerate(tqdm(self.feature_pairs, desc="Processing Gaussian pairs")):
             pair_data = dataset[:, pair]
 
             # Process each class
-            for class_idx, class_id in enumerate(unique_classes):
+            for class_idx in range(n_classes):
                 mean = self.gaussian_params['means'][class_idx, pair_idx]
                 cov = self.gaussian_params['covs'][class_idx, pair_idx]
 
-                # Center the data
-                centered = pair_data - mean.unsqueeze(0)
+                # Add regularization to covariance matrix
+                reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
+                inv_cov = torch.inverse(reg_cov)
 
-                # Compute class likelihood
-                try:
-                    # Add minimal regularization
-                    reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-                    prec = torch.inverse(reg_cov)
+                # Compute Mahalanobis distance
+                diff = pair_data - mean
+                quad_form = torch.einsum('bi,ij,bj->b', diff, inv_cov, diff)
 
-                    # Quadratic term
-                    quad = torch.sum(
-                        torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
-                        dim=1
-                    )
+                # Compute log determinant
+                sign, logdet = torch.slogdet(reg_cov)
+                logdet = sign * logdet
 
-                    # Log likelihood (excluding constant terms that are same for all classes)
-                    class_ll = -0.5 * quad
+                # Full Gaussian log-likelihood
+                log_prob = -0.5 * (quad_form + logdet + 2 * log_2pi)
 
-                except RuntimeError:
-                    # Handle numerical issues by setting very low likelihood
-                    class_ll = torch.full_like(quad, -1e10)
-
-                log_likelihoods[:, class_idx] += class_ll
-
-            pair_pbar.update(1)
+                log_likelihoods[:, class_idx] += log_prob
 
         # Convert to probabilities using softmax
-        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
+        max_log_ll = log_likelihoods.max(dim=1, keepdim=True)[0]
         exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + 1e-10)
+        posteriors = exp_ll / exp_ll.sum(dim=1, keepdim=True)
 
-        pair_pbar.close()
+        # Store parameters for later use
+        self.likelihood_params = {
+            'means': self.gaussian_params['means'],
+            'covs': self.gaussian_params['covs'],
+            'classes': unique_classes,
+            'feature_pairs': self.feature_pairs
+        }
+
         return posteriors, None
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
