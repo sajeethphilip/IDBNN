@@ -3790,7 +3790,49 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs
         }
 
+        # Calculate posterior probabilities
+        posteriors = self._calculate_gaussian_posteriors(dataset)
+
         return posteriors, None
+
+    def _calculate_gaussian_posteriors(self, features: torch.Tensor):
+        """Calculate posteriors using stored Gaussian parameters"""
+        n_samples = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+
+        log_likelihoods = torch.zeros((n_samples, n_classes), device=self.device)
+
+        for pair_idx, pair in enumerate(self.likelihood_params['feature_pairs']):
+            pair_data = features[:, pair]
+
+            for class_idx in range(n_classes):
+                mean = self.likelihood_params['means'][class_idx, pair_idx]
+                cov = self.likelihood_params['covs'][class_idx, pair_idx]
+
+                # Calculate multivariate normal log probability
+                log_prob = self._gaussian_log_prob(pair_data, mean, cov)
+                log_likelihoods[:, class_idx] += log_prob
+
+        # Softmax normalization
+        max_log_ll = log_likelihoods.max(dim=1, keepdim=True)[0]
+        exp_ll = torch.exp(log_likelihoods - max_log_ll)
+        return exp_ll / exp_ll.sum(dim=1, keepdim=True)
+
+    def _gaussian_log_prob(self, x: torch.Tensor, mean: torch.Tensor, cov: torch.Tensor):
+        """Calculate log probability of multivariate normal distribution"""
+        # Add regularization to covariance matrix
+        reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
+
+        # Compute components
+        diff = x - mean
+        inv_cov = torch.linalg.inv(reg_cov)
+        logdet = torch.logdet(reg_cov)
+
+        # Calculate quadratic form
+        quad_form = torch.einsum('bi,ij,bj->b', diff, inv_cov, diff)
+
+        # Full log probability
+        return -0.5 * (quad_form + logdet + 2 * torch.log(torch.tensor(2 * np.pi)))
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Gaussian posterior computation focusing on relative class probabilities"""
