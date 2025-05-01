@@ -284,7 +284,7 @@ class DynamicCNN(nn.Module):
         current_channels = in_channels
 
         # Add kernel adaptation
-        if config['model']['initial_kernel_type'] == 'diagonal_enhanced':
+        if initial_kernel_type == 'diagonal_enhanced':
             self._initialize_diagonal_kernels()
 
         # Automatically calculate and limit depth
