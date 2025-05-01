@@ -1577,6 +1577,13 @@ class DBNN(GPUDBNN):
             self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
                 self.X_train, self.y_train, self.X_train.shape[1]
             )
+            # Verify parameter structure
+            if not isinstance(self.likelihood_params, dict):
+                raise TypeError("likelihood_params must be a dictionary")
+
+            if 'classes' not in self.likelihood_params:
+                raise KeyError("Gaussian parameters missing class information")
+
         elif self.model_type == "Histogram":
             self.likelihood_params = self._compute_pairwise_likelihood_parallel(
                 self.X_train, self.y_train, self.X_train.shape[1]
