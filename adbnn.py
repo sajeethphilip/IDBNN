@@ -1573,10 +1573,12 @@ class DBNN(GPUDBNN):
         if self.model_type == "Gaussian":
             # Compute Gaussian parameters using training data
             self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
-            # Compute likelihood parameters
+
+            # Compute likelihood parameters (method sets self.likelihood_params internally)
             self._compute_pairwise_likelihood_parallel_std(
                 self.X_train, self.y_train, self.X_train.shape[1]
             )
+
             # Verify parameter structure
             if not isinstance(self.likelihood_params, dict):
                 raise TypeError("likelihood_params must be a dictionary")
