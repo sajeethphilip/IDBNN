@@ -1569,6 +1569,25 @@ class DBNN(GPUDBNN):
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
 
+        # After preprocessing and splitting data, compute Gaussian params if needed
+        if self.model_type == "Gaussian":
+            # Compute Gaussian parameters using training data
+            self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
+            # Compute likelihood parameters
+            self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                self.X_train, self.y_train, self.X_train.shape[1]
+            )
+        elif self.model_type == "Histogram":
+            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                self.X_train, self.y_train, self.X_train.shape[1]
+            )
+
+        # Initialize weights if needed
+        if self.weight_updater is None:
+            DEBUG.log(" Initializing weight updater")
+            self._initialize_bin_weights()
+            DEBUG.log(" Weight updater initialized")
+
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
         batch_size = self.batch_size  # Adjust based on available memory
