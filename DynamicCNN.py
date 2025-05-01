@@ -1412,7 +1412,7 @@ def main():
                     class_metadata = json.load(f)  # This is the correctly loaded variable
             features, labels, paths = extract_features(model, train_loader, device)
             csv_path = os.path.join(save_dir, f"{config['dataset']['name']}.csv")
-            save_features_to_csv(features, labels, paths, csv_path,class_metadata=metadata)
+            save_features_to_csv(features, labels, paths, csv_path,class_metadata=class_metadata)
 
             print(f"Training completed. Artifacts saved to {save_dir}")
 
@@ -1493,7 +1493,7 @@ def main():
             output_dir = os.path.dirname(args.output) if '/' in args.output else '.'
             os.makedirs(output_dir, exist_ok=True)
             training_csv_path = os.path.join("data", config['dataset']['name'], f"{config['dataset']['name']}.csv")
-            save_predictions(features, paths, predictions,args.output, config)
+            save_predictions(features, paths, predictions,args.output, class_metadata)
             print(f"Predictions saved to {args.output}")
 
         except Exception as e:
@@ -1609,7 +1609,7 @@ def predict(model, loader, device):
 # --------------------------
 # Modified Prediction Saving
 # --------------------------
-def save_predictions(features, paths, labels, output_path, config):
+def save_predictions(features, paths, labels, output_path, class_metadata):
     """Save predictions using class metadata"""
     # Load class metadata
     metadata_path = os.path.join("data", config['dataset']['name'], "class_metadata.json")
@@ -1617,7 +1617,7 @@ def save_predictions(features, paths, labels, output_path, config):
         metadata = json.load(f)
 
     # Convert numeric labels to class names
-    idx_to_class = {v: k for k, v in metadata['class_to_idx'].items()}
+    idx_to_class = {v: k for k, v in class_metadata['class_to_idx'].items()}
     class_names = [idx_to_class[label] for label in labels]
 
     # Load training CSV structure
