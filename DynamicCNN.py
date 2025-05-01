@@ -275,7 +275,7 @@ class DynamicJNet(nn.Module):
 
 class DynamicCNN(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
-            bottleneck_dim=None,  # New: Target feature dimension
+            bottleneck_dim=128,  # New: Target feature dimension
             sparsity_weight=0.01,   # New: Weight for L1 regularization
             initial_kernel_type='standard'  # Add parameter here
             ):
@@ -307,8 +307,8 @@ class DynamicCNN(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         # Feature bottleneck (add this after adaptive pooling)
         self.bottleneck = nn.Sequential(
-            nn.Linear(current_channels, bottleneck_dim) if bottleneck_dim else nn.Identity(),
-            nn.BatchNorm1d(bottleneck_dim) if bottleneck_dim else nn.Identity(),
+            nn.Linear(current_channels, min(bottleneck_dim, 128)),  # Enforce ceiling
+            nn.BatchNorm1d(min(bottleneck_dim, 128)),
             nn.ReLU(inplace=True)
         )
         self.classifier = nn.Linear(bottleneck_dim if bottleneck_dim else current_channels, num_classes)
@@ -1031,7 +1031,7 @@ def analyze_stroke_complexity(root_dir, classes):
 def calculate_adaptive_bottleneck(num_classes, feature_dim, separability):
     """Set bottleneck size based on class complexity"""
     min_dim = 64
-    max_dim = 512
+    max_dim = 128
 
     # If any class pair has high similarity, increase bottleneck
     if min(separability.values()) > 0.7:  # Highly similar classes
@@ -1076,7 +1076,7 @@ def create_default_config(name, data_dir, resize=None):
         "model": {
             "type": "jnet",  # 'cnn' or 'jnet'
             "cnn_params": {
-                "bottleneck_dim": None,
+                "bottleneck_dim": 128,  # Set default ceiling here
                 "sparsity_weight": 0.01
             },
             "jnet_params": {
