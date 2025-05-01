@@ -7,6 +7,7 @@
 # Training until patience enabled. April 7 8:14 am 2025
 #Finalised completely working module as on 15th April 2025
 # Tested and working well with numerica target also April 27 11:28 pm
+# Fixed to work Both on Gaussian and Histogram Models with command line arguments May 2 1:27 am
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -3861,6 +3862,12 @@ class DBNN(GPUDBNN):
         """Gaussian posterior computation focusing on relative class probabilities"""
         features = features.to(self.device)
         batch_size = len(features)
+        self.likelihood_params = {
+            'means': self.gaussian_params['means'],
+            'covs': self.gaussian_params['covs'],
+            'classes': self.gaussian_params['classes'],
+            'feature_pairs': self.feature_pairs
+        }
         n_classes = len(self.likelihood_params['classes'])
 
         # Initialize log likelihoods
