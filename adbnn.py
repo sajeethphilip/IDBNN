@@ -1532,7 +1532,7 @@ class DBNN(GPUDBNN):
             random_state=config.random_seed,
             fresh=config.fresh_start,
             use_previous_model=config.use_previous_model,
-            model_type=model_type if model_type is not None else config.model_type,
+            model_type=model_type if model_type is not None else config.model_type,  # Pass model type from config
             mode=self.mode
         )
         self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
@@ -6781,7 +6781,7 @@ def main():
         else:
             print("\033[K" + f"{Colors.RED}Invalid selection.{Colors.ENDC}")
 
-    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None):
+    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None, model_type="Histogram"):
         """Process a single dataset with given mode"""
         try:
             # Load config
@@ -6797,9 +6797,9 @@ def main():
 
             # Create DBNN instance
             if mode== 'train_predict' :
-                model = DBNN(dataset_name=dataset_name,mode='train')
+                model = DBNN(dataset_name=dataset_name,mode='train',model_type=model_type)
             else:
-                model = DBNN(dataset_name=dataset_name,mode=mode)
+                model = DBNN(dataset_name=dataset_name,mode=mode,model_type=model_type)
 
             if mode in ['train', 'train_predict']:
                 # Training phase
@@ -6832,7 +6832,7 @@ def main():
                 print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
 
                 dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name=dataset_name,mode='predict')
+                predictor = DBNN(dataset_name=dataset_name,mode='predict',model_type=model_type)
                 print(f"Processing {dataset_name} in predict mode")
 
                 if predictor.load_model_for_prediction(dataset_name):
@@ -6955,7 +6955,7 @@ def main():
             basename = os.path.splitext(os.path.basename(args.file_path))[0]
             conf_path = os.path.join('data', basename, f'{basename}.conf')
             csv_path = os.path.join('data', basename, f'{basename}.csv')
-            process_single_dataset(basename, conf_path, csv_path, 'invertDBNN')
+            process_single_dataset(basename, conf_path, csv_path, 'invertDBNN', model_type=args.model_type)
 
         elif args.mode in ['train', 'train_predict', 'predict']:
             if args.file_path:
@@ -6963,13 +6963,13 @@ def main():
                 workfile=os.path.splitext(os.path.basename(args.file_path))[0]
                 conf_path = os.path.join('data', basename, f'{basename}.conf')
                 csv_path = os.path.join('data', basename, f'{workfile}.csv')
-                process_single_dataset(basename, conf_path, csv_path, args.mode)
+                process_single_dataset(basename, conf_path, csv_path, args.mode, model_type=args.model_type)
             else:
                 dataset_pairs = find_dataset_pairs()
                 if dataset_pairs:
                     basename, conf_path, csv_path = dataset_pairs[0]
                     print("\033[K" + f"{Colors.YELLOW}Using default dataset: {basename}{Colors.ENDC}")
-                    process_single_dataset(basename, conf_path, csv_path, args.mode)
+                    process_single_dataset(basename, conf_path, csv_path, args.mode, model_type=args.model_type)
                 else:
                     print("\033[K" + f"{Colors.RED}No datasets found.{Colors.ENDC}")
 
