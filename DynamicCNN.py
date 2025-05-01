@@ -276,7 +276,7 @@ class DynamicJNet(nn.Module):
 class DynamicCNN(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
             bottleneck_dim=None,  # New: Target feature dimension
-            sparsity_weight=0.01   # New: Weight for L1 regularization
+            sparsity_weight=0.01,   # New: Weight for L1 regularization
             initial_kernel_type='standard'  # Add parameter here
             ):
         super().__init__()
