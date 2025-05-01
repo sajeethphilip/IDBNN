@@ -24,6 +24,7 @@ case $mode in
     echo "Cleaning..."
     rm -rf "data/${data_name}/"
     rm -rf Model/*"${data_name}"_*
+    rm -rf training_data/${data_name}/
     ;;&
   "train" | "all"| "fresh")
 
