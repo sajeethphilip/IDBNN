@@ -277,6 +277,7 @@ class DynamicCNN(nn.Module):
     def __init__(self, in_channels, num_classes, depth=3, initial_filters=32, input_size=(28,28),
             bottleneck_dim=None,  # New: Target feature dimension
             sparsity_weight=0.01   # New: Weight for L1 regularization
+            initial_kernel_type='standard'  # Add parameter here
             ):
         super().__init__()
         self.layers = nn.ModuleList()
@@ -1320,6 +1321,7 @@ def main():
             depth=config['model']['depth'],
             initial_filters=config['model']['initial_filters'],
             input_size=config['dataset']['input_size']  # Critical for depth calculation
+            initial_kernel_type=config['model'].get('initial_kernel_type', 'standard')
         ).to(device)
 
     # Load existing model if available
