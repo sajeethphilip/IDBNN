@@ -3802,7 +3802,7 @@ class DBNN(GPUDBNN):
         # Calculate posterior probabilities
         posteriors = self._calculate_gaussian_posteriors(dataset)
 
-        return posteriors, None
+        return  #posteriors, None
 
     def _calculate_gaussian_posteriors(self, features: torch.Tensor):
         """Calculate posteriors using stored Gaussian parameters"""
@@ -5492,7 +5492,9 @@ class DBNN(GPUDBNN):
             required_components = {
                 'scaler': self.scaler,
                 'label_encoder': self.label_encoder,
+                'likelihood_params': self.likelihood_params,
                 'feature_pairs': self.feature_pairs,
+                'gaussian_params': self.gaussian_params,
                 'model_type': self.model_type,
                 'target_column': self.target_column,
                 'n_bins_per_dim': self.n_bins_per_dim
