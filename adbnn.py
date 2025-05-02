@@ -7,7 +7,6 @@
 # Training until patience enabled. April 7 8:14 am 2025
 #Finalised completely working module as on 15th April 2025
 # Tested and working well with numerica target also April 27 11:28 pm
-# Fixed to work Both on Gaussian and Histogram Models with command line arguments May 2 1:27 am
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -1570,41 +1569,6 @@ class DBNN(GPUDBNN):
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
 
-        # After preprocessing and splitting data, compute Gaussian params if needed
-        if self.mode != 'predict':
-            if self.model_type == "Gaussian":
-                # Compute Gaussian parameters using training data
-                if  self.gaussian_params ==None:
-                    self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
-                self.likelihood_params = {
-                    'means': self.gaussian_params['means'],
-                    'covs': self.gaussian_params['covs'],
-                    'classes': self.gaussian_params['classes'],
-                    'feature_pairs': self.feature_pairs
-                }
-                # Compute likelihood parameters (method sets self.likelihood_params internally)
-                self._compute_pairwise_likelihood_parallel_std(
-                    self.X_train, self.y_train, self.X_train.shape[1]
-                )
-
-                # Verify parameter structure
-                if not isinstance(self.likelihood_params, dict):
-                    raise TypeError("likelihood_params must be a dictionary")
-
-                if 'classes' not in self.likelihood_params:
-                    raise KeyError("Gaussian parameters missing class information")
-
-            elif self.model_type == "Histogram":
-                self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                    self.X_train, self.y_train, self.X_train.shape[1]
-                )
-
-        # Initialize weights if needed
-        if self.weight_updater is None:
-            DEBUG.log(" Initializing weight updater")
-            self._initialize_bin_weights()
-            DEBUG.log(" Weight updater initialized")
-
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
         batch_size = self.batch_size  # Adjust based on available memory
@@ -2666,17 +2630,9 @@ class DBNN(GPUDBNN):
                         self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
                     )
                 elif self.model_type == "Gaussian":
-                    # Ensure Gaussian parameters exist
-                    if self.gaussian_params is None:
-                        self.gaussian_params = self._compute_gaussian_params(X_train, y_train)
-
-                    # Explicitly rebuild likelihood_params structure
-                    self.likelihood_params = {
-                        'means': self.gaussian_params['means'],
-                        'covs': self.gaussian_params['covs'],
-                        'classes': self.gaussian_params['classes'],
-                        'feature_pairs': self.feature_pairs
-                    }
+                    self.likelihood_params = self._compute_pairwise_likelihood_parallel_std(
+                        self.X_tensor, self.y_tensor, self.X_tensor.shape[1]
+                    )
                 DEBUG.log(" Likelihood parameters computed")
 
             # Initialize weights if needed
@@ -3747,128 +3703,139 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs
         }
 
-
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Compute Gaussian likelihoods and return posteriors with parameters"""
-        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel_std")
-        print("\033[K" + "Computing Gaussian likelihoods...")
+        """Compute Gaussian parameters (means, covariances) for all feature pairs and classes."""
+        DEBUG.log("Starting Gaussian likelihood computation")
+        print("\033[KComputing Gaussian parameters...")
 
-        # Generate feature pairs if needed
-        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
+        # Generate feature pairs if not existing
+        if self.feature_pairs is None:
             self.feature_pairs = self._generate_feature_combinations(
                 feature_dims,
                 self.config.get('likelihood_config', {}).get('feature_group_size', 2),
                 self.config.get('likelihood_config', {}).get('max_combinations', None)
-            ).to(self.device)
+            )
 
-        # Compute Gaussian parameters if not already done
-        if not hasattr(self, 'gaussian_params'):
-            self.gaussian_params = self._compute_gaussian_params(dataset, labels)
-
-        # Extract parameters
-        unique_classes = self.gaussian_params['classes']
+        unique_classes = torch.unique(labels)
         n_classes = len(unique_classes)
-        n_samples = len(dataset)
+        n_pairs = len(self.feature_pairs)
 
-        # Initialize storage
-        log_likelihoods = torch.zeros((n_samples, n_classes), device=self.device)
+        # Initialize storage for means and covariances
+        means = torch.zeros((n_classes, n_pairs, 2), device=self.device)
+        covs = torch.zeros((n_classes, n_pairs, 2, 2), device=self.device)
 
-        # Precompute normalization constants
-        log_2pi = torch.log(torch.tensor(2 * np.pi, device=self.device))
+        # Process each class
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = (labels == class_id)
+            class_data = dataset[class_mask]
 
-        # Process each feature pair
-        for pair_idx, pair in enumerate(tqdm(self.feature_pairs, desc="Processing Gaussian pairs")):
-            pair_data = dataset[:, pair]
+            # Process each feature pair
+            for pair_idx, pair in enumerate(self.feature_pairs):
+                pair_data = class_data[:, pair]
 
-            # Process each class
-            for class_idx in range(n_classes):
-                mean = self.gaussian_params['means'][class_idx, pair_idx]
-                cov = self.gaussian_params['covs'][class_idx, pair_idx]
+                # Compute mean and covariance
+                mean = torch.mean(pair_data, dim=0)
+                centered = pair_data - mean
+                cov = torch.mm(centered.T, centered) / (len(pair_data) - 1 + 1e-6)
 
-                # Add regularization to covariance matrix
-                reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-                inv_cov = torch.inverse(reg_cov)
+                # Add regularization to avoid singular matrix
+                cov += torch.eye(2, device=self.device) * 1e-6
 
-                # Compute Mahalanobis distance
-                diff = pair_data - mean
-                quad_form = torch.einsum('bi,ij,bj->b', diff, inv_cov, diff)
+                means[class_idx, pair_idx] = mean
+                covs[class_idx, pair_idx] = cov
 
-                # Compute log determinant
-                sign, logdet = torch.slogdet(reg_cov)
-                logdet = sign * logdet
-
-                # Full Gaussian log-likelihood
-                log_prob = -0.5 * (quad_form + logdet + 2 * log_2pi)
-
-                log_likelihoods[:, class_idx] += log_prob
-
-        # Convert to probabilities using softmax
-        max_log_ll = log_likelihoods.max(dim=1, keepdim=True)[0]
-        exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        posteriors = exp_ll / exp_ll.sum(dim=1, keepdim=True)
-
-        # Store parameters for later use
-        self.likelihood_params = {
-            'means': self.gaussian_params['means'],
-            'covs': self.gaussian_params['covs'],
+        # Store Gaussian parameters
+        self.gaussian_params = {
+            'means': means,
+            'covs': covs,
             'classes': unique_classes,
             'feature_pairs': self.feature_pairs
         }
 
-        # Calculate posterior probabilities
-        posteriors = self._calculate_gaussian_posteriors(dataset)
+        return self.gaussian_params
 
-        return  #posteriors, None
 
-    def _calculate_gaussian_posteriors(self, features: torch.Tensor):
-        """Calculate posteriors using stored Gaussian parameters"""
-        n_samples = features.shape[0]
-        n_classes = len(self.likelihood_params['classes'])
+    def _compute_pairwise_likelihood_parallel_std_old(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Optimized Gaussian likelihood computation with precomputed feature pairs and Gaussian parameters"""
+        DEBUG.log(" Starting _compute_pairwise_likelihood_parallel_std")
+        print("\033[K" +"Computing Gaussian likelihoods...")
+        # Generate feature pairs if they don't exist
+        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
+            self._generate_feature_combinations(feature_dims)
+        # Input validation and preparation
+        dataset = torch.as_tensor(dataset, device=self.device).contiguous()
+        labels = torch.as_tensor(labels, device=self.device).contiguous()
 
-        log_likelihoods = torch.zeros((n_samples, n_classes), device=self.device)
+        # Initialize progress tracking
+        n_pairs = len(self.feature_pairs)
+        pair_pbar = tqdm(total=n_pairs, desc="Processing feature pairs",leave=False)
 
-        for pair_idx, pair in enumerate(self.likelihood_params['feature_pairs']):
-            pair_data = features[:, pair]
+        # Pre-compute unique classes once
+        unique_classes = torch.unique(labels)
+        n_classes = len(unique_classes)
 
-            for class_idx in range(n_classes):
-                mean = self.likelihood_params['means'][class_idx, pair_idx]
-                cov = self.likelihood_params['covs'][class_idx, pair_idx]
+        # Use precomputed feature pairs and Gaussian parameters
+        if not hasattr(self, 'feature_pairs') or not hasattr(self, 'gaussian_params'):
+            self.feature_pairs = self._generate_feature_combinations(
+                feature_dims,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),  # Use group_size from config
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            ).to(self.device)
+            self.gaussian_params = self._compute_gaussian_params(dataset, labels)
 
-                # Calculate multivariate normal log probability
-                log_prob = self._gaussian_log_prob(pair_data, mean, cov)
-                log_likelihoods[:, class_idx] += log_prob
+        # Ensure gaussian_params is not None
+        if self.gaussian_params is None:
+            raise ValueError("gaussian_params is not initialized. Ensure _compute_gaussian_params is called before this method.")
+        # Pre-allocate storage arrays
+        log_likelihoods = torch.zeros((len(dataset), n_classes), device=self.device)
 
-        # Softmax normalization
-        max_log_ll = log_likelihoods.max(dim=1, keepdim=True)[0]
+        # Process each feature group
+        for pair_idx, pair in enumerate(self.feature_pairs):
+            pair_data = dataset[:, pair]
+
+            # Process each class
+            for class_idx, class_id in enumerate(unique_classes):
+                mean = self.gaussian_params['means'][class_idx, pair_idx]
+                cov = self.gaussian_params['covs'][class_idx, pair_idx]
+
+                # Center the data
+                centered = pair_data - mean.unsqueeze(0)
+
+                # Compute class likelihood
+                try:
+                    # Add minimal regularization
+                    reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
+                    prec = torch.inverse(reg_cov)
+
+                    # Quadratic term
+                    quad = torch.sum(
+                        torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
+                        dim=1
+                    )
+
+                    # Log likelihood (excluding constant terms that are same for all classes)
+                    class_ll = -0.5 * quad
+
+                except RuntimeError:
+                    # Handle numerical issues by setting very low likelihood
+                    class_ll = torch.full_like(quad, -1e10)
+
+                log_likelihoods[:, class_idx] += class_ll
+
+            pair_pbar.update(1)
+
+        # Convert to probabilities using softmax
+        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
         exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        return exp_ll / exp_ll.sum(dim=1, keepdim=True)
+        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + 1e-10)
 
-    def _gaussian_log_prob(self, x: torch.Tensor, mean: torch.Tensor, cov: torch.Tensor):
-        """Calculate log probability of multivariate normal distribution"""
-        # Add regularization to covariance matrix
-        reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-
-        # Compute components
-        diff = x - mean
-        inv_cov = torch.linalg.inv(reg_cov)
-        logdet = torch.logdet(reg_cov)
-
-        # Calculate quadratic form
-        quad_form = torch.einsum('bi,ij,bj->b', diff, inv_cov, diff)
-
-        # Full log probability
-        return -0.5 * (quad_form + logdet + 2 * torch.log(torch.tensor(2 * np.pi)))
+        pair_pbar.close()
+        return posteriors, None
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Gaussian posterior computation focusing on relative class probabilities"""
         features = features.to(self.device)
         batch_size = len(features)
-        self.likelihood_params = {
-            'means': self.gaussian_params['means'],
-            'covs': self.gaussian_params['covs'],
-            'classes': self.gaussian_params['classes'],
-            'feature_pairs': self.feature_pairs
-        }
         n_classes = len(self.likelihood_params['classes'])
 
         # Initialize log likelihoods
@@ -4150,7 +4117,6 @@ class DBNN(GPUDBNN):
             with tqdm(total=n_batches, desc="Prediction batches",leave=False) as pred_pbar:
                 for i in range(0, len(X_tensor), batch_size):
                     batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
-
                     # Get posteriors (NaN handling happens inside these methods)
                     if self.model_type == "Histogram":
                         posteriors, _ = self._compute_batch_posterior(batch_X)
@@ -5165,6 +5131,7 @@ class DBNN(GPUDBNN):
             print("\033[K" + f"{Colors.YELLOW}Generating predictions for the entire dataset{Colors.ENDC}", end='\r', flush=True)
             X_all = torch.cat([X_train, X_test], dim=0)
             y_all = torch.cat([y_train, y_test], dim=0)
+
             all_pred_classes, all_posteriors = self.predict(X_all, batch_size=batch_size)
 
             # Move tensors to CPU for accuracy calculation
@@ -5514,9 +5481,7 @@ class DBNN(GPUDBNN):
             required_components = {
                 'scaler': self.scaler,
                 'label_encoder': self.label_encoder,
-                'likelihood_params': self.likelihood_params,
                 'feature_pairs': self.feature_pairs,
-                'gaussian_params': self.gaussian_params,
                 'model_type': self.model_type,
                 'target_column': self.target_column,
                 'n_bins_per_dim': self.n_bins_per_dim
@@ -5671,7 +5636,6 @@ class DBNN(GPUDBNN):
                 self.likelihood_params['classes'] = safe_to_tensor(self.likelihood_params['classes'], self.device)
                 self.likelihood_params['feature_pairs'] = safe_to_tensor(self.likelihood_params['feature_pairs'], self.device)
 
-
             # Load optional components
             optional_components = [
                 'global_mean', 'global_std', 'categorical_encoders',
@@ -5705,64 +5669,6 @@ class DBNN(GPUDBNN):
             self.feature_pairs = None
             return False
 
-    def predict_and_save(self, save_path=None, batch_size: int = 128):
-        """Make predictions on data and save them using best model weights"""
-        try:
-            # First try to load existing model and components
-            weights_loaded = os.path.exists(self._get_weights_filename())
-            components_loaded = self._load_model_components()
-
-            if not (weights_loaded and components_loaded):
-                print("\033[K" +"Complete model not found. Training required.", end="\r", flush=True)
-                results = self.fit_predict(batch_size=batch_size)
-                return results
-
-            # Load the model weights and encoders
-            self._load_best_weights()
-            self._load_categorical_encoders()
-
-            # Explicitly use best weights for prediction
-            if self.best_W is None:
-                print("\033[K" +"No best weights found. Training required.", end="\r", flush=True)
-                results = self.fit_predict(batch_size=batch_size)
-                return results
-
-            # Store current weights temporarily
-            temp_W = self.current_W
-
-            # Use best weights for prediction
-            self.current_W = self.best_W.clone()
-
-            try:
-                # Load and preprocess input data
-                X = self.data.drop(columns=[self.target_column])
-                true_labels = self.data[self.target_column]
-
-                # Preprocess the data using the existing method
-                X_tensor = self._preprocess_data(X, is_training=False)
-
-                # Make predictions
-                print("\033[K" +f"{Colors.BLUE}Predctions for saving data{Colors.ENDC}", end="\r", flush=True)
-                predictions = self.predict(X_tensor, batch_size=batch_size)
-
-                # Save predictions and metrics
-                if save_path:
-                    self.save_predictions(X, predictions, save_path, true_labels)
-
-                return predictions
-            finally:
-                # Restore current weights
-                self.current_W = temp_W
-
-        except Exception as e:
-            print("\033[K" +f"Error during prediction process: {str(e)}")
-            print("\033[K" +"Falling back to training pipeline...")
-            history = self.adaptive_fit_predict(max_rounds=self.max_epochs, batch_size=batch_size)
-            results = self.fit_predict(batch_size=batch_size)
-            return results
-
-
-
 #--------------------------------------------------Class Ends ----------------------------------------------------------
     # DBNN class to handle prediction functionality
     def _validate_target_column(self, y: pd.Series) -> bool:
@@ -5776,7 +5682,7 @@ class DBNN(GPUDBNN):
         # Check if all values in target column are in encoder classes
         return unique_values.issubset(encoder_classes)
 
-    def predict_from_file(self, input_csv: str, output_path: str = None,
+    def predict_from_file(self, input_csv: str, output_path: str = None,model_type=None,
                          image_dir: str = None, batch_size: int = 128) -> Dict:
         """
         Make predictions from CSV file with comprehensive output handling, including
@@ -5798,7 +5704,7 @@ class DBNN(GPUDBNN):
             df = pd.read_csv(input_csv)
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
             predict_mode = True if self.mode=='predict' else False
-
+            self.model_type=model_type
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
                 if not self._validate_target_column(df[self.target_column]):
@@ -5899,6 +5805,7 @@ class DBNN(GPUDBNN):
                 DEBUG.log("No target column found - running in pure prediction mode")
 
             # Generate predictions
+            self._load_model_components()
             print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
             y_pred, posteriors = self.predict(X, batch_size=batch_size)
             pred_classes = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
@@ -6317,34 +6224,6 @@ def create_prediction_mosaic(
     except Exception as e:
         DEBUG.log(f"Error in create_prediction_mosaic: {str(e)}")
         raise RuntimeError(f"Prediction mosaic creation failed: {str(e)}")
-
-def run_gpu_benchmark(dataset_name: str, model=None, batch_size: int = 128):
-    """Run benchmark using GPU-optimized implementation"""
-    print("\033[K" +f"Running GPU benchmark on {Colors.highlight_dataset(dataset_name)} dataset...", end="\r", flush=True)
-
-    if Train:
-        # First run adaptive training if enabled
-        if EnableAdaptive:
-            history = model.adaptive_fit_predict(max_rounds=model.max_epochs, batch_size=batch_size)
-
-        # Skip fit_predict and just do predictions
-        results = model.predict_and_save(
-            save_path=f"data/{dataset_name}/{dataset_name}_predictions.csv",
-            batch_size=batch_size
-        )
-
-        plot_training_progress(results['error_rates'], dataset_name)
-        plot_confusion_matrix(
-            results['confusion_matrix'],
-            model.label_encoder.classes_,
-            dataset_name
-        )
-
-        print("\033[K" +f"{Colors.BOLD}Classification Report for {Colors.highlight_dataset(dataset_name)}:{Colors.ENDC}")
-        print("\033[K" +results['classification_report'])
-
-    return model, results
-
 
 
 def plot_training_progress(error_rates: List[float], dataset_name: str):
@@ -6929,7 +6808,7 @@ def main():
                     os.makedirs(output_dir, exist_ok=True)
                     output_path = os.path.join(output_dir, f'{dataset_name}')
 
-                    results = predictor.predict_from_file(input_csv, output_dir)
+                    results = predictor.predict_from_file(input_csv, output_dir,model_type=model_type)
                     print("\033[K" + f"Predictions saved to: {output_path}")
 
             if mode == 'invertDBNN':
