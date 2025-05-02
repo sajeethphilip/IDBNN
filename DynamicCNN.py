@@ -587,7 +587,7 @@ def train(model, train_loader, val_loader, config, device, full_dataset):
                     mask = (labels == lbl)
                     class_loss = per_sample_loss[mask].mean()
                     class_losses.append(class_loss)
-                ce_loss = torch.mean(torch.stack(class_losses))
+                ce_loss = torch.sum(torch.stack(class_losses)) if class_losses else torch.tensor(0.0)
 
             kl_loss = kl_divergence_loss(features, labels)
             loss = ce_loss + config['training_params']['kl_weight'] * kl_loss+ sparsity_loss
