@@ -1571,32 +1571,33 @@ class DBNN(GPUDBNN):
         self._preprocess_and_split_data()  # Call preprocessing only once
 
         # After preprocessing and splitting data, compute Gaussian params if needed
-        if self.model_type == "Gaussian":
-            # Compute Gaussian parameters using training data
-            if  self.gaussian_params ==None:
-                self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
-            self.likelihood_params = {
-                'means': self.gaussian_params['means'],
-                'covs': self.gaussian_params['covs'],
-                'classes': self.gaussian_params['classes'],
-                'feature_pairs': self.feature_pairs
-            }
-            # Compute likelihood parameters (method sets self.likelihood_params internally)
-            self._compute_pairwise_likelihood_parallel_std(
-                self.X_train, self.y_train, self.X_train.shape[1]
-            )
+        if self.mode != 'predict':
+            if self.model_type == "Gaussian":
+                # Compute Gaussian parameters using training data
+                if  self.gaussian_params ==None:
+                    self.gaussian_params = self._compute_gaussian_params(self.X_train, self.y_train)
+                self.likelihood_params = {
+                    'means': self.gaussian_params['means'],
+                    'covs': self.gaussian_params['covs'],
+                    'classes': self.gaussian_params['classes'],
+                    'feature_pairs': self.feature_pairs
+                }
+                # Compute likelihood parameters (method sets self.likelihood_params internally)
+                self._compute_pairwise_likelihood_parallel_std(
+                    self.X_train, self.y_train, self.X_train.shape[1]
+                )
 
-            # Verify parameter structure
-            if not isinstance(self.likelihood_params, dict):
-                raise TypeError("likelihood_params must be a dictionary")
+                # Verify parameter structure
+                if not isinstance(self.likelihood_params, dict):
+                    raise TypeError("likelihood_params must be a dictionary")
 
-            if 'classes' not in self.likelihood_params:
-                raise KeyError("Gaussian parameters missing class information")
+                if 'classes' not in self.likelihood_params:
+                    raise KeyError("Gaussian parameters missing class information")
 
-        elif self.model_type == "Histogram":
-            self.likelihood_params = self._compute_pairwise_likelihood_parallel(
-                self.X_train, self.y_train, self.X_train.shape[1]
-            )
+            elif self.model_type == "Histogram":
+                self.likelihood_params = self._compute_pairwise_likelihood_parallel(
+                    self.X_train, self.y_train, self.X_train.shape[1]
+                )
 
         # Initialize weights if needed
         if self.weight_updater is None:
@@ -5669,6 +5670,7 @@ class DBNN(GPUDBNN):
                 self.likelihood_params['covs'] = safe_to_tensor(self.likelihood_params['covs'], self.device)
                 self.likelihood_params['classes'] = safe_to_tensor(self.likelihood_params['classes'], self.device)
                 self.likelihood_params['feature_pairs'] = safe_to_tensor(self.likelihood_params['feature_pairs'], self.device)
+
 
             # Load optional components
             optional_components = [
