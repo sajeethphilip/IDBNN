@@ -9,7 +9,7 @@ read -p "Enter data path (e.g., Data/galaxies/): " input_path
 read -p "Enter mode (train/predict/all/fresh): " mode
 
 # Prompt for encoder type (sutoenc/cnn)
-read -p "Enter encoder type for cdbnn (autoencoder/cnn): " encoder_type
+read -p "Enter encoder type for cdbnn (autoen/cnn): " encoder_type
 
 # Prompt for model type (Histogram/Gaussian)
 read -p "Enter model type for adbnn (Histogram/Gaussian): " model
