@@ -2810,6 +2810,143 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
     history = defaultdict(list)
     device = next(model.parameters()).device
+    best_loss = float('inf')
+    min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
+    checkpoint_manager = UnifiedCheckpoint(config)
+    model_specific_best = checkpoint_manager.get_best_loss(phase, model)
+
+    if model_specific_best is not None:
+        best_loss = model_specific_best
+
+    patience_counter = 0
+    use_classwise_acc = config['training'].get('use_classwise_acc', True)  # Get config setting
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            running_loss = 0.0
+            running_acc = 0.0  # Track accuracy
+            num_batches = len(train_loader)
+
+            pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
+            for batch_idx, (data, labels) in enumerate(pbar):
+                try:
+                    data, labels = data.to(device), labels.to(device)
+                    optimizer.zero_grad()
+
+                    # Phase 1: Reconstruction only
+                    if phase == 1:
+                        embeddings = model.encode(data)
+                        if isinstance(embeddings, tuple):
+                            embeddings = embeddings[0]
+                        reconstruction = model.decode(embeddings)
+                        loss = F.mse_loss(reconstruction, data)
+
+                    # Phase 2: Enhanced training
+                    else:
+                        output = model(data)
+                        reconstruction = output['reconstruction'] if isinstance(output, dict) else output[1]
+                        embedding = output['embedding'] if isinstance(output, dict) else output[0]
+
+                        # Calculate base loss
+                        loss_result = loss_manager.calculate_loss(reconstruction, data,
+                                                                config['dataset'].get('image_type', 'general'))
+                        loss = loss_result['loss']
+
+                        # KL Divergence loss
+                        if model.use_kl_divergence:
+                            latent_info = model.organize_latent_space(embedding, labels)
+                            if 'cluster_probabilities' in latent_info:
+                                kl_loss = F.kl_div(latent_info['cluster_probabilities'].log(),
+                                                 latent_info['target_distribution'],
+                                                 reduction='batchmean')
+                                loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+
+                        # Classification loss and accuracy calculation
+                        if model.use_class_encoding and hasattr(model, 'classifier'):
+                            class_logits = model.classifier(embedding)
+                            class_loss = F.cross_entropy(class_logits, labels)
+                            loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * class_loss
+
+                            # Calculate accuracy
+                            with torch.no_grad():
+                                preds = torch.argmax(class_logits, dim=1)
+                                if use_classwise_acc:
+                                    # Class-balanced accuracy
+                                    class_acc = []
+                                    for cls in torch.unique(labels):
+                                        mask = labels == cls
+                                        if mask.sum() > 0:  # Handle empty classes
+                                            cls_acc = (preds[mask] == labels[mask]).float().mean()
+                                            class_acc.append(cls_acc)
+                                    acc = torch.mean(torch.stack(class_acc)) if class_acc else 0.0
+                                else:
+                                    # Standard accuracy
+                                    acc = (preds == labels).float().mean()
+                                running_acc += acc.item()
+
+                    # Backpropagation
+                    loss.backward()
+                    optimizer.step()
+
+                    # Update metrics
+                    running_loss += loss.item()
+                    avg_loss = running_loss / (batch_idx + 1)
+                    status = {
+                        'loss': f"{Colors.color_value(avg_loss, best_loss, False)}",
+                        'best': f"{best_loss:.4f}",
+                        'patience': f"{patience_counter}"
+                    }
+
+                    # Add accuracy to status in Phase 2
+                    if phase == 2 and model.use_class_encoding and hasattr(model, 'classifier'):
+                        avg_acc = running_acc / (batch_idx + 1)
+                        status['acc'] = f"{avg_acc:.2%}"
+
+                    pbar.set_postfix(status)
+
+                    # Cleanup
+                    del data, loss
+                    torch.cuda.empty_cache()
+
+                except Exception as e:
+                    logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    continue
+
+            # Epoch statistics
+            avg_loss = running_loss / num_batches
+            history[f'phase{phase}_loss'].append(avg_loss)
+
+            # Store accuracy for Phase 2
+            if phase == 2 and model.use_class_encoding and hasattr(model, 'classifier'):
+                avg_acc = running_acc / num_batches
+                history[f'phase{phase}_accuracy'].append(avg_acc)
+
+            # Checkpoint and early stopping
+            if (best_loss - avg_loss) > min_thr:
+                best_loss = avg_loss
+                patience_counter = 0
+                checkpoint_manager.save_model_state(model, optimizer, phase, epoch, avg_loss, is_best=True)
+            else:
+                patience_counter += 1
+
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
+                logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                break
+
+    except Exception as e:
+        logger.error(f"Training failed: {str(e)}")
+        raise
+
+    return history
+
+def _train_phase_old(model: nn.Module, train_loader: DataLoader,
+                optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+    """Training logic for each phase with enhanced checkpoint handling"""
+
+    history = defaultdict(list)
+    device = next(model.parameters()).device
     # Initialize with model-specific best loss
     best_loss = float('inf')
     min_thr= float(config['model']['autoencoder_config']["convergence_threshold"])
@@ -4458,6 +4595,7 @@ class DatasetProcessor:
                 "reconstruction_weight": 0.5,
                 "feedback_strength": 0.3,
                 "inverse_learning_rate": 0.1,
+                "use_classwise_acc": True, # classwise accuracy has priority
                 "early_stopping": {
                     "patience": 5,
                     "min_delta": 0.001
