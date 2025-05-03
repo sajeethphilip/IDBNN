@@ -2793,9 +2793,9 @@ class DatasetProcessor:
         self.csv_path = os.path.join(self.dataset_dir, f"{self.data_name}.csv")
 
         if self.datatype == 'torchvision':
-            self.dataset_name = self.datafile.lower()
+            self.dataset_name = self.data_name.lower()
         else:
-            self.dataset_name = Path(self.datafile).stem.lower()
+            self.dataset_name = Path(self.data_name).stem.lower()
 
 
     def _extract_archive(self, archive_path: str) -> str:
@@ -2861,7 +2861,7 @@ class DatasetProcessor:
             return self._process_torchvision()
         else:
             # Process the data path first
-            processed_path = self._process_data_path(self.datafile)
+            processed_path = self._process_data_path(self.data_name)
             return self._process_custom(processed_path)
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
@@ -3305,7 +3305,7 @@ class DatasetProcessor:
 
     def _process_torchvision(self) -> Tuple[str, str]:
         """Process torchvision dataset"""
-        dataset_name = self.datafile.upper()
+        dataset_name = self.data_name.upper()
         if not hasattr(datasets, dataset_name):
             raise ValueError(f"Torchvision dataset {dataset_name} not found")
 
