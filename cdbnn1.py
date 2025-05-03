@@ -4622,39 +4622,7 @@ class FeatureExtractorCNN(nn.Module):
             x7 = self.batch_norm(x7)
 
         return x7
-class FeatureExtractorCNN_old(nn.Module):
-    """CNN-based feature extractor model"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128):
-        super().__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
-
-        self.fc = nn.Linear(128, feature_dims)
-        self.batch_norm = nn.BatchNorm1d(feature_dims)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)  # Add batch dimension
-        x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        if x.size(0) > 1:  # Only apply batch norm if batch size > 1
-            x = self.batch_norm(x)
-        return x
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
