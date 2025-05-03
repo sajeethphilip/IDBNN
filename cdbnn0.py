@@ -3848,7 +3848,7 @@ def main():
                 data_name=args.data_name,
                 data_type=args.data_type,
                 input_path=args.input_path,
-                output_dir=args.output
+                output_dir=args.output_dir
             )
             train_dir, test_dir = processor.process()
             logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
@@ -4021,7 +4021,7 @@ def main():
                     if hasattr(args, 'invert_dbnn'):
                         config['training']['invert_DBNN'] = args.invert_dbnn
             else:
-                processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
+                processor = DatasetProcessor(args.data_name, args.data_type, getattr(args, 'output_dir', 'data'))
                 config = processor.generate_default_config(data_dir)
 
             # Determine input CSV
