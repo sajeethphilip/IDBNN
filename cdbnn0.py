@@ -458,6 +458,15 @@ class BaseFeatureExtractor(ABC):
         logger.info(f"Initialized {optimizer_type} optimizer with parameters: {optimizer_params}")
         return optimizer
 
+    def process_new_images(self, image_dir: str, output_csv: str):
+        """Process new images and save features to CSV"""
+        transform = self._get_transforms()
+        dataset = CustomImageDataset(image_dir, transform=transform)
+        loader = DataLoader(dataset, batch_size=self.config['training']['batch_size'])
+
+        features, labels = self.extract_features(loader)
+        self.save_features(features, labels, output_csv)
+
     def _initialize_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
         """Initialize learning rate scheduler if specified in config"""
         scheduler_config = self.config['model'].get('scheduler', {})
@@ -1163,6 +1172,14 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             logger.error(f"Error saving training image: {str(e)}")
             logger.error(f"Tensor shape at error: {tensor.shape if 'tensor' in locals() else 'unknown'}")
             raise
+
+    def predict(self, input_path: str):
+        """Handle both prediction modes"""
+        if self.config['training'].get('invert_DBNN', False):
+            self.predict_from_csv(input_path)
+        else:
+            self.process_new_images(input_path, f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+
 
     def predict_from_csv(self, csv_path: str):
         """Generate reconstructions from feature vectors in CSV"""
@@ -2521,6 +2538,10 @@ class CNNFeatureExtractor(BaseFeatureExtractor):
         else:
             logger.info("No checkpoint found, starting from scratch")
             self.optimizer = self._initialize_optimizer()
+
+    def predict(self, image_dir: str, output_csv: str):
+        """Predict features for new images"""
+        self.process_new_images(image_dir, output_csv)
 
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint file"""
@@ -4018,8 +4039,6 @@ def main():
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                    if hasattr(args, 'invert_dbnn'):
-                        config['training']['invert_DBNN'] = args.invert_dbnn
             else:
                 processor = DatasetProcessor(args.data_name, args.data_type, getattr(args, 'output_dir', 'data'))
                 config = processor.generate_default_config(data_dir)
@@ -4029,15 +4048,36 @@ def main():
                 input_csv = args.input_csv
             else:
                 input_csv = os.path.join(data_dir, f"{data_name}.csv")
+            if config.get('training', {}).get('invert_DBNN', False):
+                # Inverse DBNN mode: CSV -> Images
+                logger.info("Running inverse DBNN (CSV to images)...")
+                feature_extractor = get_feature_extractor(config)
+                feature_extractor.predict_from_csv(input_csv)
+            else:
+                # Standard prediction mode: Images -> CSV
+                logger.info("Running standard prediction (Images to CSV)...")
 
-            if not os.path.exists(input_csv):
-                raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+                # Get image input path
+                image_dir = input("Enter path to new images directory: ").strip()
+                if not os.path.exists(image_dir):
+                    raise FileNotFoundError(f"Image directory not found: {image_dir}")
 
-            feature_extractor = get_feature_extractor(config)
-            feature_extractor.predict_from_csv(input_csv)
+                # Load trained model
+                feature_extractor = get_feature_extractor(config)
+                if os.path.exists(os.path.join(data_dir, "checkpoints")):
+                    feature_extractor.load_model(os.path.join(data_dir, "checkpoints", f"{data_name}_best.pth"))
 
-            logger.info(f"Predictions completed successfully!")
-            return 0
+                # Process new images
+                transform = processor.get_transforms(config, is_train=False)
+                new_dataset = CustomImageDataset(image_dir, transform=transform)
+                new_loader = DataLoader(new_dataset, batch_size=config['training']['batch_size'])
+
+                # Extract and save features
+                features, labels = feature_extractor.extract_features(new_loader)
+                output_path = os.path.join(data_dir, f"new_predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                feature_extractor.save_features(features, labels, output_path)
+
+                logger.info(f"New predictions saved to {output_path}")
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
