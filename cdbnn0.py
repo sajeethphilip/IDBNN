@@ -2861,7 +2861,7 @@ class DatasetProcessor:
             return self._process_torchvision()
         else:
             # Process the data path first
-            processed_path = self._process_data_path(self.data_name)
+            processed_path = self._process_data_path(self.input_path)
             return self._process_custom(processed_path)
 
     def _process_custom(self, data_path: str) -> Tuple[str, Optional[str]]:
