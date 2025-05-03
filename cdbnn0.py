@@ -2775,23 +2775,28 @@ class DatasetProcessor:
 
     SUPPORTED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
 
-    def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
-                 output_dir: str = "data"):
-        self.datafile = datafile
-        self.datatype = datatype.lower()
+    def __init__(self, data_name: str, data_type: str, input_path: str, output_dir: str = "data"):
+        self.data_name = data_name.lower()
+        self.datatype = data_type.lower()
+        self.input_path = input_path
         self.output_dir = output_dir
+
+        self.dataset_dir = os.path.join(output_dir, self.data_name)
+        os.makedirs(self.dataset_dir, exist_ok=True)
+
+        # Config file paths
+        self.config_path = os.path.join(self.dataset_dir, f"{self.data_name}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.data_name}.conf")
+        self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
+
+        # CSV path
+        self.csv_path = os.path.join(self.dataset_dir, f"{self.data_name}.csv")
 
         if self.datatype == 'torchvision':
             self.dataset_name = self.datafile.lower()
         else:
             self.dataset_name = Path(self.datafile).stem.lower()
 
-        self.dataset_dir = os.path.join(output_dir, self.dataset_name)
-        os.makedirs(self.dataset_dir, exist_ok=True)
-
-        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
-        self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
 
     def _extract_archive(self, archive_path: str) -> str:
         """Extract compressed archive to temporary directory"""
@@ -2964,8 +2969,8 @@ class DatasetProcessor:
                 "input_size": list(input_size),
                 "mean": mean,
                 "std": std,
-                "train_dir": train_dir,
-                "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
+            "train_dir": os.path.join(self.dataset_dir, "train"),
+            "test_dir": os.path.join(self.dataset_dir, "test")
             },
             "model": {
                 "encoder_type": "autoenc",
@@ -3663,8 +3668,13 @@ def parse_arguments():
 
     parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
     parser.add_argument('--mode', choices=['train', 'predict'], default='train')
-    parser.add_argument('--data', type=str, help='dataset name/path')
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
+    parser.add_argument('--data_name', default='dataset', help='Dataset name')
+    parser.add_argument('--data_type', choices=['custom', 'torchvision'],
+                      default='custom', help='Dataset type')
+    parser.add_argument('--input_path', required=True,
+                      help='Path to input data (directory or zip file)')
+    parser.add_argument('--model-path', help='Path to trained model')
+
     parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
     parser.add_argument('--config', type=str, help='path to configuration file')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
@@ -3834,7 +3844,12 @@ def main():
             config_path = os.path.join(data_dir, f"{data_name}.json")
 
             # Process dataset
-            processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output_dir', 'data'))
+            processor = DatasetProcessor(
+                data_name=args.data_name,
+                data_type=args.data_type,
+                input_path=args.input_path,
+                output_dir=args.output
+            )
             train_dir, test_dir = processor.process()
             logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
