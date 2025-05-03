@@ -3721,9 +3721,9 @@ def get_interactive_args():
         print("Invalid type. Please enter 'torchvision' or 'custom'")
 
     # Get data path/name
-    default = last_args.get('data', '') if last_args else ''
+    default = last_args.get('data_name', '') if last_args else ''
     prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
-    args.data = input(prompt).strip() or default
+    args.input_path = input(prompt).strip() or default
 
     # Ask about invert DBNN
     default_invert = last_args.get('invert_dbnn', False) if last_args else False
@@ -3732,7 +3732,7 @@ def get_interactive_args():
 
     # If in predict mode and invert DBNN is enabled, ask for input CSV
     if args.mode == 'predict' and args.invert_dbnn:
-        default_csv = last_args.get('input_csv', '') if last_args else ''
+        default_csv = last_args.get('input_path', '') if last_args else ''
         prompt = f"Enter input CSV path (or leave empty for default) [{default_csv}]: "
         args.input_csv = input(prompt).strip() or default_csv
 
@@ -3839,7 +3839,7 @@ def main():
 
         if args.mode == 'train':
             # Setup paths
-            data_name = os.path.splitext(os.path.basename(args.data))[0]
+            data_name = os.path.splitext(os.path.basename(args.data_name))[0]
             data_dir = os.path.join('data', data_name)
             config_path = os.path.join(data_dir, f"{data_name}.json")
 
@@ -4010,7 +4010,7 @@ def main():
 
         elif args.mode == 'predict':
             # Prediction mode handling (keeping existing code)
-            data_name = os.path.splitext(os.path.basename(args.data))[0]
+            data_name = os.path.splitext(os.path.basename(args.data_name))[0]
             data_dir = os.path.join('data', data_name)
             config_path = os.path.join(data_dir, f"{data_name}.json")
 
