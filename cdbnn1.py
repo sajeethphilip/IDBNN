@@ -1,4 +1,9 @@
-#Working, fully functional with predcition 27/March/2025
+#Working, fully functional with predcition 30/March/2025
+#Revisions on Mar30 2025 Stable version 8:56 AM
+#----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
+#---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
+#-------------------------------------------------------------------------------------------------------------------------------
+
 import torch
 import copy
 import sys
@@ -74,9 +79,60 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Dict, List, Optional
 from torchvision.transforms.functional import resize
+from types import SimpleNamespace
+import os
+import json
+import logging
+import traceback
+import argparse
+from datetime import datetime
+import torch
 
 logger = logging.getLogger(__name__)
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
+    @staticmethod
+    def color_value(current_value, previous_value=None, higher_is_better=True):
+        """Color a value based on whether it improved or declined"""
+        if previous_value is None:
+            return f"{current_value:.4f}"
+
+        if higher_is_better:
+            if current_value > previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value < previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+        else:  # lower is better
+            if current_value < previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value > previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+
+        return f"{current_value:.4f}"  # No color if equal
+
+    @staticmethod
+    def highlight_dataset(name):
+        """Highlight dataset name in red"""
+        return f"{Colors.RED}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_time(time_value):
+        """Color time values based on threshold"""
+        if time_value < 10:
+            return f"{Colors.GREEN}{time_value:.2f}{Colors.ENDC}"
+        elif time_value < 30:
+            return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
+        else:
+            return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
 class PredictionManager:
     """Manages prediction on new images using a trained model."""
@@ -97,6 +153,10 @@ class PredictionManager:
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
+
         if archive_path.endswith('.zip'):
             with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
@@ -116,14 +176,14 @@ class PredictionManager:
             raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
 
         image_files = []
-
+        dataset_name = self.config['dataset']['name']
         if os.path.isfile(input_path):
             # Single image file
             if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                 return [input_path]
             # Compressed archive
             elif input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-                extract_dir = os.path.join(os.path.dirname(input_path), "extracted")
+                extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
                 os.makedirs(extract_dir, exist_ok=True)
                 self._extract_archive(input_path, extract_dir)
                 return self._get_image_files(extract_dir)  # Recursively process extracted files
@@ -155,9 +215,37 @@ class PredictionManager:
             else:
                 raise e
 
-        # Load the best model state for phase 2 with KL divergence
-        state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+        # Modified verification to be more flexible
+        if model.use_kl_divergence:
+            state_dict = checkpoint['model_states']['phase2_kld']['best']['state_dict']
+
+            # Handle missing clustering_params gracefully
+            config = checkpoint['model_states']['phase2_kld']['best'].get('config', {})
+            clustering_params = config.get('clustering_params', {})
+
+            # Check for temperature in different possible locations
+            # Initialize temperature - check multiple possible locations
+            if 'clustering_temperature' in state_dict:
+                model.clustering_temperature = state_dict['clustering_temperature'].to(self.device)
+            elif 'temperature' in clustering_params:  # Backward compatibility
+                model.clustering_temperature = torch.tensor(
+                    [clustering_params['temperature']],
+                    device=self.device
+                )
+            else:
+                model.clustering_temperature = torch.tensor([1.0], device=self.device)
+                logger.warning("Using default clustering temperature 1.0")
+
+
+        # Load the state dict (strict=False to allow missing keys)
         model.load_state_dict(state_dict, strict=False)
+
+        # Verify clustering parameters were loaded correctly
+        if model.use_kl_divergence:
+            if not hasattr(model, 'cluster_centers') or model.cluster_centers is None:
+                raise RuntimeError("Cluster centers failed to load")
+            if not hasattr(model, 'clustering_temperature') or model.clustering_temperature is None:
+                raise RuntimeError("Clustering temperature failed to load")
 
         # Force phase 2 for prediction to use clustering
         model.set_training_phase(2)
@@ -168,39 +256,53 @@ class PredictionManager:
 
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output"""
-        image_files, class_labels = self._get_image_files_with_labels(data_path)
+        """Predict features with consistent clustering output
+
+        Args:
+            data_path: Path to input (can be directory, compressed file, or single image)
+            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
+            batch_size: Batch size for prediction
+        """
+        # Get image files with labels and original filenames
+        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
 
+        # Set default output path if not provided
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
-            output_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with cluster information
+        # Initialize CSV with additional information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-            csv_writer.writerow(
-                ['filename', 'target', 'cluster_assignment', 'cluster_confidence'] +
-                feature_cols
-            )
+            csv_writer.writerow([
+                'original_filename',  # Original filename without path
+                'filepath',          # Full path to the image
+                'target',            # Class label if available
+                'cluster_assignment',
+                'cluster_confidence'
+            ] + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i + batch_size]
             batch_labels = class_labels[i:i + batch_size]
+            batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
             for filename in batch_files:
                 try:
-                    image = Image.open(filename).convert('RGB')
-                    image_tensor = transform(image).unsqueeze(0).to(self.device)
-                    batch_images.append(image_tensor)
+                    # Open image and apply transforms
+                    with Image.open(filename) as img:
+                        image = img.convert('RGB')
+                        image_tensor = transform(image).unsqueeze(0).to(self.device)
+                        batch_images.append(image_tensor)
                 except Exception as e:
                     logger.error(f"Error loading image {filename}: {str(e)}")
                     continue
@@ -214,6 +316,7 @@ class PredictionManager:
             with torch.no_grad():
                 output = self.model(batch_tensor)
 
+                # Handle different output formats
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -231,46 +334,59 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
-            # Write predictions to CSV
+            # Write predictions to CSV with original filenames
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
-                for j, (filename, true_class) in enumerate(zip(batch_files, batch_labels)):
+                for j, (filename, orig_name, true_class) in enumerate(zip(
+                    batch_files, batch_filenames, batch_labels)):
+
                     row = [
-                        os.path.basename(filename),
-                        true_class,
+                        orig_name,       # Original filename
+                        filename,        # Full filepath
+                        true_class,      # Class label
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
                     csv_writer.writerow(row)
 
-        logger.info(f"Predictions with clustering saved to {output_csv}")
+        logger.info(f"Predictions saved to {output_csv}")
 
-    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str]]:
+    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
-        Get a list of image files and their corresponding class labels from the input path.
-        Assumes images are organized in subfolders under train/test folders.
+        Get a list of image files, their corresponding class labels, and original filenames from the input path.
+        Returns:
+            Tuple[List[str], List[str], List[str]]: (image_paths, class_labels, original_filenames)
         """
         image_files = []
         class_labels = []
+        original_filenames = []
+        dataset_name = self.config['dataset']['name']
+        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
+            # Handle compressed archive
+            extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            self._extract_archive(input_path, extract_dir)
+            return self._get_image_files_with_labels(extract_dir)  # Recursively process extracted files
 
-        if os.path.isfile(input_path):
-            # Single image file (no class label)
-            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                image_files.append(input_path)
-                class_labels.append("unknown")  # No class label available
         elif os.path.isdir(input_path):
             # Directory of images - recursively search for image files
-            for root, dirs, files in os.walk(input_path):
+            for root, _, files in os.walk(input_path):
                 for file in files:
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                         image_files.append(os.path.join(root, file))
-                        # Extract class label from subfolder name
+                        original_filenames.append(file)
+                        # Extract class label from subfolder name if available
                         class_label = os.path.basename(root)
-                        class_labels.append(class_label)
+                        class_labels.append(class_label if class_label != os.path.basename(input_path) else "unknown")
+        elif os.path.isfile(input_path) and input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+            # Single image file
+            image_files.append(input_path)
+            original_filenames.append(os.path.basename(input_path))
+            class_labels.append("unknown")
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
-        return image_files, class_labels
+        return image_files, class_labels, original_filenames
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
         """Create dataset with proper channel handling for torchvision datasets."""
@@ -692,18 +808,6 @@ class BaseAutoencoder(nn.Module):
             )
             self.shape_registry['classifier_output'] = (num_classes,)
 
-        # Initialize clustering if KL divergence is enabled
-        if self.use_kl_divergence:
-            num_clusters = config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(
-                torch.randn(num_clusters, feature_dims)
-            )
-            self.clustering_temperature = (config['model']
-                                         .get('autoencoder_config', {})
-                                         .get('enhancements', {})
-                                         .get('clustering_temperature', 1.0))
-            self.shape_registry['cluster_centers'] = (num_clusters, feature_dims)
-
         # Training phase tracking
         self.training_phase = 1  # Start with phase 1
 
@@ -724,20 +828,54 @@ class BaseAutoencoder(nn.Module):
         self.best_accuracy = 0.0
         self.current_epoch = 0
         self.history = defaultdict(list)
+        # Initialize clustering parameters
+        self._initialize_clustering(config)
+
 #--------------------------
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters with existence check"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
+        if self.use_kl_divergence:
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.register_buffer('cluster_centers',
+                                   torch.randn(num_clusters, self.feature_dims))
 
+            if not hasattr(self, 'clustering_temperature'):
+                # Convert to tensor and register as buffer
+                temp_value = self.config['model']['autoencoder_config']['enhancements']['clustering_temperature']
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([temp_value], dtype=torch.float32))
+
+    def state_dict(self, *args, **kwargs):
+        """Extend state dict to include clustering parameters"""
+        state = super().state_dict(*args, **kwargs)
+        # Cluster centers and temperature are already included because they're registered buffers
+        return state
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load state dict including clustering parameters"""
+        # These will be loaded automatically since they're registered buffers
+        super().load_state_dict(state_dict, strict)
+
+        # Ensure clustering parameters are on the right device
+        if hasattr(self, 'cluster_centers') and self.cluster_centers is not None:
+            self.cluster_centers = self.cluster_centers.to(self.device)
+        if hasattr(self, 'clustering_temperature') and self.clustering_temperature is not None:
+            self.clustering_temperature = self.clustering_temperature.to(self.device)
 #--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
         self.train_dataset = dataset
 
     def _initialize_latent_organization(self):
-        """Initialize latent space organization components"""
+        """Initialize latent space organization components with existence checks"""
         self.use_kl_divergence = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_kl_divergence', True)
         self.use_class_encoding = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('use_class_encoding', True)
 
-        if self.use_class_encoding:
+        if self.use_class_encoding and not hasattr(self, 'classifier'):
             num_classes = self.config['dataset'].get('num_classes', 10)
             self.classifier = nn.Sequential(
                 nn.Linear(self.feature_dims, self.feature_dims // 2),
@@ -747,9 +885,11 @@ class BaseAutoencoder(nn.Module):
             )
 
         if self.use_kl_divergence:
-            num_clusters = self.config['dataset'].get('num_classes', 10)
-            self.cluster_centers = nn.Parameter(torch.randn(num_clusters, self.feature_dims))
-            self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = self.config['dataset'].get('num_classes', 10)
+                self.cluster_centers = nn.Parameter(torch.randn(num_clusters, self.feature_dims))
+            if not hasattr(self, 'clustering_temperature'):
+                self.clustering_temperature = self.config['model'].get('autoencoder_config', {}).get('enhancements', {}).get('clustering_temperature', 1.0)
 
     def set_training_phase(self, phase: int):
         """Set the training phase (1 or 2) with proper cluster initialization"""
@@ -804,7 +944,7 @@ class BaseAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 256:
+            if current_size < 128:
                 current_size *= 2
 
         logging.info(f"Layer sizes: {sizes}")
@@ -936,7 +1076,7 @@ class BaseAutoencoder(nn.Module):
         if img.size != target_size:
             img = img.resize(target_size, Image.Resampling.LANCZOS)
 
-        img.save(path, quality=95, optimize=True)
+        img.save(path, quality=99, optimize=True)
         logging.debug(f"Saved image to {path} with size {img.size}")
 
     def plot_reconstruction_samples(self, inputs: torch.Tensor,
@@ -1122,9 +1262,9 @@ class BaseAutoencoder(nn.Module):
                 data_dict['target'] = features['labels'].cpu().numpy()
             else:
                 logger.warning(f"labels length {len(features['labels'])} doesn't match embeddings length {base_length}")
-                data_dict['target'] = [str(i) for i in range(base_length)]
+                data_dict['predicted_target'] = [str(i) for i in range(base_length)]
         else:
-            data_dict['target'] = [str(i) for i in range(base_length)]
+            data_dict['predicted_target'] = [str(i) for i in range(base_length)]
 
         # Include additional metadata if available and length matches
         optional_fields = ['indices', 'filenames']
@@ -1207,6 +1347,7 @@ class BaseAutoencoder(nn.Module):
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
             # Ensure cluster centers are on same device
             cluster_centers = self.cluster_centers.to(embeddings.device)
+            temperature = self.clustering_temperature
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
@@ -1902,6 +2043,15 @@ class AgriculturalPatternLoss(nn.Module):
 
         return stats
 
+def safe_get_scalar(value):
+    """Safely convert any numeric value to Python float"""
+    if isinstance(value, torch.Tensor):
+        return value.item()
+    elif isinstance(value, (float, int)):
+        return float(value)
+    else:
+        raise ValueError(f"Cannot convert {type(value)} to scalar")
+
 class EnhancedLossManager:
     """Manager for handling specialized loss functions"""
 
@@ -1930,29 +2080,27 @@ class EnhancedLossManager:
         """Get appropriate loss function for image type"""
         return self.loss_functions.get(image_type)
 
-    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor,
-                      image_type: str) -> Dict[str, torch.Tensor]:
-        """Calculate loss with appropriate enhancements"""
-        loss_fn = self.get_loss_function(image_type)
-        if loss_fn is None:
-            return {'loss': F.mse_loss(reconstruction, target)}
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor, image_type: str) -> Dict[str, torch.Tensor]:
+            """Calculate loss with appropriate enhancements"""
+            loss_fn = self.get_loss_function(image_type)
+            if loss_fn is None:
+                return {'loss': F.mse_loss(reconstruction, target)}
 
-        loss = loss_fn(reconstruction, target)
+            result = loss_fn(reconstruction, target)
 
-        # Get additional statistics if available
-        stats = {}
-        if isinstance(loss_fn, AgriculturalPatternLoss):
-            texture_stats = loss_fn._analyze_texture_statistics(reconstruction)
-            pattern_stats = loss_fn._analyze_pattern_distribution(reconstruction)
-            stats.update({
-                'texture_stats': texture_stats,
-                'pattern_stats': pattern_stats
-            })
-
-        return {
-            'loss': loss,
-            'stats': stats
-        }
+            # Ensure we always return a dictionary with tensor loss
+            if isinstance(result, dict):
+                if 'loss' in result:
+                    if isinstance(result['loss'], torch.Tensor):
+                        return result
+                    else:
+                        return {'loss': torch.tensor(float(result['loss']), device=reconstruction.device)}
+                else:
+                    return {'loss': F.mse_loss(reconstruction, target)}
+            elif isinstance(result, torch.Tensor):
+                return {'loss': result}
+            else:
+                return {'loss': torch.tensor(float(result), device=reconstruction.device)}
 
 
 class UnifiedCheckpoint:
@@ -2016,12 +2164,15 @@ class UnifiedCheckpoint:
             'phase': phase,
             'loss': loss,
             'cluster_centers': model.cluster_centers.data if hasattr(model, 'cluster_centers') else None,
-            'clustering_temperature': getattr(model, 'clustering_temperature', 1.0),
+            'clustering_temperature': model.clustering_temperature if hasattr(model, 'clustering_temperature') else torch.tensor([1.0]),
             'timestamp': datetime.now().isoformat(),
             'config': {
                 'kl_divergence': model.use_kl_divergence,
                 'class_encoding': model.use_class_encoding,
-                'image_type': self.config['dataset'].get('image_type', 'general')
+                'image_type': self.config['dataset'].get('image_type', 'general'),
+                'clustering_params': {
+                    'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
+                 }
             }
         }
 
@@ -2068,9 +2219,9 @@ class UnifiedCheckpoint:
         if state_key in self.current_state['model_states']:
             best_state = self.current_state['model_states'][state_key]['best']
             if best_state is not None:
-                return best_state['loss']
+                loss = best_state['loss']
+                return loss.item() if hasattr(loss, 'item') else float(loss)
         return float('inf')
-
     def print_checkpoint_summary(self):
         """Print summary of checkpoint contents"""
         print("\nUnified Checkpoint Summary:")
@@ -2286,34 +2437,30 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     history = defaultdict(list)
     device = next(model.parameters()).device
 
-    # Get phase-specific metrics
     # Initialize unified checkpoint
     checkpoint_manager = UnifiedCheckpoint(config)
 
     # Load best loss from checkpoint
-    best_loss = checkpoint_manager.get_best_loss(phase, model)
+    best_loss = safe_get_scalar(checkpoint_manager.get_best_loss(phase, model))
     patience_counter = 0
 
     try:
         for epoch in range(start_epoch, epochs):
             model.train()
             running_loss = 0.0
-            num_batches = len(train_loader)  # Get total number of batches
+            num_batches = len(train_loader)
 
             # Training loop
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}")
             for batch_idx, (data, labels) in enumerate(pbar):
                 try:
-                    # Move data to correct device
-                    if isinstance(data, (list, tuple)):
-                        data = data[0]
                     data = data.to(device)
                     labels = labels.to(device)
 
                     # Zero gradients
                     optimizer.zero_grad()
 
-                    # Forward pass based on phase
+                    # Forward pass
                     if phase == 1:
                         # Phase 1: Only reconstruction
                         embeddings = model.encode(data)
@@ -2331,10 +2478,9 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                             embedding, reconstruction = output
 
                         # Calculate base loss
-                        loss = loss_manager.calculate_loss(
-                            reconstruction, data,
-                            config['dataset'].get('image_type', 'general')
-                        )['loss']
+                        loss_result = loss_manager.calculate_loss(reconstruction, data,
+                                                               config['dataset'].get('image_type', 'general'))
+                        loss = loss_result['loss']
 
                         # Add KL divergence loss if enabled
                         if model.use_kl_divergence:
@@ -2359,15 +2505,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     loss.backward()
                     optimizer.step()
 
-                    # Update running loss - handle possible NaN or inf
-                    current_loss = loss.item()
-                    if not (np.isnan(current_loss) or np.isinf(current_loss)):
-                        running_loss += current_loss
+                    # Get loss value safely
+                    loss_value = safe_get_scalar(loss)
+                    running_loss += loss_value
 
-                    # Calculate current average loss safely
-                    current_avg_loss = running_loss / (batch_idx + 1)  # Add 1 to avoid division by zero
-
-                    # Update progress bar with safe values
+                    # Update progress bar
+                    current_avg_loss = running_loss / (batch_idx + 1)
                     pbar.set_postfix({
                         'loss': f'{current_avg_loss:.4f}',
                         'best': f'{best_loss:.4f}'
@@ -2381,53 +2524,44 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 except Exception as e:
                     logger.error(f"Error in batch {batch_idx}: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
 
-            # Safely calculate epoch average loss
-            if num_batches > 0:
-                avg_loss = running_loss / num_batches
-            else:
-                avg_loss = float('inf')
-                logger.warning("No valid batches in epoch!")
-
-            # Record history
+            # Calculate epoch average loss
+            avg_loss = running_loss / num_batches if num_batches > 0 else float('inf')
             history[f'phase{phase}_loss'].append(avg_loss)
 
-            # Save checkpoint and check for best model
+            # Checkpoint and early stopping
             is_best = avg_loss < best_loss
             if is_best:
                 best_loss = avg_loss
                 patience_counter = 0
+                checkpoint_manager.save_model_state(
+                    model=model,
+                    optimizer=optimizer,
+                    phase=phase,
+                    epoch=epoch,
+                    loss=avg_loss,
+                    is_best=True
+                )
             else:
                 patience_counter += 1
 
-            checkpoint_manager.save_model_state(
-                model=model,
-                optimizer=optimizer,
-                phase=phase,
-                epoch=epoch,
-                loss=avg_loss,
-                is_best=is_best
-            )
-            # Early stopping check
-            patience = config['training'].get('early_stopping', {}).get('patience', 5)
-            if patience_counter >= patience:
+            if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered for phase {phase} after {epoch + 1} epochs")
                 break
 
             logger.info(f'Phase {phase} - Epoch {epoch+1}: Loss = {avg_loss:.4f}, Best = {best_loss:.4f}')
 
-            # Clean up at end of epoch
-            pbar.close()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
     except Exception as e:
         logger.error(f"Error in training phase {phase}: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
     return history
+
 
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
@@ -3034,6 +3168,9 @@ class BaseFeatureExtractor(nn.Module, ABC):
     def __init__(self, config: Dict, device: str = None):
         super().__init__()  # Initialize nn.Module
         self.config = self.verify_config(config)
+        # Add label encoder attributes
+        self.label_encoder = None  # Will be a dictionary mapping class names to indices
+        self.reverse_label_encoder = None  # Will be a dictionary mapping indices to class names
 
 
         # Set device
@@ -3075,26 +3212,54 @@ class BaseFeatureExtractor(nn.Module, ABC):
         if not self.config['execution_flags'].get('fresh_start', False):
             self._load_from_checkpoint()
 
+        # Initialize clustering parameters
+        self._initialize_clustering(config)
 
+    def _initialize_clustering(self, config: Dict):
+        """Initialize clustering parameters with existence check"""
+        self.use_kl_divergence = config['model']['autoencoder_config']['enhancements']['use_kl_divergence']
 
+        if self.use_kl_divergence:
+            # Only initialize if not already exists
+            if not hasattr(self, 'cluster_centers'):
+                num_clusters = config['dataset'].get('num_classes', 10)
+                self.register_buffer('cluster_centers',
+                                   torch.randn(num_clusters, self.feature_dims))
+
+            if not hasattr(self, 'clustering_temperature'):
+                temp_value = config['model']['autoencoder_config']['enhancements'].get( 'clustering_temperature', 1.0)
+                self.register_buffer('clustering_temperature',
+                                   torch.tensor([config['model']['autoencoder_config']
+                                               ['enhancements']['clustering_temperature']]))
+
+    def set_label_encoder(self, label_encoder: Dict):
+        """Set label encoder dictionary (class names to indices)"""
+        self.label_encoder = label_encoder
+        self.reverse_label_encoder = {v: k for k, v in label_encoder.items()}
+
+    def get_label_encoder(self) -> Optional[Dict]:
+        """Get label encoder dictionary"""
+        return self.label_encoder
+
+    def get_reverse_label_encoder(self) -> Optional[Dict]:
+        """Get reverse label encoder dictionary"""
+        return self.reverse_label_encoder
     @abstractmethod
     def _create_model(self) -> nn.Module:
         """Create and return the feature extraction model"""
         pass
 
     def state_dict(self, *args, **kwargs):
-        """Extend state dict to include clustering parameters"""
+        """Extend state dict to include label encoder"""
         state = super().state_dict(*args, **kwargs)
-        if hasattr(self, 'cluster_centers'):
-            state['cluster_centers'] = self.cluster_centers.data
-            state['clustering_temperature'] = torch.tensor([self.clustering_temperature])
+        state['label_encoder'] = self.label_encoder
+        state['reverse_label_encoder'] = self.reverse_label_encoder
         return state
 
     def load_state_dict(self, state_dict, strict: bool = True):
-        """Load state dict including clustering parameters"""
-        cluster_centers = state_dict.pop('cluster_centers', None)
-        clustering_temp = state_dict.pop('clustering_temperature', None)
-
+        """Load state dict including label encoder"""
+        self.label_encoder = state_dict.pop('label_encoder', None)
+        self.reverse_label_encoder = state_dict.pop('reverse_label_encoder', None)
         super().load_state_dict(state_dict, strict)
 
         if cluster_centers is not None:
@@ -3336,7 +3501,7 @@ class BaseFeatureExtractor(nn.Module, ABC):
         training = config.setdefault('training', {})
         training.update({
             'batch_size': 128,
-            'epochs': 20,
+            'epochs': 200,
             'num_workers': min(4, os.cpu_count() or 1),
             'checkpoint_dir': os.path.join('Model', 'checkpoints'),
             'trials': 100,
@@ -4008,6 +4173,7 @@ class AutoEncoderFeatureExtractor(BaseFeatureExtractor):
             try:
                 logger.info(f"Loading checkpoint from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.load_state_dict(checkpoint['state_dict'])  # This will load label encoders
 
                 # Load model state
                 self.feature_extractor.load_state_dict(checkpoint['state_dict'])
@@ -4622,39 +4788,6 @@ class FeatureExtractorCNN(nn.Module):
             x7 = self.batch_norm(x7)
 
         return x7
-class FeatureExtractorCNN_old(nn.Module):
-    """CNN-based feature extractor model"""
-    def __init__(self, in_channels: int = 3, feature_dims: int = 128):
-        super().__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
-
-        self.fc = nn.Linear(128, feature_dims)
-        self.batch_norm = nn.BatchNorm1d(feature_dims)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 3:
-            x = x.unsqueeze(0)  # Add batch dimension
-        x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        if x.size(0) > 1:  # Only apply batch norm if batch size > 1
-            x = self.batch_norm(x)
-        return x
 
 class DCTLayer(nn.Module):     # Do a cosine Transform
     def __init__(self):
@@ -4756,7 +4889,7 @@ class DynamicAutoencoder(nn.Module):
 
         for _ in range(max_layers):
             sizes.append(current_size)
-            if current_size < 256:
+            if current_size < 128:
                 current_size *= 2
 
         logger.info(f"Layer sizes: {sizes}")
@@ -5492,7 +5625,7 @@ class DatasetProcessor:
         else:
             self.dataset_name = Path(self.datafile).stem.lower()
 
-        self.dataset_dir = os.path.join(output_dir, self.dataset_name)
+        self.dataset_dir = os.path.join("data", self.dataset_name)
         os.makedirs(self.dataset_dir, exist_ok=True)
 
         self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
@@ -5708,7 +5841,7 @@ class DatasetProcessor:
              "model": {
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
-                "feature_dims": 128,
+                "feature_dims": feature_dims,
                 "learning_rate": 0.001,
                 "optimizer": {
                     "type": "Adam",
@@ -5852,7 +5985,7 @@ class DatasetProcessor:
             },
             "training": {
                 "batch_size": 128,
-                "epochs": 20,
+                "epochs": 200,
                 "num_workers": min(4, os.cpu_count() or 1),
                 "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
                 "validation_split": 0.2,
@@ -6695,7 +6828,7 @@ def print_usage():
     print("  --encoder_type  Type of encoder ('cnn' or 'autoenc')")
     print("  --config        Path to configuration file (overrides other options)")
     print("  --batch_size    Batch size for training (default: 128)")
-    print("  --epochs        Number of training epochs (default: 20)")
+    print("  --epochs        Number of training epochs (default: 200)")
     print("  --workers       Number of data loading workers (default: 4)")
     print("  --learning_rate Learning rate (default: 0.001)")
     print("  --output-dir    Output directory (default: data)")
@@ -6709,27 +6842,8 @@ def print_usage():
     print("  2. Process custom dataset using Autoencoder:")
     print("     python cdbnn.py --data_type custom --data path/to/images --encoder_type autoenc")
 
-def parse_arguments():
-    if len(sys.argv) == 1:
-        return get_interactive_args()
+import argparse
 
-    parser = argparse.ArgumentParser(description='CDBNN Feature Extractor')
-    parser.add_argument('--mode', choices=['train', 'reconstruct','predict'], default='train')
-    parser.add_argument('--data', type=str, help='dataset name/path')
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], default='custom')
-    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='cnn')
-    parser.add_argument('--config', type=str, help='path to configuration file')
-    parser.add_argument('--debug', action='store_true', help='enable debug mode')
-    parser.add_argument('--output', type=str, default='', help='output directory')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--epochs', type=int, default=20, help='number of epochs')
-    parser.add_argument('--workers', type=int, default=4, help='number of workers')
-    parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
-    parser.add_argument('--cpu', action='store_true', help='force CPU usage')
-    parser.add_argument('--invert-dbnn', action='store_true', help='enable inverse DBNN mode')
-    parser.add_argument('--input-csv', type=str, help='input CSV for prediction or inverse DBNN')
-
-    return parser.parse_args()
 
 
 def save_last_args(args):
@@ -6773,24 +6887,23 @@ def get_interactive_args():
 
     # Get data path/name
     default = last_args.get('data', '') if last_args else ''
-    prompt = f"Enter dataset name/path [{default}]: " if default else "Enter dataset name/path: "
-    args.data = input(prompt).strip() or default
+    prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
+    dataset_name = input(prompt).strip() or default
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        dataset_name = Path(args.data).stem if args.data else 'dataset'
         default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
         # Set default input directory
-        default_input = args.data if args.data else ''
+        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_dir = input(prompt).strip() or default_input
+        args.input_path= input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', dataset_name, f"{dataset_name}_predictions.csv")
+        default_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
@@ -6822,7 +6935,7 @@ def get_interactive_args():
     args.batch_size = int(input(f"Enter batch size [{default}]: ").strip() or default)
 
     if args.mode == 'train':
-        default = last_args.get('epochs', 20) if last_args else 20
+        default = last_args.get('epochs', 200) if last_args else 200
         args.epochs = int(input(f"Enter number of epochs [{default}]: ").strip() or default)
 
     default = last_args.get('output', 'data') if last_args else 'data'
@@ -7019,17 +7132,38 @@ def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
     try:
-        # Setup logging and parse arguments
+        # Setup logging
         logger = setup_logging()
-        args = parse_arguments()
-        dataset_name=str(args.data.split('/')[-1])
+
+        # First try to parse command line arguments
+        try:
+            args = parse_arguments()
+        except SystemExit:
+            # argparse exits when -h/--help is used
+            return 0
+        except:
+            args = None
+
+        # If no command line args or --interactive flag, use interactive input
+        if args is None or getattr(args, 'interactive', False):
+            args = interactive_input()
+
+        dataset_name = str(getattr(args, 'data_name', 'mnist'))
+
         # Process based on mode
         if args.mode == 'predict':
             # Load the config
-            config_path = os.path.join('data', dataset_name, f"{args.data}.json")
+            config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
+            if not os.path.exists(config_path):
+                logger.error(f"Config file not found at {config_path}")
+                config_path = input("Enter path to config file: ").strip()
+                if not os.path.exists(config_path):
+                    raise FileNotFoundError(f"Config file not found at {config_path}")
+
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            # Setup logging
+
+            # Setup prediction logging
             os.makedirs('logs', exist_ok=True)
             log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
             logging.basicConfig(
@@ -7043,31 +7177,27 @@ def main():
             logger.info(f"Logging setup complete. Log file: {log_file}")
 
             # Initialize the PredictionManager
-            predictor = PredictionManager(
-                config=config,
-                device='cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
-            )
-
-
+            device = 'cuda' if torch.cuda.is_available() and not getattr(args, 'cpu', False) else 'cpu'
+            predictor = PredictionManager(config=config, device=device)
 
             # Set the dataset (if required)
             if hasattr(predictor.model, 'set_dataset'):
-                # Create a dataset with the images in the input directory
-                transform = predictor._get_transforms()  # Get the image transforms
-                dataset = predictor._create_dataset(args.data, transform)  # Create the dataset
+                transform = predictor._get_transforms()
+                dataset = predictor._create_dataset(getattr(args, 'input_path'), transform)
+                predictor.model.set_dataset(dataset)
+                logger.info(f"Dataset created with {len(dataset)} images")
 
-                predictor.model.set_dataset(dataset)  # Set the dataset in the model
-                logger.info(f"Dataset created with {len(dataset)} images and set in the model.")
-            if args.output == '':
+            # Handle output path
+            if not hasattr(args, 'output') or not args.output:
                 args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                print(f"Using default output path: {args.output}")
+                logger.info(f"Using default output path: {args.output}")
 
             # Perform predictions
             logger.info("Starting prediction process...")
             predictor.predict_images(
-                data_path=args.data,
-                output_csv=args.output,
-                batch_size=args.batch_size
+                data_path=getattr(args, 'input_path'),
+                output_csv=getattr(args, 'output'),
+                batch_size=getattr(args, 'batch_size', 128)
             )
             logger.info(f"Predictions saved to {args.output}")
 
@@ -7081,20 +7211,100 @@ def main():
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
-        if args and args.debug:
+        if args and getattr(args, 'debug', False):
             traceback.print_exc()
         return 1
+
+
+def interactive_input():
+    """Collect inputs interactively if no command line args provided"""
+    print("\nInteractive Mode - Please enter the following information:")
+
+    mode = input("Enter mode (train/reconstruct/predict) [predict]: ").strip().lower() or 'predict'
+    data_name = input("Enter dataset name [mnist]: ").strip() or 'mnist'
+    input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [Data/{data_name}.zip]: ").strip() or f"Data/{data_name}.zip"
+
+    args = SimpleNamespace(
+        mode=mode,
+        data_name=data_name,
+        input_path=input_path,
+        interactive=True
+    )
+
+    # Mode-specific inputs
+    if mode == 'predict':
+        args.model_path = input(f"Enter path to trained model [data/{data_name}/checkpoints/{data_name}_unified.pth]: ").strip() or f"data/{data_name}/checkpoints/{data_name}_unified.pth"
+        args.output = input(f"Enter output CSV path [data/{data_name}/{data_name}.csv]: ").strip() or f"data/{data_name}/{data_name}.csv"
+        args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
+        args.cpu = input("Force CPU even if GPU available? (y/n) [n]: ").strip().lower() == 'y'
+
+    elif mode == 'train':
+        args.epochs = int(input("Enter number of epochs [100]: ").strip() or 100)
+        args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
+        args.learning_rate = float(input("Enter learning rate [0.001]: ").strip() or 0.001)
+
+    args.debug = input("Enable debug mode? (y/n) [n]: ").strip().lower() == 'y'
+
+    return args
+
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='CDBNN Training and Prediction')
+
+    # Main arguments
+    parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
+                       default='predict', help='Operation mode')
+    parser.add_argument('--data_name', dest='data_name', default='mnist',
+                       help='Name of the dataset')
+    parser.add_argument('--data_type', dest='data_type', default='custom',
+                       help='custom or torchvision dataset')
+
+    parser.add_argument('--input_path', required=True,
+                       help='Path to input data (directory or zip file)')
+    parser.add_argument('--interactive', action='store_true',
+                       help='Force interactive mode even with command line args')
+
+    # Prediction-specific
+    parser.add_argument('--model-path', help='Path to trained model')
+    parser.add_argument('--output', help='Output path for predictions')
+    parser.add_argument('--batch-size', type=int, default=128,
+                       help='Batch size for processing')
+    parser.add_argument('--cpu', action='store_true',
+                       help='Force CPU even if GPU available')
+
+    # Training-specific
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Number of training epochs')
+    parser.add_argument('--learning-rate', type=float, default=0.001,
+                       help='Learning rate for training')
+
+    # Debugging
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug mode with verbose output')
+
+    return parser.parse_args()
+
+
+def setup_logging():
+    """Setup basic logging configuration"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    return logging.getLogger(__name__)
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
         # Setup paths
-        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        #data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_name=args.data_name
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
         # Process dataset
-        processor = DatasetProcessor(args.data, args.data_type, getattr(args, 'output', 'data'))
+        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'))
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
@@ -7144,7 +7354,8 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
     """Handle prediction mode operations"""
     try:
         # Setup paths
-        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        #data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_name=args.data_name
         data_dir = os.path.join('data', data_name)
 
         # Load configuration
@@ -7158,11 +7369,12 @@ def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> 
         # Determine input CSV
         if args.invert_dbnn:
             input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, 'reconstructed_input.csv')
+            if not os.path.exists(input_csv):
+                raise FileNotFoundError(f"Input CSV not found: {input_csv}")
         else:
-            input_csv = args.input_csv if args.input_csv else os.path.join(data_dir, f"{data_name}.csv")
+            output_csv = args.input_csv if args.input_csv else os.path.join(data_dir, f"{data_name}.csv")
 
-        if not os.path.exists(input_csv):
-            raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
 
         # Setup output directory
         output_dir = os.path.join(data_dir, 'predictions', datetime.now().strftime('%Y%m%d_%H%M%S'))
@@ -7363,4 +7575,6 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
     return merged
 
 if __name__ == '__main__':
+    print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
+    print("Updated on March 30/2025 Stable version")
     sys.exit(main())
