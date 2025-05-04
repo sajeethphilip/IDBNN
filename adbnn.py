@@ -347,6 +347,7 @@ class DatasetConfig:
 
         # Add training parameters
         config['training_params'] = {
+            "override_global_cardinality": False
             "trials": 100,
             "cardinality_threshold": 0.9,
             "minimum_training_accuracy": 0.95,
@@ -2920,7 +2921,7 @@ class DBNN(GPUDBNN):
         n_classes = len(self.data[self.target_column].unique())
 
         # Base threshold from config
-        base_threshold = cardinality_threshold
+        base_threshold =self.config.get('training_params', {}).get('cardinality_threshold', 0.9) # cardinality_threshold
 
         # Adjust threshold based on dataset size and number of classes
         adjusted_threshold = min(
@@ -2934,7 +2935,7 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"- Number of classes: {n_classes}")
         DEBUG.log(f"- Adjusted threshold: {adjusted_threshold}")
 
-        return adjusted_threshold
+        return   base_threshold  #adjusted_threshold
 
 
     def _round_features(self, df: pd.DataFrame) -> pd.DataFrame:
