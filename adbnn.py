@@ -3952,6 +3952,7 @@ class DBNN(GPUDBNN):
                     for idx in range(len(class_adjustments)):
                         i, j = class_bin_i[idx], class_bin_j[idx]
                         weights[i, j] += class_adjustments[idx]
+
 #------------------------------------------Boost weights------------------------------------------
 
     def _compute_custom_bin_edges(self, data: torch.Tensor, bin_sizes: List[int]) -> List[torch.Tensor]:
