@@ -665,7 +665,7 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=5,batch_size=128):
+    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=128,batch_size=128):
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
@@ -1074,7 +1074,7 @@ class GPUDBNN:
                  max_epochs: int = Epochs, test_size: float = TestFraction,
                  random_state: int = TrainingRandomSeed, device: str = None,
                  fresh: bool = False, use_previous_model: bool = True,
-                 n_bins_per_dim: int = 64, model_type: str = "Histogram",mode: str=None):
+                 n_bins_per_dim: int = 128, model_type: str = "Histogram",mode: str=None):
         """Initialize GPUDBNN with support for continued training with fresh data"""
 
         # Set dataset_name and model type first
@@ -1088,12 +1088,13 @@ class GPUDBNN:
         self.test_indices = None
         self._last_metrics_printed =False
         # Add new attribute for bin-specific weights
-        self.n_bins_per_dim = n_bins_per_dim
         self.weight_updater = None  # Will be initialized after computing likelihood params
 
         # Load configuration before potential cleanup
         self.config = DatasetConfig.load_config(self.dataset_name)
         self.feature_bounds = None  # Store global min/max for each
+        #self.n_bins_per_dim = n_bins_per_dim
+        self.n_bins_per_dim = self.config.get('likelihood_config', {}).get('n_bins_per_dim', 128)
 
         # Initialize other attributes
 
@@ -3496,6 +3497,70 @@ class DBNN(GPUDBNN):
 
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
+    def _compute_pairwise_likelihood_parallel_cpu(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Memory-optimized pairwise likelihood computation with dynamic allocation"""
+        DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
+        print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
+
+        # Generate feature pairs if they don't exist
+        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
+            self._generate_feature_combinations(feature_dims)
+
+        # Move inputs to CPU first to save GPU memory
+        dataset_cpu = dataset.cpu()
+        labels_cpu = labels.cpu()
+
+        # Pre-compute unique classes on CPU
+        unique_classes, class_counts = torch.unique(labels_cpu, return_counts=True)
+        n_classes = len(unique_classes)
+        n_samples = len(dataset_cpu)
+
+        # Get bin sizes from configuration
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [64])
+        n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
+        self.n_bins_per_dim = n_bins
+
+        # Initialize storage on CPU
+        all_bin_counts = []
+        all_bin_probs = []
+
+        # Process feature pairs in smaller batches
+        pair_batch_size = self._calculate_safe_batch_size(n_classes, n_bins)
+        total_pairs = len(self.feature_pairs)
+
+        with tqdm(total=total_pairs, desc="Processing feature pairs",leave=False) as pbar:
+            for batch_start in range(0, total_pairs, pair_batch_size):
+                batch_end = min(batch_start + pair_batch_size, total_pairs)
+                batch_pairs = self.feature_pairs[batch_start:batch_end]
+
+                # Process this batch of pairs
+                batch_counts, batch_probs = self._process_pair_batch(
+                    dataset_cpu,
+                    labels_cpu,
+                    batch_pairs,
+                    unique_classes,
+                    bin_sizes
+                )
+
+                all_bin_counts.extend(batch_counts)
+                all_bin_probs.extend(batch_probs)
+                pbar.update(len(batch_pairs))
+
+                # Clear GPU cache after each batch
+                torch.cuda.empty_cache()
+
+        # Move final results to GPU
+        all_bin_counts = [t.to(self.device) for t in all_bin_counts]
+        all_bin_probs = [t.to(self.device) for t in all_bin_probs]
+
+        return {
+            'bin_counts': all_bin_counts,
+            'bin_probs': all_bin_probs,
+            'bin_edges': self.bin_edges,
+            'feature_pairs': self.feature_pairs,
+            'classes': unique_classes.to(self.device)
+        }
+
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """GPU-optimized version with dimension consistency fixes"""
         DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
@@ -3505,14 +3570,18 @@ class DBNN(GPUDBNN):
         labels = labels.contiguous()
 
         # Validate class consistency
-        unique_classes = torch.unique(labels)
+        #unique_classes = torch.unique(labels)
+        unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
+        n_samples = len(dataset)
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
         # Get bin configuration from model parameters
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
-        n_bins = bin_sizes[0]  # Use first element of bin_sizes array
+        #n_bins = bin_sizes[0]  # Use first element of bin_sizes array
+        n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
+        self.n_bins_per_dim = n_bins
 
         # Initialize weights with consistent bin size
         self._initialize_bin_weights()
@@ -3520,48 +3589,52 @@ class DBNN(GPUDBNN):
         all_bin_counts = []
         all_bin_probs = []
 
-        # Process each feature pair with dimension checks
-        for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
-            # Use precomputed bin edges that match weight dimensions
-            edges = self.bin_edges[pair_idx]
+        # Add progress bar
+        with tqdm(total=len(self.feature_pairs), desc="Pairwise likelihood", leave=False) as pbar:
 
-            # Validate bin dimensions match weight updater settings
-            assert len(edges[0]) == self.weight_updater.n_bins_per_dim + 1, \
-                f"Bin edges dimension mismatch: {len(edges[0])-1} vs {self.weight_updater.n_bins_per_dim}"
+            # Process each feature pair with dimension checks
+            for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
+                # Use precomputed bin edges that match weight dimensions
+                edges = self.bin_edges[pair_idx]
 
-            # Initialize counts tensor with proper dimensions
-            pair_counts = torch.zeros((n_classes, n_bins, n_bins),
-                                    dtype=torch.float32,
-                                    device=self.device)
+                # Validate bin dimensions match weight updater settings
+                assert len(edges[0]) == self.weight_updater.n_bins_per_dim + 1, \
+                    f"Bin edges dimension mismatch: {len(edges[0])-1} vs {self.weight_updater.n_bins_per_dim}"
 
-            for cls_idx, cls in enumerate(unique_classes):
-                cls_mask = (labels == cls)
-                if not torch.any(cls_mask):
-                    continue
+                # Initialize counts tensor with proper dimensions
+                pair_counts = torch.zeros((n_classes, n_bins, n_bins),
+                                        dtype=torch.float32,
+                                        device=self.device)
 
-                # Process data on GPU
-                data = dataset[cls_mask][:, [f1, f2]].contiguous()
+                for cls_idx, cls in enumerate(unique_classes):
+                    cls_mask = (labels == cls)
+                    if not torch.any(cls_mask):
+                        continue
 
-                # GPU-accelerated bucketization
-                indices = [
-                    torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
-                    torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
-                ]
+                    # Process data on GPU
+                    data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                # Flat indices computation
-                flat_indices = indices[0] * n_bins + indices[1]
+                    # GPU-accelerated bucketization
+                    indices = [
+                        torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
+                        torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
+                    ]
 
-                # Bincount with validated dimensions
-                counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
-                pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
+                    # Flat indices computation
+                    flat_indices = indices[0] * n_bins + indices[1]
 
-            # Laplace smoothing with dimension preservation
-            smoothed = pair_counts + 1.0
-            probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
+                    # Bincount with validated dimensions
+                    counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
+                    pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-            all_bin_counts.append(smoothed)
-            all_bin_probs.append(probs)
+                # Laplace smoothing with dimension preservation
+                smoothed = pair_counts + 1.0
+                probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
+                all_bin_counts.append(smoothed)
+                all_bin_probs.append(probs)
+                pbar.update(1)
+        pbar.close()
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
@@ -3822,23 +3895,6 @@ class DBNN(GPUDBNN):
 
         return posteriors, None
 
-    def _initialize_bin_weights_old(self):
-        """Initialize weights for either histogram bins or Gaussian components"""
-        n_classes = len(self.label_encoder.classes_)
-        if self.model_type == "Histogram":
-            self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
-                feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim,
-                batch_size=self.batch_size
-            )
-        elif self.model_type == "Gaussian":
-            # Use same weight structure but for Gaussian components
-            self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
-                feature_pairs=self.feature_pairs,
-                n_bins_per_dim=self.n_bins_per_dim  # Number of Gaussian components
-            )
 
     def _initialize_bin_weights(self):
         """Initialize weights with config-consistent bin dimensions"""
