@@ -7,7 +7,7 @@
 # Training until patience enabled. April 7 8:14 am 2025
 #Finalised completely working module as on 15th April 2025
 # Tested and working well with numerica target also April 27 11:28 pm
-#upgraded to use GPU in pairwise computations. May 4 2025 5:16 pm
+#upgraded to use GPU in pairwise computations for both models. May 4 2025 7:28 pm
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -3497,70 +3497,6 @@ class DBNN(GPUDBNN):
 
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
-    def _compute_pairwise_likelihood_parallel_cpu(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Memory-optimized pairwise likelihood computation with dynamic allocation"""
-        DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
-        print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
-
-        # Generate feature pairs if they don't exist
-        if not hasattr(self, 'feature_pairs') or self.feature_pairs is None:
-            self._generate_feature_combinations(feature_dims)
-
-        # Move inputs to CPU first to save GPU memory
-        dataset_cpu = dataset.cpu()
-        labels_cpu = labels.cpu()
-
-        # Pre-compute unique classes on CPU
-        unique_classes, class_counts = torch.unique(labels_cpu, return_counts=True)
-        n_classes = len(unique_classes)
-        n_samples = len(dataset_cpu)
-
-        # Get bin sizes from configuration
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [64])
-        n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
-        self.n_bins_per_dim = n_bins
-
-        # Initialize storage on CPU
-        all_bin_counts = []
-        all_bin_probs = []
-
-        # Process feature pairs in smaller batches
-        pair_batch_size = self._calculate_safe_batch_size(n_classes, n_bins)
-        total_pairs = len(self.feature_pairs)
-
-        with tqdm(total=total_pairs, desc="Processing feature pairs",leave=False) as pbar:
-            for batch_start in range(0, total_pairs, pair_batch_size):
-                batch_end = min(batch_start + pair_batch_size, total_pairs)
-                batch_pairs = self.feature_pairs[batch_start:batch_end]
-
-                # Process this batch of pairs
-                batch_counts, batch_probs = self._process_pair_batch(
-                    dataset_cpu,
-                    labels_cpu,
-                    batch_pairs,
-                    unique_classes,
-                    bin_sizes
-                )
-
-                all_bin_counts.extend(batch_counts)
-                all_bin_probs.extend(batch_probs)
-                pbar.update(len(batch_pairs))
-
-                # Clear GPU cache after each batch
-                torch.cuda.empty_cache()
-
-        # Move final results to GPU
-        all_bin_counts = [t.to(self.device) for t in all_bin_counts]
-        all_bin_probs = [t.to(self.device) for t in all_bin_probs]
-
-        return {
-            'bin_counts': all_bin_counts,
-            'bin_probs': all_bin_probs,
-            'bin_edges': self.bin_edges,
-            'feature_pairs': self.feature_pairs,
-            'classes': unique_classes.to(self.device)
-        }
-
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """GPU-optimized version with dimension consistency fixes"""
         DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
@@ -3787,6 +3723,72 @@ class DBNN(GPUDBNN):
         }
 
     def _compute_pairwise_likelihood_parallel_std(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Optimized Gaussian parameter computation using full covariance matrices and vectorized pair extraction."""
+        DEBUG.log("Starting optimized Gaussian likelihood computation")
+
+        # Generate feature pairs if needed
+        if self.feature_pairs is None:
+            self.feature_pairs = self._generate_feature_combinations(
+                feature_dims,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            )
+
+        unique_classes = torch.unique(labels)
+        n_classes = len(unique_classes)
+        n_pairs = len(self.feature_pairs)
+        n_features = dataset.size(1)
+
+        # Convert feature pairs to tensor for advanced indexing
+        pair_indices = torch.tensor(self.feature_pairs, device=self.device, dtype=torch.long)
+
+        # Initialize storage tensors
+        means = torch.zeros((n_classes, n_pairs, 2), device=self.device)
+        covs = torch.zeros((n_classes, n_pairs, 2, 2), device=self.device)
+
+        # Process each class with batched operations
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = labels == class_id
+            class_data = dataset[class_mask]
+
+            if class_data.size(0) == 0:  # Handle empty classes
+                covs[class_idx] += torch.eye(2, device=self.device) * 1e-6
+                continue
+
+            # Compute full feature means
+            full_mean = torch.mean(class_data, dim=0)
+
+            # Center data and compute full covariance matrix
+            centered = class_data - full_mean.unsqueeze(0)
+            cov_matrix = torch.matmul(centered.T, centered) / (centered.size(0) - 1 + 1e-6)
+            cov_matrix += torch.eye(n_features, device=self.device) * 1e-6  # Regularization
+
+            # Extract means for all pairs simultaneously
+            means[class_idx] = full_mean[pair_indices]
+
+            # Extract covariance components using vectorized indexing
+            i, j = pair_indices[:, 0], pair_indices[:, 1]
+            cov_ii = cov_matrix[i, i]
+            cov_ij = cov_matrix[i, j]
+            cov_jj = cov_matrix[j, j]
+
+            # Build covariance matrices in parallel
+            covs[class_idx, :, 0, 0] = cov_ii
+            covs[class_idx, :, 0, 1] = cov_ij
+            covs[class_idx, :, 1, 0] = cov_ij  # Symmetric
+            covs[class_idx, :, 1, 1] = cov_jj
+
+        # Store parameters with standardized structure
+        self.gaussian_params = {
+            'means': means.contiguous(),
+            'covs': covs.contiguous(),
+            'classes': unique_classes,
+            'feature_pairs': self.feature_pairs
+        }
+
+        return self.gaussian_params
+
+    def _compute_pairwise_likelihood_parallel_std_old(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """Compute Gaussian parameters (means, covariances) for all feature pairs and classes."""
         DEBUG.log("Starting Gaussian likelihood computation")
         print("\033[KComputing Gaussian parameters...")
