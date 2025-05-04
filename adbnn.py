@@ -3496,12 +3496,16 @@ class DBNN(GPUDBNN):
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """GPU-optimized version with preserved logic and memory efficiency."""
+        """GPU-optimized version with dimension consistency fixes"""
         DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
 
-        # Ensure tensors are contiguous on the current device (GPU if available)
-        dataset = dataset.contiguous()
-        labels = labels.contiguous()
+        # Get bin configuration from model parameters
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        n_bins = bin_sizes[0]
+
+        # Ensure tensors stay on the computation device
+        dataset = dataset.contiguous().to(self.device)
+        labels = labels.contiguous().to(self.device)
 
         # Validate class consistency
         unique_classes = torch.unique(labels)
@@ -3509,44 +3513,47 @@ class DBNN(GPUDBNN):
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Initialize weights and get bin configuration
-        self._initialize_bin_weights()
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
-        n_bins = bin_sizes[0]
+        # Initialize weights with proper bin dimensions
+        if not hasattr(self, 'weight_updater') or self.weight_updater.n_bins_per_dim != n_bins:
+            self._initialize_bin_weights()
 
         all_bin_counts = []
         all_bin_probs = []
 
-        # Process each feature pair entirely on GPU
+        # Process each feature pair with dimension validation
         for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
-            # Bin edges are precomputed and already on the correct device
+            # Get precomputed bin edges and verify dimensions
             edges = self.bin_edges[pair_idx]
+            if len(edges[0]) != n_bins + 1 or len(edges[1]) != n_bins + 1:
+                raise ValueError(f"Bin edges mismatch for pair {pair_idx}. Expected {n_bins+1} edges, got {len(edges[0])} and {len(edges[1])}")
 
-            # Initialize counts tensor directly on the computation device
+            # Initialize counts tensor with verified dimensions
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
                                     dtype=torch.float32,
                                     device=self.device)
 
             for cls_idx, cls in enumerate(unique_classes):
-                # Class mask and data extraction on GPU
                 cls_mask = (labels == cls)
                 if not torch.any(cls_mask):
-                    continue  # Skip empty classes
+                    continue
 
                 data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                # GPU-accelerated bin index calculation
+                # Calculate indices with explicit dimension specification
                 indices = [
-                    torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
-                    torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
+                    torch.bucketize(data[:, 0], edges[0], out_int32=True, right=True).clamp(0, n_bins-1),
+                    torch.bucketize(data[:, 1], edges[1], out_int32=True, right=True).clamp(0, n_bins-1)
                 ]
 
-                # Flat indices and bincount on GPU
+                # Flat indices calculation with dimension validation
                 flat_indices = indices[0] * n_bins + indices[1]
+                if flat_indices.max() >= n_bins * n_bins:
+                    raise ValueError("Bin index out of bounds")
+
                 counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
                 pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-            # Laplace smoothing and probability calculation on GPU
+            # Apply smoothing and normalize
             smoothed = pair_counts + 1.0
             probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
