@@ -3495,8 +3495,81 @@ class DBNN(GPUDBNN):
 
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
-
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
+        """Fixed version with proper dtype handling and bincount"""
+        DEBUG.log("Starting dtype-safe _compute_pairwise_likelihood_parallel")
+
+        # Preserve original CPU processing logic with contiguous tensors
+        dataset_cpu = dataset.cpu().contiguous()  # Ensure contiguous memory layout
+        labels_cpu = labels.cpu().contiguous()
+
+        # Get actual class count and validate
+        unique_classes = torch.unique(labels_cpu)
+        n_classes = len(unique_classes)
+        if n_classes != len(self.label_encoder.classes_):
+            raise ValueError("Class count mismatch between data and label encoder")
+
+        # Initialize weights with validated class count
+        self._initialize_bin_weights()
+
+        # Get bin configuration
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        n_bins = bin_sizes[0]
+
+        # Main processing loop with dtype safety
+        all_bin_counts = []
+        all_bin_probs = []
+
+        for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
+            # Get precomputed bin edges
+            edges = self.bin_edges[pair_idx]
+
+            # Initialize counts tensor with proper dtype
+            pair_counts = torch.zeros((n_classes, n_bins, n_bins),
+                                    dtype=torch.float32, device='cpu')
+
+            for cls_idx, cls in enumerate(unique_classes):
+                cls_mask = (labels_cpu == cls)
+                if not torch.any(cls_mask):
+                    continue  # Skip empty classes
+
+                # Process data with contiguous tensors
+                data = dataset_cpu[cls_mask][:, [f1, f2]].contiguous()
+
+                # Calculate indices with dtype safety
+                indices = [
+                    torch.bucketize(data[:, 0], edges[0].cpu()).clamp(0, n_bins-1),
+                    torch.bucketize(data[:, 1], edges[1].cpu()).clamp(0, n_bins-1)
+                ]
+
+                # Calculate flat indices using bincount-friendly method
+                flat_indices = indices[0] * n_bins + indices[1]
+
+                # Use bincount instead of histc for integer indices
+                counts = torch.bincount(
+                    flat_indices,
+                    minlength=n_bins*n_bins
+                ).view(n_bins, n_bins).float()
+
+                pair_counts[cls_idx] = counts
+
+            # Apply Laplace smoothing and calculate probabilities
+            smoothed = pair_counts + 1.0
+            probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
+
+            all_bin_counts.append(smoothed.to(self.device))
+            all_bin_probs.append(probs.to(self.device))
+
+        return {
+            'bin_counts': all_bin_counts,
+            'bin_probs': all_bin_probs,
+            'bin_edges': self.bin_edges,
+            'feature_pairs': self.feature_pairs,
+            'classes': unique_classes.to(self.device)
+        }
+
+
+    def _compute_pairwise_likelihood_parallel_old(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
         """Memory-optimized pairwise likelihood computation with dynamic allocation"""
         DEBUG.log(" Starting memory-optimized _compute_pairwise_likelihood_parallel")
         print("\033[K" + "Computing pairwise likelihoods (memory-optimized)...")
