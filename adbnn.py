@@ -11,7 +11,8 @@
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
-
+import subprocess
+from tempfile import NamedTemporaryFile
 import torch
 import time
 import argparse
@@ -384,24 +385,79 @@ class DatasetConfig:
 
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
-        """Enhanced configuration loading with URL handling and comment removal"""
+        """Enhanced configuration loading with interactive setup and comment removal"""
         if not dataset_name or not isinstance(dataset_name, str):
-            print("\033[K" +"Error: Invalid dataset name provided.")
+            print("\033[K" + "Error: Invalid dataset name provided.")
             return None
 
-        config_path = os.path.join('data', dataset_name,f"{dataset_name}.conf")
+        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
+        csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         try:
-            # Check if configuration file exists
+            # Handle missing config file
             if not os.path.exists(config_path):
-                print("\033[K" +f"Configuration file {config_path} not found.")
-                print("\033[K" +f"Creating default configuration for {dataset_name}")
-                return DatasetConfig.create_default_config(dataset_name)
+                # Check for corresponding CSV file
+                if os.path.exists(csv_path):
+                    print("\033[K" + f"Configuration file not found. Starting interactive setup for {dataset_name}...")
 
-            # Read and parse configuration
+                    # Read CSV columns
+                    try:
+                        df = pd.read_csv(csv_path, nrows=0)
+                        columns = df.columns.tolist()
+                        print("\033[K" + f"Detected columns: {', '.join(columns)}")
+                    except Exception as e:
+                        print("\033[K" + f"Error reading CSV file: {str(e)}")
+                        return None
+
+                    # Get target column from user
+                    target = None
+                    while True:
+                        target = input("\033[K" + "Enter target column name: ").strip()
+                        if target in columns:
+                            break
+                        print("\033[K" + f"Invalid column! Choose from: {', '.join(columns)}")
+
+                    # Create base configuration
+                    config = DatasetConfig.create_default_config(dataset_name)
+                    config.update({
+                        "file_path": csv_path,
+                        "column_names": columns,
+                        "target_column": target,
+                        "modelType": config.get("modelType", "Histogram")
+                    })
+
+                    # Let user edit the config
+                    with tempfile.NamedTemporaryFile(mode='w+', suffix='.conf', delete=False) as tmp:
+                        json.dump(config, tmp, indent=2)
+                        tmp_path = tmp.name
+
+                    # Open editor
+                    editor = os.environ.get('EDITOR', 'nano')
+                    try:
+                        subprocess.call([editor, tmp_path])
+                    except Exception as e:
+                        print("\033[K" + f"Error opening editor: {str(e)}")
+                        return None
+
+                    # Load edited config
+                    with open(tmp_path, 'r') as f:
+                        edited_config = json.load(f)
+                    os.remove(tmp_path)
+
+                    # Save final config
+                    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                    with open(config_path, 'w') as f:
+                        json.dump(edited_config, f, indent=2)
+                    print("\033[K" + f"Configuration saved to {config_path}")
+
+                else:
+                    print("\033[K" + f"Creating default configuration for {dataset_name}")
+                    return DatasetConfig.create_default_config(dataset_name)
+
+            # Existing configuration loading logic
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-            # Remove comments and parse
+
             def remove_comments(json_str):
                 lines = []
                 in_multiline_comment = False
@@ -425,61 +481,54 @@ class DatasetConfig:
                         lines.append(stripped)
                 return '\n'.join(lines)
 
-            # Remove comments and parse JSON
             clean_config = remove_comments(config_text)
             config = json.loads(clean_config)
-            # Validate configuration
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
 
-            # Handle file path
+            # Path handling
             if validated_config.get('file_path'):
-                # If path is relative to data directory, update it
                 if not os.path.exists(validated_config['file_path']):
                     alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                     if os.path.exists(alt_path):
                         validated_config['file_path'] = alt_path
-                        print("\033[K" +f"Using data file: {alt_path}")
+                        print("\033[K" + f"Using data file: {alt_path}")
 
-            # If still no file path, try default location
             if not validated_config.get('file_path'):
                 default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if os.path.exists(default_path):
                     validated_config['file_path'] = default_path
-                    print("\033[K" +f"Using default data file: {default_path}")
+                    print("\033[K" + f"Using default data file: {default_path}")
 
-            # If URL, handle download
+            # URL handling
             if DatasetConfig.is_url(validated_config.get('file_path', '')):
                 url = validated_config['file_path']
                 local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-
                 if not os.path.exists(local_path):
-                    print("\033[K" +f"Downloading dataset from {url}")
+                    print("\033[K" + f"Downloading dataset from {url}")
                     if not DatasetConfig.download_dataset(url, local_path):
-                        print("\033[K" +f"Failed to download dataset from {url}")
+                        print("\033[K" + f"Failed to download dataset from {url}")
                         return None
-                    print("\033[K" +f"Downloaded dataset to {local_path}")
-
+                    print("\033[K" + f"Downloaded dataset to {local_path}")
                 validated_config['file_path'] = local_path
 
-            # Verify data file exists
+            # Validation
             if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
-                print("\033[K" +f"Warning: Data file not found")
+                print("\033[K" + "Warning: Data file not found")
                 return None
 
-            # If no column names provided, try to infer from CSV header
             if not validated_config.get('column_names'):
                 try:
                     df = pd.read_csv(validated_config['file_path'], nrows=0)
                     validated_config['column_names'] = df.columns.tolist()
                 except Exception as e:
-                    print("\033[K" +f"Warning: Could not infer column names: {str(e)}")
+                    print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
                     return None
 
             return validated_config
 
         except Exception as e:
-            print("\033[K" +f"Error loading configuration for {dataset_name}: {str(e)}")
+            print("\033[K" + f"Error loading configuration for {dataset_name}: {str(e)}")
             traceback.print_exc()
             return None
 
