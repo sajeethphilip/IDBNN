@@ -351,7 +351,7 @@ class DatasetConfig:
             "trials": 100,
             "cardinality_threshold": 0.9,
             "minimum_training_accuracy": 0.95,
-            "cardinality_tolerance": 4,
+            "cardinality_tolerance": 8,
             "learning_rate": 0.001,
             "random_seed": 42,
             "epochs": 1000,
@@ -6463,7 +6463,7 @@ def load_or_create_config(config_path: str) -> dict:
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "trials": 100,
         "cardinality_threshold": 0.9,
-        "cardinality_tolerance": 4,
+        "cardinality_tolerance": 8,
         "learning_rate": 0.1,
         "random_seed": 42,
         "epochs": 1000,
@@ -6529,7 +6529,7 @@ def load_or_create_config(config_path: str) -> dict:
     Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
     Trials = config.get("trials", 100)
     cardinality_threshold = config.get("cardinality_threshold", 0.9)
-    cardinality_tolerance = config.get("cardinality_tolerance", 4)
+    cardinality_tolerance = config.get("cardinality_tolerance", 8)
     bin_sizes = config.get("bin_sizes", 128)
     n_bins_per_dim = config.get("n_bins_per_dim", 128)
     LearningRate = config.get("learning_rate", 0.1)
@@ -6661,7 +6661,7 @@ def validate_config(config: dict) -> dict:
         validated_config["cardinality_threshold"] = 0.9
 
     if "cardinality_tolerance" not in validated_config or not isinstance(validated_config["cardinality_tolerance"], int):
-        validated_config["cardinality_tolerance"] = 4
+        validated_config["cardinality_tolerance"] = 8
 
     if "learning_rate" not in validated_config or not isinstance(validated_config["learning_rate"], float):
         validated_config["learning_rate"] = 0.1
