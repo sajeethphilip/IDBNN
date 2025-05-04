@@ -1,13 +1,14 @@
-#Working, fully functional with predcition 31/March/2025 Stable Model
+# Working, fully functional with predcition 31/March/2025 Stable Model
 # Better Memory management 06:28am
-#Tested an fully functional April 4 2025 3:34 am
-#Tested for more flexibility and added posteriors with class pedictions 5 April 7:22 pm
+# Tested an fully functional April 4 2025 3:34 am
+# Tested for more flexibility and added posteriors with class pedictions 5 April 7:22 pm
 # Enhanced mosaic images 6 April 2025 8:45 am
 # Feature pair automatic recomputation disabled
 # Training until patience enabled. April 7 8:14 am 2025
-#Finalised completely working module as on 15th April 2025
+# Finalised completely working module as on 15th April 2025
 # Tested and working well with numerica target also April 27 11:28 pm
-#upgraded to use GPU in pairwise computations for both models. May 4 2025 7:28 pm
+# upgraded to use GPU in pairwise computations for both models. May 4 2025 7:28 pm
+# Added automatic conf creation option. May 4 2025 10:56 pm
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -275,7 +276,7 @@ class DatasetConfig:
     DEFAULT_CONFIG = {
         "file_path": None,
         "column_names": None,
-        "target_column": "target",
+        "target_column": None,
         "separator": ",",
         "has_header": True,
         "likelihood_config": {
@@ -288,7 +289,7 @@ class DatasetConfig:
             "cardinality_threshold_percentile": 95
         },
         "training_params": {
-            "save_plots": True,  # Parameter to save plots
+            "save_plots": False,  # Parameter to save plots
             "Save_training_epochs": False,  # Save the epochs parameter
             "training_save_path": "data"  # Save epochs path parameter
         }
@@ -361,7 +362,7 @@ class DatasetConfig:
             "reconstruction_weight": 0.5,
             "feedback_strength": 0.3,
             "inverse_learning_rate": 0.001,
-            "save_plots": True,
+            "save_plots": False,
             "class_preference": True
         }
         config["active_learning"]= {
@@ -401,13 +402,35 @@ class DatasetConfig:
                     print("\033[K" + f"Configuration file not found. Starting interactive setup for {dataset_name}...")
 
                     # Read CSV columns
+                    columns = []
+                    has_header = True
                     try:
-                        df = pd.read_csv(csv_path, nrows=0)
-                        columns = df.columns.tolist()
-                        print("\033[K" + f"Detected columns: {', '.join(columns)}")
+                        with open(csv_path, 'r') as f:
+                            first_line = f.readline().strip()
+                            columns = first_line.split(',')
+
+                            # Verify if we should use first line as header
+                            try:
+                                pd.read_csv(csv_path, nrows=0)
+                            except pd.errors.ParserError:
+                                has_header = False
+                                columns = []
                     except Exception as e:
                         print("\033[K" + f"Error reading CSV file: {str(e)}")
                         return None
+
+                    if not has_header or not columns:
+                        print("\033[K" + "CSV file appears to have no header. Please provide column names.")
+                        columns = []
+                        while True:
+                            col_input = input("\033[K" + "Enter comma-separated column names (including target): ").strip()
+                            if col_input:
+                                columns = [c.strip() for c in col_input.split(',')]
+                                if len(columns) > 1:
+                                    break
+                            print("\033[K" + "Invalid input! Must provide at least two columns.")
+
+                    print("\033[K" + f"Detected columns: {', '.join(columns)}")
 
                     # Get target column from user
                     target = None
@@ -423,6 +446,7 @@ class DatasetConfig:
                         "file_path": csv_path,
                         "column_names": columns,
                         "target_column": target,
+                        "has_header": has_header,
                         "modelType": config.get("modelType", "Histogram")
                     })
 
@@ -517,13 +541,31 @@ class DatasetConfig:
                 print("\033[K" + "Warning: Data file not found")
                 return None
 
-            if not validated_config.get('column_names'):
-                try:
-                    df = pd.read_csv(validated_config['file_path'], nrows=0)
-                    validated_config['column_names'] = df.columns.tolist()
-                except Exception as e:
-                    print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
-                    return None
+            # Validate columns
+            try:
+                df = pd.read_csv(validated_config['file_path'], nrows=0)
+                validated_config['column_names'] = df.columns.tolist()
+            except Exception as e:
+                print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
+                return None
+
+            # Validate target column exists
+            target_col = validated_config.get('target_column')
+            if target_col not in validated_config['column_names']:
+                print(f"\033[K{Colors.RED}ERROR: Configured target column '{target_col}' not found in dataset!{Colors.ENDC}")
+                print(f"\033[KAvailable columns: {', '.join(validated_config['column_names'])}")
+
+                # Interactive target column correction
+                while True:
+                    new_target = input("\033[KEnter correct target column name: ").strip()
+                    if new_target in validated_config['column_names']:
+                        validated_config['target_column'] = new_target
+                        # Save updated config
+                        with open(config_path, 'w') as f:
+                            json.dump(validated_config, f, indent=2)
+                        print(f"\033[K{Colors.GREEN}Updated target column to '{new_target}' in configuration.{Colors.ENDC}")
+                        break
+                    print(f"\033[K{Colors.RED}Invalid column! Choose from: {', '.join(validated_config['column_names'])}{Colors.ENDC}")
 
             return validated_config
 
