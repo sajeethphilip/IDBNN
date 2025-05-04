@@ -3499,13 +3499,9 @@ class DBNN(GPUDBNN):
         """GPU-optimized version with dimension consistency fixes"""
         DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
 
-        # Get bin configuration from model parameters
-        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
-        n_bins = bin_sizes[0]
-
-        # Ensure tensors stay on the computation device
-        dataset = dataset.contiguous().to(self.device)
-        labels = labels.contiguous().to(self.device)
+        # Ensure tensors are contiguous on the computation device
+        dataset = dataset.contiguous()
+        labels = labels.contiguous()
 
         # Validate class consistency
         unique_classes = torch.unique(labels)
@@ -3513,21 +3509,26 @@ class DBNN(GPUDBNN):
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Initialize weights with proper bin dimensions
-        if not hasattr(self, 'weight_updater') or self.weight_updater.n_bins_per_dim != n_bins:
-            self._initialize_bin_weights()
+        # Get bin configuration from model parameters
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        n_bins = bin_sizes[0]  # Use first element of bin_sizes array
+
+        # Initialize weights with consistent bin size
+        self._initialize_bin_weights()
 
         all_bin_counts = []
         all_bin_probs = []
 
-        # Process each feature pair with dimension validation
+        # Process each feature pair with dimension checks
         for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
-            # Get precomputed bin edges and verify dimensions
+            # Use precomputed bin edges that match weight dimensions
             edges = self.bin_edges[pair_idx]
-            if len(edges[0]) != n_bins + 1 or len(edges[1]) != n_bins + 1:
-                raise ValueError(f"Bin edges mismatch for pair {pair_idx}. Expected {n_bins+1} edges, got {len(edges[0])} and {len(edges[1])}")
 
-            # Initialize counts tensor with verified dimensions
+            # Validate bin dimensions match weight updater settings
+            assert len(edges[0]) == self.weight_updater.n_bins_per_dim + 1, \
+                f"Bin edges dimension mismatch: {len(edges[0])-1} vs {self.weight_updater.n_bins_per_dim}"
+
+            # Initialize counts tensor with proper dimensions
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
                                     dtype=torch.float32,
                                     device=self.device)
@@ -3537,23 +3538,23 @@ class DBNN(GPUDBNN):
                 if not torch.any(cls_mask):
                     continue
 
+                # Process data on GPU
                 data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                # Calculate indices with explicit dimension specification
+                # GPU-accelerated bucketization
                 indices = [
-                    torch.bucketize(data[:, 0], edges[0], out_int32=True, right=True).clamp(0, n_bins-1),
-                    torch.bucketize(data[:, 1], edges[1], out_int32=True, right=True).clamp(0, n_bins-1)
+                    torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
+                    torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
                 ]
 
-                # Flat indices calculation with dimension validation
+                # Flat indices computation
                 flat_indices = indices[0] * n_bins + indices[1]
-                if flat_indices.max() >= n_bins * n_bins:
-                    raise ValueError("Bin index out of bounds")
 
+                # Bincount with validated dimensions
                 counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
                 pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-            # Apply smoothing and normalize
+            # Laplace smoothing with dimension preservation
             smoothed = pair_counts + 1.0
             probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
@@ -3567,7 +3568,6 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs,
             'classes': unique_classes
         }
-
 
     def _process_pair_batch(self, dataset_cpu, labels_cpu, batch_pairs, unique_classes, bin_sizes):
         """Process a batch of feature pairs on CPU"""
@@ -3821,7 +3821,7 @@ class DBNN(GPUDBNN):
 
         return posteriors, None
 
-    def _initialize_bin_weights(self):
+    def _initialize_bin_weights_old(self):
         """Initialize weights for either histogram bins or Gaussian components"""
         n_classes = len(self.label_encoder.classes_)
         if self.model_type == "Histogram":
@@ -3838,6 +3838,18 @@ class DBNN(GPUDBNN):
                 feature_pairs=self.feature_pairs,
                 n_bins_per_dim=self.n_bins_per_dim  # Number of Gaussian components
             )
+
+    def _initialize_bin_weights(self):
+        """Initialize weights with config-consistent bin dimensions"""
+        bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        n_bins_per_dim = bin_sizes[0]  # Match likelihood computation
+
+        self.weight_updater = BinWeightUpdater(
+            n_classes=len(self.label_encoder.classes_),
+            feature_pairs=self.feature_pairs,
+            n_bins_per_dim=n_bins_per_dim,  # Now matches likelihood bins
+            batch_size=self.batch_size
+        )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
         """Vectorized weight updates with proper error handling"""
