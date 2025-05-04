@@ -347,7 +347,7 @@ class DatasetConfig:
 
         # Add training parameters
         config['training_params'] = {
-            "override_global_cardinality": False
+            "override_global_cardinality": False,
             "trials": 100,
             "cardinality_threshold": 0.9,
             "minimum_training_accuracy": 0.95,
