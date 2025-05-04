@@ -29,13 +29,13 @@ case $mode in
   "train" | "all"| "fresh")
 
     echo "Running training..."
-    python cdbnn0.py --mode train --data_name "$data_name" --input_path "$input_path" --encoder_type "$encoder_type"
-    python cdbnn0.py --mode predict --data_name "$data_name" --input_path "$input_path" --encoder_type "$encoder_type"
+    python cdbnn0.py --mode train --data "$input_path" --encoder_type "$encoder_type"
+    python cdbnn0.py --mode predict --data "$input_path" --encoder_type "$encoder_type"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode train --model_type "$model"
     ;;&  # Continue to next case (executes predict if mode is "all")
   "predict" | "all" | "fresh")
     echo "Running prediction..."
-    python cdbnn0.py --mode predict --data_name "$data_name" --input_path "$input_path" --encoder_type "$encoder_type"
+    python cdbnn0.py --mode predict --data "$input_path" --encoder_type "$encoder_type"
     python adbnn.py --file_path "data/${data_name}/${data_name}.csv" --mode predict --model_type "$model"
     ;;
   *)
