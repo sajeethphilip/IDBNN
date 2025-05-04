@@ -3496,76 +3496,69 @@ class DBNN(GPUDBNN):
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Fixed version with proper dtype handling and bincount"""
-        DEBUG.log("Starting dtype-safe _compute_pairwise_likelihood_parallel")
+        """GPU-optimized version with preserved logic and memory efficiency."""
+        DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
 
-        # Preserve original CPU processing logic with contiguous tensors
-        dataset_cpu = dataset.cpu().contiguous()  # Ensure contiguous memory layout
-        labels_cpu = labels.cpu().contiguous()
+        # Ensure tensors are contiguous on the current device (GPU if available)
+        dataset = dataset.contiguous()
+        labels = labels.contiguous()
 
-        # Get actual class count and validate
-        unique_classes = torch.unique(labels_cpu)
+        # Validate class consistency
+        unique_classes = torch.unique(labels)
         n_classes = len(unique_classes)
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Initialize weights with validated class count
+        # Initialize weights and get bin configuration
         self._initialize_bin_weights()
-
-        # Get bin configuration
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         n_bins = bin_sizes[0]
 
-        # Main processing loop with dtype safety
         all_bin_counts = []
         all_bin_probs = []
 
+        # Process each feature pair entirely on GPU
         for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
-            # Get precomputed bin edges
+            # Bin edges are precomputed and already on the correct device
             edges = self.bin_edges[pair_idx]
 
-            # Initialize counts tensor with proper dtype
+            # Initialize counts tensor directly on the computation device
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
-                                    dtype=torch.float32, device='cpu')
+                                    dtype=torch.float32,
+                                    device=self.device)
 
             for cls_idx, cls in enumerate(unique_classes):
-                cls_mask = (labels_cpu == cls)
+                # Class mask and data extraction on GPU
+                cls_mask = (labels == cls)
                 if not torch.any(cls_mask):
                     continue  # Skip empty classes
 
-                # Process data with contiguous tensors
-                data = dataset_cpu[cls_mask][:, [f1, f2]].contiguous()
+                data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                # Calculate indices with dtype safety
+                # GPU-accelerated bin index calculation
                 indices = [
-                    torch.bucketize(data[:, 0], edges[0].cpu()).clamp(0, n_bins-1),
-                    torch.bucketize(data[:, 1], edges[1].cpu()).clamp(0, n_bins-1)
+                    torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
+                    torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
                 ]
 
-                # Calculate flat indices using bincount-friendly method
+                # Flat indices and bincount on GPU
                 flat_indices = indices[0] * n_bins + indices[1]
+                counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
+                pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-                # Use bincount instead of histc for integer indices
-                counts = torch.bincount(
-                    flat_indices,
-                    minlength=n_bins*n_bins
-                ).view(n_bins, n_bins).float()
-
-                pair_counts[cls_idx] = counts
-
-            # Apply Laplace smoothing and calculate probabilities
+            # Laplace smoothing and probability calculation on GPU
             smoothed = pair_counts + 1.0
             probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
-            all_bin_counts.append(smoothed.to(self.device))
-            all_bin_probs.append(probs.to(self.device))
+            all_bin_counts.append(smoothed)
+            all_bin_probs.append(probs)
 
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
             'bin_edges': self.bin_edges,
             'feature_pairs': self.feature_pairs,
-            'classes': unique_classes.to(self.device)
+            'classes': unique_classes
         }
 
 
