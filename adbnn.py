@@ -7,6 +7,7 @@
 # Training until patience enabled. April 7 8:14 am 2025
 #Finalised completely working module as on 15th April 2025
 # Tested and working well with numerica target also April 27 11:28 pm
+#upgraded to use GPU in pairwise computations. May 4 2025 5:16 pm
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
