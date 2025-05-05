@@ -2395,7 +2395,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Select samples from failed predictions with mandatory inclusion of highest/lowest margin samples."""
+        """Select samples with guaranteed inclusion of top/bottom margin samples."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
@@ -2419,21 +2419,20 @@ class DBNN(GPUDBNN):
             class_mask = (y_test[misclassified_indices] == class_id)
             class_indices = misclassified_indices[class_mask]
 
-            if len(class_indices) == 0:
+            if len(class_indices) < 1:  # Changed from == 0 to < 1 for empty check
                 continue
 
-            # Calculate max samples with minimum of 2
+            # Calculate max samples ensuring minimum of 2
             total_class_samples = (y_test == class_id).sum().item()
             max_samples = max(2, int(total_class_samples * max_class_addition_percent / 100))
 
-            # Batch processing to collect all samples and margins
-            all_samples, all_margins, all_indices = [], [], []
+            # Batch processing to collect samples and margins
+            samples, margins, indices = [], [], []
             for batch_start in range(0, len(class_indices), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(class_indices))
                 batch_idx = class_indices[batch_start:batch_end]
                 batch_X = self.X_tensor[test_indices[batch_idx]]
 
-                # Compute posteriors
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
                 else:
@@ -2441,63 +2440,52 @@ class DBNN(GPUDBNN):
 
                 true_probs = posteriors[:, class_id]
                 pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
-                margins = pred_probs - true_probs
+                batch_margins = pred_probs - true_probs
 
-                all_samples.append(batch_X)
-                all_margins.append(margins)
-                all_indices.append(test_indices[batch_idx])
+                samples.append(batch_X)
+                margins.append(batch_margins)
+                indices.append(test_indices[batch_idx])
 
-            if not all_samples:
+            # Handle empty results
+            if not samples:
                 continue
 
             # Combine batch results
-            samples = torch.cat(all_samples)
-            margins = torch.cat(all_margins)
-            indices = torch.cat(all_indices)
+            samples = torch.cat(samples)
+            margins = torch.cat(margins)
+            indices = torch.cat(indices)
 
-            # Always include highest and lowest margin samples
+            # Ensure at least 2 samples exist for selection
+            if len(indices) < 2:
+                final_class_selected = indices.cpu().tolist()
+                final_selected_indices.extend(final_class_selected)
+                continue
+
+            # Find top and bottom margin indices
             max_margin_idx = torch.argmax(margins)
             min_margin_idx = torch.argmin(margins)
-            mandatory_indices = indices[[max_margin_idx, min_margin_idx]]
 
-            # Select additional samples based on thresholds
-            max_margin_val = margins[max_margin_idx]
-            min_margin_val = margins[min_margin_idx]
+            # Create index tensor correctly
+            selection_tensor = torch.stack([max_margin_idx, min_margin_idx])  # Fix dimensional issue
+            mandatory_indices = indices[selection_tensor]
 
-            strong_mask = margins >= (max_margin_val - strong_margin_threshold)
-            marginal_mask = margins <= (min_margin_val + marginal_margin_threshold)
+            # Select additional samples using thresholds
+            max_margin = margins[max_margin_idx]
+            min_margin = margins[min_margin_idx]
+            strong_mask = margins >= (max_margin - strong_margin_threshold)
+            marginal_mask = margins <= (min_margin + marginal_margin_threshold)
             selected_mask = strong_mask | marginal_mask
 
-            # Apply divergence filtering to non-mandatory samples
-            non_mandatory_mask = ~torch.isin(indices, mandatory_indices)
-            candidate_samples = samples[selected_mask & non_mandatory_mask]
-            candidate_indices = indices[selected_mask & non_mandatory_mask]
+            # Combine mandatory and additional samples
+            combined_indices = torch.cat([
+                mandatory_indices,
+                indices[selected_mask & ~torch.isin(indices, mandatory_indices)]
+            ])
 
-            if len(candidate_samples) > 0:
-                # Compute pairwise divergences
-                divergences = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
-
-                # Filter based on minimum divergence
-                eye_mask = torch.eye(len(candidate_samples), dtype=torch.bool, device=divergences.device)
-                divergences_no_self = divergences.masked_fill(eye_mask, float('inf'))
-                min_divergences = torch.min(divergences_no_self, dim=1)[0]
-                diversity_mask = min_divergences >= min_divergence
-
-                filtered_indices = candidate_indices[diversity_mask]
-            else:
-                filtered_indices = torch.tensor([], device=indices.device, dtype=torch.long)
-
-            # Combine mandatory and filtered indices
-            combined_indices = torch.cat([mandatory_indices, filtered_indices])
+            # Remove duplicates and limit to max_samples
             unique_indices = torch.unique(combined_indices)
-
-            # Final selection respecting max_samples
             final_class_selected = unique_indices[:max_samples].cpu().tolist()
             final_selected_indices.extend(final_class_selected)
-
-            # Logging
-            true_class_name = self.label_encoder.inverse_transform([class_id.cpu().item()])[0]
-            print(f"\033[KSelected {len(final_class_selected)} samples from class {true_class_name}")
 
         return final_selected_indices
 
