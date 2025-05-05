@@ -2395,7 +2395,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
 
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+    def _select_samples_from_failed_classes_tmp(self, test_predictions, y_test, test_indices):
         """Select samples with cluster-aware diversity filtering."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
@@ -2527,7 +2527,7 @@ class DBNN(GPUDBNN):
         return min_divergence < threshold
 
 
-    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """Select samples with guaranteed inclusion of top/bottom margin samples."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
