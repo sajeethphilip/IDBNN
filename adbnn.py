@@ -2395,7 +2395,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Select samples from failed predictions with enhanced margin and divergence criteria."""
+        """Select samples from failed predictions with mandatory inclusion of highest/lowest margin samples."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
@@ -2416,18 +2416,17 @@ class DBNN(GPUDBNN):
         unique_classes = torch.unique(y_test[misclassified_indices])
 
         for class_id in unique_classes:
-            # Get all misclassified samples for this class
             class_mask = (y_test[misclassified_indices] == class_id)
             class_indices = misclassified_indices[class_mask]
 
             if len(class_indices) == 0:
                 continue
 
-            # Calculate max samples to add for this class
+            # Calculate max samples with minimum of 2
             total_class_samples = (y_test == class_id).sum().item()
-            max_samples = max(1, int(total_class_samples * max_class_addition_percent / 100))
+            max_samples = max(2, int(total_class_samples * max_class_addition_percent / 100))
 
-            # Process in batches to collect samples and margins
+            # Batch processing to collect all samples and margins
             all_samples, all_margins, all_indices = [], [], []
             for batch_start in range(0, len(class_indices), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(class_indices))
@@ -2451,52 +2450,49 @@ class DBNN(GPUDBNN):
             if not all_samples:
                 continue
 
+            # Combine batch results
             samples = torch.cat(all_samples)
             margins = torch.cat(all_margins)
             indices = torch.cat(all_indices)
 
-            # Compute max and min margins for the class
-            max_margin = torch.max(margins)
-            min_margin = torch.min(margins)
+            # Always include highest and lowest margin samples
+            max_margin_idx = torch.argmax(margins)
+            min_margin_idx = torch.argmin(margins)
+            mandatory_indices = indices[[max_margin_idx, min_margin_idx]]
 
-            # Select samples within strong and marginal thresholds
-            strong_mask = margins >= (max_margin - strong_margin_threshold)
-            marginal_mask = margins <= (min_margin + marginal_margin_threshold)
+            # Select additional samples based on thresholds
+            max_margin_val = margins[max_margin_idx]
+            min_margin_val = margins[min_margin_idx]
+
+            strong_mask = margins >= (max_margin_val - strong_margin_threshold)
+            marginal_mask = margins <= (min_margin_val + marginal_margin_threshold)
             selected_mask = strong_mask | marginal_mask
 
-            selected_samples = samples[selected_mask]
-            selected_margins = margins[selected_mask]
-            selected_indices = indices[selected_mask]
+            # Apply divergence filtering to non-mandatory samples
+            non_mandatory_mask = ~torch.isin(indices, mandatory_indices)
+            candidate_samples = samples[selected_mask & non_mandatory_mask]
+            candidate_indices = indices[selected_mask & non_mandatory_mask]
 
-            # If no samples selected, add the highest margin sample
-            if selected_indices.numel() == 0:
-                top_idx = torch.argmax(margins)
-                selected_indices = indices[top_idx].unsqueeze(0)
-                selected_samples = samples[top_idx].unsqueeze(0)
-                selected_margins = margins[top_idx].unsqueeze(0)
+            if len(candidate_samples) > 0:
+                # Compute pairwise divergences
+                divergences = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
 
-            # Compute divergences
-            divergences = self._compute_sample_divergence(selected_samples, self.feature_pairs)
-            n_samples = divergences.size(0)
+                # Filter based on minimum divergence
+                eye_mask = torch.eye(len(candidate_samples), dtype=torch.bool, device=divergences.device)
+                divergences_no_self = divergences.masked_fill(eye_mask, float('inf'))
+                min_divergences = torch.min(divergences_no_self, dim=1)[0]
+                diversity_mask = min_divergences >= min_divergence
 
-            if n_samples == 0:
-                continue
+                filtered_indices = candidate_indices[diversity_mask]
+            else:
+                filtered_indices = torch.tensor([], device=indices.device, dtype=torch.long)
 
-            # Exclude self-comparisons and find minimum divergence
-            eye_mask = torch.eye(n_samples, dtype=torch.bool, device=divergences.device)
-            divergences_no_self = divergences.masked_fill(eye_mask, float('inf'))
-            min_divergences = torch.min(divergences_no_self, dim=1)[0]
+            # Combine mandatory and filtered indices
+            combined_indices = torch.cat([mandatory_indices, filtered_indices])
+            unique_indices = torch.unique(combined_indices)
 
-            # Apply divergence filter
-            diversity_mask = min_divergences >= min_divergence
-            filtered_indices = selected_indices[diversity_mask]
-
-            # Ensure at least one sample is added if any exist
-            if filtered_indices.numel() == 0 and len(indices) > 0:
-                filtered_indices = indices[torch.argmax(margins)].unsqueeze(0)
-
-            # Limit to max_samples and convert to list
-            final_class_selected = filtered_indices[:max_samples].cpu().tolist()
+            # Final selection respecting max_samples
+            final_class_selected = unique_indices[:max_samples].cpu().tolist()
             final_selected_indices.extend(final_class_selected)
 
             # Logging
