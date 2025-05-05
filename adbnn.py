@@ -2395,7 +2395,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Select samples with cluster-based diversity while ensuring margin extremes."""
+        """Cluster-based selection with robust dimension handling."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
@@ -2409,7 +2409,7 @@ class DBNN(GPUDBNN):
         misclassified_mask = (test_predictions != y_test)
         misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
 
-        if misclassified_indices.dim() == 0:
+        if misclassified_indices.dim() == 0 or len(misclassified_indices) == 0:
             return []
 
         final_selected_indices = []
@@ -2419,19 +2419,18 @@ class DBNN(GPUDBNN):
             class_mask = (y_test[misclassified_indices] == class_id)
             class_indices = misclassified_indices[class_mask]
 
-            if len(class_indices) < 1:
+            if len(class_indices) == 0:
                 continue
 
-            # Calculate max samples ensuring minimum of 2
-            total_class_samples = (y_test == class_id).sum().item()
-            max_samples = max(2, int(total_class_samples * max_class_addition_percent / 100))
-
-            # Batch processing to collect samples and margins
+            # Batch processing with dimension safeguards
             samples, margins, indices = [], [], []
             for batch_start in range(0, len(class_indices), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(class_indices))
                 batch_idx = class_indices[batch_start:batch_end]
-                batch_X = self.X_tensor[test_indices[batch_idx]]
+
+                # Ensure 2D tensor for single-sample batches
+                batch_X = self.X_tensor[test_indices[batch_idx]].unsqueeze(0) if batch_idx.dim() == 0 \
+                          else self.X_tensor[test_indices[batch_idx]]
 
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
@@ -2449,80 +2448,57 @@ class DBNN(GPUDBNN):
             if not samples:
                 continue
 
-            samples = torch.cat(samples)
-            margins = torch.cat(margins)
-            indices = torch.cat(indices)
-
-            if len(indices) < 2:
-                final_selected_indices.extend(indices.cpu().tolist())
+            # Safely combine results with dimension checks
+            try:
+                samples = torch.cat(samples)
+                margins = torch.cat(margins)
+                indices = torch.cat(indices)
+            except RuntimeError:
                 continue
 
-            # Get global margin extremes
-            max_margin_idx = torch.argmax(margins)
-            min_margin_idx = torch.argmin(margins)
-            mandatory_indices = indices[[max_margin_idx, min_margin_idx]]
+            if len(indices) < 1:
+                continue
 
-            # Select samples within threshold windows
-            max_margin = margins[max_margin_idx]
-            min_margin = margins[min_margin_idx]
-            strong_mask = margins >= (max_margin - strong_margin_threshold)
-            marginal_mask = margins <= (min_margin + marginal_margin_threshold)
-            candidate_mask = strong_mask | marginal_mask
+            # Always include extreme margins (modified indexing)
+            if len(indices) >= 2:
+                max_idx = torch.argmax(margins)
+                min_idx = torch.argmin(margins)
+                mandatory_selector = torch.tensor([max_idx.item(), min_idx.item()], device=indices.device)
+                mandatory_indices = indices[mandatory_selector]
+            else:
+                mandatory_indices = indices
 
-            # Combine mandatory and threshold candidates
-            all_candidates = torch.cat([mandatory_indices, indices[candidate_mask]])
-            unique_candidates = torch.unique(all_candidates)
-            candidate_samples = samples[torch.isin(indices, unique_candidates)]
-            candidate_margins = margins[torch.isin(indices, unique_candidates)]
+            # Cluster remaining samples
+            remaining_mask = ~torch.isin(indices, mandatory_indices)
+            candidate_samples = samples[remaining_mask]
+            candidate_indices = indices[remaining_mask]
 
-            # Cluster candidates by divergence
-            clusters = []
-            remaining = list(range(len(candidate_samples)))
+            if len(candidate_samples) > 0:
+                # Compute pairwise divergences
+                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
 
-            while remaining:
-                # Start with highest margin candidate
-                current_idx = remaining[torch.argmax(candidate_margins[remaining])]
-                current_sample = candidate_samples[current_idx]
+                # Find unique clusters
+                clusters = []
+                visited = torch.zeros(len(candidate_samples), dtype=torch.bool)
+                for i in range(len(candidate_samples)):
+                    if not visited[i]:
+                        cluster_mask = div_matrix[i] < min_divergence
+                        cluster_members = candidate_indices[cluster_mask]
+                        if len(cluster_members) > 0:
+                            clusters.append(cluster_members[0].item())
+                        visited |= cluster_mask
 
-                # Compute divergences from current sample
-                div_matrix = self._compute_sample_divergence(
-                    current_sample.unsqueeze(0),
-                    candidate_samples[remaining]
-                )
+                # Combine mandatory and clustered samples
+                selected = torch.cat([
+                    mandatory_indices,
+                    torch.tensor(clusters, device=mandatory_indices.device)
+                ]).unique()
+            else:
+                selected = mandatory_indices
 
-                # Find similar samples within divergence threshold
-                similar_mask = div_matrix.squeeze() < min_divergence
-                cluster_members = [remaining[i] for i in torch.where(similar_mask)[0]]
-
-                # Record cluster with highest margin member
-                cluster_margins = candidate_margins[cluster_members]
-                cluster_center = cluster_members[torch.argmax(cluster_margins)]
-
-                clusters.append({
-                    'members': cluster_members,
-                    'center': cluster_center,
-                    'max_margin': candidate_margins[cluster_center].item()
-                })
-
-                # Remove clustered members from remaining
-                remaining = [i for i in remaining if i not in cluster_members]
-
-            # Sort clusters by max margin descending
-            clusters.sort(key=lambda x: -x['max_margin'])
-
-            # Select one per cluster up to max_samples
-            selected_centers = []
-            for cluster in clusters:
-                if len(selected_centers) >= max_samples:
-                    break
-                selected_centers.append(cluster['center'])
-
-            # Get final indices from cluster centers
-            final_class_selected = indices[
-                torch.isin(indices, unique_candidates[selected_centers])
-            ].cpu().unique().tolist()
-
-            final_selected_indices.extend(final_class_selected[:max_samples])
+            # Apply class-level max samples
+            max_samples = max(2, int((y_test == class_id).sum().item() * max_class_addition_percent / 100))
+            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
         return final_selected_indices
 
