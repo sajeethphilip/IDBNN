@@ -9,6 +9,7 @@
 # Tested and working well with numerica target also April 27 11:28 pm
 # upgraded to use GPU in pairwise computations for both models. May 4 2025 7:28 pm
 # Added automatic conf creation option. May 4 2025 10:56 pm
+# Updated failed candidate selection procedure as per DBNN original concepts May 5 2025 3:57 pm
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -2393,24 +2394,13 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
-
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """
-        Memory-efficient implementation of sample selection using batched processing
-        """
-        # Configuration parameters
+        """Select samples from failed predictions with enhanced margin and divergence criteria."""
         active_learning_config = self.config.get('active_learning', {})
-        tolerance = active_learning_config.get('tolerance', 1.0) / 100.0
-        min_divergence = active_learning_config.get('min_divergence', 0.1)
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
-        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)  # Default to 5%
-
-        # Calculate optimal batch size based on sample size
-        sample_size = self.X_tensor[0].element_size() * self.X_tensor[0].nelement()
-        self.batch_size = self._calculate_optimal_batch_size(sample_size)
-        batch_size=self.batch_size
-        print("\033[K" +f"{Colors.GREEN}Upadated batch size to  {batch_size} using dynamic batchsize updater{Colors.ENDC}", end="\r", flush=True)
+        min_divergence = active_learning_config.get('min_divergence', 0.1)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
@@ -2426,115 +2416,95 @@ class DBNN(GPUDBNN):
         unique_classes = torch.unique(y_test[misclassified_indices])
 
         for class_id in unique_classes:
-            class_mask = y_test[misclassified_indices] == class_id
+            # Get all misclassified samples for this class
+            class_mask = (y_test[misclassified_indices] == class_id)
             class_indices = misclassified_indices[class_mask]
 
             if len(class_indices) == 0:
                 continue
 
-            # Calculate the maximum number of samples to add from this class
+            # Calculate max samples to add for this class
             total_class_samples = (y_test == class_id).sum().item()
-            max_samples_to_add = int(total_class_samples * (max_class_addition_percent / 100.0))
+            max_samples = max(1, int(total_class_samples * max_class_addition_percent / 100))
 
-            # Process class samples in batches
-            for batch_start in range(0, len(class_indices), batch_size):
-                batch_end = min(batch_start + batch_size, len(class_indices))
-                batch_indices = class_indices[batch_start:batch_end]
+            # Process in batches to collect samples and margins
+            all_samples, all_margins, all_indices = [], [], []
+            for batch_start in range(0, len(class_indices), self.batch_size):
+                batch_end = min(batch_start + self.batch_size, len(class_indices))
+                batch_idx = class_indices[batch_start:batch_end]
+                batch_X = self.X_tensor[test_indices[batch_idx]]
 
-                # Get batch data
-                batch_samples = self.X_tensor[test_indices[batch_indices]]
-
-                # Compute probabilities for batch
+                # Compute posteriors
                 if self.model_type == "Histogram":
-                    probs, _ = self._compute_batch_posterior(batch_samples)
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
                 else:
-                    probs, _ = self._compute_batch_posterior_std(batch_samples)
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-                # Compute error margins for batch
-                true_probs = probs[:, class_id]
-                pred_classes = torch.argmax(probs, dim=1)
-                pred_probs = probs[torch.arange(len(pred_classes)), pred_classes]
-                error_margins = pred_probs - true_probs
+                true_probs = posteriors[:, class_id]
+                pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
+                margins = pred_probs - true_probs
 
-                # Split into strong and marginal failures
-                strong_failures = error_margins >= strong_margin_threshold
-                marginal_failures = (error_margins > 0) & (error_margins < marginal_margin_threshold)
+                all_samples.append(batch_X)
+                all_margins.append(margins)
+                all_indices.append(test_indices[batch_idx])
 
-                # Process each failure type
-                for failure_type, failure_mask in [("strong", strong_failures), ("marginal", marginal_failures)]:
-                    if not failure_mask.any():
-                        continue
+            if not all_samples:
+                continue
 
-                    # Get failure samples for this batch
-                    failure_samples = batch_samples[failure_mask]
-                    failure_margins = error_margins[failure_mask]
-                    failure_indices = test_indices[batch_indices[failure_mask]]
+            samples = torch.cat(all_samples)
+            margins = torch.cat(all_margins)
+            indices = torch.cat(all_indices)
 
-                    # Compute cardinalities for these samples
-                    cardinalities = self._compute_feature_cardinalities(failure_samples)
+            # Compute max and min margins for the class
+            max_margin = torch.max(margins)
+            min_margin = torch.min(margins)
 
-                    # Use dynamic threshold based on distribution
-                    cardinality_threshold = torch.median(cardinalities)
-                    low_card_mask = cardinalities <= cardinality_threshold
+            # Select samples within strong and marginal thresholds
+            strong_mask = margins >= (max_margin - strong_margin_threshold)
+            marginal_mask = margins <= (min_margin + marginal_margin_threshold)
+            selected_mask = strong_mask | marginal_mask
 
-                    if not low_card_mask.any():
-                        continue
+            selected_samples = samples[selected_mask]
+            selected_margins = margins[selected_mask]
+            selected_indices = indices[selected_mask]
 
-                    # Process samples meeting cardinality criteria
-                    low_card_samples = failure_samples[low_card_mask]
-                    low_card_margins = failure_margins[low_card_mask]
-                    low_card_indices = failure_indices[low_card_mask]
+            # If no samples selected, add the highest margin sample
+            if selected_indices.numel() == 0:
+                top_idx = torch.argmax(margins)
+                selected_indices = indices[top_idx].unsqueeze(0)
+                selected_samples = samples[top_idx].unsqueeze(0)
+                selected_margins = margins[top_idx].unsqueeze(0)
 
-                    # Compute divergences only for low cardinality samples
-                    divergences = self._compute_sample_divergence(low_card_samples, self.feature_pairs)
+            # Compute divergences
+            divergences = self._compute_sample_divergence(selected_samples, self.feature_pairs)
+            n_samples = divergences.size(0)
 
-                    # Select diverse samples efficiently
-                    selected_mask = torch.zeros(len(low_card_samples), dtype=torch.bool, device=self.device)
+            if n_samples == 0:
+                continue
 
-                    # Initialize with best margin sample
-                    if failure_type == "strong":
-                        best_idx = torch.argmax(low_card_margins)
-                    else:
-                        best_idx = torch.argmin(low_card_margins)
-                    selected_mask[best_idx] = True
+            # Exclude self-comparisons and find minimum divergence
+            eye_mask = torch.eye(n_samples, dtype=torch.bool, device=divergences.device)
+            divergences_no_self = divergences.masked_fill(eye_mask, float('inf'))
+            min_divergences = torch.min(divergences_no_self, dim=1)[0]
 
-                    # Add diverse samples meeting divergence criterion
-                    while True:
-                        # Compute minimum divergence to selected samples
-                        min_divs = divergences[:, selected_mask].min(dim=1)[0]
-                        candidate_mask = (~selected_mask) & (min_divs >= min_divergence)
+            # Apply divergence filter
+            diversity_mask = min_divergences >= min_divergence
+            filtered_indices = selected_indices[diversity_mask]
 
-                        if not candidate_mask.any():
-                            break
+            # Ensure at least one sample is added if any exist
+            if filtered_indices.numel() == 0 and len(indices) > 0:
+                filtered_indices = indices[torch.argmax(margins)].unsqueeze(0)
 
-                        # Select next sample based on margin type
-                        candidate_margins = low_card_margins.clone()
-                        candidate_margins[~candidate_mask] = float('inf') if failure_type == "marginal" else float('-inf')
+            # Limit to max_samples and convert to list
+            final_class_selected = filtered_indices[:max_samples].cpu().tolist()
+            final_selected_indices.extend(final_class_selected)
 
-                        best_idx = torch.argmin(candidate_margins) if failure_type == "marginal" else torch.argmax(candidate_margins)
-                        selected_mask[best_idx] = True
+            # Logging
+            true_class_name = self.label_encoder.inverse_transform([class_id.cpu().item()])[0]
+            print(f"\033[KSelected {len(final_class_selected)} samples from class {true_class_name}")
 
-                    # Add selected indices, but ensure we don't exceed the maximum allowed for this class
-                    selected_indices = low_card_indices[selected_mask]
-                    if len(final_selected_indices) + len(selected_indices) > max_samples_to_add:
-                        # If adding these samples would exceed the limit, only add enough to reach the limit
-                        remaining_samples = max_samples_to_add - len(final_selected_indices)
-                        selected_indices = selected_indices[:remaining_samples]
-
-                    final_selected_indices.extend(selected_indices.cpu().tolist())
-
-                    # Print selection info
-                    true_class_name = self.label_encoder.inverse_transform([class_id.item()])[0]
-                    n_selected = selected_mask.sum().item()
-                    DEBUG.log(f" Selected {n_selected} {failure_type} failure samples from class {true_class_name}")
-                    DEBUG.log(f" - Cardinality threshold: {cardinality_threshold:.3f}")
-                    DEBUG.log(f" - Average margin: {low_card_margins[selected_mask].mean().item():.3f}")
-
-                # Clear cache after processing each batch
-                torch.cuda.empty_cache()
-
-        print("\033[K" +f"Total samples selected: {len(final_selected_indices)}                                                           ")
         return final_selected_indices
+
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
                                 reconstructed_features: np.ndarray,
