@@ -2395,13 +2395,14 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Cluster-based selection with robust dimension handling."""
+        """Device-aware cluster selection with proper tensor placement."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
         min_divergence = active_learning_config.get('min_divergence', 0.1)
         max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
+        # Ensure all input tensors are on model device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
@@ -2422,15 +2423,16 @@ class DBNN(GPUDBNN):
             if len(class_indices) == 0:
                 continue
 
-            # Batch processing with dimension safeguards
+            # Batch processing with device consistency
             samples, margins, indices = [], [], []
             for batch_start in range(0, len(class_indices), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(class_indices))
                 batch_idx = class_indices[batch_start:batch_end]
 
-                # Ensure 2D tensor for single-sample batches
-                batch_X = self.X_tensor[test_indices[batch_idx]].unsqueeze(0) if batch_idx.dim() == 0 \
-                          else self.X_tensor[test_indices[batch_idx]]
+                # Ensure device consistency for index-based access
+                batch_X = self.X_tensor[test_indices[batch_idx]]
+                if batch_X.dim() == 1:
+                    batch_X = batch_X.unsqueeze(0)
 
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
@@ -2438,7 +2440,7 @@ class DBNN(GPUDBNN):
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
                 true_probs = posteriors[:, class_id]
-                pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
+                pred_probs = posteriors[torch.arange(len(posteriors), device=self.device), torch.argmax(posteriors, dim=1)]
                 batch_margins = pred_probs - true_probs
 
                 samples.append(batch_X)
@@ -2448,55 +2450,55 @@ class DBNN(GPUDBNN):
             if not samples:
                 continue
 
-            # Safely combine results with dimension checks
-            try:
-                samples = torch.cat(samples)
-                margins = torch.cat(margins)
-                indices = torch.cat(indices)
-            except RuntimeError:
-                continue
+            # Combine with device preservation
+            samples = torch.cat(samples)
+            margins = torch.cat(margins)
+            indices = torch.cat(indices)
 
             if len(indices) < 1:
                 continue
 
-            # Always include extreme margins (modified indexing)
+            # Device-aware mandatory selection
             if len(indices) >= 2:
                 max_idx = torch.argmax(margins)
                 min_idx = torch.argmin(margins)
-                mandatory_selector = torch.tensor([max_idx.item(), min_idx.item()], device=indices.device)
+                mandatory_selector = torch.tensor([max_idx, min_idx], device=self.device)
                 mandatory_indices = indices[mandatory_selector]
             else:
                 mandatory_indices = indices
 
-            # Cluster remaining samples
+            # Cluster analysis with device consistency
             remaining_mask = ~torch.isin(indices, mandatory_indices)
             candidate_samples = samples[remaining_mask]
             candidate_indices = indices[remaining_mask]
 
             if len(candidate_samples) > 0:
-                # Compute pairwise divergences
+                # Compute divergences on correct device
                 div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
 
-                # Find unique clusters
+                # Cluster tracking on same device
+                visited = torch.zeros(len(candidate_samples),
+                                    dtype=torch.bool,
+                                    device=candidate_samples.device)
+
                 clusters = []
-                visited = torch.zeros(len(candidate_samples), dtype=torch.bool)
                 for i in range(len(candidate_samples)):
                     if not visited[i]:
                         cluster_mask = div_matrix[i] < min_divergence
                         cluster_members = candidate_indices[cluster_mask]
                         if len(cluster_members) > 0:
-                            clusters.append(cluster_members[0].item())
-                        visited |= cluster_mask
+                            clusters.append(cluster_members[0])
+                        visited |= cluster_mask  # Now same device
 
-                # Combine mandatory and clustered samples
-                selected = torch.cat([
-                    mandatory_indices,
-                    torch.tensor(clusters, device=mandatory_indices.device)
-                ]).unique()
+                # Convert clusters to tensor on correct device
+                cluster_tensor = torch.tensor(clusters, device=mandatory_indices.device) if clusters \
+                                else torch.tensor([], device=mandatory_indices.device)
+
+                selected = torch.cat([mandatory_indices, cluster_tensor]).unique()
             else:
                 selected = mandatory_indices
 
-            # Apply class-level max samples
+            # Final selection with device-to-CPU conversion
             max_samples = max(2, int((y_test == class_id).sum().item() * max_class_addition_percent / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
