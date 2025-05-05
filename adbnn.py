@@ -2394,9 +2394,8 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
-
-    def _select_samples_from_failed_classes_tmp(self, test_predictions, y_test, test_indices):
-        """Select samples with cluster-aware diversity filtering."""
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+        """Select samples with cluster-based diversity while ensuring margin extremes."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
@@ -2423,7 +2422,7 @@ class DBNN(GPUDBNN):
             if len(class_indices) < 1:
                 continue
 
-            # Calculate max samples with minimum of 2
+            # Calculate max samples ensuring minimum of 2
             total_class_samples = (y_test == class_id).sum().item()
             max_samples = max(2, int(total_class_samples * max_class_addition_percent / 100))
 
@@ -2450,84 +2449,84 @@ class DBNN(GPUDBNN):
             if not samples:
                 continue
 
-            # Combine batch results
             samples = torch.cat(samples)
             margins = torch.cat(margins)
             indices = torch.cat(indices)
 
-            # Handle small sample cases
             if len(indices) < 2:
                 final_selected_indices.extend(indices.cpu().tolist())
                 continue
 
-            # Find mandatory samples
+            # Get global margin extremes
             max_margin_idx = torch.argmax(margins)
             min_margin_idx = torch.argmin(margins)
             mandatory_indices = indices[[max_margin_idx, min_margin_idx]]
 
-            # Calculate selection thresholds
+            # Select samples within threshold windows
             max_margin = margins[max_margin_idx]
             min_margin = margins[min_margin_idx]
             strong_mask = margins >= (max_margin - strong_margin_threshold)
             marginal_mask = margins <= (min_margin + marginal_margin_threshold)
             candidate_mask = strong_mask | marginal_mask
 
-            # Get all candidate indices
-            candidates = indices[candidate_mask]
-            candidate_features = samples[candidate_mask]
+            # Combine mandatory and threshold candidates
+            all_candidates = torch.cat([mandatory_indices, indices[candidate_mask]])
+            unique_candidates = torch.unique(all_candidates)
+            candidate_samples = samples[torch.isin(indices, unique_candidates)]
+            candidate_margins = margins[torch.isin(indices, unique_candidates)]
 
-            if len(candidates) == 0:
-                final_selected_indices.extend(mandatory_indices.cpu().tolist())
-                continue
+            # Cluster candidates by divergence
+            clusters = []
+            remaining = list(range(len(candidate_samples)))
 
-            # Compute pairwise divergences
-            divergences = self._compute_sample_divergence(candidate_features, self.feature_pairs)
+            while remaining:
+                # Start with highest margin candidate
+                current_idx = remaining[torch.argmax(candidate_margins[remaining])]
+                current_sample = candidate_samples[current_idx]
 
-            # Sort by margin descending (strong failures first)
-            sorted_indices = torch.argsort(margins[candidate_mask], descending=True)
-            sorted_candidates = candidates[sorted_indices]
-            sorted_divergences = divergences[sorted_indices][:, sorted_indices]
+                # Compute divergences from current sample
+                div_matrix = self._compute_sample_divergence(
+                    current_sample.unsqueeze(0),
+                    candidate_samples[remaining]
+                )
 
-            # Initialize selection with mandatory samples
-            selected = []
-            mandatory_mask = torch.isin(sorted_candidates, mandatory_indices)
-            mandatory_positions = torch.where(mandatory_mask)[0]
+                # Find similar samples within divergence threshold
+                similar_mask = div_matrix.squeeze() < min_divergence
+                cluster_members = [remaining[i] for i in torch.where(similar_mask)[0]]
 
-            # Process mandatory samples first
-            for pos in mandatory_positions:
-                if len(selected) >= max_samples:
+                # Record cluster with highest margin member
+                cluster_margins = candidate_margins[cluster_members]
+                cluster_center = cluster_members[torch.argmax(cluster_margins)]
+
+                clusters.append({
+                    'members': cluster_members,
+                    'center': cluster_center,
+                    'max_margin': candidate_margins[cluster_center].item()
+                })
+
+                # Remove clustered members from remaining
+                remaining = [i for i in remaining if i not in cluster_members]
+
+            # Sort clusters by max margin descending
+            clusters.sort(key=lambda x: -x['max_margin'])
+
+            # Select one per cluster up to max_samples
+            selected_centers = []
+            for cluster in clusters:
+                if len(selected_centers) >= max_samples:
                     break
-                current_idx = sorted_candidates[pos]
-                if not self._has_conflict(current_idx, selected, sorted_candidates, sorted_divergences, min_divergence):
-                    selected.append(current_idx.item())
+                selected_centers.append(cluster['center'])
 
-            # Process remaining candidates
-            for i in range(len(sorted_candidates)):
-                if len(selected) >= max_samples:
-                    break
-                current_idx = sorted_candidates[i]
-                if current_idx in selected:
-                    continue
-                if not self._has_conflict(current_idx, selected, sorted_candidates, sorted_divergences, min_divergence):
-                    selected.append(current_idx.item())
+            # Get final indices from cluster centers
+            final_class_selected = indices[
+                torch.isin(indices, unique_candidates[selected_centers])
+            ].cpu().unique().tolist()
 
-            # Final selection respecting max_samples
-            final_class_selected = selected[:max_samples]
-            final_selected_indices.extend(final_class_selected)
+            final_selected_indices.extend(final_class_selected[:max_samples])
 
         return final_selected_indices
 
-    def _has_conflict(self, candidate_idx, selected, all_candidates, divergences, threshold):
-        """Check if candidate conflicts with selected samples."""
-        if not selected:
-            return False
-        candidate_pos = torch.where(all_candidates == candidate_idx)[0].item()
-        selected_positions = [torch.where(all_candidates == s)[0].item() for s in selected]
-        min_divergence = torch.min(divergences[candidate_pos, selected_positions])
-        return min_divergence < threshold
-
-
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """Select samples with guaranteed inclusion of top/bottom margin samples."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
