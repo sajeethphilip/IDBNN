@@ -2394,7 +2394,140 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
+
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+        """Select samples with cluster-aware diversity filtering."""
+        active_learning_config = self.config.get('active_learning', {})
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
+        min_divergence = active_learning_config.get('min_divergence', 0.1)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
+
+        test_predictions = torch.as_tensor(test_predictions, device=self.device)
+        y_test = torch.as_tensor(y_test, device=self.device)
+        test_indices = torch.as_tensor(test_indices, device=self.device)
+
+        misclassified_mask = (test_predictions != y_test)
+        misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
+
+        if misclassified_indices.dim() == 0:
+            return []
+
+        final_selected_indices = []
+        unique_classes = torch.unique(y_test[misclassified_indices])
+
+        for class_id in unique_classes:
+            class_mask = (y_test[misclassified_indices] == class_id)
+            class_indices = misclassified_indices[class_mask]
+
+            if len(class_indices) < 1:
+                continue
+
+            # Calculate max samples with minimum of 2
+            total_class_samples = (y_test == class_id).sum().item()
+            max_samples = max(2, int(total_class_samples * max_class_addition_percent / 100))
+
+            # Batch processing to collect samples and margins
+            samples, margins, indices = [], [], []
+            for batch_start in range(0, len(class_indices), self.batch_size):
+                batch_end = min(batch_start + self.batch_size, len(class_indices))
+                batch_idx = class_indices[batch_start:batch_end]
+                batch_X = self.X_tensor[test_indices[batch_idx]]
+
+                if self.model_type == "Histogram":
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                else:
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+
+                true_probs = posteriors[:, class_id]
+                pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
+                batch_margins = pred_probs - true_probs
+
+                samples.append(batch_X)
+                margins.append(batch_margins)
+                indices.append(test_indices[batch_idx])
+
+            if not samples:
+                continue
+
+            # Combine batch results
+            samples = torch.cat(samples)
+            margins = torch.cat(margins)
+            indices = torch.cat(indices)
+
+            # Handle small sample cases
+            if len(indices) < 2:
+                final_selected_indices.extend(indices.cpu().tolist())
+                continue
+
+            # Find mandatory samples
+            max_margin_idx = torch.argmax(margins)
+            min_margin_idx = torch.argmin(margins)
+            mandatory_indices = indices[[max_margin_idx, min_margin_idx]]
+
+            # Calculate selection thresholds
+            max_margin = margins[max_margin_idx]
+            min_margin = margins[min_margin_idx]
+            strong_mask = margins >= (max_margin - strong_margin_threshold)
+            marginal_mask = margins <= (min_margin + marginal_margin_threshold)
+            candidate_mask = strong_mask | marginal_mask
+
+            # Get all candidate indices
+            candidates = indices[candidate_mask]
+            candidate_features = samples[candidate_mask]
+
+            if len(candidates) == 0:
+                final_selected_indices.extend(mandatory_indices.cpu().tolist())
+                continue
+
+            # Compute pairwise divergences
+            divergences = self._compute_sample_divergence(candidate_features, self.feature_pairs)
+
+            # Sort by margin descending (strong failures first)
+            sorted_indices = torch.argsort(margins[candidate_mask], descending=True)
+            sorted_candidates = candidates[sorted_indices]
+            sorted_divergences = divergences[sorted_indices][:, sorted_indices]
+
+            # Initialize selection with mandatory samples
+            selected = []
+            mandatory_mask = torch.isin(sorted_candidates, mandatory_indices)
+            mandatory_positions = torch.where(mandatory_mask)[0]
+
+            # Process mandatory samples first
+            for pos in mandatory_positions:
+                if len(selected) >= max_samples:
+                    break
+                current_idx = sorted_candidates[pos]
+                if not self._has_conflict(current_idx, selected, sorted_candidates, sorted_divergences, min_divergence):
+                    selected.append(current_idx.item())
+
+            # Process remaining candidates
+            for i in range(len(sorted_candidates)):
+                if len(selected) >= max_samples:
+                    break
+                current_idx = sorted_candidates[i]
+                if current_idx in selected:
+                    continue
+                if not self._has_conflict(current_idx, selected, sorted_candidates, sorted_divergences, min_divergence):
+                    selected.append(current_idx.item())
+
+            # Final selection respecting max_samples
+            final_class_selected = selected[:max_samples]
+            final_selected_indices.extend(final_class_selected)
+
+        return final_selected_indices
+
+    def _has_conflict(self, candidate_idx, selected, all_candidates, divergences, threshold):
+        """Check if candidate conflicts with selected samples."""
+        if not selected:
+            return False
+        candidate_pos = torch.where(all_candidates == candidate_idx)[0].item()
+        selected_positions = [torch.where(all_candidates == s)[0].item() for s in selected]
+        min_divergence = torch.min(divergences[candidate_pos, selected_positions])
+        return min_divergence < threshold
+
+
+    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """Select samples with guaranteed inclusion of top/bottom margin samples."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
