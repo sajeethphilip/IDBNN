@@ -372,7 +372,7 @@ class DatasetConfig:
             "cardinality_threshold_percentile": 95,
             "strong_margin_threshold": 0.1,
             "marginal_margin_threshold": 0.1,
-            "min_divergence": 0.1
+            "min_divergence": 0.3
         }
         config["execution_flags"]= {
             "train": True,
@@ -2399,7 +2399,7 @@ class DBNN(GPUDBNN):
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.1)
         marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.1)
-        min_divergence = active_learning_config.get('min_divergence', 0.1)
+        min_divergence = active_learning_config.get('min_divergence', 0.3)
         max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
@@ -6472,7 +6472,7 @@ def load_or_create_config(config_path: str) -> dict:
             "cardinality_threshold_percentile": 95,
             "strong_margin_threshold": 0.1,
             "marginal_margin_threshold": 0.1,
-            "min_divergence": 0.1
+            "min_divergence": 0.3
         },
         "execution_flags": {
             "train": True,
