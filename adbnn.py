@@ -730,7 +730,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         return df
 
     # Return DataFrame with only the columns to keep
-    #print("\033[K" +f"Keeping only these features: {valid_columns}")
+    print("\033[K" +f"Keeping only these features: {valid_columns}")
     return df[valid_columns]
 #-------------------------------------------------
 class ComputationCache:
