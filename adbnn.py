@@ -332,16 +332,7 @@ class DatasetConfig:
         config = DatasetConfig.DEFAULT_CONFIG.copy()
         config['file_path'] = f"{dataset_name}.csv"
 
-        # Try to infer column names from CSV if it exists
-        if os.path.exists(config['file_path']):
-            try:
-                with open(config['file_path'], 'r') as f:
-                    header = f.readline().strip()
-                    config['column_names'] = header.split(config['separator'])
-                    if config['column_names']:
-                        config['target_column'] = config['column_names'][-1]
-            except Exception as e:
-                print("\033[K" +f"Warning: Could not read header from {config['file_path']}: {str(e)}")
+
 
         # Add model type configuration
         config['modelType'] = "Histogram"  # Default to Histogram model
