@@ -2402,9 +2402,10 @@ class DBNN(GPUDBNN):
         max_class_addition_percent = config.get('max_class_addition_percent', 5)
 
         # Convert inputs to tensors with memory pinning
-        test_preds = torch.as_tensor(test_predictions, device=self.device, pin_memory=True)
-        y_test_tensor = torch.as_tensor(y_test, device=self.device, pin_memory=True)
-        test_indices_tensor = torch.as_tensor(test_indices, device=self.device, pin_memory=True)
+        test_preds = torch.as_tensor(test_predictions, device=self.device)  # Removed pin_memory
+        y_test_tensor = torch.as_tensor(y_test, device=self.device)         # Removed pin_memory
+        test_indices_tensor = torch.as_tensor(test_indices, device=self.device)
+
 
         # Find misclassified samples using fused tensor ops
         mis_mask = torch.ne(test_preds, y_test_tensor)
