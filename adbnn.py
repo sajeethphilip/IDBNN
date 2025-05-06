@@ -2403,7 +2403,7 @@ class DBNN(GPUDBNN):
 
         # Convert inputs to tensors first
         test_preds = torch.as_tensor(test_predictions, device=self.device)
-        y_test_tensor = torch.as_tensor(y_test, device=self.device)
+        y_test_tensor = torch.as_tensor(y_test, device=self.device)  # Fixed tensor conversion
         test_indices_tensor = torch.as_tensor(test_indices, device=self.device)
 
         # Find misclassified samples using tensor ops
@@ -2415,7 +2415,7 @@ class DBNN(GPUDBNN):
 
         # Get misclassified data using tensor indices
         mis_X = self.X_tensor[test_indices_tensor][mis_mask]
-        mis_y = y_test_tensor[mis_mask]
+        mis_y = y_test_tensor[mis_mask]  # Now using tensor version
         mis_indices = test_indices_tensor[mis_positions]
 
         # Rest of the original optimized code remains the same
@@ -2467,8 +2467,8 @@ class DBNN(GPUDBNN):
             else:
                 selected = mandatory_indices
 
-            # Apply class limits
-            class_total = (y_test == class_id).sum()
+            # FIXED: Use tensor version of y_test and convert to Python scalar
+            class_total = (y_test_tensor == class_id).sum().item()  # Added .item()
             max_samples = max(2, int(class_total * max_class_addition_percent / 100))
             selected_indices.append(selected[:max_samples])
 
