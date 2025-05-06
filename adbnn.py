@@ -332,7 +332,16 @@ class DatasetConfig:
         config = DatasetConfig.DEFAULT_CONFIG.copy()
         config['file_path'] = f"{dataset_name}.csv"
 
-
+        # Try to infer column names from CSV if it exists
+        if os.path.exists(config['file_path']):
+            try:
+                with open(config['file_path'], 'r') as f:
+                    header = f.readline().strip()
+                    config['column_names'] = header.split(config['separator'])
+                    if config['column_names']:
+                        config['target_column'] = config['column_names'][-1]
+            except Exception as e:
+                print("\033[K" +f"Warning: Could not read header from {config['file_path']}: {str(e)}")
 
         # Add model type configuration
         config['modelType'] = "Histogram"  # Default to Histogram model
@@ -706,7 +715,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         name.strip() for name in config['column_names']
         if not name.strip().startswith('#')
     ]
-    print(requested_columns)
+
     # If no uncommented columns found in config, return original DataFrame
     if not requested_columns:
         print("\033[K" +"No uncommented column names found in config. Returning original DataFrame.")
@@ -714,14 +723,14 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
 
     # Check if any requested columns exist in the DataFrame
     valid_columns = [col for col in requested_columns if col in current_cols]
-    print(valid_columns)
+
     # If no valid columns found, return original DataFrame
     if not valid_columns:
         print("\033[K" +"None of the requested columns exist in the DataFrame. Returning original DataFrame.")
         return df
 
     # Return DataFrame with only the columns to keep
-    print("\033[K" +f"Keeping only these features: {valid_columns}")
+    #print("\033[K" +f"Keeping only these features: {valid_columns}")
     return df[valid_columns]
 #-------------------------------------------------
 class ComputationCache:
@@ -2387,81 +2396,94 @@ class DBNN(GPUDBNN):
 
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Optimized version with proper tensor conversion"""
+        """Optimized version with memory-efficient tensor operations and error fixes"""
         config = self.config.get('active_learning', {})
         min_divergence = config.get('min_divergence', 0.1)
         max_class_addition_percent = config.get('max_class_addition_percent', 5)
 
-        # Convert inputs to tensors first
-        test_preds = torch.as_tensor(test_predictions, device=self.device)
-        y_test_tensor = torch.as_tensor(y_test, device=self.device)  # Fixed tensor conversion
-        test_indices_tensor = torch.as_tensor(test_indices, device=self.device)
+        # Convert inputs to tensors with memory pinning
+        test_preds = torch.as_tensor(test_predictions, device=self.device, pin_memory=True)
+        y_test_tensor = torch.as_tensor(y_test, device=self.device, pin_memory=True)
+        test_indices_tensor = torch.as_tensor(test_indices, device=self.device, pin_memory=True)
 
-        # Find misclassified samples using tensor ops
+        # Find misclassified samples using fused tensor ops
         mis_mask = torch.ne(test_preds, y_test_tensor)
-        mis_positions = torch.nonzero(mis_mask).squeeze()
+        mis_positions = mis_mask.nonzero().squeeze()
 
         if mis_positions.numel() == 0:
             return []
 
-        # Get misclassified data using tensor indices
-        mis_X = self.X_tensor[test_indices_tensor][mis_mask]
-        mis_y = y_test_tensor[mis_mask]  # Now using tensor version
-        mis_indices = test_indices_tensor[mis_positions]
+        # Use index_select for memory-efficient access
+        mis_X = torch.index_select(
+            self.X_tensor.index_select(0, test_indices_tensor),
+            0,
+            mis_positions
+        )
+        mis_y = y_test_tensor.index_select(0, mis_positions)
+        mis_indices = test_indices_tensor.index_select(0, mis_positions)
 
-        # Rest of the original optimized code remains the same
-        posteriors, _ = self._compute_batch_posterior(mis_X)
-        pred_probs = posteriors[torch.arange(posteriors.size(0)), torch.argmax(posteriors, 1)]
-        true_probs = posteriors[torch.arange(posteriors.size(0)), mis_y]
-        margins = pred_probs - true_probs
+        # Compute posteriors in a memory-conscious way
+        with torch.inference_mode():
+            posteriors, _ = self._compute_batch_posterior(mis_X)
+            pred_probs = posteriors[torch.arange(posteriors.size(0), device=self.device),
+                                  posteriors.argmax(dim=1)]
+            true_probs = posteriors[torch.arange(posteriors.size(0), device=self.device), mis_y]
+            margins = pred_probs - true_probs
 
         selected_indices = []
         for class_id in torch.unique(mis_y):
-            class_mask = mis_y == class_id
+            # Memory-efficient class masking
+            class_mask = torch.eq(mis_y, class_id)
             if not class_mask.any():
                 continue
 
-            # Class-specific data slicing
-            class_indices = mis_indices[class_mask]
-            class_X = mis_X[class_mask]
-            class_margins = margins[class_mask]
+            # Use masked_select instead of boolean indexing
+            class_indices = mis_indices.masked_select(class_mask)
+            class_X = mis_X.masked_select(class_mask.unsqueeze(1)).view(-1, mis_X.size(1))
+            class_margins = margins.masked_select(class_mask)
 
-            # Find extreme samples using tensor ops
-            extreme_indices = torch.stack([
-                torch.argmax(class_margins),
-                torch.argmin(class_margins)
-            ])
-            mandatory_indices = class_indices.gather(0, extreme_indices)
+            # Find extreme samples with reduced memory footprint
+            if class_indices.numel() >= 2:
+                extreme_idx = torch.stack([
+                    class_margins.argmax(),
+                    class_margins.argmin()
+                ])
+                mandatory_indices = class_indices.gather(0, extreme_idx)
+            else:
+                mandatory_indices = class_indices
 
-            # Cluster remaining samples
+            # Cluster remaining samples with memory reuse
             remaining_mask = ~torch.isin(class_indices, mandatory_indices)
-            candidate_X = class_X[remaining_mask]
-            candidate_indices = class_indices[remaining_mask]
+            if remaining_mask.any():
+                candidate_X = class_X.masked_select(remaining_mask.unsqueeze(1)).view(-1, class_X.size(1))
+                candidate_indices = class_indices.masked_select(remaining_mask)
 
-            if candidate_X.size(0) > 0:
-                # Vectorized divergence calculation
-                diff = candidate_X.unsqueeze(1) - candidate_X.unsqueeze(0)
-                dist_matrix = torch.norm(diff, dim=2)
-                div_matrix = dist_matrix.mean(dim=1)
+                # Memory-efficient divergence calculation
+                with torch.no_grad():
+                    diff = candidate_X.unsqueeze(1) - candidate_X.unsqueeze(0)  # [N,1,D] - [1,N,D]
+                    dist_matrix = diff.norm(dim=2)  # [N,N]
+                    div_matrix = dist_matrix.mean(dim=1)  # [N]
 
-                # GPU-optimized cluster selection
+                # Cluster selection with in-place operations
                 cluster_mask = div_matrix < min_divergence
                 cluster_rep_mask = torch.zeros_like(cluster_mask, dtype=torch.bool)
 
                 for i in range(cluster_mask.size(0)):
                     if not cluster_rep_mask[i]:
+                        cluster_rep_mask[i] = True
                         cluster_rep_mask |= cluster_mask[i]
-                        cluster_rep_mask[i] = True  # Keep first representative
 
-                cluster_indices = candidate_indices[cluster_rep_mask]
+                cluster_indices = candidate_indices.masked_select(cluster_rep_mask)
                 selected = torch.cat([mandatory_indices, cluster_indices]).unique()
             else:
                 selected = mandatory_indices
 
-            # FIXED: Use tensor version of y_test and convert to Python scalar
-            class_total = (y_test_tensor == class_id).sum().item()  # Added .item()
+            # Apply class limits with tensor-aware sizing
+            class_total = (y_test_tensor == class_id).sum().item()
             max_samples = max(2, int(class_total * max_class_addition_percent / 100))
-            selected_indices.append(selected[:max_samples])
+            selected = selected[:max_samples] if selected.numel() > max_samples else selected
+
+            selected_indices.append(selected)
 
         return torch.cat(selected_indices).cpu().tolist() if selected_indices else []
 
