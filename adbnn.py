@@ -2394,54 +2394,130 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
+
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Vectorized failed sample selection using GPU-accelerated top-k sampling"""
+        """Fixed version with proper dimension handling and bounds checking"""
+        # Get config parameters
+        config = self.config.get('active_learning', {})
+        strong_margin = config.get('strong_margin_threshold', 0.6)
+        marginal_margin = config.get('marginal_margin_threshold', 0.3)
+        min_divergence = config.get('min_divergence', 0.1)
+
         # Convert to tensors on GPU
-        test_predictions = torch.as_tensor(test_predictions, device=self.device)
+        test_preds = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
 
-        # Find misclassified samples in one pass
-        misclassified_mask = (test_predictions != y_test)
-        misclassified_indices = test_indices[misclassified_mask]
+        # 1. Find misclassified samples with bounds checking
+        mis_mask = test_preds != y_test
+        mis_positions = torch.where(mis_mask)[0]
 
-        if len(misclassified_indices) == 0:
+        if len(mis_positions) == 0:
             return []
 
-        # Get posterior probabilities in batch
-        batch_X = self.X_tensor[test_indices]
-        posteriors, _ = self._compute_batch_posterior(batch_X)
+        # 2. Get misclassified data with proper indexing
+        mis_indices = test_indices[mis_positions]
+        mis_X = self.X_tensor[test_indices][mis_mask]
+        mis_y = y_test[mis_positions]
 
-        # Calculate margin scores vectorized
-        true_probs = posteriors[torch.arange(len(posteriors)), y_test]
-        pred_probs = posteriors.max(dim=1).values
+        # 3. Compute posteriors with dimension safety
+        posteriors, _ = self._compute_batch_posterior(mis_X)
+        num_classes = posteriors.size(1)  # Get actual number of classes
+
+        # 4. Safely compute prediction probabilities
+        with torch.no_grad():
+            # Clamp predictions to valid class indices
+            valid_preds = torch.clamp(test_preds[mis_mask], 0, num_classes-1)
+            pred_probs = posteriors[torch.arange(len(posteriors)), valid_preds]
+
+        true_probs = posteriors[torch.arange(len(posteriors)), mis_y]
         margins = pred_probs - true_probs
 
-        # Class-wise top-k selection
-        unique_classes, class_counts = torch.unique(y_test[misclassified_mask], return_counts=True)
-        selected_indices = []
+        # 5. Split into strong and marginal errors
+        strong_mask = margins >= strong_margin
+        marginal_mask = margins <= marginal_margin
 
-        for class_id, count in zip(unique_classes, class_counts):
-            class_mask = (y_test[misclassified_mask] == class_id)
-            class_margins = margins[misclassified_mask][class_mask]
-            class_indices = misclassified_indices[class_mask]
+        # 6. Class-wise processing with bounds checking
+        selected = []
+        for class_id in torch.unique(mis_y):
+            class_mask = mis_y == class_id
+            if not class_mask.any():
+                continue
 
-            # Select top 10% most confident errors and bottom 10% uncertain cases
-            k = max(1, int(len(class_margins) * 0.1))
-            topk = torch.topk(class_margins, k).indices
-            bottomk = torch.topk(-class_margins, k).indices
+            # Class-specific data with dimension validation
+            class_X = mis_X[class_mask]
+            class_indices = mis_indices[class_mask]
+            class_margins = margins[class_mask]
 
-            # Combine and deduplicate
-            selected = torch.cat([
-                class_indices[topk],
-                class_indices[bottomk]
-            ]).unique()
+            # Process strong errors
+            if (class_strong := (class_margins >= strong_margin)).any():
+                strong_samples = self._select_divergent_samples(
+                    class_X[class_strong],
+                    class_indices[class_strong],
+                    min_divergence,
+                    select_top=True
+                )
+                selected.extend(strong_samples)
 
-            selected_indices.append(selected.cpu())
+            # Process marginal errors
+            if (class_marginal := (class_margins <= marginal_margin)).any():
+                marginal_samples = self._select_divergent_samples(
+                    class_X[class_marginal],
+                    class_indices[class_marginal],
+                    min_divergence,
+                    select_top=False
+                )
+                selected.extend(marginal_samples)
 
-        # Limit to max 2% of total samples per class
-        max_samples = max(2, int(len(test_indices) * 0.02))
-        return torch.cat(selected_indices)[:max_samples].tolist()
+        # 7. Apply global limits with class balance
+        max_samples = min(int(len(test_indices) * 0.02), len(selected))
+        return selected[:max_samples]
+
+    def _select_divergent_samples(self, X, indices, min_div, select_top=True):
+        """Dimension-safe divergent sample selection"""
+        if len(X) < 2:
+            return indices.tolist()
+
+        try:
+            # 1. PCA with dimension validation
+            n_components = min(3, X.shape[1], X.shape[0]-1)
+            X_centered = X - X.mean(dim=0)
+            _, _, V = torch.pca_lowrank(X_centered, q=n_components)
+            X_reduced = torch.mm(X_centered, V[:, :n_components])
+
+            # 2. Distance matrix with safe initialization
+            distances = torch.cdist(X_reduced, X_reduced)
+            divergence = distances.mean(dim=1)
+
+            # 3. Scoring with bounds checking
+            feature_norms = torch.norm(X_reduced, dim=1)
+            scores = 0.6 * feature_norms + 0.4 * divergence if select_top else 0.3 * feature_norms + 0.7 * divergence
+
+            # 4. Cluster-aware selection
+            selected = []
+            selected_features = []
+            sort_order = torch.argsort(scores, descending=select_top)
+
+            for idx in sort_order:
+                current_feat = X_reduced[idx]
+                if len(selected_features) > 0:
+                    min_dist = torch.min(torch.cdist(current_feat.unsqueeze(0),
+                                                   torch.stack(selected_features)))
+                    if min_dist < min_div:
+                        continue
+
+                selected.append(indices[idx].item())
+                selected_features.append(current_feat)
+
+                if len(selected) >= min(5, len(X)):
+                    break
+
+            return selected
+
+        except RuntimeError as e:
+            print(f"Divergence selection failed: {str(e)}")
+            return indices[:min(5, len(indices))].tolist()
+
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with robust dimension handling."""
