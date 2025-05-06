@@ -715,7 +715,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         name.strip() for name in config['column_names']
         if not name.strip().startswith('#')
     ]
-
+    print(requested_columns)
     # If no uncommented columns found in config, return original DataFrame
     if not requested_columns:
         print("\033[K" +"No uncommented column names found in config. Returning original DataFrame.")
@@ -723,7 +723,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
 
     # Check if any requested columns exist in the DataFrame
     valid_columns = [col for col in requested_columns if col in current_cols]
-
+    print(valid_columns)
     # If no valid columns found, return original DataFrame
     if not valid_columns:
         print("\033[K" +"None of the requested columns exist in the DataFrame. Returning original DataFrame.")
