@@ -2395,6 +2395,55 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+        """Vectorized failed sample selection using GPU-accelerated top-k sampling"""
+        # Convert to tensors on GPU
+        test_predictions = torch.as_tensor(test_predictions, device=self.device)
+        y_test = torch.as_tensor(y_test, device=self.device)
+        test_indices = torch.as_tensor(test_indices, device=self.device)
+
+        # Find misclassified samples in one pass
+        misclassified_mask = (test_predictions != y_test)
+        misclassified_indices = test_indices[misclassified_mask]
+
+        if len(misclassified_indices) == 0:
+            return []
+
+        # Get posterior probabilities in batch
+        batch_X = self.X_tensor[test_indices]
+        posteriors, _ = self._compute_batch_posterior(batch_X)
+
+        # Calculate margin scores vectorized
+        true_probs = posteriors[torch.arange(len(posteriors)), y_test]
+        pred_probs = posteriors.max(dim=1).values
+        margins = pred_probs - true_probs
+
+        # Class-wise top-k selection
+        unique_classes, class_counts = torch.unique(y_test[misclassified_mask], return_counts=True)
+        selected_indices = []
+
+        for class_id, count in zip(unique_classes, class_counts):
+            class_mask = (y_test[misclassified_mask] == class_id)
+            class_margins = margins[misclassified_mask][class_mask]
+            class_indices = misclassified_indices[class_mask]
+
+            # Select top 10% most confident errors and bottom 10% uncertain cases
+            k = max(1, int(len(class_margins) * 0.1))
+            topk = torch.topk(class_margins, k).indices
+            bottomk = torch.topk(-class_margins, k).indices
+
+            # Combine and deduplicate
+            selected = torch.cat([
+                class_indices[topk],
+                class_indices[bottomk]
+            ]).unique()
+
+            selected_indices.append(selected.cpu())
+
+        # Limit to max 2% of total samples per class
+        max_samples = max(2, int(len(test_indices) * 0.02))
+        return torch.cat(selected_indices)[:max_samples].tolist()
+
+    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with robust dimension handling."""
         active_learning_config = self.config.get('active_learning', {})
         strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.6)
