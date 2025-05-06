@@ -2396,92 +2396,83 @@ class DBNN(GPUDBNN):
 
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Optimized version maintaining original cluster-based selection logic"""
+        """Optimized version with proper tensor conversion"""
         config = self.config.get('active_learning', {})
         min_divergence = config.get('min_divergence', 0.1)
         max_class_addition_percent = config.get('max_class_addition_percent', 5)
 
-        # Convert to tensors on GPU
+        # Convert inputs to tensors first
         test_preds = torch.as_tensor(test_predictions, device=self.device)
-        y_test = torch.as_tensor(y_test, device=self.device)
-        test_indices = torch.as_tensor(test_indices, device=self.device)
+        y_test_tensor = torch.as_tensor(y_test, device=self.device)
+        test_indices_tensor = torch.as_tensor(test_indices, device=self.device)
 
-        # Find misclassified samples
-        mis_mask = test_preds != y_test
-        mis_positions = torch.where(mis_mask)[0]
+        # Find misclassified samples using tensor ops
+        mis_mask = torch.ne(test_preds, y_test_tensor)
+        mis_positions = torch.nonzero(mis_mask).squeeze()
 
-        if len(mis_positions) == 0:
+        if mis_positions.numel() == 0:
             return []
 
-        # Get misclassified data
-        mis_indices = test_indices[mis_positions]
-        mis_X = self.X_tensor[test_indices][mis_mask]
-        mis_y = y_test[mis_positions]
+        # Get misclassified data using tensor indices
+        mis_X = self.X_tensor[test_indices_tensor][mis_mask]
+        mis_y = y_test_tensor[mis_mask]
+        mis_indices = test_indices_tensor[mis_positions]
 
-        # Compute posteriors and margins
+        # Rest of the original optimized code remains the same
         posteriors, _ = self._compute_batch_posterior(mis_X)
-        pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
-        true_probs = posteriors[torch.arange(len(posteriors)), mis_y]
+        pred_probs = posteriors[torch.arange(posteriors.size(0)), torch.argmax(posteriors, 1)]
+        true_probs = posteriors[torch.arange(posteriors.size(0)), mis_y]
         margins = pred_probs - true_probs
 
-        final_selected_indices = []
-        unique_classes = torch.unique(mis_y)
+        selected_indices = []
+        for class_id in torch.unique(mis_y):
+            class_mask = mis_y == class_id
+            if not class_mask.any():
+                continue
 
-        for class_id in unique_classes:
-            class_mask = (mis_y == class_id)
+            # Class-specific data slicing
             class_indices = mis_indices[class_mask]
             class_X = mis_X[class_mask]
             class_margins = margins[class_mask]
 
-            if len(class_indices) == 0:
-                continue
-
-            # Handle mandatory indices selection with dimension check
-            if len(class_indices) >= 2:
-                # Convert indices to scalars before indexing
-                max_idx = torch.argmax(class_margins).item()
-                min_idx = torch.argmin(class_margins).item()
-                mandatory_selector = torch.tensor([max_idx, min_idx], device=class_indices.device)
-                mandatory_indices = class_indices[mandatory_selector]
-            else:
-                mandatory_indices = class_indices
+            # Find extreme samples using tensor ops
+            extreme_indices = torch.stack([
+                torch.argmax(class_margins),
+                torch.argmin(class_margins)
+            ])
+            mandatory_indices = class_indices.gather(0, extreme_indices)
 
             # Cluster remaining samples
             remaining_mask = ~torch.isin(class_indices, mandatory_indices)
-            candidate_samples = class_X[remaining_mask]
+            candidate_X = class_X[remaining_mask]
             candidate_indices = class_indices[remaining_mask]
 
-            if len(candidate_samples) > 0:
-                # Compute pairwise divergences
-                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
+            if candidate_X.size(0) > 0:
+                # Vectorized divergence calculation
+                diff = candidate_X.unsqueeze(1) - candidate_X.unsqueeze(0)
+                dist_matrix = torch.norm(diff, dim=2)
+                div_matrix = dist_matrix.mean(dim=1)
 
-                # Cluster selection logic
-                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=div_matrix.device)
-                cluster_indices = []
+                # GPU-optimized cluster selection
+                cluster_mask = div_matrix < min_divergence
+                cluster_rep_mask = torch.zeros_like(cluster_mask, dtype=torch.bool)
 
-                for i in range(len(candidate_samples)):
-                    if not visited[i]:
-                        cluster_mask = div_matrix[i] < min_divergence
-                        cluster_members = torch.where(cluster_mask)[0]
-                        if len(cluster_members) > 0:  # Ensure we don't select empty clusters
-                            cluster_indices.append(candidate_indices[cluster_members[0]].item())
-                            visited |= cluster_mask
+                for i in range(cluster_mask.size(0)):
+                    if not cluster_rep_mask[i]:
+                        cluster_rep_mask |= cluster_mask[i]
+                        cluster_rep_mask[i] = True  # Keep first representative
 
-                # Combine mandatory and clustered samples
-                if cluster_indices:
-                    cluster_tensor = torch.tensor(cluster_indices, device=class_indices.device)
-                    selected = torch.cat([mandatory_indices, cluster_tensor]).unique()
-                else:
-                    selected = mandatory_indices
+                cluster_indices = candidate_indices[cluster_rep_mask]
+                selected = torch.cat([mandatory_indices, cluster_indices]).unique()
             else:
                 selected = mandatory_indices
 
-            # Apply class-level max samples
-            class_total = (y_test == class_id).sum().item()
+            # Apply class limits
+            class_total = (y_test == class_id).sum()
             max_samples = max(2, int(class_total * max_class_addition_percent / 100))
-            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
+            selected_indices.append(selected[:max_samples])
 
-        return final_selected_indices
+        return torch.cat(selected_indices).cpu().tolist() if selected_indices else []
 
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
