@@ -311,20 +311,6 @@ class DatasetConfig:
         except:
             return False
 
-    @staticmethod
-    def validate_columns(config: Dict) -> bool:
-        """Validate column configuration"""
-        if 'column_names' in config and config['column_names']:
-            if not isinstance(config['column_names'], list):
-                print("\033[K" +"Error: column_names must be a list")
-                return False
-
-            # Validate target column is in column names
-            if config['target_column'] not in config['column_names']:
-                print("\033[K" +f"Error: target_column '{config['target_column']}' not found in column_names")
-                return False
-
-        return True
 
     @staticmethod
     def create_default_config(dataset_name: str) -> Dict:
@@ -6769,66 +6755,6 @@ def validate_config(config: dict) -> dict:
         validated_config["display"] = None
 
     return validated_config
-
-def print_dataset_info(conf_path: str, csv_path: str):
-    """Print information about the dataset with robust error handling"""
-    try:
-        # Load configuration
-        with open(conf_path, 'r') as f:
-            config = json.load(f)
-
-        # Get file sizes
-        conf_size = os.path.getsize(conf_path)
-        csv_size = os.path.getsize(csv_path)
-
-        print("\033[K" +"Dataset Information:")
-        print("\033[K" +f"Dataset name: {os.path.splitext(os.path.basename(conf_path))[0]}")
-        print("\033[K" +f"Configuration file: {conf_path} ({conf_size/1024:.1f} KB)")
-        print("\033[K" +f"Data file: {csv_path} ({csv_size/1024:.1f} KB)")
-        print("\033[K" +f"Model type: {config.get('modelType', 'Not specified')}")
-
-        # Safely access configuration values
-
-        target_column = config.get('target_column', 'target')  # Default to 'target' if not specified
-        print("\033[K" +f"Target column: {target_column}")
-
-        # Safely handle column names
-        column_names = config.get('column_names', [])
-        if column_names:
-            print("\033[K" +f"Number of columns: {len(column_names)}")
-
-            # Count excluded features
-            excluded = sum(1 for col in column_names if str(col).startswith('#'))
-            print("\033[K" +f"Excluded features: {excluded}")
-
-            # Show first few column names
-            print("\033[K" +"Features:")
-            for col in column_names[:5]:
-                excluded = "  (excluded)" if str(col).startswith('#') else ""
-                print("\033[K" +f"  {col}{excluded}")
-            if len(column_names) > 5:
-                print("\033[K" +f"  ... and {len(column_names)-5} more")
-        else:
-            # Try to get column info from CSV if no column names in config
-            try:
-                df = pd.read_csv(csv_path, nrows=0)
-                columns = df.columns.tolist()
-                print("\033[K" +f"Number of columns (from CSV): {len(columns)}")
-                print("\033[K" +"Features (from CSV):")
-                for col in columns[:5]:
-                    print("\033[K" +f"  {col}")
-                if len(columns) > 5:
-                    print("\033[K" +f"  ... and {len(columns)-5} more")
-            except Exception as e:
-                print("\033[K" +"Could not read column information from CSV")
-
-    except FileNotFoundError:
-        print("\033[K" +f"Error: Could not find configuration file: {conf_path}")
-    except json.JSONDecodeError:
-        print("\033[K" +f"Error: Invalid JSON in configuration file: {conf_path}")
-    except Exception as e:
-        print("\033[K" +f"Error reading dataset info: {str(e)}")
-        print("\033[K" +f"Traceback: {traceback.format_exc()}")
 
 
 def main():
