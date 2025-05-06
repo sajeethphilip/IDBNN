@@ -370,8 +370,8 @@ class DatasetConfig:
         config["active_learning"]= {
             "tolerance": 1.0,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.3,
-            "marginal_margin_threshold": 0.3,
+            "strong_margin_threshold": 0.5,
+            "marginal_margin_threshold": 0.5,
             "min_divergence": 0.5
         }
         config["execution_flags"]= {
@@ -2397,8 +2397,8 @@ class DBNN(GPUDBNN):
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with robust dimension handling."""
         active_learning_config = self.config.get('active_learning', {})
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.3)
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.3)
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.5)
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.5)
         min_divergence = active_learning_config.get('min_divergence', 0.5)
         max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
@@ -6470,8 +6470,8 @@ def load_or_create_config(config_path: str) -> dict:
         "active_learning": {
             "tolerance": 1.0,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.3,
-            "marginal_margin_threshold": 0.3,
+            "strong_margin_threshold": 0.5,
+            "marginal_margin_threshold": 0.5,
             "min_divergence": 0.5
         },
         "execution_flags": {
