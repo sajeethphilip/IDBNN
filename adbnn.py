@@ -2436,13 +2436,13 @@ class DBNN(GPUDBNN):
             if len(class_indices) == 0:
                 continue
 
-            # Always include extreme margins - FIX APPLIED HERE
+            # Handle mandatory indices selection with dimension check
             if len(class_indices) >= 2:
-                max_idx = torch.argmax(class_margins)
-                min_idx = torch.argmin(class_margins)
-                # Create tensor of indices before indexing
-                indices = torch.stack([max_idx, min_idx])
-                mandatory_indices = class_indices[indices]
+                # Convert indices to scalars before indexing
+                max_idx = torch.argmax(class_margins).item()
+                min_idx = torch.argmin(class_margins).item()
+                mandatory_selector = torch.tensor([max_idx, min_idx], device=class_indices.device)
+                mandatory_indices = class_indices[mandatory_selector]
             else:
                 mandatory_indices = class_indices
 
@@ -2463,14 +2463,16 @@ class DBNN(GPUDBNN):
                     if not visited[i]:
                         cluster_mask = div_matrix[i] < min_divergence
                         cluster_members = torch.where(cluster_mask)[0]
-                        cluster_indices.append(candidate_indices[cluster_members[0]].item())
-                        visited |= cluster_mask
+                        if len(cluster_members) > 0:  # Ensure we don't select empty clusters
+                            cluster_indices.append(candidate_indices[cluster_members[0]].item())
+                            visited |= cluster_mask
 
                 # Combine mandatory and clustered samples
-                selected = torch.cat([
-                    mandatory_indices,
-                    torch.tensor(cluster_indices, device=mandatory_indices.device)
-                ]).unique()
+                if cluster_indices:
+                    cluster_tensor = torch.tensor(cluster_indices, device=class_indices.device)
+                    selected = torch.cat([mandatory_indices, cluster_tensor]).unique()
+                else:
+                    selected = mandatory_indices
             else:
                 selected = mandatory_indices
 
