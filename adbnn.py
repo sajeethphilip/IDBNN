@@ -2383,117 +2383,104 @@ class DBNN(GPUDBNN):
 
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Memory-efficient implementation with original selection fidelity"""
+        """Memory-optimized sample selection with proper batch handling"""
         config = self.config.get('active_learning', {})
         min_divergence = config.get('min_divergence', 0.1)
         max_class_addition_percent = config.get('max_class_addition_percent', 5)
 
-        # Convert to tensors without memory pinning
+        # Convert to tensors without pin_memory
         test_preds = torch.as_tensor(test_predictions, device=self.device)
         y_test_tensor = torch.as_tensor(y_test, device=self.device)
         test_indices_tensor = torch.as_tensor(test_indices, device=self.device)
 
-        # Find misclassified samples using original logic
+        # Find misclassified samples
         mis_mask = torch.ne(test_preds, y_test_tensor)
         mis_positions = mis_mask.nonzero().squeeze()
 
         if mis_positions.numel() == 0:
             return []
 
-        # Preserve original indexing logic
-        mis_X = self.X_tensor.index_select(0, test_indices_tensor).index_select(0, mis_positions)
-        mis_y = y_test_tensor.index_select(0, mis_positions)
-        mis_indices = test_indices_tensor.index_select(0, mis_positions)
+        # Efficient memory access using indexing
+        mis_X = self.X_tensor[test_indices_tensor][mis_positions]
+        mis_y = y_test_tensor[mis_positions]
+        mis_indices = test_indices_tensor[mis_positions]
 
-        # Full precision posterior calculation (disable autocast)
-        with torch.no_grad(), torch.amp.autocast(enabled=False):  # Critical precision section
-            posteriors, _ = self._compute_batch_posterior(mis_X.float())  # Force FP32
-            pred_probs = posteriors[torch.arange(posteriors.size(0)), posteriors.argmax(1)]
-            true_probs = posteriors[torch.arange(posteriors.size(0)), mis_y]
+        # Compute posteriors with memory conservation
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast(device_type='cuda'):  # Updated autocast syntax
+                    posteriors, _ = self._compute_batch_posterior(mis_X)
+            else:
+                posteriors, _ = self._compute_batch_posterior(mis_X)
+
+            pred_probs = posteriors[torch.arange(len(posteriors)), posteriors.argmax(1)]
+            true_probs = posteriors[torch.arange(len(posteriors)), mis_y]
             margins = pred_probs - true_probs
 
         selected_indices = []
         for class_id in torch.unique(mis_y):
-            class_mask = torch.eq(mis_y, class_id)
+            class_mask = mis_y == class_id
             if not class_mask.any():
                 continue
 
-            # Original selection logic for mandatory samples
-            class_indices = mis_indices.masked_select(class_mask)
-            class_X = mis_X.masked_select(class_mask.unsqueeze(1)).view(-1, mis_X.size(1))
-            class_margins = margins.masked_select(class_mask)
+            # Process class-specific data
+            class_X = mis_X[class_mask]
+            class_indices = mis_indices[class_mask]
+            class_margins = margins[class_mask]
 
-            if class_indices.numel() >= 2:
+            # Select extreme samples
+            if len(class_indices) >= 2:
                 extreme_idx = torch.stack([class_margins.argmax(), class_margins.argmin()])
-                mandatory_indices = class_indices.gather(0, extreme_idx)
+                mandatory = class_indices[extreme_idx]
             else:
-                mandatory_indices = class_indices
+                mandatory = class_indices
 
-            # Memory-optimized divergence calculation with original logic fidelity
-            remaining_mask = ~torch.isin(class_indices, mandatory_indices)
-            if remaining_mask.any():
-                candidate_X = class_X[remaining_mask]
-                candidate_indices = class_indices[remaining_mask]
+            # Process remaining candidates in memory-efficient batches
+            remaining_mask = ~torch.isin(class_indices, mandatory)
+            if not remaining_mask.any():
+                selected_indices.append(mandatory)
+                continue
 
-                # Batched pairwise distance calculation with numerical stability
-                batch_size = self._calculate_safe_batch_size(candidate_X)
-                div_matrix = torch.zeros(len(candidate_X), device='cpu')  # Store on CPU
+            candidate_X = class_X[remaining_mask]
+            candidate_indices = class_indices[remaining_mask]
+            n_candidates = len(candidate_X)
 
-                for i in range(0, len(candidate_X), batch_size):
-                    batch = candidate_X[i:i+batch_size].float()  # FP32 for precision
-                    batch_norms = torch.norm(batch, dim=1)**2
+            # Precompute squared norms for all candidates first
+            sq_norm_all = torch.sum(candidate_X.float() ** 2, dim=1)  # Precompute once
 
-                    # Chunked matrix multiplication to prevent memory spikes
-                    chunk_size = min(256, len(candidate_X))
-                    for j in range(0, len(candidate_X), chunk_size):
-                        chunk = candidate_X[j:j+chunk_size].float()
-                        dot_prod = torch.mm(batch, chunk.T)
-                        dists = torch.sqrt(
-                            batch_norms[:, None] +
-                            torch.norm(chunk, dim=1)**2[None, :] -
-                            2*dot_prod +
-                            1e-7  # Numerical stability
-                        )
-                        div_matrix[i:i+batch_size] += dists.sum(dim=1).cpu()
-                        del chunk, dot_prod, dists
+            # Batched divergence calculation
+            batch_size = min(256, n_candidates)  # Ensure batch_size <= total candidates
+            div_scores = torch.zeros(n_candidates, device=self.device)
 
-                    div_matrix[i:i+batch_size] /= len(candidate_X)  # Average over all samples
-                    del batch, batch_norms
+            for i in range(0, n_candidates, batch_size):
+                batch = candidate_X[i:i+batch_size].float()
+                batch_size_actual = batch.size(0)
+
+                # Compute dot products with all candidates using matrix multiply
+                dot_prod = torch.mm(batch, candidate_X.T.float())
+
+                # Use precomputed sq_norm_all for correct dimensions
+                dists = torch.sqrt(
+                    torch.sum(batch ** 2, dim=1, keepdim=True) +  # Current batch norms
+                    sq_norm_all[None, :] -                        # All candidate norms
+                    2 * dot_prod + 1e-6
+                )
+
+                # Compute divergence scores for this batch
+                div_scores[i:i+batch_size_actual] = dists.mean(dim=1)
+                del batch, dot_prod, dists
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                # Original cluster selection logic
-                cluster_mask = div_matrix < min_divergence
-                cluster_rep_mask = torch.zeros_like(cluster_mask)
+            # Cluster selection
+            cluster_mask = div_scores < min_divergence
+            selected_clusters = candidate_indices[cluster_mask]
 
-                for i in range(cluster_mask.size(0)):
-                    if not cluster_rep_mask[i]:
-                        cluster_rep_mask[i] = True
-                        cluster_rep_mask |= cluster_mask[i]
-
-                cluster_indices = candidate_indices[cluster_rep_mask.to(device=candidate_indices.device)]
-                selected = torch.cat([mandatory_indices, cluster_indices]).unique()
-            else:
-                selected = mandatory_indices
-
-            # Original class size limiting
-            class_total = (y_test_tensor == class_id).sum().item()
-            max_samples = max(2, int(class_total * max_class_addition_percent / 100))
-            selected = selected[:max_samples] if selected.numel() > max_samples else selected
-
-            selected_indices.append(selected)
+            final_selected = torch.cat([mandatory, selected_clusters]).unique()
+            class_max = max(20, int((y_test_tensor == class_id).sum() * max_class_addition_percent / 100))
+            selected_indices.append(final_selected[:class_max])
 
         return torch.cat(selected_indices).cpu().tolist() if selected_indices else []
-
-    def _calculate_safe_batch_size(self, tensor):
-        """Dynamic batch sizing based on available memory"""
-        element_size = tensor.element_size()
-        num_features = tensor.size(1)
-
-        if torch.cuda.is_available():
-            free_mem = torch.cuda.mem_get_info()[0]
-            safe_elements = free_mem // (element_size * num_features * 3)  # 3x buffer
-            return max(64, min(1024, safe_elements))
-        return 256  # Conservative CPU default
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with robust dimension handling."""
