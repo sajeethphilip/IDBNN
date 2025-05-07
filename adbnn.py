@@ -753,7 +753,10 @@ class BinWeightUpdater:
         # Initialize histogram_weights as empty dictionary first
         self.histogram_weights = {}
         self.batch_size=batch_size
-
+        # Ensure all weight tensors are contiguous
+        for c in self.histogram_weights.values():
+            for p in c.values():
+                p = p.contiguous()
         # Create weights for each class and feature pair
         for class_id in range(n_classes):
             self.histogram_weights[class_id] = {}
@@ -797,36 +800,43 @@ class BinWeightUpdater:
         self.update_values = torch.zeros(1000, dtype=torch.float32)
         self.update_count = 0
 
-
+    def _validate_update(old_weights, new_weights, updates):
+        """Sanity check for update consistency"""
+        for (class_id, pair_idx, bin_i, bin_j), adj in updates.items():
+            assert torch.allclose(
+                old_weights[class_id][pair_idx][bin_i, bin_j] + adj,
+                new_weights[class_id][pair_idx][bin_i, bin_j]
+            ), "Update mismatch detected!"
     def batch_update_weights(self, class_indices, pair_indices, bin_indices, adjustments):
-            """Batch update with compatibility and proper shape handling"""
-            n_updates = len(class_indices)
+        # Convert to tensors first
+        class_ids = torch.tensor(class_indices, dtype=torch.long, device=self.device)
+        pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
+        bin_is = torch.tensor([bi[0] if isinstance(bi, (list, tuple)) else bi
+                              for bi in bin_indices], device=self.device)
+        bin_js = torch.tensor([bj[1] if isinstance(bj, (list, tuple)) else bj
+                              for bj in bin_indices], device=self.device)
+        adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
 
-            # Process in batches for memory efficiency
-            batch_size = self.batch_size  # Adjust based on available memory
-            for i in range(0, n_updates, batch_size):
-                end_idx = min(i + batch_size, n_updates)
+        # Group updates by (class, pair)
+        unique_pairs, inverse = torch.unique(
+            torch.stack([class_ids, pair_ids]), dim=1, return_inverse=True
+        )
 
-                for idx in range(i, end_idx):
-                    class_id = int(class_indices[idx])
-                    pair_idx = int(pair_indices[idx])
+        for group_idx in range(unique_pairs.shape[1]):
+            class_id, pair_id = unique_pairs[:, group_idx]
+            mask = inverse == group_idx
 
-                    # Handle bin indices properly based on their structure
-                    if isinstance(bin_indices[idx], tuple):
-                        bin_i, bin_j = bin_indices[idx]
-                    else:
-                        # If bin_indices is a tensor or array
-                        bin_i = bin_indices[idx][0] if len(bin_indices[idx].shape) > 1 else bin_indices[idx]
-                        bin_j = bin_indices[idx][1] if len(bin_indices[idx].shape) > 1 else bin_indices[idx]
+            # Get all updates for this (class, pair)
+            b_i = bin_is[mask]
+            b_j = bin_js[mask]
+            adj = adjs[mask]
 
-                    # Ensure indices are properly shaped scalars
-                    bin_i = int(bin_i.item() if torch.is_tensor(bin_i) else bin_i)
-                    bin_j = int(bin_j.item() if torch.is_tensor(bin_j) else bin_j)
-
-                    adjustment = float(adjustments[idx].item() if torch.is_tensor(adjustments[idx]) else adjustments[idx])
-
-                    # Update weight with proper shape handling
-                    self.histogram_weights[class_id][pair_idx][bin_i, bin_j] += adjustment
+            # Vectorized update
+            self.histogram_weights[class_id.item()][pair_id.item()].index_put_(
+                indices=(b_i, b_j),
+                values=adj,
+                accumulate=True
+            )
 
 
     def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
@@ -889,36 +899,38 @@ class BinWeightUpdater:
 
     def update_histogram_weights(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
-        """Update weights with proper type checking"""
-        try:
-            # Ensure proper types
-            true_class = int(true_class)
-            pred_class = int(pred_class)
+        # Precompute all adjustments first
+        adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
 
-            # Get the posterior values needed for adjustment
-            true_posterior = float(posteriors[true_class])
-            pred_posterior = float(posteriors[pred_class])
+        # Batch indices and values
+        pair_indices = []
+        bin_is = []
+        bin_js = []
+        adjustments = []
 
-            # Calculate weight adjustment
-            adjustment = learning_rate * (1.0 - (true_posterior / pred_posterior))
+        for pair_idx, (bin_i, bin_j) in bin_indices.items():
+            pair_indices.append(pair_idx)
+            bin_is.append(bin_i)
+            bin_js.append(bin_j)
+            adjustments.append(adjustment)
 
-            for pair_idx, (bin_i, bin_j) in bin_indices.items():
-                # Ensure integer indices
-                pair_idx = int(pair_idx)
-                bin_i = int(bin_i)
-                bin_j = int(bin_j)
+        # Convert to tensors
+        pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
+        b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
+        b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
+        adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
 
-                # Get and update weights
-                weights = self.histogram_weights[true_class][pair_idx]
-                weights[bin_i, bin_j] += adjustment
+        # Group by pair_idx
+        unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
 
-        except Exception as e:
-            DEBUG.log(f"Error updating histogram weights:")
-            DEBUG.log(f"- True class: {true_class}")
-            DEBUG.log(f"- Pred class: {pred_class}")
-            DEBUG.log(f"- Adjustment: {adjustment}")
-            DEBUG.log(f"- Error: {str(e)}")
-            raise
+        for pair_id in unique_pairs:
+            mask = pair_ids == pair_id
+            self.histogram_weights[true_class][pair_id.item()].index_put_(
+                indices=(b_i[mask], b_j[mask]),
+                values=adjs[mask],
+                accumulate=True
+            )
+
 
     def update_gaussian_weights(self, failed_case, true_class, pred_class,
                                component_responsibilities, posteriors, learning_rate):
@@ -2481,122 +2493,6 @@ class DBNN(GPUDBNN):
         # Combine all selected indices safely
         return torch.cat(selected).unique().cpu().tolist() if selected else []
 
-    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices):
-        """Cluster-based selection with robust dimension handling."""
-        active_learning_config = self.config.get('active_learning', {})
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.6)
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.6)
-        min_divergence = active_learning_config.get('min_divergence', 0.1)
-        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
-
-        test_predictions = torch.as_tensor(test_predictions, device=self.device)
-        y_test = torch.as_tensor(y_test, device=self.device)
-        test_indices = torch.as_tensor(test_indices, device=self.device)
-
-        misclassified_mask = (test_predictions != y_test)
-        misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
-
-        if misclassified_indices.dim() == 0 or len(misclassified_indices) == 0:
-            return []
-
-        final_selected_indices = []
-        unique_classes = torch.unique(y_test[misclassified_indices])
-
-        for class_id in unique_classes:
-            class_mask = (y_test[misclassified_indices] == class_id)
-            class_indices = misclassified_indices[class_mask]
-
-            if len(class_indices) == 0:
-                continue
-
-            # Batch processing with dimension safeguards
-            samples, margins, indices = [], [], []
-            for batch_start in range(0, len(class_indices), self.batch_size):
-                batch_end = min(batch_start + self.batch_size, len(class_indices))
-                batch_idx = class_indices[batch_start:batch_end]
-
-                # Ensure 2D tensor for single-sample batches
-                batch_X = self.X_tensor[test_indices[batch_idx]].unsqueeze(0) if batch_idx.dim() == 0 \
-                          else self.X_tensor[test_indices[batch_idx]]
-
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                else:
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
-
-                true_probs = posteriors[:, class_id]
-                pred_probs = posteriors[torch.arange(len(posteriors)), torch.argmax(posteriors, dim=1)]
-                batch_margins = pred_probs - true_probs
-
-                samples.append(batch_X)
-                margins.append(batch_margins)
-                indices.append(test_indices[batch_idx])
-
-            if not samples:
-                continue
-
-            # Safely combine results with dimension checks
-            try:
-                samples = torch.cat(samples)
-                margins = torch.cat(margins)
-                indices = torch.cat(indices)
-            except RuntimeError:
-                continue
-
-            if len(indices) < 1:
-                continue
-
-            # Always include extreme margins (modified indexing)
-            if len(indices) >= 2:
-                max_idx = torch.argmax(margins)
-                min_idx = torch.argmin(margins)
-                mandatory_selector = torch.tensor([max_idx.item(), min_idx.item()], device=indices.device)
-                mandatory_indices = indices[mandatory_selector]
-            else:
-                mandatory_indices = indices
-
-            # Cluster remaining samples
-            remaining_mask = ~torch.isin(indices, mandatory_indices)
-            candidate_samples = samples[remaining_mask]
-            candidate_indices = indices[remaining_mask]
-
-            if len(candidate_samples) > 0:
-                # Compute pairwise divergences
-                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
-
-                # Find unique clusters
-                clusters = []
-                visited = torch.zeros(len(candidate_samples),
-                            dtype=torch.bool,
-                            device=candidate_samples.device)
-                cluster_indices = []
-                for i in range(len(candidate_samples)):
-                    if not visited[i]:
-                        # Find similar samples within divergence threshold
-                        cluster_mask = div_matrix[i] < min_divergence
-                        cluster_members = torch.where(cluster_mask)[0]
-
-                        # Store first member of each cluster
-                        cluster_indices.append(candidate_indices[cluster_members[0]].item())
-
-                        # Update visited using same-device tensors
-                        visited |= cluster_mask.to(visited.device)
-
-                # Combine mandatory and clustered samples
-                selected = torch.cat([
-                    mandatory_indices,
-                    torch.tensor(cluster_indices,
-                                device=mandatory_indices.device)
-                ]).unique()
-            else:
-                selected = mandatory_indices
-
-            # Apply class-level max samples
-            max_samples = max(2, int((y_test == class_id).sum().item() * max_class_addition_percent / 100))
-            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
-
-        return final_selected_indices
-
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
                                 reconstructed_features: np.ndarray,
@@ -3936,57 +3832,6 @@ class DBNN(GPUDBNN):
         self.gaussian_params = {
             'means': means.contiguous(),
             'covs': covs.contiguous(),
-            'classes': unique_classes,
-            'feature_pairs': self.feature_pairs
-        }
-
-        return self.gaussian_params
-
-    def _compute_pairwise_likelihood_parallel_std_old(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Compute Gaussian parameters (means, covariances) for all feature pairs and classes."""
-        DEBUG.log("Starting Gaussian likelihood computation")
-        print("\033[KComputing Gaussian parameters...")
-
-        # Generate feature pairs if not existing
-        if self.feature_pairs is None:
-            self.feature_pairs = self._generate_feature_combinations(
-                feature_dims,
-                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
-                self.config.get('likelihood_config', {}).get('max_combinations', None)
-            )
-
-        unique_classes = torch.unique(labels)
-        n_classes = len(unique_classes)
-        n_pairs = len(self.feature_pairs)
-
-        # Initialize storage for means and covariances
-        means = torch.zeros((n_classes, n_pairs, 2), device=self.device)
-        covs = torch.zeros((n_classes, n_pairs, 2, 2), device=self.device)
-
-        # Process each class
-        for class_idx, class_id in enumerate(unique_classes):
-            class_mask = (labels == class_id)
-            class_data = dataset[class_mask]
-
-            # Process each feature pair
-            for pair_idx, pair in enumerate(self.feature_pairs):
-                pair_data = class_data[:, pair]
-
-                # Compute mean and covariance
-                mean = torch.mean(pair_data, dim=0)
-                centered = pair_data - mean
-                cov = torch.mm(centered.T, centered) / (len(pair_data) - 1 + 1e-6)
-
-                # Add regularization to avoid singular matrix
-                cov += torch.eye(2, device=self.device) * 1e-6
-
-                means[class_idx, pair_idx] = mean
-                covs[class_idx, pair_idx] = cov
-
-        # Store Gaussian parameters
-        self.gaussian_params = {
-            'means': means,
-            'covs': covs,
             'classes': unique_classes,
             'feature_pairs': self.feature_pairs
         }
