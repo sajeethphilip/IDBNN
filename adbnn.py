@@ -469,7 +469,7 @@ class DatasetConfig:
             # Existing configuration loading logic
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-            print(config)
+                print(config_text)
             def remove_comments(json_str):
                 lines = []
                 in_multiline_comment = False
