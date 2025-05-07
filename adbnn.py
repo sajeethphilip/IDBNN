@@ -5329,12 +5329,13 @@ class DBNN(GPUDBNN):
                     self.best_combined_accuracy = current_metric # maximise the classwise accuracies
                     print(f"The mean class accuracy is {mean_class_acc}")
                 else:
-                    print("\033[K" + f"{Colors.GREEN}Best combined accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
+                    print("\033[K" + f"{Colors.GREEN}Best classwise accuracy improved from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
                     self.best_combined_accuracy = current_metric
                 print("\033[K" + f"{Colors.RED}---------------------------------------------------------------------------------------{Colors.ENDC}")
 
                 self._save_model_components()
-
+            else:
+                print("\033[K" + f"{Colors.RED}Current classwise accuracy declined from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
             self.reset_to_initial_state() # After saving the weights, reset to initial state for next round.
 
 
