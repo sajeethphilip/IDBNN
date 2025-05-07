@@ -4434,6 +4434,10 @@ class DBNN(GPUDBNN):
         # Decode numeric labels back to original alphanumeric labels
         y_true_labels = self.label_encoder.inverse_transform(y_true)
         y_pred_labels = self.label_encoder.inverse_transform(y_pred)
+        class_accuracies = self._calculate_class_wise_accuracy(torch.from_numpy(y_true_labels).cpu(), torch.from_numpy(y_pred_labels).cpu())
+
+        # Use minimum class accuracy as the criterion
+        self.best_combined_accuracy = sum([v['accuracy'] for v in class_accuracies.values()]) / len(class_accuracies)
 
         # Get unique classes from both true and predicted labels
         unique_true = np.unique(y_true_labels)
