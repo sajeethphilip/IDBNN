@@ -2443,25 +2443,31 @@ class DBNN(GPUDBNN):
             # Cluster remaining samples with memory reuse
             remaining_mask = ~torch.isin(class_indices, mandatory_indices)
             if remaining_mask.any():
-                candidate_X = class_X.masked_select(remaining_mask.unsqueeze(1)).view(-1, class_X.size(1))
+                candidate_X = class_X[remaining_mask].float()
                 candidate_indices = class_indices.masked_select(remaining_mask)
 
-                # Memory-efficient divergence calculation
-                with torch.no_grad():
-                    diff = candidate_X.unsqueeze(1) - candidate_X.unsqueeze(0)  # [N,1,D] - [1,N,D]
-                    dist_matrix = diff.norm(dim=2)  # [N,N]
-                    div_matrix = dist_matrix.mean(dim=1)  # [N]
+                # Calculate divergence in batches
+                batch_size = 256  # Adjust based on available memory
+                n_candidates = len(candidate_X)
+                div_matrix = torch.zeros(n_candidates, device='cpu')  # Keep on CPU
 
-                # Cluster selection with in-place operations
-                cluster_mask = div_matrix < min_divergence
-                cluster_rep_mask = torch.zeros_like(cluster_mask, dtype=torch.bool)
+                for i in range(0, n_candidates, batch_size):
+                    batch_end = min(i+batch_size, n_candidates)
+                    batch = candidate_X[i:batch_end].to(self.device)
 
-                for i in range(cluster_mask.size(0)):
-                    if not cluster_rep_mask[i]:
-                        cluster_rep_mask[i] = True
-                        cluster_rep_mask |= cluster_mask[i]
+                    # Compute batch divergence using matrix identity for memory efficiency
+                    norms = torch.norm(batch, dim=1, keepdim=True)**2
+                    dists = norms + norms.T - 2 * torch.mm(batch, batch.T)
+                    batch_div = torch.mean(torch.sqrt(torch.abs(dists)), dim=1)
 
-                cluster_indices = candidate_indices.masked_select(cluster_rep_mask)
+                    div_matrix[i:batch_end] = batch_div.cpu()
+                    del batch, norms, dists, batch_div
+                    torch.cuda.empty_cache()
+
+                # Find representative samples using CPU-based operations
+                cluster_rep_mask = self._find_representative_samples(div_matrix, min_divergence)
+                cluster_indices = candidate_indices[cluster_rep_mask]
+
                 selected = torch.cat([mandatory_indices, cluster_indices]).unique()
             else:
                 selected = mandatory_indices
