@@ -317,7 +317,7 @@ class DatasetConfig:
         """Create a default configuration file with enhanced defaults"""
         config = DatasetConfig.DEFAULT_CONFIG.copy()
         config['file_path'] = f"{dataset_name}.csv"
-
+        print(f"{Colors.RED} Creating default configuration as the cofiguration file is invalid {Colors.ENDC}")
         # Try to infer column names from CSV if it exists
         if os.path.exists(config['file_path']):
             try:
