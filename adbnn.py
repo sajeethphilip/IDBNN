@@ -469,7 +469,7 @@ class DatasetConfig:
             # Existing configuration loading logic
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-                print(config_text)
+
             def remove_comments(json_str):
                 lines = []
                 in_multiline_comment = False
@@ -1195,7 +1195,7 @@ class GPUDBNN:
         os.makedirs('Model', exist_ok=True)
 
         # Load configuration and data
-        self.config = DatasetConfig.load_config(self.dataset_name)
+        # DatasetConfig.load_config(self.dataset_name)
         self.target_column = self.config['target_column']
 
         # Initialize model components
@@ -1285,7 +1285,7 @@ class GPUDBNN:
         os.makedirs('Model', exist_ok=True)
 
         # Load dataset configuration and data
-        self.config = DatasetConfig.load_config(self.dataset_name)
+        #self.config = DatasetConfig.load_config(self.dataset_name)
         self.data = self._load_dataset()
 
         self.target_column = self.config['target_column']
@@ -1297,7 +1297,7 @@ class GPUDBNN:
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
         # Load dataset configuration and data
-        self.config = DatasetConfig.load_config(self.dataset_name)
+        #self.config = DatasetConfig.load_config(self.dataset_name)
         self.data = self._load_dataset()
 
         self.target_column = self.config['target_column']
