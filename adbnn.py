@@ -2477,7 +2477,7 @@ class DBNN(GPUDBNN):
             selected_clusters = candidate_indices[cluster_mask]
 
             final_selected = torch.cat([mandatory, selected_clusters]).unique()
-            class_max = max(20, int((y_test_tensor == class_id).sum() * max_class_addition_percent / 100))
+            class_max = max(2, int((y_test_tensor == class_id).sum() * max_class_addition_percent / 100))
             selected_indices.append(final_selected[:class_max])
 
         return torch.cat(selected_indices).cpu().tolist() if selected_indices else []
