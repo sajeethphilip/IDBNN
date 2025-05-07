@@ -2383,7 +2383,7 @@ class DBNN(GPUDBNN):
 
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Memory-optimized sample selection with batched divergence calculation"""
+        """Memory-optimized sample selection with proper batch handling"""
         config = self.config.get('active_learning', {})
         min_divergence = config.get('min_divergence', 0.1)
         max_class_addition_percent = config.get('max_class_addition_percent', 5)
@@ -2400,14 +2400,19 @@ class DBNN(GPUDBNN):
         if mis_positions.numel() == 0:
             return []
 
-        # Efficient memory access
+        # Efficient memory access using indexing
         mis_X = self.X_tensor[test_indices_tensor][mis_positions]
         mis_y = y_test_tensor[mis_positions]
         mis_indices = test_indices_tensor[mis_positions]
 
         # Compute posteriors with memory conservation
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            posteriors, _ = self._compute_batch_posterior(mis_X)
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast(device_type='cuda'):  # Updated autocast syntax
+                    posteriors, _ = self._compute_batch_posterior(mis_X)
+            else:
+                posteriors, _ = self._compute_batch_posterior(mis_X)
+
             pred_probs = posteriors[torch.arange(len(posteriors)), posteriors.argmax(1)]
             true_probs = posteriors[torch.arange(len(posteriors)), mis_y]
             margins = pred_probs - true_probs
@@ -2438,23 +2443,34 @@ class DBNN(GPUDBNN):
 
             candidate_X = class_X[remaining_mask]
             candidate_indices = class_indices[remaining_mask]
+            n_candidates = len(candidate_X)
+
+            # Precompute squared norms for all candidates first
+            sq_norm_all = torch.sum(candidate_X.float() ** 2, dim=1)  # Precompute once
 
             # Batched divergence calculation
-            batch_size = 256  # Adjust based on available memory
-            div_scores = torch.zeros(len(candidate_X), device=self.device)
+            batch_size = min(256, n_candidates)  # Ensure batch_size <= total candidates
+            div_scores = torch.zeros(n_candidates, device=self.device)
 
-            for i in range(0, len(candidate_X), batch_size):
-                batch = candidate_X[i:i+batch_size]
+            for i in range(0, n_candidates, batch_size):
+                batch = candidate_X[i:i+batch_size].float()
+                batch_size_actual = batch.size(0)
 
-                # Efficient pairwise distance calculation using matrix identity
-                sq_norm = torch.sum(batch**2, dim=1)
-                dot_prod = torch.mm(batch, candidate_X.T)
+                # Compute dot products with all candidates using matrix multiply
+                dot_prod = torch.mm(batch, candidate_X.T.float())
+
+                # Use precomputed sq_norm_all for correct dimensions
                 dists = torch.sqrt(
-                    sq_norm[:, None] + sq_norm[None, :] - 2*dot_prod + 1e-6
+                    torch.sum(batch ** 2, dim=1, keepdim=True) +  # Current batch norms
+                    sq_norm_all[None, :] -                        # All candidate norms
+                    2 * dot_prod + 1e-6
                 )
 
-                div_scores[i:i+batch_size] = dists.mean(dim=1)
-                del sq_norm, dot_prod, dists
+                # Compute divergence scores for this batch
+                div_scores[i:i+batch_size_actual] = dists.mean(dim=1)
+                del batch, dot_prod, dists
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # Cluster selection
             cluster_mask = div_scores < min_divergence
