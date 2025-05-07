@@ -2417,7 +2417,10 @@ class DBNN(GPUDBNN):
 
         # Compute posteriors in one batch
         with torch.no_grad():
-            posteriors, _ = self._compute_batch_posterior(X_mis)
+            if self.model_type == "Histogram":
+                posteriors, _ = self._compute_batch_posterior(X_mis)
+            elif self.model_type == "Gaussian":
+                posteriors, _ = self._compute_batch_posterior_std(X_mis)
 
         # Get number of classes from posteriors tensor shape
         num_classes = posteriors.size(1)
