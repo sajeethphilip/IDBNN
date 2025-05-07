@@ -469,7 +469,7 @@ class DatasetConfig:
             # Existing configuration loading logic
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_text = f.read()
-
+                print(config)
             def remove_comments(json_str):
                 lines = []
                 in_multiline_comment = False
@@ -688,7 +688,7 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         DataFrame with only the specified columns
     """
     # If no column names in config, return original DataFrame
-    print(config['column_names'])
+
     if 'column_names' not in config or not config['column_names']:
         print("\033[K" +"No column names specified in config. Keeping all columns.")
         return df
