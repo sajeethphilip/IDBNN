@@ -1397,140 +1397,6 @@ class GPUDBNN:
             torch.cuda.empty_cache()  # Free memory between batches
 
         return bin_edges
-#----------------------
-    def _compute_balanced_accuracy(self, y_true, y_pred):
-        """Compute class-balanced accuracy"""
-        cm = confusion_matrix(y_true, y_pred)
-        per_class_acc = np.diag(cm) / cm.sum(axis=1)
-        return np.mean(per_class_acc[~np.isnan(per_class_acc)])
-
-    def _select_balanced_samples(self, misclassified_indices, y_test, n_samples=2):
-        """Select misclassified samples with balanced class representation and error margins"""
-        class_indices = defaultdict(list)
-        y_test_cpu = y_test.cpu()
-
-        # Get probability info for each misclassified sample
-        probs_info = {}
-        for idx in misclassified_indices:
-            true_class = y_test_cpu[idx].item()
-            probs = self._compute_batch_posterior(self.X_tensor[idx].unsqueeze(0))[0]
-            pred_class = torch.argmax(probs).item()
-            true_prob = probs[true_class].item()
-            pred_prob = probs[pred_class].item()
-            error_margin = pred_prob - true_prob  # Higher means more confident wrong prediction
-
-            class_indices[true_class].append(idx)
-            probs_info[idx] = {
-                'true_class': true_class,
-                'pred_class': pred_class,
-                'error_margin': error_margin,
-                'true_prob': true_prob,
-                'pred_prob': pred_prob
-            }
-
-        # Calculate class-wise statistics
-        class_stats = {}
-        for cls in class_indices:
-            cls_samples = y_test_cpu == cls
-            total = cls_samples.sum().item()
-            misclassified = len(class_indices[cls])
-            error_rate = misclassified / total if total > 0 else 1.0
-            class_stats[cls] = {
-                'error_rate': error_rate,
-                'total': total,
-                'misclassified': misclassified
-            }
-
-        selected_indices = []
-        remaining_samples = n_samples
-
-        # First, ensure at least one sample from each failing class
-        for true_class, stats in class_stats.items():
-            if stats['error_rate'] > 0:  # Class has errors
-                # Get samples from this class sorted by error margin
-                class_samples = [(idx, probs_info[idx]['error_margin'])
-                               for idx in class_indices[true_class]]
-                class_samples.sort(key=lambda x: x[1], reverse=True)  # Highest error margin first
-
-                # Select the sample with highest error margin
-                if class_samples:
-                    idx = class_samples[0][0]
-                    selected_indices.append(idx)
-                    remaining_samples -= 1
-
-                    # Print selection info
-                    info = probs_info[idx]
-                    true_class_name = self.label_encoder.inverse_transform([info['true_class']])[0]
-                    pred_class_name = self.label_encoder.inverse_transform([info['pred_class']])[0]
-                    print("\033[K" +f"Adding sample from class {true_class_name} (misclassified as {pred_class_name}, "
-                          f"error margin: {info['error_margin']:.3f})")
-
-        # If we still have samples to select, choose based on error rates and margins
-        if remaining_samples > 0:
-            # Create pool of remaining samples with weights
-            remaining_pool = []
-            for idx in misclassified_indices:
-                if idx not in selected_indices:
-                    info = probs_info[idx]
-                    cls_stats = class_stats[info['true_class']]
-
-                    # Weight based on class error rate and individual error margin
-                    weight = cls_stats['error_rate'] * (1 + info['error_margin'])
-                    remaining_pool.append((idx, weight))
-
-            # Sort by weight and select top remaining_samples
-            remaining_pool.sort(key=lambda x: x[1], reverse=True)
-            for idx, weight in remaining_pool[:remaining_samples]:
-                selected_indices.append(idx)
-                info = probs_info[idx]
-                true_class_name = self.label_encoder.inverse_transform([info['true_class']])[0]
-                pred_class_name = self.label_encoder.inverse_transform([info['pred_class']])[0]
-                print("\033[K" +f"Adding additional sample from class {true_class_name} (misclassified as {pred_class_name}, "
-                      f"error margin: {info['error_margin']:.3f})")
-
-        # Print summary
-        print("\033[K" +f"Selection Summary:")
-        print("\033[K" +f"Total failing classes: {len(class_stats)}")
-        print("\033[K" +f"Selected {len(selected_indices)} samples total")
-        for cls in sorted(class_stats.keys()):
-            cls_name = self.label_encoder.inverse_transform([cls])[0]
-            stats = class_stats[cls]
-            selected_from_class = sum(1 for idx in selected_indices
-                                    if probs_info[idx]['true_class'] == cls)
-            print("\033[K" +f"Class {cls_name}: {selected_from_class} samples selected out of {stats['misclassified']} "
-                  f"misclassified (error rate: {stats['error_rate']:.3f})")
-
-        return selected_indices
-
-    def _print_detailed_metrics(self, y_true, y_pred, prefix=""):
-        """Print detailed performance metrics with color coding"""
-        # Compute metrics
-        balanced_acc = self._compute_balanced_accuracy(y_true, y_pred)
-        raw_acc = np.mean(y_true == y_pred)
-
-        # Print metrics with colors
-        print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}{prefix}Detailed Metrics:{Colors.ENDC}")
-
-        # Raw accuracy
-        acc_color = Colors.GREEN if raw_acc >= 0.9 else Colors.YELLOW if raw_acc >= 0.7 else Colors.BLUE
-        print("\033[K" +f"{Colors.BOLD}Raw Accuracy:{Colors.ENDC} {acc_color}{raw_acc:.4%}{Colors.ENDC}")
-
-        # Balanced accuracy
-        bal_color = Colors.GREEN if balanced_acc >= 0.9 else Colors.YELLOW if balanced_acc >= 0.7 else Colors.BLUE
-        print("\033[K" +f"{Colors.BOLD}Balanced Accuracy:{Colors.ENDC} {bal_color}{balanced_acc:.4%}{Colors.ENDC}")
-
-        # Per-class metrics
-        print("\033[K" +f"{Colors.BOLD}Per-class Performance:{Colors.ENDC}")
-        cm = confusion_matrix(y_true, y_pred)
-        class_labels = np.unique(y_true)
-
-        for i, label in enumerate(class_labels):
-            class_acc = cm[i,i] / cm[i].sum() if cm[i].sum() > 0 else 0
-            color = Colors.GREEN if class_acc >= 0.9 else Colors.YELLOW if class_acc >= 0.7 else Colors.BLUE
-            samples = cm[i].sum()
-            print("\033[K" +f"Class {label}: {color}{class_acc:.4%}{Colors.ENDC} ({samples:,} samples)")
-
-        return balanced_acc
 #---------------------- -------------------------------------DBNN Class -------------------------------
 class DBNNConfig:
     """Configuration class for DBNN parameters"""
@@ -2397,107 +2263,123 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Vectorized GPU-optimized sample selection from misclassified examples"""
+        """Cluster-based selection with robust dimension handling - Optimized Version."""
         active_learning_config = self.config.get('active_learning', {})
+        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.6)
+        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.6)
         min_divergence = active_learning_config.get('min_divergence', 0.1)
         max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
-        # Convert to tensors and ensure device consistency
+        # Convert inputs to tensors on active device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
 
-        # Create boolean mask on GPU
-        misclassified_mask = (test_predictions != y_test)
+        # Find misclassified samples
+        misclassified_mask = test_predictions != y_test
+        misclassified_indices = misclassified_mask.nonzero().squeeze()
 
-        if not torch.any(misclassified_mask):
+        if misclassified_indices.numel() == 0:
             return []
 
-        # Get all misclassified samples in one batch
-        misclassified_indices = torch.nonzero(misclassified_mask).squeeze()
-        X_mis = self.X_tensor[test_indices[misclassified_indices]]
-        y_mis = y_test[misclassified_indices]
+        final_selected_indices = []
+        unique_classes = torch.unique(y_test[misclassified_indices])
 
-        # Compute posteriors in one batch
-        with torch.no_grad():
-            if self.model_type == "Histogram":
-                posteriors, _ = self._compute_batch_posterior(X_mis)
-            elif self.model_type == "Gaussian":
-                posteriors, _ = self._compute_batch_posterior_std(X_mis)
+        for class_id in unique_classes:
+            class_mask = y_test[misclassified_indices] == class_id
+            class_indices = misclassified_indices[class_mask]
 
-        # Get number of classes from posteriors tensor shape
-        num_classes = posteriors.size(1)
-
-        # SAFE INDEXING: Clamp predictions to valid class range
-        safe_pred_indices = torch.clamp(test_predictions[misclassified_indices], 0, num_classes-1)
-
-        # Calculate error margins vectorized with safe indices
-        pred_probs = posteriors[torch.arange(len(posteriors), device=self.device), safe_pred_indices]
-        true_probs = posteriors[torch.arange(len(posteriors), device=self.device), y_mis]
-        error_margins = (pred_probs - true_probs)
-
-        # Group by true class using vectorized operations
-        unique_classes, class_counts = torch.unique(y_mis, return_counts=True)
-        class_indices = torch.argsort(y_mis)
-        sorted_classes = y_mis[class_indices]
-        splits = torch.cat([torch.tensor([0], device=self.device),
-                          torch.cumsum(class_counts, 0)])
-
-        selected = []
-
-        # Process each class with vectorized operations
-        for i in range(len(unique_classes)):
-            cls = unique_classes[i]
-            count = class_counts[i]
-            cls_start = splits[i]
-            cls_end = splits[i+1]
-
-            # Extract class-specific data with bounds checking
-            if cls_start >= len(class_indices) or cls_end > len(class_indices):
+            if class_indices.numel() == 0:
                 continue
 
-            cls_mask = (sorted_classes == cls)
-            cls_X = X_mis[class_indices[cls_start:cls_end]]
-            cls_error_margins = error_margins[class_indices[cls_start:cls_end]]
-            cls_global_indices = test_indices[misclassified_indices[class_indices[cls_start:cls_end]]]
+            # Vectorized batch processing
+            samples, margins, indices = [], [], []
+            for batch_start in range(0, len(class_indices), self.batch_size):
+                batch_end = min((batch_start + self.batch_size), len(class_indices))
+                batch_idx = class_indices[batch_start:batch_end]
 
-            # Skip classes with no misclassified samples
-            if len(cls_X) == 0:
+                # Simplified tensor indexing
+                batch_X = self.X_tensor[test_indices[batch_idx]]
+
+                # Unified posterior computation
+                if self.model_type == "Histogram":
+                    posteriors, _ = self._compute_batch_posterior(batch_X)
+                else:
+                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+
+                # Optimized margin calculation
+                max_probs, _ = torch.max(posteriors, dim=1)
+                true_probs = posteriors[:, class_id]
+                batch_margins = max_probs - true_probs
+
+                samples.append(batch_X)
+                margins.append(batch_margins)
+                indices.append(test_indices[batch_idx])
+
+            if not samples:
                 continue
 
-            # Select extreme margins first
-            sort_idx = torch.argsort(cls_error_margins, descending=True)
-            max_samples = max(2, int(count * max_class_addition_percent / 100))
+            # Combine batch results efficiently
+            try:
+                samples = torch.cat(samples)
+                margins = torch.cat(margins)
+                indices = torch.cat(indices)
+            except RuntimeError:
+                continue
 
-            # Always select top 2 most confident errors with bounds checking
-            mandatory_idx = sort_idx[:min(2, len(sort_idx))]
-            mandatory_indices = cls_global_indices[mandatory_idx]
+            if indices.numel() == 0:
+                continue
+
+            # Direct tensor indexing for mandatory samples
+            if len(indices) >= 2:
+                max_idx = torch.argmax(margins)
+                min_idx = torch.argmin(margins)
+                mandatory_indices = indices[torch.stack([max_idx, min_idx])]
+            else:
+                mandatory_indices = indices
 
             # Process remaining candidates
-            remaining_idx = sort_idx[2:max_samples]
-            if len(remaining_idx) == 0:
-                selected.append(mandatory_indices)
-                continue
+            remaining_mask = ~torch.isin(indices, mandatory_indices)
+            candidate_samples = samples[remaining_mask]
+            candidate_indices = indices[remaining_mask]
 
-            # Compute pairwise divergence matrix efficiently
-            with torch.no_grad():
-                diff = cls_X[remaining_idx].unsqueeze(1) - cls_X[remaining_idx].unsqueeze(0)
-                div_matrix = torch.norm(diff, dim=2, p=2)
-                div_matrix.fill_diagonal_(float('inf'))  # Ignore self-similarity
+            if candidate_samples.numel() > 0:
+                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
+                clusters = []
+                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=candidate_samples.device)
+                cluster_tensors = []
 
-            # Find diverse samples using vectorized operations
-            k = min(len(remaining_idx), max_samples-2)
-            if k > 0:
-                _, top_div_idx = torch.topk(div_matrix.min(dim=0).values, k=k)
-                selected.append(torch.cat([
-                    mandatory_indices,
-                    cls_global_indices[remaining_idx[top_div_idx]]
-                ]))
+                for i in range(len(candidate_samples)):
+                    if not visited[i]:
+                        cluster_mask = div_matrix[i] < min_divergence
+                        # Fix: Use flatten() instead of squeeze() to maintain 1D tensor
+                        cluster_members = cluster_mask.nonzero().flatten()
+
+                        # Handle empty clusters case
+                        if cluster_members.numel() == 0:
+                            continue
+
+                        # Store cluster representative directly as tensor
+                        cluster_tensors.append(candidate_indices[cluster_members[0]])
+
+                        # Update visited efficiently
+                        visited |= cluster_mask
+
+                # Combine cluster representatives
+                if cluster_tensors:
+                    cluster_indices = torch.stack(cluster_tensors)
+                    selected = torch.cat([mandatory_indices, cluster_indices]).unique()
+                else:
+                    selected = mandatory_indices
             else:
-                selected.append(mandatory_indices)
+                selected = mandatory_indices
 
-        # Combine all selected indices safely
-        return torch.cat(selected).unique().cpu().tolist() if selected else []
+            # Apply class quota
+            class_count = (y_test == class_id).sum().item()
+            max_samples = max(2, int(class_count * max_class_addition_percent / 100))
+            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
+
+        return final_selected_indices
 
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
@@ -4289,9 +4171,14 @@ class DBNN(GPUDBNN):
 
     def print_colored_confusion_matrix(self, y_true, y_pred, class_labels=None, header=None):
         # Decode numeric labels back to original alphanumeric labels
+        class_accuracies = self._calculate_class_wise_accuracy(
+            torch.as_tensor(y_true),
+            torch.as_tensor(y_pred)
+        )
+
+        # Get string labels for display only
         y_true_labels = self.label_encoder.inverse_transform(y_true)
         y_pred_labels = self.label_encoder.inverse_transform(y_pred)
-        class_accuracies = self._calculate_class_wise_accuracy(torch.from_numpy(y_true_labels).cpu(), torch.from_numpy(y_pred_labels).cpu())
 
         # Use minimum class accuracy as the criterion
         self.best_combined_accuracy = sum([v['accuracy'] for v in class_accuracies.values()]) / len(class_accuracies)
