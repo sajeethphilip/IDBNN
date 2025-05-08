@@ -2263,10 +2263,11 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Cluster-based selection with robust dimension handling - Optimized Version."""
+        """Cluster-based selection with progress tracking and optimized processing"""
+        from tqdm import tqdm
+
+        # Configuration parameters
         active_learning_config = self.config.get('active_learning', {})
-        strong_margin_threshold = active_learning_config.get('strong_margin_threshold', 0.6)
-        marginal_margin_threshold = active_learning_config.get('marginal_margin_threshold', 0.6)
         min_divergence = active_learning_config.get('min_divergence', 0.1)
         max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
 
@@ -2285,41 +2286,64 @@ class DBNN(GPUDBNN):
         final_selected_indices = []
         unique_classes = torch.unique(y_test[misclassified_indices])
 
-        for class_id in unique_classes:
+        # Class processing progress bar
+        class_pbar = tqdm(
+            unique_classes.cpu().numpy(),
+            desc="Processing classes",
+            leave=False,
+            position=0
+        )
+
+        for class_id in class_pbar:
+            class_pbar.set_postfix_str(f"Class {class_id}")
             class_mask = y_test[misclassified_indices] == class_id
             class_indices = misclassified_indices[class_mask]
 
             if class_indices.numel() == 0:
                 continue
 
-            # Vectorized batch processing
+            # Batch processing setup
             samples, margins, indices = [], [], []
+            batch_iter = range(0, len(class_indices), self.batch_size)
+            batch_pbar = tqdm(
+                total=len(class_indices),
+                desc=f"Class {class_id} batches",
+                leave=False,
+                position=1,
+                unit='sample'
+            )
+
+            # Batch processing loop
             for batch_start in range(0, len(class_indices), self.batch_size):
-                batch_end = min((batch_start + self.batch_size), len(class_indices))
+                batch_end = min(batch_start + self.batch_size, len(class_indices))
                 batch_idx = class_indices[batch_start:batch_end]
 
-                # Simplified tensor indexing
+                # Data loading and processing
                 batch_X = self.X_tensor[test_indices[batch_idx]]
 
-                # Unified posterior computation
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
                 else:
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-                # Optimized margin calculation
+                # Margin calculation
                 max_probs, _ = torch.max(posteriors, dim=1)
                 true_probs = posteriors[:, class_id]
                 batch_margins = max_probs - true_probs
 
+                # Store results
                 samples.append(batch_X)
                 margins.append(batch_margins)
                 indices.append(test_indices[batch_idx])
+                batch_pbar.update(len(batch_idx))
 
+            batch_pbar.close()
+
+            # Skip if no valid samples
             if not samples:
                 continue
 
-            # Combine batch results efficiently
+            # Combine batch results
             try:
                 samples = torch.cat(samples)
                 margins = torch.cat(margins)
@@ -2330,7 +2354,7 @@ class DBNN(GPUDBNN):
             if indices.numel() == 0:
                 continue
 
-            # Direct tensor indexing for mandatory samples
+            # Mandatory sample selection
             if len(indices) >= 2:
                 max_idx = torch.argmax(margins)
                 min_idx = torch.argmin(margins)
@@ -2338,34 +2362,29 @@ class DBNN(GPUDBNN):
             else:
                 mandatory_indices = indices
 
-            # Process remaining candidates
+            # Cluster processing
             remaining_mask = ~torch.isin(indices, mandatory_indices)
             candidate_samples = samples[remaining_mask]
             candidate_indices = indices[remaining_mask]
 
             if candidate_samples.numel() > 0:
                 div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
-                clusters = []
-                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=candidate_samples.device)
+                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=self.device)
                 cluster_tensors = []
 
+                # Cluster identification loop
                 for i in range(len(candidate_samples)):
                     if not visited[i]:
                         cluster_mask = div_matrix[i] < min_divergence
-                        # Fix: Use flatten() instead of squeeze() to maintain 1D tensor
                         cluster_members = cluster_mask.nonzero().flatten()
 
-                        # Handle empty clusters case
                         if cluster_members.numel() == 0:
                             continue
 
-                        # Store cluster representative directly as tensor
                         cluster_tensors.append(candidate_indices[cluster_members[0]])
-
-                        # Update visited efficiently
                         visited |= cluster_mask
 
-                # Combine cluster representatives
+                # Combine selected samples
                 if cluster_tensors:
                     cluster_indices = torch.stack(cluster_tensors)
                     selected = torch.cat([mandatory_indices, cluster_indices]).unique()
@@ -2379,6 +2398,7 @@ class DBNN(GPUDBNN):
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
+        class_pbar.close()
         return final_selected_indices
 
 
