@@ -10,6 +10,7 @@
 # upgraded to use GPU in pairwise computations for both models. May 4 2025 7:28 pm
 # Added automatic conf creation option. May 4 2025 10:56 pm
 # Updated failed candidate selection procedure as per DBNN original concepts May 5 2025 3:57 pm
+# Fixed the bug in feature selection : May 10:12:09 am
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
