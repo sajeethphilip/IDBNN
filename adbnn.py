@@ -2146,6 +2146,67 @@ class DBNN(GPUDBNN):
         return threshold
 
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
+        """Optimized divergence computation with device handling fixes"""
+        from tqdm import tqdm
+
+        # Convert device string to torch.device
+        device = torch.device(self.device) if isinstance(self.device, str) else self.device
+
+        n_samples = sample_data.shape[0]
+        if n_samples <= 1:
+            return torch.zeros((1, 1), device=device)
+
+        # Create pair indices tensor properly
+        with torch.no_grad():
+            pair_indices = torch.as_tensor(feature_pairs, device=device)  # Fixes warning
+
+        n_pairs = len(feature_pairs)
+
+        # Device type check fix
+        dtype = torch.float16 if device.type == 'cuda' else torch.float32
+        element_size = 2 if dtype == torch.float16 else 4
+
+        # Memory calculation
+        if device.type == 'cuda':
+            available_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
+        else:
+            available_mem = 1e9  # 1GB dummy value for CPU
+
+        matrix_size = n_samples * n_samples * element_size
+        max_pairs_per_batch = max(1, int(available_mem * 0.4 / (matrix_size * 2)))
+
+        total_distances = torch.zeros((n_samples, n_samples), device=device, dtype=dtype)
+
+        with tqdm(total=n_pairs, desc='Computing divergences', leave=False) as pbar:
+            for batch_start in range(0, n_pairs, max_pairs_per_batch):
+                batch_end = min(batch_start + max_pairs_per_batch, n_pairs)
+                current_batch_size = batch_end - batch_start
+
+                batch_pairs = pair_indices[batch_start:batch_end]
+                batch_data = sample_data[:, batch_pairs].movedim(1, 2)
+
+                diff = batch_data[:, None] - batch_data[None, :]
+                batch_distances = torch.norm(diff, p=2, dim=-1)
+
+                total_distances += batch_distances.sum(dim=-1).to(dtype=dtype)
+
+                del batch_data, diff, batch_distances
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+
+                pbar.update(current_batch_size)
+
+        distances = total_distances / n_pairs
+        if distances.dtype != torch.float32:
+            distances = distances.to(torch.float32)
+
+        max_val = distances.max()
+        if max_val > 0:
+            distances.div_(max_val)
+
+        return distances
+
+    def _compute_sample_divergence_old(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
         """
         Memory-efficient computation of pairwise feature divergence.
         Processes feature pairs in batches to avoid OOM errors.
