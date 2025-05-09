@@ -2363,8 +2363,8 @@ class DBNN(GPUDBNN):
             class_min_posterior = torch.min(true_probs_all)
 
             # Calculate dynamic thresholds
-            strong_threshold =active_learning_config.get("strong_margin_threshold",0.1) * class_max_posterior
-            marginal_threshold =active_learning_config.get("marginal_margin_threshold",0.1)* class_min_posterior
+            strong_threshold =class_max_posterior-active_learning_config.get("strong_margin_threshold",0.1) * class_max_posterior
+            marginal_threshold =class_min_posterior+active_learning_config.get("marginal_margin_threshold",0.1)* class_min_posterior
 
             # Filter samples meeting criteria
             strong_mask = max_probs_all >= strong_threshold
