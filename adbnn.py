@@ -2269,7 +2269,7 @@ class DBNN(GPUDBNN):
         # Configuration parameters
         active_learning_config = self.config.get('active_learning', {})
         min_divergence = active_learning_config.get('min_divergence', 0.1)
-        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 5)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 99) # retain 99% of the maximal divergence samples from the class
 
         # Convert inputs to tensors on active device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
@@ -2302,8 +2302,9 @@ class DBNN(GPUDBNN):
             if class_indices.numel() == 0:
                 continue
 
-            # Batch processing setup
-            samples, margins, indices = [], [], []
+            # Batch processing to get posteriors and margins
+            samples, margins, max_probs_list, true_probs_list, indices = [], [], [], [], []
+
             batch_iter = range(0, len(class_indices), self.batch_size)
             batch_pbar = tqdm(
                 total=len(class_indices),
@@ -2332,6 +2333,9 @@ class DBNN(GPUDBNN):
 
                 samples.append(batch_X)
                 margins.append(batch_margins)
+                max_probs_list.append(max_probs)  # for marginal selection
+                true_probs_list.append(true_probs)  #
+
                 indices.append(test_indices[batch_idx])
                 batch_pbar.update(len(batch_idx))
 
@@ -2344,12 +2348,32 @@ class DBNN(GPUDBNN):
             try:
                 samples = torch.cat(samples).to(self.device)
                 margins = torch.cat(margins).to(self.device)
+                max_probs_all = torch.cat(max_probs_list).to(self.device)  #for marginal selection
+                true_probs_all = torch.cat(true_probs_list).to(self.device)  #
                 indices = torch.cat(indices).to(self.device)
             except RuntimeError:
                 continue
 
             if indices.numel() == 0:
                 continue
+
+            # --- New Threshold Logic Starts Here ---
+            # Get class-specific extreme posteriors
+            class_max_posterior = torch.max(max_probs_all)
+            class_min_posterior = torch.min(true_probs_all)
+
+            # Calculate dynamic thresholds
+            strong_threshold =active_learning_config.get("strong_margin_threshold",0.1) * class_max_posterior
+            marginal_threshold =active_learning_config.get("marginal_margin_threshold",0.1)* class_min_posterior
+
+            # Filter samples meeting criteria
+            strong_mask = max_probs_all >= strong_threshold
+            marginal_mask = true_probs_all <= marginal_threshold
+            combined_mask = strong_mask | marginal_mask
+
+            # Select eligible candidates
+            eligible_indices = indices[combined_mask]
+            # --- New Threshold Logic Ends Here ---
 
             # Mandatory samples selection
             if len(indices) >= 2:
@@ -2358,6 +2382,10 @@ class DBNN(GPUDBNN):
                 mandatory_indices = indices[torch.stack([max_idx, min_idx])]
             else:
                 mandatory_indices = indices
+
+            # Combine mandatory + threshold-filtered samples
+            all_candidates = torch.cat([mandatory_indices, eligible_indices]).unique()
+
 
             # Cluster processing with device control
             remaining_mask = ~torch.isin(indices, mandatory_indices)
