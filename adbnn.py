@@ -2263,7 +2263,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
-        """Cluster-based selection with progress tracking and optimized processing"""
+        """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
 
         # Configuration parameters
@@ -2288,7 +2288,7 @@ class DBNN(GPUDBNN):
 
         # Class processing progress bar
         class_pbar = tqdm(
-            unique_classes.cpu().numpy(),
+            unique_classes.cpu().numpy(),  # Keep progress bar on CPU
             desc="Processing classes",
             leave=False,
             position=0
@@ -2313,25 +2313,23 @@ class DBNN(GPUDBNN):
                 unit='sample'
             )
 
-            # Batch processing loop
             for batch_start in range(0, len(class_indices), self.batch_size):
                 batch_end = min(batch_start + self.batch_size, len(class_indices))
                 batch_idx = class_indices[batch_start:batch_end]
 
-                # Data loading and processing
-                batch_X = self.X_tensor[test_indices[batch_idx]]
+                # Ensure device consistency
+                batch_X = self.X_tensor[test_indices[batch_idx]].to(self.device)
 
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
                 else:
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-                # Margin calculation
+                # Device-stable calculations
                 max_probs, _ = torch.max(posteriors, dim=1)
                 true_probs = posteriors[:, class_id]
                 batch_margins = max_probs - true_probs
 
-                # Store results
                 samples.append(batch_X)
                 margins.append(batch_margins)
                 indices.append(test_indices[batch_idx])
@@ -2339,22 +2337,21 @@ class DBNN(GPUDBNN):
 
             batch_pbar.close()
 
-            # Skip if no valid samples
             if not samples:
                 continue
 
-            # Combine batch results
+            # Device-aware concatenation
             try:
-                samples = torch.cat(samples)
-                margins = torch.cat(margins)
-                indices = torch.cat(indices)
+                samples = torch.cat(samples).to(self.device)
+                margins = torch.cat(margins).to(self.device)
+                indices = torch.cat(indices).to(self.device)
             except RuntimeError:
                 continue
 
             if indices.numel() == 0:
                 continue
 
-            # Mandatory sample selection
+            # Mandatory samples selection
             if len(indices) >= 2:
                 max_idx = torch.argmax(margins)
                 min_idx = torch.argmin(margins)
@@ -2362,38 +2359,47 @@ class DBNN(GPUDBNN):
             else:
                 mandatory_indices = indices
 
-            # Cluster processing
+            # Cluster processing with device control
             remaining_mask = ~torch.isin(indices, mandatory_indices)
-            candidate_samples = samples[remaining_mask]
-            candidate_indices = indices[remaining_mask]
+            candidate_samples = samples[remaining_mask].to(self.device)
+            candidate_indices = indices[remaining_mask].to(self.device)
 
             if candidate_samples.numel() > 0:
-                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
-                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=self.device)
-                cluster_tensors = []
+                # Ensure divergence matrix stays on device
+                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs).to(self.device)
 
-                # Cluster identification loop
+                # Device-consistent visited mask
+                visited = torch.zeros(len(candidate_samples),
+                                    dtype=torch.bool,
+                                    device=self.device)
+
+                cluster_tensors = []
+                min_divergence_tensor = torch.tensor(min_divergence,
+                                                   device=self.device)
+
                 for i in range(len(candidate_samples)):
                     if not visited[i]:
-                        cluster_mask = div_matrix[i] < min_divergence
+                        # Device-aware comparison
+                        cluster_mask = div_matrix[i] < min_divergence_tensor
                         cluster_members = cluster_mask.nonzero().flatten()
 
                         if cluster_members.numel() == 0:
                             continue
 
+                        # Device-stable indexing
                         cluster_tensors.append(candidate_indices[cluster_members[0]])
-                        visited |= cluster_mask
+                        visited |= cluster_mask.to(self.device)
 
-                # Combine selected samples
                 if cluster_tensors:
                     cluster_indices = torch.stack(cluster_tensors)
-                    selected = torch.cat([mandatory_indices, cluster_indices]).unique()
+                    selected = torch.cat([mandatory_indices.to(self.device),
+                                        cluster_indices.to(self.device)]).unique()
                 else:
                     selected = mandatory_indices
             else:
                 selected = mandatory_indices
 
-            # Apply class quota
+            # Final device-to-CPU transfer
             class_count = (y_test == class_id).sum().item()
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
