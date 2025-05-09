@@ -2146,65 +2146,59 @@ class DBNN(GPUDBNN):
         return threshold
 
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
-        """Optimized divergence computation with device handling fixes"""
+        """Memory-efficient divergence computation with chunked processing"""
         from tqdm import tqdm
 
-        # Convert device string to torch.device
         device = torch.device(self.device) if isinstance(self.device, str) else self.device
-
         n_samples = sample_data.shape[0]
+
         if n_samples <= 1:
             return torch.zeros((1, 1), device=device)
 
-        # Create pair indices tensor properly
-        with torch.no_grad():
-            pair_indices = torch.as_tensor(feature_pairs, device=device)  # Fixes warning
-
-        n_pairs = len(feature_pairs)
-
-        # Device type check fix
+        # Use float16 for memory savings with mixed precision
         dtype = torch.float16 if device.type == 'cuda' else torch.float32
-        element_size = 2 if dtype == torch.float16 else 4
+        distances = torch.zeros((n_samples, n_samples), device=device, dtype=dtype)
 
-        # Memory calculation
-        if device.type == 'cuda':
-            available_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
-        else:
-            available_mem = 1e9  # 1GB dummy value for CPU
+        # Process one feature pair at a time with memory reuse
+        with tqdm(total=len(feature_pairs), desc='Computing divergences', leave=False) as pbar:
+            for pair in feature_pairs:
+                # Get feature pair data
+                a, b = pair
+                pair_data = sample_data[:, [a, b]].to(device)  # [n_samples, 2]
 
-        matrix_size = n_samples * n_samples * element_size
-        max_pairs_per_batch = max(1, int(available_mem * 0.4 / (matrix_size * 2)))
+                # Compute pairwise differences in chunks
+                chunk_size = 256  # Adjust based on available memory
+                for i in range(0, n_samples, chunk_size):
+                    i_end = min(i + chunk_size, n_samples)
+                    chunk_i = pair_data[i:i_end]
 
-        total_distances = torch.zeros((n_samples, n_samples), device=device, dtype=dtype)
+                    for j in range(0, n_samples, chunk_size):
+                        j_end = min(j + chunk_size, n_samples)
+                        chunk_j = pair_data[j:j_end]
 
-        with tqdm(total=n_pairs, desc='Computing divergences', leave=False) as pbar:
-            for batch_start in range(0, n_pairs, max_pairs_per_batch):
-                batch_end = min(batch_start + max_pairs_per_batch, n_pairs)
-                current_batch_size = batch_end - batch_start
+                        # Compute chunk differences
+                        diff = chunk_i.unsqueeze(1) - chunk_j.unsqueeze(0)  # [chunk_i, chunk_j, 2]
+                        chunk_dist = torch.norm(diff, p=2, dim=-1)  # [chunk_i, chunk_j]
 
-                batch_pairs = pair_indices[batch_start:batch_end]
-                batch_data = sample_data[:, batch_pairs].movedim(1, 2)
+                        # Accumulate distances
+                        distances[i:i_end, j:j_end] += chunk_dist.to(dtype=dtype)
 
-                diff = batch_data[:, None] - batch_data[None, :]
-                batch_distances = torch.norm(diff, p=2, dim=-1)
+                        # Cleanup
+                        del diff, chunk_dist
 
-                total_distances += batch_distances.sum(dim=-1).to(dtype=dtype)
-
-                del batch_data, diff, batch_distances
+                # Update progress and clean memory
+                pbar.update(1)
+                del pair_data
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
 
-                pbar.update(current_batch_size)
-
-        distances = total_distances / n_pairs
-        if distances.dtype != torch.float32:
-            distances = distances.to(torch.float32)
-
+        # Normalization
+        distances /= len(feature_pairs)
         max_val = distances.max()
         if max_val > 0:
-            distances.div_(max_val)
+            distances /= max_val
 
-        return distances
+        return distances.to(torch.float32)
 
 
     def _compute_feature_cardinalities(self, samples_data: torch.Tensor) -> torch.Tensor:
