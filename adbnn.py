@@ -532,9 +532,16 @@ class DatasetConfig:
             # Validate columns
             try:
                 df = pd.read_csv(validated_config['file_path'], nrows=0)
-                validated_config['column_names'] = df.columns.tolist()
+                # Only set column names if not already configured
+                if 'column_names' not in validated_config or not validated_config['column_names']:
+                    validated_config['column_names'] = df.columns.tolist()
+                # Otherwise, validate configured columns exist in CSV
+                else:
+                    missing = set(validated_config['column_names']) - set(df.columns)
+                    if missing:
+                        print(f"Configured columns missing in CSV: {missing}")
             except Exception as e:
-                print("\033[K" + f"Warning: Could not infer column names: {str(e)}")
+                print("\033[K" + f"Warning: Could not validate columns: {str(e)}")
                 return None
 
             # Validate target column exists
