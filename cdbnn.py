@@ -4511,9 +4511,9 @@ class DatasetProcessor:
             "active_learning": {
                 "tolerance": 1.0,
                 "cardinality_threshold_percentile": 95,
-                "strong_margin_threshold": 0.5,
-                "marginal_margin_threshold": 0.5,
-                "min_divergence": 0.5
+                "strong_margin_threshold": 0.01,
+                "marginal_margin_threshold": 0.01,
+                "min_divergence": 0.1
             },
             "training_params": {
                 "trials": 100,
