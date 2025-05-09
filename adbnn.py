@@ -2144,8 +2144,64 @@ class DBNN(GPUDBNN):
               f"({(n_included/len(cardinalities))*100:.1f}%)")
 
         return threshold
-
+#--------------------compute sample divergence -----------------------
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
+        """Optimized divergence computation with batched feature processing"""
+        device = sample_data.device
+        n_samples = sample_data.shape[0]
+
+        if n_samples <= 1:
+            return torch.zeros((1, 1), device=device)
+
+        # Use mixed precision with memory-efficient accumulation
+        dtype = torch.float16 if device.type == 'cuda' else torch.float32
+        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float32)
+
+        # Process feature pairs in memory-optimized batches
+        batch_size = self._get_feature_batch_size(n_samples, len(feature_pairs))
+
+        with torch.no_grad():
+            for i in range(0, len(feature_pairs), batch_size):
+                batch_pairs = feature_pairs[i:i+batch_size]
+
+                # Get batch data in reduced precision
+                batch_data = sample_data[:, batch_pairs].to(dtype)
+
+                # Vectorized pairwise distance calculation
+                diff = batch_data.unsqueeze(1) - batch_data.unsqueeze(0)  # [n_samples, n_samples, batch_size, 2]
+                batch_dist = torch.norm(diff, p=2, dim=-1)  # [n_samples, n_samples, batch_size]
+
+                # Accumulate with proper type casting
+                distances += batch_dist.mean(dim=-1).to(torch.float32)
+
+                # Explicit memory cleanup
+                del batch_data, diff, batch_dist
+                torch.cuda.empty_cache()
+
+        # Normalize while maintaining numerical stability
+        distances /= len(feature_pairs)
+        max_val = distances.max()
+        return distances / (max_val + 1e-7) if max_val > 0 else distances
+
+    def _get_feature_batch_size(self, n_samples, n_pairs):
+        """Dynamically determine optimal feature batch size based on available memory"""
+        if not torch.cuda.is_available():
+            return 100  # Default for CPU
+
+        # Calculate available memory with safety margin
+        free_mem = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+        safety_margin = 0.8  # Use only 80% of available memory
+        available_mem = free_mem * safety_margin
+
+        # Memory estimation per feature pair batch
+        per_pair_mem = n_samples * n_samples * 4  # 4 bytes per float32
+        max_batches = available_mem // per_pair_mem
+
+        return min(max(1, int(max_batches)), 256)  # Limit between 1-256
+
+
+#---------------------------------------------------------------------------------------
+    def _compute_sample_divergence_old(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
         """Memory-efficient divergence computation with chunked processing"""
         from tqdm import tqdm
 
