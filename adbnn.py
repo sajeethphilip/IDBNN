@@ -2206,61 +2206,6 @@ class DBNN(GPUDBNN):
 
         return distances
 
-    def _compute_sample_divergence_old(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
-        """
-        Memory-efficient computation of pairwise feature divergence.
-        Processes feature pairs in batches to avoid OOM errors.
-        """
-        n_samples = sample_data.shape[0]
-        if n_samples <= 1:
-            return torch.zeros((1, 1), device=self.device)
-
-        # Calculate maximum number of pairs we can process at once
-        pair_element_size = 4  # bytes per float32 element
-        matrix_size = n_samples * n_samples * pair_element_size
-        available_mem = torch.cuda.memory_reserved(0) - torch.cuda.memory_allocated(0)
-        max_pairs_per_batch = max(1, int(available_mem * 0.5 / matrix_size))  # Use only 50% of available memory
-
-        # Initialize result on CPU (we'll move to GPU later if needed)
-        total_distances = torch.zeros((n_samples, n_samples), device='cpu')
-
-        # Process feature pairs in batches
-        for batch_start in range(0, len(feature_pairs), max_pairs_per_batch):
-            batch_end = min(batch_start + max_pairs_per_batch, len(feature_pairs))
-            batch_pairs = feature_pairs[batch_start:batch_end]
-
-            # Move only the needed data to GPU
-            with torch.no_grad():
-                # Get batch data (shape: [n_samples, n_pairs, 2])
-                batch_data = torch.stack([sample_data[:, pair] for pair in batch_pairs], dim=1)
-                batch_data = batch_data.to(self.device)
-
-                # Compute pairwise differences (shape: [n_samples, n_samples, n_pairs, 2])
-                diff = batch_data.unsqueeze(1) - batch_data.unsqueeze(0)
-
-                # Compute distances for this batch (shape: [n_samples, n_samples, n_pairs])
-                batch_distances = torch.norm(diff, dim=3)
-
-                # Sum distances and move to CPU immediately
-                total_distances += batch_distances.sum(dim=2).cpu()
-
-                # Clean up
-                del batch_data, diff, batch_distances
-                torch.cuda.empty_cache()
-
-        # Compute mean distance across all pairs
-        distances = total_distances / len(feature_pairs)
-
-        # Normalize if needed
-        max_val = distances.max()
-        if max_val > 0:
-            distances /= max_val
-
-        # Move to device if it's small enough
-        if n_samples * n_samples * 4 < 1e8:  # ~100MB
-            distances = distances.to(self.device)
-
-        return distances
 
     def _compute_feature_cardinalities(self, samples_data: torch.Tensor) -> torch.Tensor:
         """
