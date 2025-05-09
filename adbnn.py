@@ -6362,7 +6362,7 @@ def load_or_create_config(config_path: str) -> dict:
         "active_learning": {
             "tolerance": 1.0,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.01,
+            "strong_margin_threshold": 0.01,           # Consider only a margin of 1% of the max for divergence computation and sample selection.
             "marginal_margin_threshold": 0.01,
             "min_divergence": 0.1
         },
