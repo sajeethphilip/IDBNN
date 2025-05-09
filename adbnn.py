@@ -356,8 +356,8 @@ class DatasetConfig:
         config["active_learning"]= {
             "tolerance": 1.0,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.6,
-            "marginal_margin_threshold": 0.6,
+            "strong_margin_threshold": 0.01,
+            "marginal_margin_threshold": 0.01,
             "min_divergence": 0.1
         }
         config["execution_flags"]= {
@@ -2363,8 +2363,8 @@ class DBNN(GPUDBNN):
             class_min_posterior = torch.min(true_probs_all)
 
             # Calculate dynamic thresholds
-            strong_threshold =class_max_posterior-active_learning_config.get("strong_margin_threshold",0.1) * class_max_posterior
-            marginal_threshold =class_min_posterior+active_learning_config.get("marginal_margin_threshold",0.1)* class_min_posterior
+            strong_threshold =class_max_posterior-active_learning_config.get("strong_margin_threshold",0.01) * class_max_posterior
+            marginal_threshold =class_min_posterior+active_learning_config.get("marginal_margin_threshold",0.01)* class_min_posterior
 
             # Filter samples meeting criteria
             strong_mask = max_probs_all >= strong_threshold
@@ -6362,8 +6362,8 @@ def load_or_create_config(config_path: str) -> dict:
         "active_learning": {
             "tolerance": 1.0,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.6,
-            "marginal_margin_threshold": 0.6,
+            "strong_margin_threshold": 0.01,
+            "marginal_margin_threshold": 0.01,
             "min_divergence": 0.1
         },
         "execution_flags": {
