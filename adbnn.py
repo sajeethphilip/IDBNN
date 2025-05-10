@@ -2337,7 +2337,10 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
+#-------------updated failed classes samples selection ----------------------
 
+
+#----------------------------------------------------------------------------------------------
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with device-aware processing"""
@@ -2356,7 +2359,7 @@ class DBNN(GPUDBNN):
         # Find misclassified samples
         misclassified_mask = test_predictions != y_test
         misclassified_indices = misclassified_mask.nonzero().squeeze()
-
+        print(len(misclassified_mask),len(misclassified_indices))
         if misclassified_indices.numel() == 0:
             return []
 
