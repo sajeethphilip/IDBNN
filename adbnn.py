@@ -562,6 +562,14 @@ class DatasetConfig:
                         print(f"\033[K{Colors.GREEN}Updated target column to '{new_target}' in configuration.{Colors.ENDC}")
                         break
                     print(f"\033[K{Colors.RED}Invalid column! Choose from: {', '.join(validated_config['column_names'])}{Colors.ENDC}")
+            if isinstance(target_col, (int, float)):
+                # Convert numeric indices to column name
+                validated_config['target_column'] = str(validated_config['column_names'][target_col])
+            elif isinstance(target_col, str):
+                pass  # Already correct
+            else:
+                raise ValueError(f"Invalid target column type: {type(target_col)}")
+
 
             return validated_config
 
@@ -1945,6 +1953,10 @@ class DBNN(GPUDBNN):
                 'shuffle_path': shuffle_path
             }
 
+            # Convert target column to string once
+            if self.target_column in df.columns:
+                df[self.target_column] = df[self.target_column].apply(str)  # Force string
+
             return df
 
         except Exception as e:
@@ -2326,6 +2338,7 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
+
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
         """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
@@ -2365,6 +2378,7 @@ class DBNN(GPUDBNN):
 
             if class_indices.numel() == 0:
                 continue
+
 
             # Batch processing to get posteriors and margins
             samples, margins, max_probs_list, true_probs_list, indices = [], [], [], [], []
@@ -5730,6 +5744,9 @@ class DBNN(GPUDBNN):
         try:
             # Load data
             df = pd.read_csv(input_csv)
+            if self.target_column in df.columns:
+                df[self.target_column] = df[self.target_column].apply(str)  # Force string
+
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
             predict_mode = True if self.mode=='predict' else False
             self.model_type=model_type
