@@ -1827,6 +1827,8 @@ class DBNN(GPUDBNN):
             else:
                 #results_df['true_class'] = true_labels_np
                 results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+                # Ensure predicted_class uses string labels
+                results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
 
         return results_df
 
@@ -2632,26 +2634,15 @@ class DBNN(GPUDBNN):
                         if os.path.exists(prev_train_file):
                             prev_train_data = pd.read_csv(prev_train_file)
 
-                            # Match rows between previous training data and current data
-                            train_indices = []
-                            prev_features = prev_train_data.drop(columns=[self.target_column])
-                            current_features = X
+                            # Try loading indices from last split
+                            prev_train, prev_test = self.load_last_known_split()
 
-                            # Ensure columns match
-                            common_cols = list(set(prev_features.columns) & set(current_features.columns))
-
-                            # Find matching rows
-                            for idx, row in current_features[common_cols].iterrows():
-                                # Check if this row exists in previous training data
-                                matches = (prev_features[common_cols] == row).all(axis=1)
-                                if matches.any():
-                                    train_indices.append(idx)
-
-                            print("\033[K" +f"Loaded {len(train_indices)} previous training samples")
-
-                            # Initialize test indices as all indices not in training
-                            test_indices = list(set(range(len(X))) - set(train_indices))
-                        else:
+                            if prev_train and prev_test:
+                                train_indices = prev_train
+                                test_indices = prev_test
+                                print(f"\033[KResuming with {len(train_indices)} previous training samples")
+                            else:
+                                print("\033[KNo valid previous split found, initializing new training set")
                             print("\033[K" +"No previous training data found - starting fresh")
                             train_indices = []
                             test_indices = list(range(len(X)))
@@ -4012,72 +4003,57 @@ class DBNN(GPUDBNN):
 
 
 #---------------------------------------------------------Save Last data -------------------------
-    def save_last_split(self, train_indices: list, test_indices: list):
-        """Save the last training/testing split to CSV files"""
-        dataset_name = self.dataset_name
-
-        # Get full dataset
-        X = self.data.drop(columns=[self.target_column])
-        y = self.data[self.target_column]
-
-        # Save training data
-        train_data = pd.concat([X.iloc[train_indices], y.iloc[train_indices]], axis=1)
-        train_data.to_csv(f'data/{dataset_name}/Last_training.csv',header=True, index=True)
-
-        # Save testing data
-        test_data = pd.concat([X.iloc[test_indices], y.iloc[test_indices]], axis=1)
-        test_data.to_csv(f'data/{dataset_name}/Last_testing.csv', header=True, index=True)
-        print("\033[K" +f"{Colors.GREEN}Last testing data is saved to data/{dataset_name}/Last_testing.csv{Colors.ENDC}")
-        print("\033[K" +f"{Colors.GREEN}Last training data is saved to data/{dataset_name}/Last_training.csv{Colors.ENDC}")
-
     def load_last_known_split(self):
-        """Load the last known good training/testing split with proper column alignment"""
+        """Load the last known split using stored original indices"""
         dataset_name = self.dataset_name
         train_file = f'data/{dataset_name}/Last_training.csv'
         test_file = f'data/{dataset_name}/Last_testing.csv'
 
         if os.path.exists(train_file) and os.path.exists(test_file):
             try:
-                # Load the saved splits
-                train_data = pd.read_csv(train_file)
-                test_data = pd.read_csv(test_file)
+                # Load indices directly from index column
+                train_df = pd.read_csv(train_file)
+                test_df = pd.read_csv(test_file)
 
-                # Get current feature columns excluding target
-                X = self.data.drop(columns=[self.target_column])
-                current_columns = X.columns
-
-                # Ensure train_data has same columns as current data
-                train_features = train_data.drop(columns=[self.target_column])
-                train_features = train_features[current_columns]
-
-                # Initialize indices lists
-                train_indices = []
-                test_indices = []
-
-                # Match rows using selected columns
-                for idx, row in X.iterrows():
-                    # Align the row with train_features columns
-                    row = row[current_columns]
-
-                    # Compare with train data first
-                    match_mask = (train_features == row).all(axis=1)
-                    if match_mask.any():
-                        train_indices.append(idx)
-                    else:
-                        test_indices.append(idx)
-
-                if train_indices or test_indices:
-                    print("\033[K" +f"Loaded previous split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
-                    return train_indices, test_indices
-                else:
-                    print("\033[K" +"No valid indices found in previous split")
+                # Validate index column exists
+                if 'original_index' not in train_df.columns or 'original_index' not in test_df.columns:
+                    print("\033[K" + "No original_index column found in split files")
                     return None, None
 
+                # Get indices as lists
+                train_indices = train_df['original_index'].tolist()
+                test_indices = test_df['original_index'].tolist()
+
+                # Validate indices against current data
+                max_valid_index = len(self.data) - 1
+                train_indices = [idx for idx in train_indices if 0 <= idx <= max_valid_index]
+                test_indices = [idx for idx in test_indices if 0 <= idx <= max_valid_index]
+
+                print(f"\033[KLoaded previous split - Training: {len(train_indices)}, Testing: {len(test_indices)}")
+                return train_indices, test_indices
+
             except Exception as e:
-                print("\033[K" +f"Error loading previous split: {str(e)}")
+                print(f"\033[KError loading previous split: {str(e)}")
                 return None, None
 
         return None, None
+
+    def save_last_split(self, train_indices: list, test_indices: list):
+        """Save split with original dataset indices"""
+        dataset_name = self.dataset_name
+        os.makedirs(f'data/{dataset_name}', exist_ok=True)
+
+        # Save training indices with original indexes
+        train_df = self.data.iloc[train_indices].copy()
+        train_df['original_index'] = train_indices
+        train_df.to_csv(f'data/{dataset_name}/Last_training.csv', index=False)
+
+        # Save testing indices with original indexes
+        test_df = self.data.iloc[test_indices].copy()
+        test_df['original_index'] = test_indices
+        test_df.to_csv(f'data/{dataset_name}/Last_testing.csv', index=False)
+
+        print(f"\033[KSaved split with {len(train_indices)} train, {len(test_indices)} test samples")
 #---------------Predcit New --------------------
 
 
