@@ -2342,40 +2342,36 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
 
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices,results):
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
 
         # Configuration parameters
         active_learning_config = self.config.get('active_learning', {})
         min_divergence = active_learning_config.get('min_divergence', 0.1)
-        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 99) # retain 99% of the maximal divergence samples from the class
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 99)
 
         # Convert inputs to tensors on active device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
-        all_results=results['all_predictions']
+
+        all_results = results['all_predictions']
         test_results = all_results.iloc[self.test_indices]
-        misclassified_mask = test_results['predicted_class'] != test_results['true_class']
-        misclassified_indices = test_results[misclassified_mask].index.tolist()  # Get original indices
-        if misclassified_indices:
-            # Convert indices to tensor indices relative to test_indices
-            test_idx_tensor = torch.tensor(self.test_indices, device=self.device)
-            selected_test_indices = test_idx_tensor[misclassified_indices]
-            # Use selected_test_indices to get actual samples from X_tensor
-            failed_samples = y_test[selected_test_indices]
-        else:
-            failed_samples = torch.tensor([], device=self.device)
-        if len(misclassified_indices) == 0:
-            return []
+
+        # Create boolean mask using numpy arrays to avoid chained indexing
+        misclassified_mask = test_results['predicted_class'].to_numpy() != test_results['true_class'].to_numpy()
+        misclassified_indices = test_results.index[misclassified_mask].tolist()
+
+        # Create mapping from original indices to test set positions
+        test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
 
         final_selected_indices = []
         unique_classes = test_results['true_class'].unique()
-        print(unique_classes)
+
         # Class processing progress bar
         class_pbar = tqdm(
-            unique_classes, #.cpu().numpy(),  # Keep progress bar on CPU
+            unique_classes,
             desc="Processing classes",
             leave=False,
             position=0
@@ -2383,140 +2379,114 @@ class DBNN(GPUDBNN):
 
         for class_id in class_pbar:
             class_pbar.set_postfix_str(f"Class {class_id}")
-            class_mask = [misclassified_indices] == class_id
-            class_indices = misclassified_indices[class_mask]
 
-            if class_indices.numel() == 0:
+            # Convert string class label to encoded integer
+            encoded_class_id = self.label_encoder.transform([class_id])[0]
+
+            # Get class-specific misclassified indices using proper boolean indexing
+            class_mask = (test_results.loc[misclassified_indices, 'true_class'] == class_id).to_numpy()
+            class_indices = np.array(misclassified_indices)[class_mask].tolist()
+
+            # Convert original indices to test set positions
+            class_positions = [test_pos_map[idx] for idx in class_indices if idx in test_pos_map]
+            if not class_positions:
                 continue
 
+            # Convert to tensor with proper dtype
+            class_pos_tensor = torch.tensor(class_positions, dtype=torch.long, device=self.device)
 
-            # Batch processing to get posteriors and margins
-            samples, margins, max_probs_list, true_probs_list, indices = [], [], [], [], []
-
-            batch_iter = range(0, len(class_indices), self.batch_size)
+            # Batch processing
+            samples, margins, indices = [], [], []
             batch_pbar = tqdm(
-                total=len(class_indices),
+                total=len(class_positions),
                 desc=f"Class {class_id} batches",
                 leave=False,
                 position=1,
                 unit='sample'
             )
 
-            for batch_start in range(0, len(class_indices), self.batch_size):
-                batch_end = min(batch_start + self.batch_size, len(class_indices))
-                batch_idx = class_indices[batch_start:batch_end]
+            for batch_start in range(0, len(class_positions), self.batch_size):
+                batch_end = min(batch_start + self.batch_size, len(class_positions))
+                batch_pos = class_pos_tensor[batch_start:batch_end]
 
-                # Ensure device consistency
-                batch_X = self.X_tensor[test_indices[batch_idx]].to(self.device)
+                # Get actual data indices
+                batch_indices = test_indices[batch_pos]
+                batch_X = self.X_tensor[batch_indices]
 
+                # Compute posteriors using encoded class ID
                 if self.model_type == "Histogram":
                     posteriors, _ = self._compute_batch_posterior(batch_X)
                 else:
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-                # Device-stable calculations
+                # Device-stable calculations using encoded class ID
                 max_probs, _ = torch.max(posteriors, dim=1)
-                true_probs = posteriors[:, class_id]
+                true_probs = posteriors[:, encoded_class_id]  # Use encoded class ID
                 batch_margins = max_probs - true_probs
 
                 samples.append(batch_X)
                 margins.append(batch_margins)
-                max_probs_list.append(max_probs)  # for marginal selection
-                true_probs_list.append(true_probs)  #
-
-                indices.append(test_indices[batch_idx])
-                batch_pbar.update(len(batch_idx))
+                indices.append(batch_indices)
+                batch_pbar.update(len(batch_pos))
 
             batch_pbar.close()
 
             if not samples:
                 continue
 
-            # Device-aware concatenation
             try:
-                samples = torch.cat(samples).to(self.device)
-                margins = torch.cat(margins).to(self.device)
-                max_probs_all = torch.cat(max_probs_list).to(self.device)  #for marginal selection
-                true_probs_all = torch.cat(true_probs_list).to(self.device)  #
-                indices = torch.cat(indices).to(self.device)
+                # Concatenate tensors properly
+                margins = torch.cat(margins)
+                indices = torch.cat(indices)
+                samples = torch.cat(samples)
             except RuntimeError:
                 continue
 
             if indices.numel() == 0:
                 continue
 
-            # --- New Threshold Logic Starts Here ---
-            # Get class-specific extreme posteriors
-            class_max_posterior = torch.max(max_probs_all)
-            class_min_posterior = torch.min(true_probs_all)
+            # --- Threshold Logic ---
+            class_max_posterior = torch.max(margins)
+            class_min_posterior = torch.min(margins)
 
-            # Calculate dynamic thresholds
-            strong_threshold =class_max_posterior-active_learning_config.get("strong_margin_threshold",0.01) * class_max_posterior
-            marginal_threshold =class_min_posterior+active_learning_config.get("marginal_margin_threshold",0.01)* class_min_posterior
+            strong_threshold = class_max_posterior - active_learning_config.get("strong_margin_threshold", 0.01)
+            marginal_threshold = class_min_posterior + active_learning_config.get("marginal_margin_threshold", 0.01)
 
-            # Filter samples meeting criteria
-            strong_mask = max_probs_all >= strong_threshold
-            marginal_mask = true_probs_all <= marginal_threshold
+            strong_mask = margins >= strong_threshold
+            marginal_mask = margins <= marginal_threshold
             combined_mask = strong_mask | marginal_mask
 
-            # Select eligible candidates
             eligible_indices = indices[combined_mask]
-            # --- New Threshold Logic Ends Here ---
 
-            # Mandatory samples selection
-            if len(indices) >= 2:
-                max_idx = torch.argmax(margins)
-                min_idx = torch.argmin(margins)
-                mandatory_indices = indices[torch.stack([max_idx, min_idx])]
-            else:
-                mandatory_indices = indices
+            # --- Cluster Processing ---
+            mandatory_indices = indices[torch.topk(margins, k=min(2, len(margins))).indices]
 
-            # Combine mandatory + threshold-filtered samples
             all_candidates = torch.cat([mandatory_indices, eligible_indices]).unique()
-
-
-            # Cluster processing with device control
             remaining_mask = ~torch.isin(indices, mandatory_indices)
-            candidate_samples = samples[remaining_mask].to(self.device)
-            candidate_indices = indices[remaining_mask].to(self.device)
+            candidate_samples = samples[remaining_mask]
 
             if candidate_samples.numel() > 0:
-                # Ensure divergence matrix stays on device
-                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs).to(self.device)
-
-                # Device-consistent visited mask
-                visited = torch.zeros(len(candidate_samples),
-                                    dtype=torch.bool,
-                                    device=self.device)
-
-                cluster_tensors = []
-                min_divergence_tensor = torch.tensor(min_divergence,
-                                                   device=self.device)
+                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
+                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=self.device)
+                cluster_indices = []
 
                 for i in range(len(candidate_samples)):
                     if not visited[i]:
-                        # Device-aware comparison
-                        cluster_mask = div_matrix[i] < min_divergence_tensor
-                        cluster_members = cluster_mask.nonzero().flatten()
+                        cluster_mask = div_matrix[i] < min_divergence
+                        cluster_members = torch.where(cluster_mask)[0]
+                        if cluster_members.numel() > 0:
+                            cluster_indices.append(indices[remaining_mask][cluster_members[0]])
+                            visited[cluster_members] = True
 
-                        if cluster_members.numel() == 0:
-                            continue
-
-                        # Device-stable indexing
-                        cluster_tensors.append(candidate_indices[cluster_members[0]])
-                        visited |= cluster_mask.to(self.device)
-
-                if cluster_tensors:
-                    cluster_indices = torch.stack(cluster_tensors)
-                    selected = torch.cat([mandatory_indices.to(self.device),
-                                        cluster_indices.to(self.device)]).unique()
+                if cluster_indices:
+                    selected = torch.cat([mandatory_indices, torch.stack(cluster_indices)]).unique()
                 else:
                     selected = mandatory_indices
             else:
                 selected = mandatory_indices
 
-            # Final device-to-CPU transfer
-            class_count = (y_test == class_id).sum().item()
+            # Final selection with encoded class count check
+            class_count = (y_test == encoded_class_id).sum().item()  # Use encoded class ID
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
