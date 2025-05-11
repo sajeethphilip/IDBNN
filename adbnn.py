@@ -1787,12 +1787,13 @@ class DBNN(GPUDBNN):
                                     columns=getattr(self, 'feature_columns',
                                                   [f'feature_{i}' for i in range(X_orig_np.shape[1])]))
 
-
+        #true_classes=results_df['true_class']
         # Add predictions with label decoding if possible
         if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
             try:
                 # Add predictions and confidence (max probability)
                 results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
+
                 # Add posteriors if available
                 if posteriors_np is not None:
                     for i, class_name in enumerate(self.label_encoder.classes_):
@@ -1818,11 +1819,13 @@ class DBNN(GPUDBNN):
                 hasattr(self, 'label_encoder') and
                 hasattr(self.label_encoder, 'classes_')):
                 try:
-                    results_df['true_class'] = true_labels_np  # Keep original strings
+                    #results_df['true_class'] = true_labels_np  # Keep original strings
+                    results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
                 except Exception as e:
                     print(f"Couldn't preserve true labels: {str(e)}")
             else:
-                results_df['true_class'] = true_labels_np
+                #results_df['true_class'] = true_labels_np
+                results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
 
         return results_df
 
@@ -2339,7 +2342,7 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
 
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices):
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices,results):
         """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
 
@@ -2352,20 +2355,27 @@ class DBNN(GPUDBNN):
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
         y_test = torch.as_tensor(y_test, device=self.device)
         test_indices = torch.as_tensor(test_indices, device=self.device)
-
-        # Find misclassified samples
-        misclassified_mask = test_predictions != y_test
-        misclassified_indices = misclassified_mask.nonzero().squeeze()
-        print(len(misclassified_mask),len(misclassified_indices))
-        if misclassified_indices.numel() == 0:
+        all_results=results['all_predictions']
+        test_results = all_results.iloc[self.test_indices]
+        misclassified_mask = test_results['predicted_class'] != test_results['true_class']
+        misclassified_indices = test_results[misclassified_mask].index.tolist()  # Get original indices
+        if misclassified_indices:
+            # Convert indices to tensor indices relative to test_indices
+            test_idx_tensor = torch.tensor(self.test_indices, device=self.device)
+            selected_test_indices = test_idx_tensor[misclassified_indices]
+            # Use selected_test_indices to get actual samples from X_tensor
+            failed_samples = y_test[selected_test_indices]
+        else:
+            failed_samples = torch.tensor([], device=self.device)
+        if len(misclassified_indices) == 0:
             return []
 
         final_selected_indices = []
-        unique_classes = torch.unique(y_test[misclassified_indices])
-
+        unique_classes = test_results['true_class'].unique()
+        print(unique_classes)
         # Class processing progress bar
         class_pbar = tqdm(
-            unique_classes.cpu().numpy(),  # Keep progress bar on CPU
+            unique_classes, #.cpu().numpy(),  # Keep progress bar on CPU
             desc="Processing classes",
             leave=False,
             position=0
@@ -2373,7 +2383,7 @@ class DBNN(GPUDBNN):
 
         for class_id in class_pbar:
             class_pbar.set_postfix_str(f"Class {class_id}")
-            class_mask = y_test[misclassified_indices] == class_id
+            class_mask = [misclassified_indices] == class_id
             class_indices = misclassified_indices[class_mask]
 
             if class_indices.numel() == 0:
@@ -2829,7 +2839,7 @@ class DBNN(GPUDBNN):
 
                         # Get new training samples from misclassified examples
                         new_train_indices = self._select_samples_from_failed_classes(
-                            test_predictions, y_test, test_indices
+                            test_predictions, y_test, test_indices,results
                         )
 
                         if not new_train_indices:
@@ -2840,7 +2850,7 @@ class DBNN(GPUDBNN):
                     else:
                         # Training did not achieve 100% accuracy, select new samples
                         new_train_indices = self._select_samples_from_failed_classes(
-                            test_predictions, y_test, test_indices
+                            test_predictions, y_test, test_indices,results
                         )
 
                         if not new_train_indices:
