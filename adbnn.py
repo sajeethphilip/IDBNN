@@ -5672,13 +5672,24 @@ class DBNN(GPUDBNN):
     # DBNN class to handle prediction functionality
     def _validate_target_column(self, y: pd.Series) -> bool:
         """Check if target column values match label encoder classes"""
+        # Handle case where label encoder isn't initialized
         if not hasattr(self.label_encoder, 'classes_'):
+            print(f"{Colors.RED}Label encoder not initialized!{Colors.ENDC}")
+            return False  # Or raise ValueError if critical
+
+        # Handle empty classes
+        if len(self.label_encoder.classes_) == 0:
+            print(f"{Colors.RED}Label encoder has no classes!{Colors.ENDC}")
             return False
 
+        # Check value alignment
         unique_values = set(y.unique())
         encoder_classes = set(self.label_encoder.classes_)
 
-        # Check if all values in target column are in encoder classes
+        # Allow validation in prediction mode (target column may not exist)
+        if self.mode == 'predict' and self.target_column not in y.name:
+            return True
+
         return unique_values.issubset(encoder_classes)
 
     def predict_from_file(self, input_csv: str, output_path: str = None,model_type=None,
