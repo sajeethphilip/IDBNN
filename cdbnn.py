@@ -1565,32 +1565,51 @@ class BaseAutoencoder(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass with flexible output format"""
-        embedding = self.encode(x)
+        """Forward pass with attention weight support"""
+        # Shared encoder processing
+        attn_weights = None
+        encoded = x
+
+        # Process through encoder layers
+        for idx, layer in enumerate(self.encoder_layers):
+            encoded = layer(encoded)
+            # Capture attention weights from last layer if enabled
+            if idx == len(self.encoder_layers)-1 and self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
+                if isinstance(encoded, tuple):
+                    encoded, attn_weights = encoded  # Unpack if layer returns (features, attn_weights)
+                else:
+                    # For backward compatibility with existing layers
+                    attn_weights = encoded.mean(dim=1, keepdim=True)  # Fallback attention
+
+        embedding = encoded
         if isinstance(embedding, tuple):
             embedding = embedding[0]
+
         reconstruction = self.decode(embedding)
 
+        # Phase 2 output format
         if self.training_phase == 2:
-            # Return dictionary format in phase 2
             output = {
                 'embedding': embedding,
-                'reconstruction': reconstruction
+                'reconstruction': reconstruction,
+                'attn_weights': attn_weights
             }
 
             if self.use_class_encoding and hasattr(self, 'classifier'):
                 class_logits = self.classifier(embedding)
-                output['class_logits'] = class_logits
-                output['class_predictions'] = class_logits.argmax(dim=1)
+                output.update({
+                    'class_logits': class_logits,
+                    'class_predictions': class_logits.argmax(dim=1)
+                })
 
             if self.use_kl_divergence:
                 latent_info = self.organize_latent_space(embedding)
                 output.update(latent_info)
 
             return output
-        else:
-            # Return tuple format in phase 1
-            return embedding, reconstruction
+
+        # Phase 1 output format
+        return (embedding, attn_weights) if attn_weights is not None else (embedding, reconstruction)
 
     def get_encoding_shape(self) -> Tuple[int, ...]:
         """Get the shape of the encoding at each layer"""
