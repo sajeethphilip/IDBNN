@@ -358,7 +358,7 @@ class PredictionManager:
                 'label_type',  # New column indicating label source
                 'target', # Combined column for both true and predicted labels
                 'cluster_assignment',
-                'cluster_confidence'.
+                'cluster_confidence',
                 'heatmap_path'
                 ] + feature_cols)
             else:
