@@ -4932,6 +4932,23 @@ class ConfigManager:
                 result[key] = value
             elif isinstance(value, dict) and isinstance(result[key], dict):
                 result[key] = self.merge_configs(result[key], value)
+        # Second pass: Ensure heatmap_attn exists in enhancements
+        try:
+            enhancements = result.setdefault('model', {}).setdefault('autoencoder_config', {}).setdefault('enhancements', {})
+            enhancements.setdefault('heatmap_attn', False)
+
+        # Special handling for legacy config formats
+        except AttributeError as e:
+            logger.warning(f"Fixing legacy config structure: {str(e)}")
+            result['model'] = result.get('model', {})
+            result['model']['autoencoder_config'] = result['model'].get('autoencoder_config', {})
+            result['model']['autoencoder_config']['enhancements'] = result['model']['autoencoder_config'].get('enhancements', {})
+            result['model']['autoencoder_config']['enhancements']['heatmap_attn'] = False
+
+        # Final validation
+        if not isinstance(result['model']['autoencoder_config']['enhancements'].get('heatmap_attn'), bool):
+            result['model']['autoencoder_config']['enhancements']['heatmap_attn'] = False
+
         return result
 
     def manage_config(self, filepath: str, template: Dict) -> Dict:
