@@ -461,24 +461,29 @@ class PredictionManager:
     def _generate_attention_heatmaps(self, attn_weights, input_size, original_images):
         heatmaps = []
         for i in range(attn_weights.size(0)):
-            # Get attention weights for this sample
-            weights = attn_weights[i].mean(dim=0).cpu().numpy()
+            # Get attention weights and ensure 2D
+            weights = attn_weights[i].mean(dim=0).squeeze().cpu().numpy()
 
-            # Resize to original image dimensions
+            # Resize to match ORIGINAL IMAGE SIZE (not input_size)
             img = original_images[i]
-            weights = cv2.resize(weights, img.size, interpolation=cv2.INTER_LINEAR)
+            weights = cv2.resize(
+                weights,
+                img.size,  # PIL.Image.size is (width, height)
+                interpolation=cv2.INTER_LINEAR
+            )
 
             # Normalize and apply color map
             norm_weights = (weights - weights.min()) / (weights.max() - weights.min() + 1e-8)
             heatmap = cv2.applyColorMap(np.uint8(255 * norm_weights), cv2.COLORMAP_JET)
             heatmap = Image.fromarray(cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB))
 
-            # Blend with original image
-            blended = Image.blend(img.convert('RGBA'),
-                                heatmap.convert('RGBA'),
-                                alpha=0.5)
+            # Blend with original image (ensure both are RGBA)
+            blended = Image.blend(
+                img.convert('RGBA'),
+                heatmap.convert('RGBA'),
+                alpha=0.5
+            )
             heatmaps.append(blended)
-
         return heatmaps
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
