@@ -1514,15 +1514,16 @@ class BaseAutoencoder(nn.Module):
         """Create encoder layers"""
         layers = nn.ModuleList()
         in_channels = self.in_channels
+        print(f"Initial encoder in_channels: {in_channels}")  # Debug
 
-        for size in self.layer_sizes:
+        for idx, size in enumerate(self.layer_sizes):
+            print(f"Creating encoder layer {idx}: in={in_channels}, out={size}")  # Debug
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
                 nn.LeakyReLU(0.2)
             ))
-            in_channels = size
-
+            in_channels = size  # Critical for channel progression
         return layers
 
     def _create_embedder(self) -> nn.Sequential:
