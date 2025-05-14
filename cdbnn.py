@@ -624,6 +624,14 @@ class BaseEnhancementConfig:
         if 'loss_functions' not in self.config['model']:
             self.config['model']['loss_functions'] = {}
 
+        if 'enhancements' not in self.config['model']['autoencoder_config']:
+            self.config['model']['autoencoder_config']['enhancements'] = {}
+
+        # Add heatmap_attn with default False if missing
+        self.config['model']['autoencoder_config']['enhancements'].setdefault(
+            'heatmap_attn', False
+        )
+
     def _adjust_learning_rates(self, num_enhancements: int) -> None:
         """Adjust learning rates based on number of enabled enhancements"""
         complexity_factor = max(1, num_enhancements * 0.5)
