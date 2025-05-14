@@ -384,12 +384,13 @@ class PredictionManager:
                 # Handle attention heatmaps
                 if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
                     # Process input through entire encoder first
-                    encoded_features = batch_tensor
-                    for layer in self.model.encoder_layers:
-                        encoded_features = layer(encoded_features)
+                    encoded_features = self.model.encode(batch_tensor)  # Get encoded features directly
+                    if isinstance(encoded_features, tuple):
+                        encoded_features = encoded_features[0]  # Unpack if returns tuple
 
-                    # Get attention weights from last layer using encoded features
+                    # Get attention weights from the last encoder layer
                     _, attn_weights = self.model.encoder_layers[-1](encoded_features)
+
 
                     # Generate heatmaps with original image sizes
                     heatmaps = self._generate_attention_heatmaps(
