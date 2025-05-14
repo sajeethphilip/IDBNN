@@ -627,6 +627,9 @@ class BaseEnhancementConfig:
         if 'enhancements' not in self.config['model']['autoencoder_config']:
             self.config['model']['autoencoder_config']['enhancements'] = {}
 
+        if 'heatmap_attn' not in self.config['model']['autoencoder_config']['enhancements'] :
+            self.config['model']['autoencoder_config']['enhancements'][ 'heatmap_attn'] = {}
+
         # Add heatmap_attn with default False if missing
         self.config['model']['autoencoder_config']['enhancements'].setdefault(
             'heatmap_attn', False
