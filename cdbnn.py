@@ -3644,7 +3644,7 @@ class SelfAttention(nn.Module):
         out = out.view(batch_size, channels, height, width)  # Reshape to original dimensions
 
         # Combine with input
-         return self.gamma * out + x, attention_scores  # Residual connection
+        return self.gamma * out + x, attention_scores  # Residual connection
 
 
 
