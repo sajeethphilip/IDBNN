@@ -348,7 +348,7 @@ class PredictionManager:
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
 
             # Modified header to indicate pseudo-labels when needed
-            if self.config['model']['autoencoder_config']['enhancements']['heatmap_attn']:
+            if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
                 # Add heatmap directory creation
                 heatmap_dir = os.path.join(os.path.dirname(output_csv), 'attention_heatmaps')
                 os.makedirs(heatmap_dir, exist_ok=True)
@@ -398,7 +398,7 @@ class PredictionManager:
                 output = self.model(batch_tensor)
 
                 # Get attention weights if enabled
-                if self.config['model']['autoencoder_config']['enhancements']['heatmap_attn']:
+                if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
                     _, attn_weights = self.model.encoder_layers[-1](batch_tensor)  # Get from last layer
 
                     # Process attention weights
@@ -426,7 +426,7 @@ class PredictionManager:
                     cluster_conf = ['NA'] * len(batch_files)
 
             # Save heatmaps and update CSV
-            if self.config['model']['autoencoder_config']['enhancements']['heatmap_attn']:
+            if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
                 for j, (filename, orig_name) in enumerate(zip(batch_files, batch_filenames)):
                     heatmap_path = os.path.join(heatmap_dir, f"{Path(orig_name).stem}_attn.png")
                     heatmaps[j].save(heatmap_path)
