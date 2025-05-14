@@ -321,19 +321,13 @@ class PredictionManager:
         return model
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output
-
-        Args:
-            data_path: Path to input (can be directory, compressed file, or single image)
-            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
-            batch_size: Batch size for prediction
-        """
+        """Predict features with consistent clustering output"""
         # Get image files with labels and original filenames
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
 
-        # Set default output path if not provided
+        # Set default output path
         if output_csv is None:
             dataset_name = self.config['dataset']['name']
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
@@ -341,35 +335,23 @@ class PredictionManager:
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with additional information
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        # Initialize CSV headers
+        heatmap_dir = None
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
 
-            # Modified header to indicate pseudo-labels when needed
+            header = [
+                'original_filename', 'filepath', 'label_type',
+                'target', 'cluster_assignment', 'cluster_confidence'
+            ]
+
             if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
-                # Add heatmap directory creation
                 heatmap_dir = os.path.join(os.path.dirname(output_csv), 'attention_heatmaps')
                 os.makedirs(heatmap_dir, exist_ok=True)
-                csv_writer.writerow([
-                'original_filename',
-                'filepath',
-                'label_type',  # New column indicating label source
-                'target', # Combined column for both true and predicted labels
-                'cluster_assignment',
-                'cluster_confidence',
-                'heatmap_path'
-                ] + feature_cols)
-            else:
-                csv_writer.writerow([
-                    'original_filename',
-                    'filepath',
-                    'label_type',  # New column indicating label source
-                    'target', # Combined column for both true and predicted labels
-                    'cluster_assignment',
-                    'cluster_confidence'
-                ] + feature_cols)
+                header.append('heatmap_path')
+
+            csv_writer.writerow(header + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -378,6 +360,7 @@ class PredictionManager:
             batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
+            # Load and transform images
             for filename in batch_files:
                 try:
                     with Image.open(filename) as img:
@@ -392,22 +375,30 @@ class PredictionManager:
                 continue
 
             batch_tensor = torch.cat(batch_images, dim=0)
+            heatmaps = []
 
-            # Get predictions with clustering
             with torch.no_grad():
+                # Full forward pass through the model
                 output = self.model(batch_tensor)
 
-                # Get attention weights if enabled
+                # Handle attention heatmaps
                 if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
-                    _, attn_weights = self.model.encoder_layers[-1](batch_tensor)  # Get from last layer
+                    # Process input through entire encoder first
+                    encoded_features = batch_tensor
+                    for layer in self.model.encoder_layers:
+                        encoded_features = layer(encoded_features)
 
-                    # Process attention weights
+                    # Get attention weights from last layer using encoded features
+                    _, attn_weights = self.model.encoder_layers[-1](encoded_features)
+
+                    # Generate heatmaps with original image sizes
                     heatmaps = self._generate_attention_heatmaps(
                         attn_weights,
-                        batch_tensor.shape[-2:],
+                        batch_tensor.shape[-2:],  # Original input size
                         [Image.open(f) for f in batch_files]
                     )
 
+                # Process model outputs
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -416,47 +407,36 @@ class PredictionManager:
                     latent_info = self.model.organize_latent_space(embedding)
 
                 features = embedding.cpu().numpy()
+                cluster_assign = latent_info.get('cluster_assignments', ['NA']*len(batch_files)).cpu().numpy()
+                cluster_conf = latent_info.get('cluster_probabilities', torch.zeros(len(batch_files))).max(1)[0].cpu().numpy()
 
-                # Get cluster information
-                if 'cluster_assignments' in latent_info:
-                    cluster_assign = latent_info['cluster_assignments'].cpu().numpy()
-                    cluster_conf = latent_info['cluster_probabilities'].max(1)[0].cpu().numpy()
-                else:
-                    cluster_assign = ['NA'] * len(batch_files)
-                    cluster_conf = ['NA'] * len(batch_files)
-
-            # Save heatmaps and update CSV
-            if self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False):
+            # Save heatmaps if enabled
+            if heatmap_dir and heatmaps:
                 for j, (filename, orig_name) in enumerate(zip(batch_files, batch_filenames)):
                     heatmap_path = os.path.join(heatmap_dir, f"{Path(orig_name).stem}_attn.png")
                     heatmaps[j].save(heatmap_path)
-                    row.append(heatmap_path)  # Add to CSV row
 
-            # Write predictions to CSV
+            # Write batch predictions to CSV
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
-                for j, (filename, orig_name, true_class) in enumerate(zip(
-                    batch_files, batch_filenames, batch_labels)):
-
-                    # Determine label source and value
-                    if true_class == "unknown" or true_class == "":
-                        label_type = "predicted"
-                        target = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
-                    else:
-                        label_type = "true"
-                        target = true_class
-
+                for j, (filename, orig_name, true_class) in enumerate(zip(batch_files, batch_filenames, batch_labels)):
                     row = [
-                        orig_name,        # Original filename
-                        filename,         # Full filepath
-                        label_type,      # Label source
-                        target,     # Actual label value (true or predicted)
+                        orig_name,
+                        filename,
+                        "predicted" if true_class in ["unknown", ""] else "true",
+                        str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown",
                         cluster_assign[j],
                         cluster_conf[j]
-                    ] + features[j].tolist()
+                    ]
+
+                    if heatmap_dir:
+                        row.append(os.path.join(heatmap_dir, f"{Path(orig_name).stem}_attn.png"))
+
+                    row += features[j].tolist()
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
+        return output_csv
 
     def _generate_attention_heatmaps(self, attn_weights, input_size, original_images):
         heatmaps = []
