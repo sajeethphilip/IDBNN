@@ -330,6 +330,7 @@ class PredictionManager:
         """
         # Get image files with labels and original filenames
         heatmap_enabled = self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False)
+        print(f"heatmap is {heatmap_enabled}")
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
