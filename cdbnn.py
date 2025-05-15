@@ -467,6 +467,7 @@ class PredictionManager:
         """Save attention heatmaps preserving directory structure"""
         heatmap_paths = []
         if attn_weights is None:
+            print(f"Attention weights not available!")
             return heatmap_paths
 
         for idx, file_path in enumerate(batch_files):
