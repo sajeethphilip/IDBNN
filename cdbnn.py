@@ -349,15 +349,23 @@ class PredictionManager:
             csv_writer = csv.writer(csvfile)
             feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
 
-            # Modified header to indicate pseudo-labels when needed
-            csv_writer.writerow([
+        # Initialize CSV header
+        with open(output_csv, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_columns = [
                 'original_filename',
                 'filepath',
-                'label_type',  # New column indicating label source
-                'target', # Combined column for both true and predicted labels
+                'label_type',
+                'target',
                 'cluster_assignment',
                 'cluster_confidence'
-            ] + feature_cols)
+            ] + feature_cols
+
+            if heatmap_enabled:
+                csv_columns.append('heatmap_path')
+
+            csv_writer.writerow(csv_columns)
+
 
         if heatmap_enabled:
             heatmap_dir = os.path.join(os.path.dirname(output_csv), 'heatmaps')
@@ -435,6 +443,8 @@ class PredictionManager:
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
+                    if heatmap_enabled:
+                        row.append(batch_heatmap_paths[j] if j < len(batch_heatmap_paths) else "")
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
@@ -453,8 +463,9 @@ class PredictionManager:
 
     def _save_attention_heatmaps(self, batch_files, attn_weights, base_dir, target_size):
         """Save attention heatmaps preserving directory structure"""
+        heatmap_paths = []
         if attn_weights is None:
-            return
+            return heatmap_paths
 
         for idx, file_path in enumerate(batch_files):
             try:
@@ -466,8 +477,17 @@ class PredictionManager:
                 # Resize attention weights to match original image size
                 heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
                 heatmap.save(heatmap_path.replace('.', '_heatmap.').rsplit('.', 1)[0] + '.png')
+
+                 # Create and save heatmap
+                heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
+                heatmap.save(heatmap_path)
+                heatmap_paths.append(heatmap_path)
+
             except Exception as e:
-                logger.error(f"Error saving heatmap for {file_path}: {str(e)}")
+                logger.error(f"Failed to save heatmap for {file_path}: {str(e)}")
+                heatmap_paths.append("")  # Maintain alignment with batch
+
+        return heatmap_paths
 
     def _create_heatmap_image(self, attn_matrix, target_size):
         """Convert attention weights to heatmap image"""
