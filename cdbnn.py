@@ -321,11 +321,13 @@ class PredictionManager:
         return model
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with consistent clustering output"""
-        # Get heatmap config
-        heatmap_enabled = self.config['model'].get('heatmap_attn', False)
-        base_output_dir = os.path.dirname(output_csv) if output_csv else os.path.join('data', self.config['dataset']['name'])
+        """Predict features with consistent clustering output
 
+        Args:
+            data_path: Path to input (can be directory, compressed file, or single image)
+            output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
+            batch_size: Batch size for prediction
+        """
         # Get image files with labels and original filenames
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
@@ -339,19 +341,21 @@ class PredictionManager:
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with headers
+        # Initialize CSV with additional information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            headers = [
-                'original_filename', 'filepath', 'label_type', 'target',
-                'cluster_assignment', 'cluster_confidence'
-            ] + [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
 
-            if heatmap_enabled:
-                headers.append('heatmap_path')
-
-            csv_writer.writerow(headers)
+            # Modified header to indicate pseudo-labels when needed
+            csv_writer.writerow([
+                'original_filename',
+                'filepath',
+                'label_type',  # New column indicating label source
+                'target', # Combined column for both true and predicted labels
+                'cluster_assignment',
+                'cluster_confidence'
+            ] + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -360,7 +364,6 @@ class PredictionManager:
             batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
-            # Load batch images
             for filename in batch_files:
                 try:
                     with Image.open(filename) as img:
@@ -376,12 +379,10 @@ class PredictionManager:
 
             batch_tensor = torch.cat(batch_images, dim=0)
 
-            # Get predictions
+            # Get predictions with clustering
             with torch.no_grad():
                 output = self.model(batch_tensor)
-                attn_weights = output.get('attention_weights', None) if heatmap_enabled else None
 
-                # Extract features and cluster info
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -406,45 +407,21 @@ class PredictionManager:
                     batch_files, batch_filenames, batch_labels)):
 
                     # Determine label source and value
-                    if true_class in ("unknown", ""):
+                    if true_class == "unknown" or true_class == "":
                         label_type = "predicted"
                         target = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
                     else:
                         label_type = "true"
                         target = true_class
 
-                    # Build row
                     row = [
                         orig_name,        # Original filename
                         filename,         # Full filepath
-                        label_type,       # Label source
-                        target,           # Actual label value
+                        label_type,      # Label source
+                        target,     # Actual label value (true or predicted)
                         cluster_assign[j],
                         cluster_conf[j]
                     ] + features[j].tolist()
-
-                    # Add heatmap path if enabled
-                    if heatmap_enabled and attn_weights is not None:
-                        with Image.open(filename) as img:
-                            orig_size = img.size
-
-                        # Preserve input folder structure
-                        rel_path = os.path.relpath(os.path.dirname(filename), data_path)
-                        heatmap_dir = os.path.join(base_output_dir, 'heatmaps', rel_path)
-                        os.makedirs(heatmap_dir, exist_ok=True)
-
-                        # Generate heatmap
-                        heatmap_path = generate_attention_heatmap(
-                            attn_weights[j],
-                            orig_size,
-                            filename,
-                            heatmap_dir,
-                            self.config
-                        )
-                        row.append(os.path.relpath(heatmap_path, base_output_dir))
-                    else:
-                        row.append('')
-
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
@@ -1475,8 +1452,7 @@ class BaseAutoencoder(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
-                nn.LeakyReLU(0.2),
-                SelfAttention(size)
+                nn.LeakyReLU(0.2)
             ))
             in_channels = size
 
@@ -1538,14 +1514,6 @@ class BaseAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
         embedding = self.encode(x)
-        attention_maps = []
-        # In encoder layers
-        for layer in self.encoder_layers:
-            x = layer(x)
-            # Collect attention from SelfAttention layers
-            if isinstance(layer[-1], SelfAttention):
-                attention_maps.append(x.detach())
-
         if isinstance(embedding, tuple):
             embedding = embedding[0]
         reconstruction = self.decode(embedding)
@@ -1553,10 +1521,9 @@ class BaseAutoencoder(nn.Module):
         if self.training_phase == 2:
             # Return dictionary format in phase 2
             output = {
-                            'embedding': embedding,
-                            'reconstruction': reconstruction,
-                            'attention_weights': torch.stack(attention_maps).mean(dim=0) if attention_maps else None
-                        }
+                'embedding': embedding,
+                'reconstruction': reconstruction
+            }
 
             if self.use_class_encoding and hasattr(self, 'classifier'):
                 class_logits = self.classifier(embedding)
@@ -4084,76 +4051,7 @@ class CustomImageDataset(Dataset):
 
         # Return only image and label during training
         return image, label
-#----------------------------------------------------------------------------Generate Attn Map --------------------------------
-def generate_attention_heatmap(attention_weights, original_size, filename, output_dir, config):
-    """Generate attention heatmap without matplotlib using numpy/PIL"""
-    # Convert to numpy array and remove batch dimension
-    if isinstance(attention_weights, torch.Tensor):
-        attn = attention_weights.squeeze().float().cpu().numpy()
-    else:
-        attn = np.squeeze(attention_weights).astype(float)
 
-    # Average across channels if needed
-    if attn.ndim == 3:
-        attn = attn.mean(axis=0)
-
-    # Normalize to 0-1
-    attn_norm = (attn - attn.min()) / (attn.max() - attn.min() + 1e-8)
-
-    # Apply viridis colormap (RGB) without matplotlib
-    cmap = config['model'].get('heatmap_colormap', 'viridis')
-    colored = (255 * apply_colormap(attn_norm, cmap)).astype(np.uint8)
-
-    # Resize to original image dimensions
-    img = Image.fromarray(colored)
-    img = img.resize(original_size, resample=Image.Resampling.BILINEAR)
-
-    # Preserve original folder structure
-    rel_path = os.path.relpath(os.path.dirname(filename),
-                              os.path.dirname(config['dataset']['test_dir']))
-    heatmap_dir = os.path.join(output_dir, rel_path)
-    os.makedirs(heatmap_dir, exist_ok=True)
-
-    # Save as PNG
-    heatmap_path = os.path.join(heatmap_dir,
-                               f"{Path(filename).stem}_heatmap.png")
-    img.save(heatmap_path)
-
-    return heatmap_path
-
-def apply_colormap(x, name='viridis'):
-    """Manual colormap implementation for common maps"""
-    x = np.clip(x, 0, 1)
-    if name == 'viridis':
-        # Viridis colormap approximation
-        cmap = np.array([
-            [0.267004, 0.004874, 0.329415],
-            [0.275191, 0.194905, 0.496005],
-            [0.212395, 0.359683, 0.551710],
-            [0.153364, 0.497000, 0.557724],
-            [0.122312, 0.633153, 0.530398],
-            [0.288921, 0.758394, 0.428426],
-            [0.626579, 0.854645, 0.223353],
-            [0.993248, 0.906157, 0.143936]
-        ])
-    elif name == 'inferno':
-        # Inferno colormap approximation
-        cmap = np.array([
-            [0.001462, 0.000466, 0.013866],
-            [0.267004, 0.004874, 0.329415],
-            [0.524760, 0.063536, 0.318548],
-            [0.748264, 0.156823, 0.232552],
-            [0.939227, 0.304589, 0.136626],
-            [0.988362, 0.554103, 0.034483],
-            [0.906157, 0.846716, 0.143936],
-            [0.987053, 0.991438, 0.749504]
-        ])
-    else:  # Fallback to grayscale
-        return np.stack([x]*3, axis=-1)
-
-    indices = np.clip((x * (cmap.shape[0]-1)).astype(int), 0, cmap.shape[0]-1)
-    return cmap[indices]
-#--------------------------------------------------------------Attn Map Ends -------------------
 class DatasetProcessor:
     SUPPORTED_FORMATS = {
         'zip': zipfile.ZipFile,
@@ -4403,8 +4301,6 @@ class DatasetProcessor:
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
              "model": {
-                "heatmap_attn": False,
-                "heatmap_colormap": "viridis",  # Can be viridis/inferno/plasma/magma
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
                 "feature_dims": feature_dims,
@@ -5843,7 +5739,7 @@ def parse_arguments():
     # Prediction-specific
     parser.add_argument('--model-path', help='Path to trained model')
     parser.add_argument('--output', help='Output path for predictions')
-    parser.add_argument('--batch-size', type=int, default=32,
+    parser.add_argument('--batch-size', type=int, default=128,
                        help='Batch size for processing')
     parser.add_argument('--cpu', action='store_true',
                        help='Force CPU even if GPU available')
