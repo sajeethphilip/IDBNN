@@ -459,8 +459,8 @@ class PredictionManager:
         # For models with SelfAttention layers
         attn_weights = []
         for module in self.model.modules():
-            if isinstance(module, SelfAttention):
-                attn_weights.append(module.last_attention.cpu().numpy())
+        if module.last_attention is not None:
+                        attn_weights.append(module.last_attention)
         return attn_weights[-1] if attn_weights else None
 
     def _save_attention_heatmaps(self, batch_files, attn_weights, base_dir, target_size):
@@ -3673,7 +3673,7 @@ class SelfAttention(nn.Module):
         # Compute attention scores
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
-        self.last_attention = attention_scores.detach().cpu()
+        self.last_attention = attention_scores.detach().cpu().numpy()
 
         # Store attention weights for visualization
         #self.last_attention = attention_scores
