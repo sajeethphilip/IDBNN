@@ -378,6 +378,7 @@ class PredictionManager:
             batch_labels = class_labels[i:i + batch_size]
             batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
+            batch_heatmap_paths = []
 
             for filename in batch_files:
                 try:
@@ -399,7 +400,7 @@ class PredictionManager:
                 output = self.model(batch_tensor)
                 if heatmap_enabled:
                     attn_weights = self._get_attention_weights(output)
-                    self._save_attention_heatmaps(
+                    batch_heatmap_paths = self._save_attention_heatmaps(
                         batch_files, attn_weights,
                         heatmap_dir, target_size
                     )
