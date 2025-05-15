@@ -1475,7 +1475,8 @@ class BaseAutoencoder(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
-                nn.LeakyReLU(0.2)
+                nn.LeakyReLU(0.2),
+                SelfAttention(size)
             ))
             in_channels = size
 
