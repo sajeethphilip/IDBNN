@@ -459,7 +459,7 @@ class PredictionManager:
         # For models with SelfAttention layers
         attn_weights = []
         for module in self.model.modules():
-        if module.last_attention is not None:
+            if module.last_attention is not None:
                         attn_weights.append(module.last_attention)
         return attn_weights[-1] if attn_weights else None
 
