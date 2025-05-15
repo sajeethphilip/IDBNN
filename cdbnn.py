@@ -451,7 +451,7 @@ class PredictionManager:
 
         logger.info(f"Predictions saved to {output_csv}")
 
-    def _get_attention_weights(self, output):
+    def _get_attention_weights_old(self, output):
         """Extract attention weights from model output"""
         if isinstance(output, dict) and 'attention' in output:
             return output['attention']
@@ -459,9 +459,31 @@ class PredictionManager:
         # For models with SelfAttention layers
         attn_weights = []
         for module in self.model.modules():
-            if isinstance(module, SelfAttention):
-                attn_weights.append(module.last_attention.cpu().numpy())
+            if module.last_attention is not None:
+                        attn_weights.append(module.last_attention)
         return attn_weights[-1] if attn_weights else None
+
+    # In PredictionManager
+    def _get_attention_weights(self, output):
+        """Get attention weights from all attention layers"""
+        attn_weights = []
+
+        # Get from explicit attention layers first
+        if isinstance(output, dict) and 'attention' in output:
+            return output['attention']
+
+        # Get from all SelfAttention modules
+        for name, module in self.model.named_modules():
+            if isinstance(module, SelfAttention):
+                if module.last_attention is not None:
+                    attn_weights.append(module.last_attention)
+
+        # For multi-layer attention, average weights
+        if attn_weights:
+            return torch.stack(attn_weights).mean(dim=0)
+
+        logger.warning("No attention weights found in model modules")
+        return None
 
     def _save_attention_heatmaps(self, batch_files, attn_weights, base_dir, target_size):
         """Save attention heatmaps preserving directory structure"""
@@ -1542,7 +1564,8 @@ class BaseAutoencoder(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
-                nn.LeakyReLU(0.2)
+                nn.LeakyReLU(0.2),
+                SelfAttention(size)  # Add attention to all base models
             ))
             in_channels = size
 
@@ -2711,6 +2734,7 @@ class ModelFactory:
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
         """Create model with proper channel handling."""
+
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
@@ -3673,10 +3697,9 @@ class SelfAttention(nn.Module):
         # Compute attention scores
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
-        self.last_attention = attention_scores.detach().cpu().numpy()
-
-        # Store attention weights for visualization
-        #self.last_attention = attention_scores
+        self.last_attention = attention_scores
+        if not self.training:  # Ensure persistence during prediction
+            self.last_attention = self.last_attention.clone().detach()
 
         # Apply attention to values
         out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
