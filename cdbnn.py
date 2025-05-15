@@ -459,8 +459,8 @@ class PredictionManager:
         # For models with SelfAttention layers
         attn_weights = []
         for module in self.model.modules():
-            if module.last_attention is not None:
-                        attn_weights.append(module.last_attention)
+            if isinstance(module, SelfAttention):
+                attn_weights.append(module.last_attention.cpu().numpy())
         return attn_weights[-1] if attn_weights else None
 
     def _save_attention_heatmaps(self, batch_files, attn_weights, base_dir, target_size):
