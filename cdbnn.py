@@ -479,8 +479,9 @@ class PredictionManager:
                 # Generate and save heatmap
                 heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
                 new_filename = f"{os.path.splitext(heatmap_path)[0]}_heatmap.png"
+                print(f"File will be saved to {new_filename}")
                 heatmap.save(new_filename)
-                heatmap_paths.append(heatmap_path)
+                heatmap_paths.append(new_filename)
 
             except Exception as e:
                 logger.error(f"Failed to save heatmap for {file_path}: {str(e)}")
@@ -649,7 +650,7 @@ class BaseEnhancementConfig:
         # Initialize enhancement modules
         if 'enhancement_modules' not in self.config['model']:
             self.config['model']['enhancement_modules'] = {}
-        if ['heatmap_attn'] not in self.config['model']['autoencoder_config']['enhancements']:
+        if  'heatmap_attn'  not in self.config['model']['autoencoder_config']['enhancements']:
             self.config['model']['autoencoder_config']['enhancements']['heatmap_attn'] ={}
             self.config['model']['autoencoder_config']['enhancements']['heatmap_attn'] =False
 
