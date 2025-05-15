@@ -328,6 +328,10 @@ class PredictionManager:
             output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
             batch_size: Batch size for prediction
         """
+        # Get configuration settings
+        heatmap_enabled = self.config['model'].get('heatmap_attn', False)
+        input_size = tuple(self.config['dataset']['input_size'])
+
         # Get image files with labels and original filenames
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
@@ -338,24 +342,33 @@ class PredictionManager:
             dataset_name = self.config['dataset']['name']
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
+        # Create heatmap directory if needed
+        heatmap_dir = None
+        if heatmap_enabled:
+            heatmap_dir = os.path.join(os.path.dirname(output_csv), 'heatmaps')
+            os.makedirs(heatmap_dir, exist_ok=True)
+
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV with additional information
+        # Initialize CSV headers
+        csv_columns = [
+            'original_filename',
+            'filepath',
+            'label_type',
+            'target',
+            'cluster_assignment',
+            'cluster_confidence'
+        ]
+        if heatmap_enabled:
+            csv_columns += ['heatmap_path']
+        csv_columns += [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+
+        # Write CSV header
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-
-            # Modified header to indicate pseudo-labels when needed
-            csv_writer.writerow([
-                'original_filename',
-                'filepath',
-                'label_type',  # New column indicating label source
-                'target', # Combined column for both true and predicted labels
-                'cluster_assignment',
-                'cluster_confidence'
-            ] + feature_cols)
+            csv_writer.writerow(csv_columns)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -364,6 +377,7 @@ class PredictionManager:
             batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
+            # Load and preprocess images
             for filename in batch_files:
                 try:
                     with Image.open(filename) as img:
@@ -383,6 +397,7 @@ class PredictionManager:
             with torch.no_grad():
                 output = self.model(batch_tensor)
 
+                # Extract embeddings and latent info
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -400,6 +415,36 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
+                # Generate heatmaps if enabled
+                heatmap_paths = []
+                if heatmap_enabled and hasattr(self.model, 'attention_maps'):
+                    for j, filename in enumerate(batch_filenames):
+                        try:
+                            # Get attention from last encoder layer
+                            attn = self.model.attention_maps[-1][j].cpu().numpy()
+
+                            # Aggregate attention across heads and queries
+                            attn_agg = attn.mean(axis=0)  # Average across attention heads
+
+                            # Create heatmap image
+                            heatmap = self._create_attention_heatmap(
+                                attn_agg,
+                                original_size=Image.open(batch_files[j]).size,
+                                target_size=input_size
+                            )
+
+                            # Save heatmap
+                            base_name = os.path.basename(filename)
+                            heatmap_path = os.path.join(heatmap_dir, f"{os.path.splitext(base_name)[0]}_heatmap.png")
+                            heatmap.save(heatmap_path)
+                            heatmap_paths.append(heatmap_path)
+                        except Exception as e:
+                            logger.error(f"Error generating heatmap for {filename}: {str(e)}")
+                            heatmap_paths.append('')
+                    # Clear attention maps to save memory
+                    del self.model.attention_maps
+                    torch.cuda.empty_cache()
+
             # Write predictions to CSV
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
@@ -414,17 +459,44 @@ class PredictionManager:
                         label_type = "true"
                         target = true_class
 
+                    # Build row data
                     row = [
                         orig_name,        # Original filename
                         filename,         # Full filepath
-                        label_type,      # Label source
-                        target,     # Actual label value (true or predicted)
+                        label_type,       # Label source
+                        target,           # Actual label value
                         cluster_assign[j],
                         cluster_conf[j]
-                    ] + features[j].tolist()
+                    ]
+
+                    # Add heatmap path if enabled
+                    if heatmap_enabled:
+                        row.append(heatmap_paths[j] if j < len(heatmap_paths) else '')
+
+                    # Add features
+                    row += features[j].tolist()
+
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
+
+    def _create_attention_heatmap(self, attention_weights: np.ndarray, original_size: tuple, target_size: tuple) -> Image.Image:
+        """Create attention heatmap visualization"""
+        # Convert attention weights to 2D map
+        side = int(np.sqrt(attention_weights.shape[0]))
+        attn_map = attention_weights.reshape(side, side)
+
+        # Resize to target input size
+        attn_resized = cv2.resize(attn_map, target_size[::-1], interpolation=cv2.INTER_CUBIC)
+
+        # Resize back to original image size
+        attn_original_size = cv2.resize(attn_resized, original_size, interpolation=cv2.INTER_CUBIC)
+
+        # Normalize and apply color map
+        normalized = (attn_original_size - attn_original_size.min()) / (attn_original_size.max() - attn_original_size.min() + 1e-8)
+        heatmap = (plt.cm.viridis(normalized)[:, :, :3] * 255).astype(np.uint8)
+
+        return Image.fromarray(heatmap)
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
@@ -1494,9 +1566,12 @@ class BaseAutoencoder(nn.Module):
         return layers
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Basic encoding process"""
+        self.attention_maps = []
         for layer in self.encoder_layers:
             x = layer(x)
+            sa_module = layer[-1]  # Last module is SelfAttention
+            if isinstance(sa_module, SelfAttention):
+                self.attention_maps.append(sa_module.attention_scores.detach())
         x = x.view(x.size(0), -1)
         return self.embedder(x)
 
@@ -4301,6 +4376,7 @@ class DatasetProcessor:
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
              "model": {
+                'heatmap_attn': False,
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
                 "feature_dims": feature_dims,
