@@ -3652,6 +3652,7 @@ class SelfAttention(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
         self.in_channels = in_channels
+        self.last_attention = None
 
         # Query, Key, and Value transformations
         self.query = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
@@ -3672,9 +3673,10 @@ class SelfAttention(nn.Module):
         # Compute attention scores
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
+        self.last_attention = attention_scores.detach().cpu()
 
         # Store attention weights for visualization
-        self.last_attention = attention_scores
+        #self.last_attention = attention_scores
 
         # Apply attention to values
         out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
