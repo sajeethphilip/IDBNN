@@ -475,13 +475,10 @@ class PredictionManager:
                 heatmap_path = os.path.join(base_dir, rel_path)
                 os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
 
-                # Resize attention weights to match original image size
+                # Generate and save heatmap
                 heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
-                heatmap.save(heatmap_path.replace('.', '_heatmap.').rsplit('.', 1)[0] + '.png')
-
-                 # Create and save heatmap
-                heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
-                heatmap.save(heatmap_path)
+                new_filename = f"{os.path.splitext(heatmap_path)[0]}_heatmap.png"
+                heatmap.save(new_filename)
                 heatmap_paths.append(heatmap_path)
 
             except Exception as e:
