@@ -5843,7 +5843,7 @@ def parse_arguments():
     # Prediction-specific
     parser.add_argument('--model-path', help='Path to trained model')
     parser.add_argument('--output', help='Output path for predictions')
-    parser.add_argument('--batch-size', type=int, default=128,
+    parser.add_argument('--batch-size', type=int, default=32,
                        help='Batch size for processing')
     parser.add_argument('--cpu', action='store_true',
                        help='Force CPU even if GPU available')
