@@ -329,6 +329,7 @@ class PredictionManager:
             batch_size: Batch size for prediction
         """
         # Get image files with labels and original filenames
+        heatmap_enabled = self.config['model']['autoencoder_config']['enhancements'].get('heatmap_attn', False)
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
@@ -357,6 +358,11 @@ class PredictionManager:
                 'cluster_confidence'
             ] + feature_cols)
 
+        if heatmap_enabled:
+            heatmap_dir = os.path.join(os.path.dirname(output_csv), 'heatmaps')
+            os.makedirs(heatmap_dir, exist_ok=True)
+
+
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i + batch_size]
@@ -382,6 +388,12 @@ class PredictionManager:
             # Get predictions with clustering
             with torch.no_grad():
                 output = self.model(batch_tensor)
+                if heatmap_enabled:
+                    attn_weights = self._get_attention_weights(output)
+                    self._save_attention_heatmaps(
+                        batch_files, attn_weights,
+                        heatmap_dir, transform.output_size
+                    )
 
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
@@ -425,6 +437,50 @@ class PredictionManager:
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
+
+    def _get_attention_weights(self, output):
+        """Extract attention weights from model output"""
+        if isinstance(output, dict) and 'attention' in output:
+            return output['attention']
+
+        # For models with SelfAttention layers
+        attn_weights = []
+        for module in self.model.modules():
+            if isinstance(module, SelfAttention):
+                attn_weights.append(module.last_attention.cpu().numpy())
+        return attn_weights[-1] if attn_weights else None
+
+    def _save_attention_heatmaps(self, batch_files, attn_weights, base_dir, target_size):
+        """Save attention heatmaps preserving directory structure"""
+        if attn_weights is None:
+            return
+
+        for idx, file_path in enumerate(batch_files):
+            try:
+                # Get relative path from original data path
+                rel_path = os.path.relpath(file_path, self.config['dataset']['train_dir'])
+                heatmap_path = os.path.join(base_dir, rel_path)
+                os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+
+                # Resize attention weights to match original image size
+                heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
+                heatmap.save(heatmap_path.replace('.', '_heatmap.'))
+            except Exception as e:
+                logger.error(f"Error saving heatmap for {file_path}: {str(e)}")
+
+    def _create_heatmap_image(self, attn_matrix, target_size):
+        """Convert attention weights to heatmap image"""
+        # Upsample attention matrix to original image size
+        heatmap = torch.tensor(attn_matrix)
+        heatmap = F.interpolate(heatmap.unsqueeze(0).unsqueeze(0),
+                              size=target_size,
+                              mode='bilinear').squeeze()
+
+        # Convert to numpy and apply colormap
+        np_heatmap = heatmap.numpy()
+        np_heatmap = (np_heatmap - np_heatmap.min()) / (np_heatmap.max() - np_heatmap.min() + 1e-8)
+        heatmap_img = (plt.cm.viridis(np_heatmap)[..., :3] * 255).astype(np.uint8)
+        return Image.fromarray(heatmap_img)
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
@@ -564,6 +620,9 @@ class BaseEnhancementConfig:
         # Initialize enhancement modules
         if 'enhancement_modules' not in self.config['model']:
             self.config['model']['enhancement_modules'] = {}
+        if ['heatmap_attn'] not in self.config['model']['autoencoder_config']['enhancements']:
+            self.config['model']['autoencoder_config']['enhancements']['heatmap_attn'] ={}
+            self.config['model']['autoencoder_config']['enhancements']['heatmap_attn'] =False
 
         # Initialize loss functions
         if 'loss_functions' not in self.config['model']:
@@ -3583,12 +3642,16 @@ class SelfAttention(nn.Module):
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
 
+        # Store attention weights for visualization
+        self.last_attention = attention_scores
+
         # Apply attention to values
         out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
         out = out.view(batch_size, channels, height, width)  # Reshape to original dimensions
 
         # Combine with input
         out = self.gamma * out + x  # Residual connection
+
         return out
 
 
@@ -4327,6 +4390,7 @@ class DatasetProcessor:
                     "min_epochs": 10,
                     "patience": 5,
                     "enhancements": {
+                        "heatmap_attn": False,
                         "enabled": True,
                         "use_kl_divergence": True,
                         "use_class_encoding": False,
