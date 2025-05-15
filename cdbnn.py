@@ -552,6 +552,8 @@ class PredictionManager:
     def _get_transforms(self) -> transforms.Compose:
         """Get the image transforms with strict channel control."""
 
+        target_size = tuple(self.config['dataset']['input_size'])
+
         transform_list = [
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
