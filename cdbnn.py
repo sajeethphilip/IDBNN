@@ -340,6 +340,7 @@ class PredictionManager:
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         transform = self._get_transforms()
+        target_size = transform.output_size  # Get from our custom compose
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
         # Initialize CSV with additional information
@@ -392,7 +393,7 @@ class PredictionManager:
                     attn_weights = self._get_attention_weights(output)
                     self._save_attention_heatmaps(
                         batch_files, attn_weights,
-                        heatmap_dir, transform.output_size
+                        heatmap_dir, target_size
                     )
 
                 if isinstance(output, dict):
@@ -464,7 +465,7 @@ class PredictionManager:
 
                 # Resize attention weights to match original image size
                 heatmap = self._create_heatmap_image(attn_weights[idx], target_size)
-                heatmap.save(heatmap_path.replace('.', '_heatmap.'))
+                heatmap.save(heatmap_path.replace('.', '_heatmap.').rsplit('.', 1)[0] + '.png')
             except Exception as e:
                 logger.error(f"Error saving heatmap for {file_path}: {str(e)}")
 
@@ -550,6 +551,7 @@ class PredictionManager:
 
     def _get_transforms(self) -> transforms.Compose:
         """Get the image transforms with strict channel control."""
+
         transform_list = [
             transforms.Resize(tuple(self.config['dataset']['input_size'])),
             transforms.ToTensor(),
@@ -569,7 +571,13 @@ class PredictionManager:
             std=self.config['dataset']['std']
         ))
 
-        return transforms.Compose(transform_list)
+        # Create custom compose to store size info
+        class SizedCompose(transforms.Compose):
+            def __init__(self, transforms, size):
+                super().__init__(transforms)
+                self.output_size = size
+
+        return SizedCompose(transform_list, target_size)
 
     def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
         """Save predictions to a CSV file."""
