@@ -3659,6 +3659,10 @@ class SelfAttention(nn.Module):
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
 
+        # Store attention scores for later access
+        self.attention_scores = attention_scores.detach()  # Detach to prevent gradient flow
+
+
         # Apply attention to values
         out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
         out = out.view(batch_size, channels, height, width)  # Reshape to original dimensions
