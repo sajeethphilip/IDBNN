@@ -984,6 +984,13 @@ class BaseAutoencoder(nn.Module):
         # Initialize clustering parameters
         self._initialize_clustering(config)
 
+        # Initialize attention maps as buffer instead of list
+        self.register_buffer('attention_maps', torch.Tensor())
+
+        # Modify encoder layers creation to include SelfAttention
+        self.encoder_layers = self._create_encoder_layers()
+
+
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
         """Identify high-confidence predictions for semi-supervised learning"""
@@ -1524,7 +1531,8 @@ class BaseAutoencoder(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
-                nn.LeakyReLU(0.2)
+                nn.LeakyReLU(0.2),
+                SelfAttention(size)
             ))
             in_channels = size
 
@@ -1566,12 +1574,18 @@ class BaseAutoencoder(nn.Module):
         return layers
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        self.attention_maps = []
+        attention_list = []
         for layer in self.encoder_layers:
             x = layer(x)
-            sa_module = layer[-1]  # Last module is SelfAttention
+            # Get attention from SelfAttention module (now 4th element in Sequential)
+            sa_module = layer[3]
             if isinstance(sa_module, SelfAttention):
-                self.attention_maps.append(sa_module.attention_scores.detach())
+                attention_list.append(sa_module.attention_scores.detach())
+
+        # Store in buffer instead of instance variable
+        if attention_list:
+            self.attention_maps = torch.stack(attention_list)
+
         x = x.view(x.size(0), -1)
         print("\033[K" +f"{Colors.YELLOW}The attention map: {self.attention_maps}{Colors.ENDC}") #, end="\r", flush=True)
         return self.embedder(x)
@@ -1589,6 +1603,8 @@ class BaseAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
+        # Reset attention maps at start of forward pass
+        self.attention_maps = torch.Tensor().to(x.device)
         embedding = self.encode(x)
         if isinstance(embedding, tuple):
             embedding = embedding[0]
