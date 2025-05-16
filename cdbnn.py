@@ -328,10 +328,6 @@ class PredictionManager:
             output_csv: Path to output CSV file (default: dataset_name.csv in dataset folder)
             batch_size: Batch size for prediction
         """
-        # Get configuration settings
-        heatmap_enabled = self.config['model'].get('heatmap_attn', False)
-        input_size = tuple(self.config['dataset']['input_size'])
-
         # Get image files with labels and original filenames
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
@@ -342,33 +338,24 @@ class PredictionManager:
             dataset_name = self.config['dataset']['name']
             output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
-        # Create heatmap directory if needed
-        heatmap_dir = None
-        if heatmap_enabled:
-            heatmap_dir = os.path.join(os.path.dirname(output_csv), 'heatmaps')
-            os.makedirs(heatmap_dir, exist_ok=True)
-
         transform = self._get_transforms()
         logger.info(f"Processing {len(image_files)} images with batch size {batch_size}")
 
-        # Initialize CSV headers
-        csv_columns = [
-            'original_filename',
-            'filepath',
-            'label_type',
-            'target',
-            'cluster_assignment',
-            'cluster_confidence'
-        ]
-        if heatmap_enabled:
-            csv_columns += ['heatmap_path']
-        csv_columns += [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-
-        # Write CSV header
+        # Initialize CSV with additional information
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         with open(output_csv, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            csv_writer.writerow(csv_columns)
+            feature_cols = [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+
+            # Modified header to indicate pseudo-labels when needed
+            csv_writer.writerow([
+                'original_filename',
+                'filepath',
+                'label_type',  # New column indicating label source
+                'target', # Combined column for both true and predicted labels
+                'cluster_assignment',
+                'cluster_confidence'
+            ] + feature_cols)
 
         # Process images in batches
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -377,7 +364,6 @@ class PredictionManager:
             batch_filenames = original_filenames[i:i + batch_size]
             batch_images = []
 
-            # Load and preprocess images
             for filename in batch_files:
                 try:
                     with Image.open(filename) as img:
@@ -397,7 +383,6 @@ class PredictionManager:
             with torch.no_grad():
                 output = self.model(batch_tensor)
 
-                # Extract embeddings and latent info
                 if isinstance(output, dict):
                     embedding = output.get('embedding', output.get('features'))
                     latent_info = output
@@ -415,36 +400,6 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
-                # Generate heatmaps if enabled
-                heatmap_paths = []
-                if heatmap_enabled and hasattr(self.model, 'attention_maps'):
-                    for j, filename in enumerate(batch_filenames):
-                        try:
-                            # Get attention from last encoder layer
-                            attn = self.model.attention_maps[-1][j].cpu().numpy()
-
-                            # Aggregate attention across heads and queries
-                            attn_agg = attn.mean(axis=0)  # Average across attention heads
-
-                            # Create heatmap image
-                            heatmap = self._create_attention_heatmap(
-                                attn_agg,
-                                original_size=Image.open(batch_files[j]).size,
-                                target_size=input_size
-                            )
-
-                            # Save heatmap
-                            base_name = os.path.basename(filename)
-                            heatmap_path = os.path.join(heatmap_dir, f"{os.path.splitext(base_name)[0]}_heatmap.png")
-                            heatmap.save(heatmap_path)
-                            heatmap_paths.append(heatmap_path)
-                        except Exception as e:
-                            logger.error(f"Error generating heatmap for {filename}: {str(e)}")
-                            heatmap_paths.append('')
-                    # Clear attention maps to save memory
-                    del self.model.attention_maps
-                    torch.cuda.empty_cache()
-
             # Write predictions to CSV
             with open(output_csv, 'a', newline='') as csvfile:
                 csv_writer = csv.writer(csvfile)
@@ -459,44 +414,17 @@ class PredictionManager:
                         label_type = "true"
                         target = true_class
 
-                    # Build row data
                     row = [
                         orig_name,        # Original filename
                         filename,         # Full filepath
-                        label_type,       # Label source
-                        target,           # Actual label value
+                        label_type,      # Label source
+                        target,     # Actual label value (true or predicted)
                         cluster_assign[j],
                         cluster_conf[j]
-                    ]
-
-                    # Add heatmap path if enabled
-                    if heatmap_enabled:
-                        row.append(heatmap_paths[j] if j < len(heatmap_paths) else '')
-
-                    # Add features
-                    row += features[j].tolist()
-
+                    ] + features[j].tolist()
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
-
-    def _create_attention_heatmap(self, attention_weights: np.ndarray, original_size: tuple, target_size: tuple) -> Image.Image:
-        """Create attention heatmap visualization"""
-        # Convert attention weights to 2D map
-        side = int(np.sqrt(attention_weights.shape[0]))
-        attn_map = attention_weights.reshape(side, side)
-
-        # Resize to target input size
-        attn_resized = cv2.resize(attn_map, target_size[::-1], interpolation=cv2.INTER_CUBIC)
-
-        # Resize back to original image size
-        attn_original_size = cv2.resize(attn_resized, original_size, interpolation=cv2.INTER_CUBIC)
-
-        # Normalize and apply color map
-        normalized = (attn_original_size - attn_original_size.min()) / (attn_original_size.max() - attn_original_size.min() + 1e-8)
-        heatmap = (plt.cm.viridis(normalized)[:, :, :3] * 255).astype(np.uint8)
-
-        return Image.fromarray(heatmap)
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
@@ -983,13 +911,6 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
         # Initialize clustering parameters
         self._initialize_clustering(config)
-
-        # Initialize attention maps as buffer instead of list
-        self.register_buffer('attention_maps', torch.Tensor())
-
-        # Modify encoder layers creation to include SelfAttention
-        self.encoder_layers = self._create_encoder_layers()
-
 
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
@@ -1531,8 +1452,7 @@ class BaseAutoencoder(nn.Module):
             layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, size, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(size),
-                nn.LeakyReLU(0.2),
-                SelfAttention(size)
+                nn.LeakyReLU(0.2)
             ))
             in_channels = size
 
@@ -1574,20 +1494,10 @@ class BaseAutoencoder(nn.Module):
         return layers
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        attention_list = []
+        """Basic encoding process"""
         for layer in self.encoder_layers:
             x = layer(x)
-            # Get attention from SelfAttention module (now 4th element in Sequential)
-            sa_module = layer[3]
-            if isinstance(sa_module, SelfAttention):
-                attention_list.append(sa_module.attention_scores.detach())
-
-        # Store in buffer instead of instance variable
-        if attention_list:
-            self.attention_maps = torch.stack(attention_list)
-
         x = x.view(x.size(0), -1)
-        print("\033[K" +f"{Colors.YELLOW}The attention map: {self.attention_maps}{Colors.ENDC}") #, end="\r", flush=True)
         return self.embedder(x)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
@@ -1603,8 +1513,6 @@ class BaseAutoencoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass with flexible output format"""
-        # Reset attention maps at start of forward pass
-        self.attention_maps = torch.Tensor().to(x.device)
         embedding = self.encode(x)
         if isinstance(embedding, tuple):
             embedding = embedding[0]
@@ -2660,58 +2568,24 @@ class UnifiedCheckpoint:
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
-        """Load model state from unified checkpoint with device awareness"""
-        try:
-            state_key = self.get_state_key(phase, model)
+        """Load model state from unified checkpoint"""
+        state_key = self.get_state_key(phase, model)
 
-            if state_key not in self.current_state['model_states']:
-                logger.info(f"No existing state found for {state_key}")
-                return None
+        if state_key not in self.current_state['model_states']:
+            logger.info(f"No existing state found for {state_key}")
+            return None
 
-            # Get appropriate state
-            state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
-            if state_dict is None:
-                return None
+        # Get appropriate state
+        state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
+        if state_dict is None:
+            return None
 
-            # Determine device to load onto
-            device = next(model.parameters()).device if torch.cuda.is_available() else 'cpu'
-            if 'device' in state_dict:  # Backward compatibility
-                saved_device = state_dict['device']
-                logger.info(f"Original model trained on: {saved_device}")
+        # Load state
+        model.load_state_dict(state_dict['state_dict'])
+        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
 
-            # Load model state with device mapping
-            model.load_state_dict({
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
-                for k, v in state_dict['state_dict'].items()
-            })
-
-            # Move optimizer state to correct device
-            optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-            for state in optimizer.state.values():
-                for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(device)
-
-            # Ensure model is on correct device
-            model.to(device)
-
-            # Verify device consistency
-            current_device = next(model.parameters()).device
-            logger.info(f"Successfully loaded state onto {current_device}")
-            if str(current_device) != str(device):
-                logger.warning(f"Device mismatch! Model on {current_device}, requested {device}")
-
-            logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
-            return state_dict
-
-        except RuntimeError as e:
-            if 'device' in str(e):
-                logger.error(f"Critical device mismatch: {str(e)}")
-                logger.info("Attempting cross-device load...")
-                model.load_state_dict(state_dict['state_dict'], strict=False)
-                model.to(device)
-                return state_dict
-            raise e
+        logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
+        return state_dict
 
     def get_best_loss(self, phase: int, model: nn.Module) -> float:
         """Get best loss for current configuration"""
@@ -2747,7 +2621,6 @@ class ModelFactory:
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
         """Create model with proper channel handling."""
-        device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
@@ -2766,13 +2639,6 @@ class ModelFactory:
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
         else:
             model = BaseAutoencoder(input_shape, feature_dims, config)
-
-        model = model.to(device)
-
-        # Verify all parameters are on correct device
-        for p in model.parameters():
-            if p.device != device:
-                p.data = p.data.to(device)
 
         # Verify channel compatibility
         if hasattr(model, 'in_channels'):
@@ -3717,10 +3583,6 @@ class SelfAttention(nn.Module):
         attention_scores = torch.bmm(queries, keys)  # (B, H*W, H*W)
         attention_scores = F.softmax(attention_scores, dim=-1)  # Normalize scores
 
-        # Store attention scores for later access
-        self.attention_scores = attention_scores.detach()  # Detach to prevent gradient flow
-
-
         # Apply attention to values
         out = torch.bmm(values, attention_scores.permute(0, 2, 1))  # (B, C, H*W)
         out = out.view(batch_size, channels, height, width)  # Reshape to original dimensions
@@ -4439,7 +4301,6 @@ class DatasetProcessor:
                 "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
             },
              "model": {
-                'heatmap_attn': False,
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
                 "feature_dims": feature_dims,
