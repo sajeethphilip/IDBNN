@@ -1820,8 +1820,8 @@ class DBNN(GPUDBNN):
                 hasattr(self, 'label_encoder') and
                 hasattr(self.label_encoder, 'classes_')):
                 try:
-                    #results_df['true_class'] = true_labels_np  # Keep original strings
-                    results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+                    results_df['true_class'] = true_labels_np  # Keep original strings
+                    #results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
                 except Exception as e:
                     print(f"Couldn't preserve true labels: {str(e)}")
             else:
@@ -1883,6 +1883,7 @@ class DBNN(GPUDBNN):
             predict_mode = True if self.mode=='predict' else False
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
+                df[self.target_column] = df[self.target_column].astype(str)
                 if not self._validate_target_column(df[self.target_column]):
                     print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
