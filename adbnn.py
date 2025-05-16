@@ -1883,7 +1883,7 @@ class DBNN(GPUDBNN):
             predict_mode = True if self.mode=='predict' else False
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
-                df[self.target_column] = df[self.target_column].astype(str)
+
                 if not self._validate_target_column(df[self.target_column]):
                     print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
