@@ -1239,6 +1239,8 @@ class GPUDBNN:
                     f"Expected model files in: Model/{self.dataset_name}_*\n"
                     "Please train the model first."
                 )
+            self._load_label_encoder()
+
         elif self.use_previous_model:
             # Try to load existing model, but don't fail if it doesn't exist
             try:
