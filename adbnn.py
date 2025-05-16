@@ -1239,8 +1239,6 @@ class GPUDBNN:
                     f"Expected model files in: Model/{self.dataset_name}_*\n"
                     "Please train the model first."
                 )
-            self._load_label_encoder()
-
         elif self.use_previous_model:
             # Try to load existing model, but don't fail if it doesn't exist
             try:
@@ -1885,7 +1883,6 @@ class DBNN(GPUDBNN):
             predict_mode = True if self.mode=='predict' else False
             # Handle target column validation
             if predict_mode and self.target_column in df.columns:
-
                 if not self._validate_target_column(df[self.target_column]):
                     print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
