@@ -1573,7 +1573,7 @@ class BaseAutoencoder(nn.Module):
             if isinstance(sa_module, SelfAttention):
                 self.attention_maps.append(sa_module.attention_scores.detach())
         x = x.view(x.size(0), -1)
-        print(f"{Colors.YELLOW}The attention map: {self.attention_maps}{Colors.ENDC}", end="\r", flush=True))
+        print(f"{Colors.YELLOW}The attention map: {self.attention_maps}{Colors.ENDC}", end="\r", flush=True)
         return self.embedder(x)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
