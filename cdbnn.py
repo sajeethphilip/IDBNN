@@ -2660,24 +2660,58 @@ class UnifiedCheckpoint:
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
-        """Load model state from unified checkpoint"""
-        state_key = self.get_state_key(phase, model)
+        """Load model state from unified checkpoint with device awareness"""
+        try:
+            state_key = self.get_state_key(phase, model)
 
-        if state_key not in self.current_state['model_states']:
-            logger.info(f"No existing state found for {state_key}")
-            return None
+            if state_key not in self.current_state['model_states']:
+                logger.info(f"No existing state found for {state_key}")
+                return None
 
-        # Get appropriate state
-        state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
-        if state_dict is None:
-            return None
+            # Get appropriate state
+            state_dict = self.current_state['model_states'][state_key]['best' if load_best else 'current']
+            if state_dict is None:
+                return None
 
-        # Load state
-        model.load_state_dict(state_dict['state_dict'])
-        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+            # Determine device to load onto
+            device = next(model.parameters()).device if torch.cuda.is_available() else 'cpu'
+            if 'device' in state_dict:  # Backward compatibility
+                saved_device = state_dict['device']
+                logger.info(f"Original model trained on: {saved_device}")
 
-        logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
-        return state_dict
+            # Load model state with device mapping
+            model.load_state_dict({
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in state_dict['state_dict'].items()
+            })
+
+            # Move optimizer state to correct device
+            optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
+
+            # Ensure model is on correct device
+            model.to(device)
+
+            # Verify device consistency
+            current_device = next(model.parameters()).device
+            logger.info(f"Successfully loaded state onto {current_device}")
+            if str(current_device) != str(device):
+                logger.warning(f"Device mismatch! Model on {current_device}, requested {device}")
+
+            logger.info(f"Loaded {'best' if load_best else 'current'} state for {state_key}")
+            return state_dict
+
+        except RuntimeError as e:
+            if 'device' in str(e):
+                logger.error(f"Critical device mismatch: {str(e)}")
+                logger.info("Attempting cross-device load...")
+                model.load_state_dict(state_dict['state_dict'], strict=False)
+                model.to(device)
+                return state_dict
+            raise e
 
     def get_best_loss(self, phase: int, model: nn.Module) -> float:
         """Get best loss for current configuration"""
@@ -2713,6 +2747,7 @@ class ModelFactory:
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
         """Create model with proper channel handling."""
+        device = torch.device('cuda' if config['execution_flags']['use_gpu'] and torch.cuda.is_available() else 'cpu')
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
@@ -2731,6 +2766,13 @@ class ModelFactory:
             model = AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
         else:
             model = BaseAutoencoder(input_shape, feature_dims, config)
+
+        model = model.to(device)
+
+        # Verify all parameters are on correct device
+        for p in model.parameters():
+            if p.device != device:
+                p.data = p.data.to(device)
 
         # Verify channel compatibility
         if hasattr(model, 'in_channels'):
