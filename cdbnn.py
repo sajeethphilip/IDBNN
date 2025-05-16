@@ -458,7 +458,7 @@ class PredictionManager:
                     csv_writer.writerow(row)
 
         logger.info(f"Predictions saved to {output_csv}")
-        return model
+
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
