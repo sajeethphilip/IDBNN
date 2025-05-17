@@ -203,7 +203,7 @@ class PredictionManager:
 
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.heatmap_attn = config['model'].get('heatmap_attn', True)
+        self.heatmap_attn = config['model'].get('heatmap_attn', False)
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
@@ -325,7 +325,7 @@ class PredictionManager:
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with actual class names and generate heatmaps"""
         # Configuration and initialization
-        heatmap_enabled = self.config['model'].get('heatmap_attn', True)
+        heatmap_enabled = self.config['model'].get('heatmap_attn', False)
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
 
@@ -480,7 +480,7 @@ class PredictionManager:
 
     def predict_images_old(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with consistent clustering output and generate heatmaps"""
-        heatmap_enabled = self.config['model'].get('heatmap_attn', True)
+        heatmap_enabled = self.config['model'].get('heatmap_attn', False)
 
         # Get image files and setup output
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
@@ -735,7 +735,7 @@ class BaseEnhancementConfig:
         if 'model' not in self.config:
             self.config['model'] = {}
         if 'heatmap_attn' not in self.config['model']:
-            self.config['model']['heatmap_attn'] = True
+            self.config['model']['heatmap_attn'] = False
         # Initialize autoencoder config
         if 'autoencoder_config' not in self.config['model']:
             self.config['model']['autoencoder_config'] = {
