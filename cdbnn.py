@@ -372,16 +372,16 @@ class PredictionManager:
                 continue
 
             # Model inference with gradient calculation
-            with torch.set_grad_enabled(heatmap_enabled):  # Enable gradients only for heatmap
+            with torch.set_grad_enabled(heatmap_enabled):
                 batch_tensor = torch.cat(batch_images, dim=0)
                 feature_maps = []
                 gradients = []
 
                 # Feature map and gradient hook
                 def hook(module, input, output):
-                    feature_maps.append(output.detach())
+                    feature_maps.append(output.detach())  # Detach immediately
                     def backward_hook(grad):
-                        gradients.append(grad.detach().cpu())
+                        gradients.append(grad.detach().cpu())  # Detach and move to CPU
                     if heatmap_enabled:
                         output.register_hook(backward_hook)
 
@@ -391,21 +391,21 @@ class PredictionManager:
                 output = self.model(batch_tensor)
                 hook_handle.remove()
 
-                # Process outputs
+                # Process outputs with proper detachment
                 embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                features = embedding.cpu().numpy()
+                features = embedding.detach().cpu().numpy()  # Detach before conversion
 
                 # Cluster processing
                 cluster_assign = ['NA'] * len(batch_files)
                 cluster_conf = ['NA'] * len(batch_files)
                 if 'cluster_assignments' in output:
-                    cluster_nums = output['cluster_assignments'].cpu().numpy()
+                    cluster_nums = output['cluster_assignments'].detach().cpu().numpy()
                     cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                    cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+                    cluster_conf = output['cluster_probabilities'].max(1)[0].detach().cpu().numpy()
 
                 # Grad-CAM heatmap generation
                 heatmap_paths = [''] * len(batch_files)
-                if heatmap_enabled and feature_maps and (gradients or not self.model.training):
+                if heatmap_enabled and feature_maps:
                     try:
                         # Get target for gradient calculation
                         if 'cluster_probabilities' in output:
@@ -420,39 +420,33 @@ class PredictionManager:
                             grads_val = gradients[0]
                             pooled_grads = torch.mean(grads_val, dim=[0, 2, 3])
                         else:
-                            pooled_grads = torch.ones(feature_maps[0].size(1))  # Fallback
+                            pooled_grads = torch.ones(feature_maps[0].size(1), device='cpu')  # Fallback
 
-                        # Weight feature maps by gradients
+                        # Weight feature maps by gradients (detached)
                         feature_map = feature_maps[0].cpu()
                         for i in range(feature_map.size(1)):
                             feature_map[:, i, :, :] *= pooled_grads[i]
 
                         # Generate and process heatmaps
                         heatmaps = torch.mean(feature_map, dim=1, keepdim=True)
-                        heatmaps = F.relu(heatmaps)  # Only positive influence
+                        heatmaps = F.relu(heatmaps).detach()  # Detach after operations
                         heatmaps = F.interpolate(
                             heatmaps,
                             size=self.config['dataset']['input_size'],
                             mode='bilinear',
                             align_corners=False
-                        ).squeeze(1).numpy()
+                        ).squeeze(1).cpu().numpy()
 
                         # Save visualizations
                         for j, filename in enumerate(batch_files):
-                            # Convert tensor to image
-                            img_tensor = batch_tensor[j].cpu()
-                            img = self._tensor_to_image(img_tensor)
+                            img = self._tensor_to_image(batch_tensor[j])
 
-                            # Create overlay
                             plt.figure(figsize=(10, 10))
                             plt.imshow(img)
-
-                            hm = heatmaps[j]
-                            hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+                            hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
                             plt.imshow(hm, cmap='jet', alpha=0.5)
                             plt.axis('off')
 
-                            # Save heatmap
                             rel_path = os.path.relpath(filename, data_path)
                             heatmap_path = os.path.join(heatmap_base, rel_path)
                             heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.png'
@@ -470,12 +464,10 @@ class PredictionManager:
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
-                    # Determine label type and target
                     is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
                     label_type = "predicted" if is_unknown else "true"
                     target = true_class if label_type == "true" else cluster_assign[j]
 
-                    # Build row
                     row = [
                         orig_name,
                         filename,
@@ -494,17 +486,17 @@ class PredictionManager:
 
     def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
         """Convert tensor to image array with proper denormalization"""
-        tensor = tensor.clone().detach().cpu()
+        tensor = tensor.detach().cpu().clone()  # Ensure detachment
         if tensor.dim() == 4:
             tensor = tensor.squeeze(0)
 
-        # Denormalize
-        mean = torch.tensor(self.config['dataset']['mean']).view(-1, 1, 1)
-        std = torch.tensor(self.config['dataset']['std']).view(-1, 1, 1)
+        # Denormalize with proper device handling
+        mean = torch.tensor(self.config['dataset']['mean'], device=tensor.device).view(-1, 1, 1)
+        std = torch.tensor(self.config['dataset']['std'], device=tensor.device).view(-1, 1, 1)
         tensor = tensor * std + mean
 
         # Convert to numpy array
-        tensor = tensor.clamp(0, 1).permute(1, 2, 0).numpy()
+        tensor = tensor.clamp(0, 1).permute(1, 2, 0).cpu().numpy()
         return (tensor * 255).astype(np.uint8)
 
     def _get_class_mapping(self, data_path: str) -> Dict[int, str]:
