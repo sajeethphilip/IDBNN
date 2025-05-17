@@ -321,7 +321,164 @@ class PredictionManager:
         logger.info("Model loaded successfully with all components")
         return model
 
+#--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
+        """Predict features with actual class names and generate heatmaps"""
+        # Configuration and initialization
+        heatmap_enabled = self.config['model'].get('heatmap_attn', True)
+        class_mapping = self._get_class_mapping(data_path)
+        reverse_class_mapping = {v: k for k, v in class_mapping.items()}
+
+        # Get image files and validate
+        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
+        if not image_files:
+            raise ValueError(f"No valid images found in {data_path}")
+
+        # Set output paths
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        heatmap_base = os.path.join(os.path.dirname(output_csv), 'heatmaps')
+        os.makedirs(heatmap_base, exist_ok=True) if heatmap_enabled else None
+
+        # Prepare CSV headers
+        csv_headers = [
+            'original_filename', 'filepath', 'label_type', 'target',
+            'cluster_assignment', 'cluster_confidence'
+        ] + [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+        if heatmap_enabled:
+            csv_headers.append('heatmap_path')
+
+        with open(output_csv, 'w', newline='') as csvfile:
+            csv.writer(csvfile).writerow(csv_headers)
+
+        # Batch processing
+        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+            batch_files = image_files[i:i+batch_size]
+            batch_labels = class_labels[i:i+batch_size]
+            batch_filenames = original_filenames[i:i+batch_size]
+            batch_images = []
+
+            # Load and transform images
+            for filename in batch_files:
+                try:
+                    with Image.open(filename) as img:
+                        image_tensor = self._get_transforms()(img.convert('RGB')).unsqueeze(0).to(self.device)
+                        batch_images.append(image_tensor)
+                except Exception as e:
+                    logger.error(f"Error loading {filename}: {str(e)}")
+                    continue
+            if not batch_images:
+                continue
+
+            # Model inference
+            with torch.no_grad():
+                batch_tensor = torch.cat(batch_images, dim=0)
+                feature_maps = []
+
+                # Feature map hook
+                def hook(module, input, output):
+                    feature_maps.append(output.detach())
+                hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
+
+                # Forward pass
+                output = self.model(batch_tensor)
+                hook_handle.remove()
+
+                # Process outputs
+                embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+                features = embedding.cpu().numpy()
+
+                # Cluster processing
+                if 'cluster_assignments' in output:
+                    cluster_nums = output['cluster_assignments'].cpu().numpy()
+                    cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
+                    cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+                else:
+                    cluster_assign = ['NA'] * len(batch_files)
+                    cluster_conf = ['NA'] * len(batch_files)
+
+                # Heatmap generation
+                heatmap_paths = [''] * len(batch_files)
+                if heatmap_enabled and feature_maps:
+                    try:
+                        fm_tensor = feature_maps[0]
+                        heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
+                        heatmaps = F.interpolate(
+                            heatmaps,
+                            size=self.config['dataset']['input_size'],
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze(1).cpu().numpy()
+
+                        for j, filename in enumerate(batch_files):
+                            rel_path = os.path.relpath(filename, data_path)
+                            heatmap_path = os.path.join(heatmap_base, rel_path)
+                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
+
+                            os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                            hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
+                            plt.imsave(heatmap_path, hm, cmap='viridis')
+                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                    except Exception as e:
+                        logger.error(f"Heatmap error: {str(e)}")
+
+            # CSV writing
+            with open(output_csv, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                for j, (filename, orig_name, true_class) in enumerate(zip(
+                    batch_files, batch_filenames, batch_labels)):
+
+                    # Determine label type and target
+                    is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
+                    label_type = "predicted" if is_unknown else "true"
+
+                    if label_type == "true":
+                        target = true_class  # Actual class name from directory
+                    else:
+                        target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
+
+                    # Build row
+                    row = [
+                        orig_name,
+                        filename,
+                        label_type,
+                        target,
+                        cluster_assign[j],
+                        cluster_conf[j]
+                    ] + features[j].tolist()
+
+                    if heatmap_enabled:
+                        row.append(heatmap_paths[j])
+
+                    writer.writerow(row)
+
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def _get_class_mapping(self, data_path: str) -> Dict[int, str]:
+        """Build class name to index mapping from directory structure"""
+        class_mapping = {}
+        class_dirs = []
+
+        if os.path.isdir(data_path):
+            # Get immediate subdirectories
+            with os.scandir(data_path) as entries:
+                for entry in entries:
+                    if entry.is_dir():
+                        class_dirs.append(entry.path)
+
+            # Sort alphabetically for consistent indexing
+            class_dirs = sorted(class_dirs, key=lambda x: os.path.basename(x))
+
+            # Create mapping
+            for idx, class_dir in enumerate(class_dirs):
+                class_name = os.path.basename(class_dir)
+                class_mapping[idx] = class_name
+
+        return class_mapping
+#-----------------------------------------------------------
+
+    def predict_images_old(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with consistent clustering output and generate heatmaps"""
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
 
@@ -442,6 +599,7 @@ class PredictionManager:
 
                     label_type = "predicted" if true_class in ["unknown", ""] else "true"
                     target = str(cluster_assign[j]) if cluster_assign[j] != 'NA' else "unknown"
+
 
                     row = [
                         orig_name,
