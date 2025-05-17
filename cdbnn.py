@@ -323,7 +323,7 @@ class PredictionManager:
 
 #--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with Grad-CAM based heatmaps for explainability"""
+        """Predict features with efficient batch processing and accurate progress tracking"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', False)
         class_mapping = self._get_class_mapping(data_path)
@@ -333,6 +333,11 @@ class PredictionManager:
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
+
+        # Calculate actual batch count for accurate progress tracking
+        total_images = len(image_files)
+        num_batches = (total_images + batch_size - 1) // batch_size
+        logger.info(f"Starting prediction on {total_images} images in {num_batches} batches")
 
         # Set output paths
         if output_csv is None:
@@ -352,137 +357,111 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv.writer(csvfile).writerow(csv_headers)
 
-        # Batch processing
-        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
-            batch_files = image_files[i:i+batch_size]
-            batch_labels = class_labels[i:i+batch_size]
-            batch_filenames = original_filenames[i:i+batch_size]
-            batch_images = []
+        # Batch processing with proper resource cleanup
+        with torch.no_grad():
+            pbar = tqdm(total=total_images, desc="Processing images", unit="img")
+            try:
+                for batch_idx in range(num_batches):
+                    start_idx = batch_idx * batch_size
+                    end_idx = min((batch_idx + 1) * batch_size, total_images)
+                    current_batch = image_files[start_idx:end_idx]
+                    current_labels = class_labels[start_idx:end_idx]
+                    current_filenames = original_filenames[start_idx:end_idx]
 
-            # Load and transform images
-            for filename in batch_files:
-                try:
-                    with Image.open(filename) as img:
-                        image_tensor = self._get_transforms()(img.convert('RGB')).unsqueeze(0).to(self.device)
-                        batch_images.append(image_tensor)
-                except Exception as e:
-                    logger.error(f"Error loading {filename}: {str(e)}")
-                    continue
-            if not batch_images:
-                continue
+                    # Batch loading with error handling
+                    batch_tensors = []
+                    valid_indices = []
+                    for idx, filename in enumerate(current_batch):
+                        try:
+                            with Image.open(filename) as img:
+                                tensor = self._get_transforms()(img.convert('RGB'))
+                                batch_tensors.append(tensor)
+                                valid_indices.append(idx)
+                        except Exception as e:
+                            logger.error(f"Skipping corrupt image {filename}: {str(e)}")
 
-            # Model inference with gradient calculation
-            with torch.set_grad_enabled(heatmap_enabled):
-                batch_tensor = torch.cat(batch_images, dim=0)
-                feature_maps = []
-                gradients = []
+                    if not batch_tensors:
+                        continue
 
-                # Feature map and gradient hook
-                def hook(module, input, output):
-                    feature_maps.append(output.detach())  # Detach immediately
-                    def backward_hook(grad):
-                        gradients.append(grad.detach().cpu())  # Detach and move to CPU
-                    if heatmap_enabled:
-                        output.register_hook(backward_hook)
+                    # Model inference
+                    batch = torch.stack(batch_tensors).to(self.device)
+                    output = self.model(batch)
 
-                hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
+                    # Process outputs
+                    embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+                    features = embedding.cpu().numpy()
 
-                # Forward pass
-                output = self.model(batch_tensor)
-                hook_handle.remove()
+                    # Cluster processing
+                    cluster_assign = ['NA'] * len(valid_indices)
+                    cluster_conf = ['NA'] * len(valid_indices)
+                    if 'cluster_assignments' in output:
+                        cluster_nums = output['cluster_assignments'].cpu().numpy()
+                        cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
+                        cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
 
-                # Process outputs with proper detachment
-                embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                features = embedding.detach().cpu().numpy()  # Detach before conversion
+                    # Heatmap generation
+                    heatmap_paths = [''] * len(valid_indices)
+                    if heatmap_enabled and hasattr(self.model, 'get_activation_maps'):
+                        try:
+                            activation_maps = self.model.get_activation_maps(batch)
+                            for idx, (filename, activation) in enumerate(zip(current_batch, activation_maps)):
+                                img = self._tensor_to_image(batch[idx])
+                                hm_path = self._save_heatmap(
+                                    img, activation,
+                                    os.path.join(heatmap_base, os.path.relpath(filename, data_path))
+                                )
+                                heatmap_paths[idx] = os.path.relpath(hm_path, os.path.dirname(output_csv))
+                        except Exception as e:
+                            logger.error(f"Heatmap generation failed: {str(e)}")
 
-                # Cluster processing
-                cluster_assign = ['NA'] * len(batch_files)
-                cluster_conf = ['NA'] * len(batch_files)
-                if 'cluster_assignments' in output:
-                    cluster_nums = output['cluster_assignments'].detach().cpu().numpy()
-                    cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                    cluster_conf = output['cluster_probabilities'].max(1)[0].detach().cpu().numpy()
+                    # CSV writing for successful processed items
+                    with open(output_csv, 'a', newline='') as csvfile:
+                        writer = csv.writer(csvfile)
+                        for idx in valid_indices:
+                            filename = current_batch[idx]
+                            orig_name = current_filenames[idx]
+                            true_class = current_labels[idx]
 
-                # Grad-CAM heatmap generation
-                heatmap_paths = [''] * len(batch_files)
-                if heatmap_enabled and feature_maps:
-                    try:
-                        # Get target for gradient calculation
-                        if 'cluster_probabilities' in output:
-                            target = output['cluster_probabilities'].max(1)[0]
-                        elif 'class_predictions' in output:
-                            target = output['class_predictions']
-                        else:
-                            target = torch.norm(embedding, dim=1)
+                            is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
+                            label_type = "predicted" if is_unknown else "true"
+                            target = true_class if label_type == "true" else cluster_assign[idx]
 
-                        # Calculate gradients if available
-                        if gradients:
-                            grads_val = gradients[0]
-                            pooled_grads = torch.mean(grads_val, dim=[0, 2, 3])
-                        else:
-                            pooled_grads = torch.ones(feature_maps[0].size(1), device='cpu')  # Fallback
+                            row = [
+                                orig_name,
+                                filename,
+                                label_type,
+                                target,
+                                cluster_assign[idx],
+                                cluster_conf[idx]
+                            ] + features[idx].tolist()
 
-                        # Weight feature maps by gradients (detached)
-                        feature_map = feature_maps[0].cpu()
-                        for i in range(feature_map.size(1)):
-                            feature_map[:, i, :, :] *= pooled_grads[i]
+                            if heatmap_enabled:
+                                row.append(heatmap_paths[idx])
 
-                        # Generate and process heatmaps
-                        heatmaps = torch.mean(feature_map, dim=1, keepdim=True)
-                        heatmaps = F.relu(heatmaps).detach()  # Detach after operations
-                        heatmaps = F.interpolate(
-                            heatmaps,
-                            size=self.config['dataset']['input_size'],
-                            mode='bilinear',
-                            align_corners=False
-                        ).squeeze(1).cpu().numpy()
+                            writer.writerow(row)
 
-                        # Save visualizations
-                        for j, filename in enumerate(batch_files):
-                            img = self._tensor_to_image(batch_tensor[j])
+                    pbar.update(len(valid_indices))
 
-                            plt.figure(figsize=(10, 10))
-                            plt.imshow(img)
-                            hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
-                            plt.imshow(hm, cmap='jet', alpha=0.5)
-                            plt.axis('off')
+            finally:
+                pbar.close()
+                torch.cuda.empty_cache()
 
-                            rel_path = os.path.relpath(filename, data_path)
-                            heatmap_path = os.path.join(heatmap_base, rel_path)
-                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.png'
-                            os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
-                            plt.savefig(heatmap_path, bbox_inches='tight', pad_inches=0)
-                            plt.close()
-
-                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
-                    except Exception as e:
-                        logger.error(f"Heatmap generation failed: {str(e)}")
-
-            # CSV writing
-            with open(output_csv, 'a', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                for j, (filename, orig_name, true_class) in enumerate(zip(
-                    batch_files, batch_filenames, batch_labels)):
-
-                    is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
-                    label_type = "predicted" if is_unknown else "true"
-                    target = true_class if label_type == "true" else cluster_assign[j]
-
-                    row = [
-                        orig_name,
-                        filename,
-                        label_type,
-                        target,
-                        cluster_assign[j],
-                        cluster_conf[j]
-                    ] + features[j].tolist()
-
-                    if heatmap_enabled:
-                        row.append(heatmap_paths[j])
-
-                    writer.writerow(row)
-
+        logger.info(f"Successfully processed {pbar.n}/{total_images} images")
         logger.info(f"Predictions saved to {output_csv}")
+
+    def _save_heatmap(self, image: np.ndarray, activation: np.ndarray, base_path: str) -> str:
+        """Save heatmap visualization efficiently"""
+        heatmap_path = os.path.splitext(base_path)[0] + '_heatmap.png'
+        os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+
+        plt.figure(figsize=(10, 10))
+        plt.imshow(image)
+        plt.imshow(activation, cmap='jet', alpha=0.5)
+        plt.axis('off')
+        plt.savefig(heatmap_path, bbox_inches='tight', pad_inches=0)
+        plt.close()
+
+        return heatmap_path
 
     def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
         """Convert tensor to image array with proper denormalization"""
