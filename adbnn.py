@@ -1,3 +1,6 @@
+#--------------------------Fully Functional bug fixed version ----------------------------
+#------------------------------------May 17 2025 19:05 IST----------------------------
+
 # Working, fully functional with predcition 31/March/2025 Stable Model
 # Better Memory management 06:28am
 # Tested an fully functional April 4 2025 3:34 am
@@ -12,6 +15,7 @@
 # Updated failed candidate selection procedure as per DBNN original concepts May 5 2025 3:57 pm
 # Fixed the bug in feature selection : May 10:12:09 am
 # Fixed the bug in sample selection May 11 1:27 am
+
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-----------------------------------------------------------------------------------------------------------------------------
@@ -1821,7 +1825,6 @@ class DBNN(GPUDBNN):
                 hasattr(self.label_encoder, 'classes_')):
                 try:
                     results_df['true_class'] = true_labels_np  # Keep original strings
-                    #results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
                 except Exception as e:
                     print(f"Couldn't preserve true labels: {str(e)}")
             else:
