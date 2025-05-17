@@ -450,15 +450,57 @@ class PredictionManager:
         logger.info(f"Predictions saved to {output_csv}")
 
     def _save_heatmap(self, image: np.ndarray, activation: np.ndarray, base_path: str) -> str:
-        """Save heatmap visualization efficiently"""
+        """Save enhanced heatmap visualization with improved interpretability"""
         heatmap_path = os.path.splitext(base_path)[0] + '_heatmap.png'
         os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
 
-        plt.figure(figsize=(10, 10))
-        plt.imshow(image)
-        plt.imshow(activation, cmap='jet', alpha=0.5)
-        plt.axis('off')
-        plt.savefig(heatmap_path, bbox_inches='tight', pad_inches=0)
+        # Normalize activation to [0,1] using min-max scaling
+        activation_normalized = (activation - activation.min()) / (activation.max() - activation.min() + 1e-8)
+
+        # Create figure with proper aspect ratio
+        fig, ax = plt.subplots(figsize=(12, 10), dpi=300)
+
+        # Display original image
+        ax.imshow(image)
+
+        # Overlay heatmap with improved colormap and blending
+        heatmap = ax.imshow(activation_normalized,
+                           cmap='viridis',  # More perceptually uniform
+                           alpha=0.85,      # Increased opacity for better visibility
+                           interpolation='lanczos')  # Sharper rendering
+
+        # Add colorbar with professional styling
+        cbar = fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
+        cbar.outline.set_visible(False)
+        cbar.ax.tick_params(labelsize=8, length=0)
+        cbar.set_label('Activation Intensity', rotation=270, labelpad=15, fontsize=10)
+
+        # Add subtle grid for spatial reference
+        ax.grid(which='major', axis='both', linestyle='--', alpha=0.2, color='white')
+
+        # Remove axis ticks while preserving aspect ratio
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+        # Add title with class information
+        class_name = os.path.basename(os.path.dirname(base_path))
+        ax.set_title(f'Class Activation Map: {class_name}',
+                    fontsize=12, pad=15, color='white', backgroundcolor='#404040')
+
+        # Enhance border visibility
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor('#808080')
+            spine.set_linewidth(0.5)
+
+        # Save high-quality output
+        plt.savefig(heatmap_path,
+                    bbox_inches='tight',
+                    pad_inches=0.1,
+                    facecolor=fig.get_facecolor(),
+                    dpi=300)
         plt.close()
 
         return heatmap_path
