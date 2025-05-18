@@ -216,25 +216,21 @@ class PredictionManager:
         else:  # fallback to mean activation
             return torch.mean(fm_tensor, dim=1, keepdim=True)
 
-    def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> np.ndarray:
-        """Compute Grad-CAM heatmaps with gradient weighting"""
-        # Store original model state
+    def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> torch.Tensor:
         original_training = self.model.training
-        self.model.train()  # Temporarily enable training mode for gradients
+        self.model.train()  # Ensure model is in training mode
         self.model.zero_grad()
 
         try:
             with torch.enable_grad():
-                # Re-run forward pass with gradients
+                # Re-run forward pass to establish computation graph
                 output_grad = self.model(batch_tensor)
 
                 # Get targets from current output
-                if 'class_predictions' in output_grad:
-                    targets = output_grad['class_predictions']
-                else:
-                    targets = torch.argmax(output_grad['embedding'], dim=1)
+                targets = output_grad.get('class_predictions',
+                                        torch.argmax(output_grad['embedding'], dim=1))
 
-                # Create one-hot encoding for targets
+                # Create one-hot encoding
                 one_hot = torch.zeros_like(output_grad['embedding'])
                 one_hot.scatter_(1, targets.unsqueeze(1), 1.0)
 
@@ -242,24 +238,21 @@ class PredictionManager:
                 (output_grad['embedding'] * one_hot).sum().backward(retain_graph=True)
 
                 # Get gradients from the feature maps
-                gradients = fm_tensor.grad  # Should now have valid gradients
+                gradients = fm_tensor.grad
+                if gradients is None:
+                    raise RuntimeError("Failed to compute gradients for Grad-CAM")
 
-                # Pool gradients across spatial dimensions
-                pooled_gradients = torch.mean(gradients, dim=(0, 2, 3), keepdim=True)
+                # Pool gradients using correct dimensions
+                pooled_gradients = torch.mean(gradients, dim=(0, 2, 3), keepdim=True)  # Fixed dim as tuple
 
                 # Weight features by gradient importance
                 weighted_features = fm_tensor * pooled_gradients
                 heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
-
-                # Apply ReLU and normalize
-                heatmaps = F.relu(heatmaps)
-                return heatmaps.detach()
+                return F.relu(heatmaps)
 
         finally:
-            # Restore original model state
-            self.model.train(original_training)
+            self.model.train(original_training)  # Restore original training state
             self.model.zero_grad()
-
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
@@ -432,13 +425,17 @@ class PredictionManager:
 
                 # Feature map hook
                 def hook(module, input, output):
-                    # Remove .detach() and enable gradients
-                    output.requires_grad_(True)
                     feature_maps.append(output)
                 hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
 
                 # Forward pass
-                output = self.model(batch_tensor)
+                # Conditionally enable gradients based on heatmap method
+                if self.heatmap_method == 'gradcam':
+                    with torch.enable_grad():  # Enable gradients for Grad-CAM
+                        output = self.model(batch_tensor)
+                else:
+                    with torch.no_grad():  # Disable gradients for mean method
+                        output = self.model(batch_tensor)
                 hook_handle.remove()
 
                 # Process outputs
@@ -458,13 +455,13 @@ class PredictionManager:
                 heatmap_paths = [''] * len(batch_files)
                 if heatmap_enabled and feature_maps:
                     try:
-                        fm_tensor = feature_maps[0].requires_grad_(True)
-                        #fm_tensor = feature_maps[0]
+                        fm_tensor = feature_maps[0]
                         #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         if self.heatmap_method == 'gradcam':
                             heatmaps= self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
                         else:
-                            heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
+                            with torch.no_grad():
+                                heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         heatmaps = F.interpolate(
                             heatmaps,
                             size=self.config['dataset']['input_size'],
