@@ -218,34 +218,47 @@ class PredictionManager:
 
     def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> np.ndarray:
         """Compute Grad-CAM heatmaps with gradient weighting"""
-        # Zero gradients before backward pass
+        # Store original model state
+        original_training = self.model.training
         self.model.zero_grad()
 
-        # Get target class from model output
-        if 'class_predictions' in output:
-            targets = output['class_predictions']
-        elif 'cluster_assignments' in output:
-            targets = output['cluster_assignments']
-        else:
-            targets = torch.argmax(output['embedding'], dim=1)
+        try:
+            # Temporarily enable gradient computation
+            with torch.enable_grad():
+                # Re-run forward pass with gradients
+                output_grad = self.model(batch_tensor.requires_grad_(True))
 
-        # Backward pass for gradients
-        with torch.enable_grad():
-            loss = output['class_logits'][range(len(output['class_logits'])), targets].sum() \
-                if 'class_logits' in output else output['embedding'].sum()
-            loss.backward(retain_graph=True)
+                # Get targets from current output
+                if 'class_predictions' in output:
+                    targets = output['class_predictions']
+                else:
+                    targets = torch.argmax(output_grad['embedding'], dim=1)
 
-        # Get gradients and feature maps
-        gradients = self.model.encoder_layers[-1].weight.grad
-        pooled_gradients = torch.mean(gradients, dim=[0, 2, 3])
+                # Calculate gradients for specific class
+                if 'class_logits' in output_grad:
+                    loss = output_grad['class_logits'][range(len(output_grad['class_logits'])), targets].sum()
+                else:
+                    loss = output_grad['embedding'][range(len(output_grad['embedding'])), targets].sum()
 
-        # Weight features by gradient importance
-        weighted_features = fm_tensor * pooled_gradients[None, :, None, None]
-        heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
+                # Backward pass with retained graph
+                loss.backward(retain_graph=True)
 
-        # Apply ReLU and normalize
-        heatmaps = F.relu(heatmaps)
-        return heatmaps
+                # Get gradients from the feature maps
+                gradients = fm_tensor.grad  # Directly access gradients from feature maps
+
+                # Pool gradients and weight features
+                pooled_gradients = torch.mean(gradients, dim=[0, 2, 3])
+                weighted_features = fm_tensor * pooled_gradients[None, :, None, None]
+                heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
+
+                # Apply ReLU and normalize
+                heatmaps = F.relu(heatmaps)
+                return heatmaps.detach()
+
+        finally:
+            # Restore original model state
+            self.model.train(original_training)
+            self.model.zero_grad()
 
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
@@ -443,7 +456,8 @@ class PredictionManager:
                 heatmap_paths = [''] * len(batch_files)
                 if heatmap_enabled and feature_maps:
                     try:
-                        fm_tensor = feature_maps[0]
+                        fm_tensor = feature_maps[0].clone().requires_grad_(True)
+                        #fm_tensor = feature_maps[0]
                         #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         if self.heatmap_method == 'gradcam':
                             heatmaps= self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
