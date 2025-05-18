@@ -432,7 +432,9 @@ class PredictionManager:
 
                 # Feature map hook
                 def hook(module, input, output):
-                    feature_maps.append(output.detach())
+                    # Remove .detach() and enable gradients
+                    output.requires_grad_(True)
+                    feature_maps.append(output)
                 hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
 
                 # Forward pass
