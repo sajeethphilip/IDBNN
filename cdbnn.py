@@ -245,7 +245,7 @@ class PredictionManager:
                 gradients = fm_tensor.grad  # Should now have valid gradients
 
                 # Pool gradients across spatial dimensions
-                pooled_gradients = torch.mean(gradients, dim=[0, 2, 3], keepdim=True)
+                pooled_gradients = torch.mean(gradients, dim=(0, 2, 3), keepdim=True)
 
                 # Weight features by gradient importance
                 weighted_features = fm_tensor * pooled_gradients
