@@ -204,69 +204,9 @@ class PredictionManager:
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.heatmap_attn = config['model'].get('heatmap_attn', True)
-        self.heatmap_method = config['model'].get('heatmap_method', 'gradcam')  # 'mean' or 'gradcam'
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
-
-    def _compute_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> np.ndarray:
-        """Compute heatmaps using configured method"""
-        if self.heatmap_method == 'gradcam':
-            return self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
-        else:  # fallback to mean activation
-            return torch.mean(fm_tensor, dim=1, keepdim=True)
-
-    def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> torch.Tensor:
-        # Store original model state
-        original_training = self.model.training
-        original_requires_grad = []
-
-        try:
-            # Enable gradients for all parameters
-            self.model.train()
-            for param in self.model.parameters():
-                original_requires_grad.append(param.requires_grad)
-                param.requires_grad_(True)
-
-            # Zero gradients before forward pass
-            self.model.zero_grad()
-
-            # Forward pass with gradients
-            with torch.enable_grad():
-                output_grad = self.model(batch_tensor)
-
-                # Get targets from current output
-                targets = output_grad.get('class_predictions',
-                                        torch.argmax(output_grad['embedding'], dim=1))
-
-                # Create one-hot encoding
-                one_hot = torch.zeros_like(output_grad['embedding'])
-                one_hot.scatter_(1, targets.unsqueeze(1), 1.0)
-
-                # Backward pass for gradients
-                (output_grad['embedding'] * one_hot).sum().backward(retain_graph=True)
-
-                # Verify gradients exist
-                if fm_tensor.grad is None:
-                    raise RuntimeError("Grad-CAM gradients not computed. Check if: \n"
-                                     "1. Feature map tensor has requires_grad=True\n"
-                                     "2. Backward pass was properly executed\n"
-                                     "3. Model parameters have requires_grad=True")
-
-                # Pool gradients using correct dimensions
-                pooled_gradients = torch.mean(fm_tensor.grad, dim=(0, 2, 3), keepdim=True)
-
-                # Weight features by gradient importance
-                weighted_features = fm_tensor * pooled_gradients
-                heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
-                return F.relu(heatmaps)
-
-        finally:
-            # Restore original model state
-            self.model.train(original_training)
-            for param, orig_grad in zip(self.model.parameters(), original_requires_grad):
-                param.requires_grad_(orig_grad)
-            self.model.zero_grad()
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
@@ -435,23 +375,14 @@ class PredictionManager:
             with torch.no_grad():
                 batch_tensor = torch.cat(batch_images, dim=0)
                 feature_maps = []
-                gradients = []
 
                 # Feature map hook
                 def hook(module, input, output):
-                    output.requires_grad_(True)  # Explicitly enable gradients
-                    output.retain_grad()         # Force gradient retention
-                    feature_maps.append(output)
+                    feature_maps.append(output.detach())
                 hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
 
                 # Forward pass
-                # Conditionally enable gradients based on heatmap method
-                if self.heatmap_method == 'gradcam':
-                    with torch.enable_grad():  # Enable gradients for Grad-CAM
-                        output = self.model(batch_tensor)
-                else:
-                    with torch.no_grad():  # Disable gradients for mean method
-                        output = self.model(batch_tensor)
+                output = self.model(batch_tensor)
                 hook_handle.remove()
 
                 # Process outputs
@@ -472,13 +403,7 @@ class PredictionManager:
                 if heatmap_enabled and feature_maps:
                     try:
                         fm_tensor = feature_maps[0]
-                        #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
-                        if self.heatmap_method == 'gradcam':
-                            with torch.set_grad_enabled(True):
-                                heatmaps = self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
-                        else:
-                            with torch.no_grad():
-                                heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
+                        heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         heatmaps = F.interpolate(
                             heatmaps,
                             size=self.config['dataset']['input_size'],
@@ -813,8 +738,6 @@ class BaseEnhancementConfig:
             self.config['model'] = {}
         if 'heatmap_attn' not in self.config['model']:
             self.config['model']['heatmap_attn'] = True
-        if 'heatmap_method' not in self.config['model']:
-            self.config['model']['heatmap_method'] = 'gradcam'
         # Initialize autoencoder config
         if 'autoencoder_config' not in self.config['model']:
             self.config['model']['autoencoder_config'] = {
