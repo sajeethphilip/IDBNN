@@ -1617,8 +1617,13 @@ class BaseAutoencoder(nn.Module):
         """Basic encoding process"""
         for layer in self.encoder_layers:
             x = layer(x)
+        self.activation_maps = x
         x = x.view(x.size(0), -1)
         return self.embedder(x)
+
+    def get_activation_maps(self) -> torch.Tensor:
+        """Return activation maps from the last encoder layer"""
+        return self.activation_maps
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Basic decoding process"""
@@ -1952,6 +1957,7 @@ class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
                     galaxy_features = self.galaxy_enhancer[idx](x)
                     x = x + 0.1 * galaxy_features
 
+        self.activation_maps = x
         x = x.view(x.size(0), -1)
         embedding = self.embedder(x)
 
