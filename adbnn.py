@@ -3120,9 +3120,15 @@ class DBNN(GPUDBNN):
             safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
             pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
 
-            # Sort by prediction confidence (highest first)
+            # Clean and sort data
             sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            sorted_df = sorted_df.dropna(subset=['filepath'])  # Remove rows without filepaths
             n_images = len(sorted_df)
+
+            if n_images == 0:
+                print(f"\033[KSkipping {class_name} - No valid images found")
+                continue
+
             n_pages = math.ceil(n_images / images_per_page)
 
             # PDF setup with margins
@@ -3141,15 +3147,13 @@ class DBNN(GPUDBNN):
             pair_width = usable_width / columns
             img_width = pair_width * 0.45
             heatmap_width = pair_width * 0.45
-            img_height = (letter[1] * 0.85) / (rows * 2)
+            img_height = (letter[1] * 0.85) / (rows * 2)  # 85% of available height
 
             with tqdm(total=n_images,
-                     desc=f"{str(class_name)[:15]:<15}",
-                     unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
-                     leave=False) as pbar:
-
-                processed_images = 0
+                    desc=f"{str(class_name)[:15]:<15}",
+                    unit="img",
+                    bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
+                    leave=False) as pbar:
 
                 for page_num in range(n_pages):
                     start_idx = page_num * images_per_page
@@ -3160,7 +3164,7 @@ class DBNN(GPUDBNN):
                     if len(page_images) == 0:
                         continue
 
-                    # Page header
+                    # Create page elements
                     elements.append(Paragraph(
                         f"Class: {class_name} (Sorted by Confidence)",
                         styles['Heading2']
@@ -3169,33 +3173,24 @@ class DBNN(GPUDBNN):
 
                     table_data = []
                     current_row = []
-                    valid_images = 0
+                    valid_count = 0
 
                     for _, row in page_images.iterrows():
                         try:
-                            # Handle NaN values and path validation
-                            img_path = str(row.get('filepath', '')).strip() or None
-                            heat_path = str(row.get('heatmap_path', '')).strip() or None
-                            img_name = os.path.basename(img_path) if img_path else "No image"
-                            confidence = row['prediction_confidence']
+                            # Get and validate paths
+                            img_path = str(row['filepath']).strip()
+                            heat_path = str(row.get('heatmap_path', '')).strip()
 
-                            # Validate paths
-                            valid_img = img_path and os.path.exists(img_path)
-                            valid_heat = heat_path and os.path.exists(heat_path)
+                            if not os.path.exists(img_path):
+                                raise FileNotFoundError(f"Image not found: {img_path}")
 
-                            # Create image elements with fallbacks
-                            img_element = self._create_image_element(
-                                img_path if valid_img else None,
-                                img_width,
-                                img_height,
-                                'Original'
-                            )
-                            heat_element = self._create_image_element(
-                                heat_path if valid_heat else None,
-                                heatmap_width,
-                                img_height,
-                                'Heatmap'
-                            )
+                            # Load and verify images
+                            with Image.open(img_path) as img:
+                                img.verify()
+
+                            # Create image elements
+                            img_element = ReportLabImage(img_path, width=img_width, height=img_height)
+                            heat_element = self._create_heatmap_element(heat_path, heatmap_width, img_height)
 
                             # Create image pair table
                             pair_table = Table(
@@ -3209,14 +3204,13 @@ class DBNN(GPUDBNN):
                             )
 
                             # Create caption with hyperlink
-                            caption_text = (f'<link href="{img_path}">{img_name[:15]}...</link><br/>'
-                                          f'Conf: {confidence:.2%}') if img_path else f'Missing image<br/>Conf: {confidence:.2%}'
+                            img_name = os.path.basename(img_path)
+                            caption_text = f'<link href="{img_path}">{img_name[:15]}...</link><br/>Conf: {row["prediction_confidence"]:.2%}'
                             caption = Paragraph(caption_text, paragraph_styles['Hyperlink'])
 
-                            # Combine elements
-                            cell_content = [pair_table, caption]
-                            current_row.append(cell_content)
-                            valid_images += 1
+                            # Add to table
+                            current_row.append([pair_table, caption])
+                            valid_count += 1
 
                             # Start new row when current row is full
                             if len(current_row) == columns:
@@ -3224,13 +3218,11 @@ class DBNN(GPUDBNN):
                                 current_row = []
 
                         except Exception as e:
-                            print(f"\033[K⚠️ Error processing row {processed_images}: {str(e)}")
-                            continue
+                            print(f"\033[KSkipping invalid entry: {str(e)}")
                         finally:
-                            processed_images += 1
                             pbar.update(1)
 
-                    # Add remaining valid items if any
+                    # Add remaining items if any
                     if current_row:
                         table_data.append(current_row)
 
@@ -3248,26 +3240,27 @@ class DBNN(GPUDBNN):
                         )
                         elements.append(main_table)
 
-                    if page_num < n_pages - 1 and valid_images > 0:
+                    if page_num < n_pages - 1 and valid_count > 0:
                         elements.append(PageBreak())
 
-                # Only build if we have elements
+                # Build the document if we have valid elements
                 if elements:
                     try:
                         doc.build(elements)
-                        print(f"\033[K✅ {class_name} - Saved {valid_images} images+heatmaps to {os.path.basename(pdf_path)}")
+                        print(f"\033[K✅ {class_name} - Saved {valid_count} images to {os.path.basename(pdf_path)}")
                     except Exception as e:
                         print(f"\033[K❌ Failed to build PDF for {class_name}: {str(e)}")
 
-    def _create_image_element(self, path, width, height, label):
-        """Helper to create image elements with error handling"""
-        if path and os.path.exists(path):
+    def _create_heatmap_element(self, heat_path, width, height):
+        """Create heatmap image element with validation"""
+        if heat_path and os.path.exists(heat_path):
             try:
-                return ReportLabImage(path, width=width, height=height)
+                with Image.open(heat_path) as img:
+                    img.verify()
+                return ReportLabImage(heat_path, width=width, height=height)
             except Exception as e:
-                return Paragraph(f"Invalid {label}\n{os.path.basename(path)}", 'Caption')
-        return Paragraph(f"Missing {label}", 'Caption')
-
+                return Paragraph(f"Invalid heatmap\n{os.path.basename(heat_path)}", 'Caption')
+        return Paragraph("No heatmap available", 'Caption')
 #---------------------------------------------------------------------------------
     def generate_class_pdf_mosaics_old(self, predictions_df, output_dir, columns=4, rows=4):
         """
