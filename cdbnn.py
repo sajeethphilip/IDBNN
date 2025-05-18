@@ -217,13 +217,22 @@ class PredictionManager:
             return torch.mean(fm_tensor, dim=1, keepdim=True)
 
     def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> torch.Tensor:
+        # Store original model state
         original_training = self.model.training
-        self.model.train()  # Ensure model is in training mode
-        self.model.zero_grad()
+        original_requires_grad = []
 
         try:
+            # Enable gradients for all parameters
+            self.model.train()
+            for param in self.model.parameters():
+                original_requires_grad.append(param.requires_grad)
+                param.requires_grad_(True)
+
+            # Zero gradients before forward pass
+            self.model.zero_grad()
+
+            # Forward pass with gradients
             with torch.enable_grad():
-                # Re-run forward pass to establish computation graph
                 output_grad = self.model(batch_tensor)
 
                 # Get targets from current output
@@ -237,13 +246,15 @@ class PredictionManager:
                 # Backward pass for gradients
                 (output_grad['embedding'] * one_hot).sum().backward(retain_graph=True)
 
-                # Get gradients from the feature maps
-                gradients = fm_tensor.grad
-                if gradients is None:
-                    raise RuntimeError("Failed to compute gradients for Grad-CAM")
+                # Verify gradients exist
+                if fm_tensor.grad is None:
+                    raise RuntimeError("Grad-CAM gradients not computed. Check if: \n"
+                                     "1. Feature map tensor has requires_grad=True\n"
+                                     "2. Backward pass was properly executed\n"
+                                     "3. Model parameters have requires_grad=True")
 
                 # Pool gradients using correct dimensions
-                pooled_gradients = torch.mean(gradients, dim=(0, 2, 3), keepdim=True)  # Fixed dim as tuple
+                pooled_gradients = torch.mean(fm_tensor.grad, dim=(0, 2, 3), keepdim=True)
 
                 # Weight features by gradient importance
                 weighted_features = fm_tensor * pooled_gradients
@@ -251,7 +262,10 @@ class PredictionManager:
                 return F.relu(heatmaps)
 
         finally:
-            self.model.train(original_training)  # Restore original training state
+            # Restore original model state
+            self.model.train(original_training)
+            for param, orig_grad in zip(self.model.parameters(), original_requires_grad):
+                param.requires_grad_(orig_grad)
             self.model.zero_grad()
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
@@ -425,6 +439,8 @@ class PredictionManager:
 
                 # Feature map hook
                 def hook(module, input, output):
+                    output.requires_grad_(True)  # Explicitly enable gradients
+                    output.retain_grad()         # Force gradient retention
                     feature_maps.append(output)
                 hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
 
