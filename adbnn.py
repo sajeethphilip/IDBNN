@@ -3084,8 +3084,170 @@ class DBNN(GPUDBNN):
         return {
             'all_predictions': f"{output_dir}{dataset_name}_all_predictions.csv"
         }
-
+#----------------------------pdf mosaic ----------------------------------------
     def generate_class_pdf_mosaics(self, predictions_df, output_dir, columns=4, rows=4):
+        """
+        Generate PDF mosaics with images and heatmaps side-by-side.
+        """
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Define styles
+        styles = getSampleStyleSheet()
+        if 'Caption' not in styles:
+            from reportlab.lib.styles import ParagraphStyle
+            styles.add(ParagraphStyle(
+                name='Caption',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=9,
+                spaceBefore=2,
+                spaceAfter=2,
+                alignment=1  # Center aligned
+            ))
+
+        # Add hyperlink style
+        if 'Hyperlink' not in styles:
+            styles.add(ParagraphStyle(
+                name='Hyperlink',
+                parent=styles['Caption'],
+                textColor=colors.blue,
+                underline=1
+            ))
+
+        # Group by predicted class
+        class_groups = predictions_df.groupby('predicted_class')
+        images_per_page = columns * rows
+
+        for class_name, group_df in class_groups:
+            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
+
+            # Sort by prediction confidence (highest first)
+            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
+            n_images = len(sorted_df)
+            n_pages = math.ceil(n_images / images_per_page)
+
+            # PDF setup with margins
+            doc = SimpleDocTemplate(
+                pdf_path,
+                pagesize=letter,
+                rightMargin=0.5*inch,
+                leftMargin=0.5*inch,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch
+            )
+            elements = []
+
+            # Calculate dimensions - 40% for image, 40% for heatmap, 20% spacing
+            usable_width = letter[0] - inch
+            pair_width = usable_width / columns
+            img_width = pair_width * 0.45
+            heatmap_width = pair_width * 0.45
+            img_height = (letter[1] * 0.85) / (rows * 2)  # Half height for image+heatmap
+
+            with tqdm(total=n_images,
+                     desc=f"{str(class_name)[:15]:<15}",
+                     unit="img",
+                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
+                     leave=False) as pbar:
+
+                processed_images = 0
+
+                for page_num in range(n_pages):
+                    start_idx = page_num * images_per_page
+                    end_idx = min(start_idx + images_per_page, n_images)
+                    page_images = sorted_df.iloc[start_idx:end_idx]
+
+                    # Page header
+                    elements.append(Paragraph(
+                        f"Class: {class_name} (Sorted by Confidence)",
+                        styles['Heading2']
+                    ))
+                    elements.append(Spacer(1, 0.1*inch))
+
+                    # Create main table
+                    table_data = []
+                    current_row = []
+
+                    for _, row in page_images.iterrows():
+                        img_path = row.get('filepath', '')
+                        heat_path = row.get('heatmap_path', '')
+                        img_name = os.path.basename(img_path)
+                        confidence = row['prediction_confidence']
+
+                        try:
+                            # Create image pair table
+                            pair_table = Table(
+                                [[
+                                    self._create_image_element(img_path, img_width, img_height, 'Original'),
+                                    self._create_image_element(heat_path, heatmap_width, img_height, 'Heatmap')
+                                ]],
+                                colWidths=[img_width, heatmap_width],
+                                style=TableStyle([
+                                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                                    ('BOX', (0,0), (-1,-1), 0.5, colors.grey)
+                                ])
+                            )
+
+                            # Create caption with hyperlink
+                            caption_text = f'<link href="{img_path}">{img_name[:15]}...</link><br/>Conf: {confidence:.2%}'
+                            caption = Paragraph(caption_text, styles['Hyperlink'])
+
+                            # Combine image pair and caption
+                            cell_content = [pair_table, caption]
+                            current_row.append(cell_content)
+
+                            # Start new row when current row is full
+                            if len(current_row) == columns:
+                                table_data.append(current_row)
+                                current_row = []
+
+                        except Exception as e:
+                            print(f"\033[K⚠️ Error processing {img_path}: {str(e)}")
+                            continue
+
+                        # Update progress
+                        processed_images += 1
+                        pbar.update(1)
+
+                    # Add remaining items if any
+                    if current_row:
+                        table_data.append(current_row)
+
+                    # Create main table
+                    main_table = Table(
+                        table_data,
+                        colWidths=[pair_width] * columns,
+                        style=TableStyle([
+                            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                            ('PADDING', (0,0), (-1,-1), 2),
+                            ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)
+                        ])
+                    )
+
+                    elements.append(main_table)
+                    if page_num < n_pages - 1:
+                        elements.append(PageBreak())
+
+                # Build the PDF
+                doc.build(elements)
+
+            print(f"\033[K✅ {class_name} - Saved {n_images} images+heatmaps to {os.path.basename(pdf_path)}")
+
+    def _create_image_element(self, path, width, height, label):
+        """Helper to create image elements with error handling"""
+        if path and os.path.exists(path):
+            try:
+                img = ReportLabImage(path, width=width, height=height)
+                return img
+            except:
+                return Paragraph(f"Invalid image\n{label}", self.styles['Caption'])
+        return Paragraph(f"Missing\n{label}", self.styles['Caption'])
+#---------------------------------------------------------------------------------
+    def generate_class_pdf_mosaics_old(self, predictions_df, output_dir, columns=4, rows=4):
         """
         Generate PDF mosaics with configurable grid layout (columns x rows per page).
         Captions are clickable hyperlinks to the original image paths.
