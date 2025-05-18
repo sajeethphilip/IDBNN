@@ -474,7 +474,8 @@ class PredictionManager:
                         fm_tensor = feature_maps[0]
                         #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         if self.heatmap_method == 'gradcam':
-                            heatmaps= self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
+                            with torch.set_grad_enabled(True):
+                                heatmaps = self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
                         else:
                             with torch.no_grad():
                                 heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
