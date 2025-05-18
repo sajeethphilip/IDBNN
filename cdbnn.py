@@ -419,7 +419,9 @@ class PredictionManager:
                             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
                             hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
                             plt.imsave(heatmap_path, hm, cmap='viridis')
-                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                            #heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                            heatmap_paths[j] = os.path.join('data', self.config['dataset']['name'], 'heatmaps', rel_path)
+                            heatmap_paths[j] = os.path.splitext(heatmap_paths[j])[0] + '_heatmap.png'
                     except Exception as e:
                         logger.error(f"Heatmap error: {str(e)}")
 
