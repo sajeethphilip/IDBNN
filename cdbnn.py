@@ -412,14 +412,44 @@ class PredictionManager:
                         ).squeeze(1).cpu().numpy()
 
                         for j, filename in enumerate(batch_files):
+
+                            # Get original image tensor and denormalize
+                            img_tensor = batch_tensor[j].cpu()
+                            img = img_tensor.numpy().transpose(1, 2, 0)
+                            img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
+                            img = np.clip(img, 0, 1)
+                            img = (img * 255).astype(np.uint8)
+
+                            # Create PIL Image
+                            pil_img = Image.fromarray(img, 'RGB')
+
+                            # Process heatmap
+                            hm = heatmaps[j]
+                            hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+                            hm = (hm * 255).astype(np.uint8)
+
+                            # Create heatmap overlay (yellow color base)
+                            overlay = Image.new('RGBA', pil_img.size)
+                            for x in range(hm.shape[1]):
+                                for y in range(hm.shape[0]):
+                                    intensity = hm[y, x]
+                                    alpha = int(intensity * 0.45)  # Adjust transparency here
+                                    overlay.putpixel((x, y), (255, 255, 0, alpha))  # Yellow overlay
+
+                            # Composite images
+                            pil_img = pil_img.convert('RGBA')
+                            combined = Image.alpha_composite(pil_img, overlay)
+                            combined = combined.convert('RGB')
+
                             rel_path = os.path.relpath(filename, data_path)
                             heatmap_path = os.path.join(heatmap_base, rel_path)
                             heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
 
                             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
-                            hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
-                            plt.imsave(heatmap_path, hm, cmap='viridis')
-                            #heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                            combined.save(heatmap_path, quality=95)
+                            #hm = (heatmaps[j] - heatmaps[j].min()) / (heatmaps[j].max() - heatmaps[j].min() + 1e-8)
+                            #plt.imsave(heatmap_path, hm, cmap='viridis')
+                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
                             heatmap_paths[j] = os.path.join('data', self.config['dataset']['name'], 'heatmaps', rel_path)
                             heatmap_paths[j] = os.path.splitext(heatmap_paths[j])[0] + '_heatmap.png'
                     except Exception as e:
