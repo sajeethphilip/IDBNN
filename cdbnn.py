@@ -220,35 +220,35 @@ class PredictionManager:
         """Compute Grad-CAM heatmaps with gradient weighting"""
         # Store original model state
         original_training = self.model.training
+        self.model.train()  # Temporarily enable training mode for gradients
         self.model.zero_grad()
 
         try:
-            # Temporarily enable gradient computation
             with torch.enable_grad():
                 # Re-run forward pass with gradients
-                output_grad = self.model(batch_tensor.requires_grad_(True))
+                output_grad = self.model(batch_tensor)
 
                 # Get targets from current output
-                if 'class_predictions' in output:
-                    targets = output['class_predictions']
+                if 'class_predictions' in output_grad:
+                    targets = output_grad['class_predictions']
                 else:
                     targets = torch.argmax(output_grad['embedding'], dim=1)
 
-                # Calculate gradients for specific class
-                if 'class_logits' in output_grad:
-                    loss = output_grad['class_logits'][range(len(output_grad['class_logits'])), targets].sum()
-                else:
-                    loss = output_grad['embedding'][range(len(output_grad['embedding'])), targets].sum()
+                # Create one-hot encoding for targets
+                one_hot = torch.zeros_like(output_grad['embedding'])
+                one_hot.scatter_(1, targets.unsqueeze(1), 1.0)
 
-                # Backward pass with retained graph
-                loss.backward(retain_graph=True)
+                # Backward pass for gradients
+                (output_grad['embedding'] * one_hot).sum().backward(retain_graph=True)
 
                 # Get gradients from the feature maps
-                gradients = fm_tensor.grad  # Directly access gradients from feature maps
+                gradients = fm_tensor.grad  # Should now have valid gradients
 
-                # Pool gradients and weight features
-                pooled_gradients = torch.mean(gradients, dim=[0, 2, 3])
-                weighted_features = fm_tensor * pooled_gradients[None, :, None, None]
+                # Pool gradients across spatial dimensions
+                pooled_gradients = torch.mean(gradients, dim=[0, 2, 3], keepdim=True)
+
+                # Weight features by gradient importance
+                weighted_features = fm_tensor * pooled_gradients
                 heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
 
                 # Apply ReLU and normalize
@@ -456,7 +456,7 @@ class PredictionManager:
                 heatmap_paths = [''] * len(batch_files)
                 if heatmap_enabled and feature_maps:
                     try:
-                        fm_tensor = feature_maps[0].clone().requires_grad_(True)
+                        fm_tensor = feature_maps[0].requires_grad_(True)
                         #fm_tensor = feature_maps[0]
                         #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         if self.heatmap_method == 'gradcam':
