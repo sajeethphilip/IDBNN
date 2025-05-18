@@ -2039,7 +2039,7 @@ class DBNN(GPUDBNN):
 
                 # Gather probabilities for all samples and classes at once
                 probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
-                log_likelihoods += torch.log(probs.t() + epsilon)
+                log_likelihoods += torch.log(probs.t()/ len(self.feature_pairs) + epsilon)
 
                 pbar.update(1)  # Update progress bar
 
