@@ -404,11 +404,12 @@ class PredictionManager:
                     heatmap_paths = [''] * len(valid_indices)
                     if heatmap_enabled and hasattr(self.model, 'get_activation_maps'):
                         try:
-                            activation_maps = self.model.get_activation_maps(batch)
-                            for idx, (filename, activation) in enumerate(zip(current_batch, activation_maps)):
+                            # Pass batch to get_activation_maps
+                            activation_maps = self.model.get_activation_maps(batch)  # batch is already on device
+                            for idx, activation in enumerate(activation_maps):
                                 img = self._tensor_to_image(batch[idx])
                                 hm_path = self._save_heatmap(
-                                    img, activation,
+                                    img, activation.mean(dim=0).cpu().numpy(),  # Average across channels
                                     os.path.join(heatmap_base, os.path.relpath(filename, data_path))
                                 )
                                 heatmap_paths[idx] = os.path.relpath(hm_path, os.path.dirname(output_csv))
@@ -1621,9 +1622,13 @@ class BaseAutoencoder(nn.Module):
         x = x.view(x.size(0), -1)
         return self.embedder(x)
 
-    def get_activation_maps(self) -> torch.Tensor:
-        """Return activation maps from the last encoder layer"""
-        return self.activation_maps
+    def get_activation_maps(self, x: torch.Tensor) -> torch.Tensor:
+        """Get activation maps from the last encoder layer"""
+        # Forward pass through encoder only
+        with torch.no_grad():
+            for layer in self.encoder_layers:
+                x = layer(x)
+        return x
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
         """Basic decoding process"""
