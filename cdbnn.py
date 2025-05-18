@@ -414,7 +414,7 @@ class PredictionManager:
                                 heatmap_paths[idx] = os.path.relpath(hm_path, os.path.dirname(output_csv))
                         except Exception as e:
                             logger.error(f"Heatmap generation failed: {str(e)}")
-
+                    print(heatmap_paths)
                     # CSV writing for successful processed items
                     with open(output_csv, 'a', newline='') as csvfile:
                         writer = csv.writer(csvfile)
