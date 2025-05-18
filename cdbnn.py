@@ -204,8 +204,48 @@ class PredictionManager:
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.heatmap_attn = config['model'].get('heatmap_attn', True)
+        self.heatmap_method = config['model'].get('heatmap_method', 'gradcam')  # 'mean' or 'gradcam'
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
+
+
+    def _compute_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> np.ndarray:
+        """Compute heatmaps using configured method"""
+        if self.heatmap_method == 'gradcam':
+            return self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
+        else:  # fallback to mean activation
+            return torch.mean(fm_tensor, dim=1, keepdim=True)
+
+    def _gradcam_heatmaps(self, fm_tensor: torch.Tensor, batch_tensor: torch.Tensor, output: Dict) -> np.ndarray:
+        """Compute Grad-CAM heatmaps with gradient weighting"""
+        # Zero gradients before backward pass
+        self.model.zero_grad()
+
+        # Get target class from model output
+        if 'class_predictions' in output:
+            targets = output['class_predictions']
+        elif 'cluster_assignments' in output:
+            targets = output['cluster_assignments']
+        else:
+            targets = torch.argmax(output['embedding'], dim=1)
+
+        # Backward pass for gradients
+        with torch.enable_grad():
+            loss = output['class_logits'][range(len(output['class_logits'])), targets].sum() \
+                if 'class_logits' in output else output['embedding'].sum()
+            loss.backward(retain_graph=True)
+
+        # Get gradients and feature maps
+        gradients = self.model.encoder_layers[-1].weight.grad
+        pooled_gradients = torch.mean(gradients, dim=[0, 2, 3])
+
+        # Weight features by gradient importance
+        weighted_features = fm_tensor * pooled_gradients[None, :, None, None]
+        heatmaps = torch.sum(weighted_features, dim=1, keepdim=True)
+
+        # Apply ReLU and normalize
+        heatmaps = F.relu(heatmaps)
+        return heatmaps
 
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
@@ -375,6 +415,7 @@ class PredictionManager:
             with torch.no_grad():
                 batch_tensor = torch.cat(batch_images, dim=0)
                 feature_maps = []
+                gradients = []
 
                 # Feature map hook
                 def hook(module, input, output):
@@ -403,7 +444,11 @@ class PredictionManager:
                 if heatmap_enabled and feature_maps:
                     try:
                         fm_tensor = feature_maps[0]
-                        heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
+                        #heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
+                        if self.heatmap_method == 'gradcam':
+                            heatmaps= self._gradcam_heatmaps(fm_tensor, batch_tensor, output)
+                        else:
+                            heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
                         heatmaps = F.interpolate(
                             heatmaps,
                             size=self.config['dataset']['input_size'],
@@ -738,6 +783,8 @@ class BaseEnhancementConfig:
             self.config['model'] = {}
         if 'heatmap_attn' not in self.config['model']:
             self.config['model']['heatmap_attn'] = True
+        if 'heatmap_method' not in self.config['model']:
+            self.config['model']['heatmap_method'] = 'gradcam'
         # Initialize autoencoder config
         if 'autoencoder_config' not in self.config['model']:
             self.config['model']['autoencoder_config'] = {
