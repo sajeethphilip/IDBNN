@@ -326,6 +326,7 @@ class PredictionManager:
         """Predict features with efficient batch processing and accurate progress tracking"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', False)
+        print(f"{Colors.GREEN} heatmap is {heatmap_enabled}. {Colors.ENDC}")
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
 
