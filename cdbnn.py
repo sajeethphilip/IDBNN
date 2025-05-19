@@ -328,6 +328,7 @@ class PredictionManager:
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
+        input_size = tuple(self.config['dataset']['input_size'])
 
         # Get image files and validate
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
@@ -374,16 +375,22 @@ class PredictionManager:
             # Model inference
             with torch.no_grad():
                 batch_tensor = torch.cat(batch_images, dim=0)
-                feature_maps = []
+                all_feature_maps = []
 
-                # Feature map hook
-                def hook(module, input, output):
-                    feature_maps.append(output.detach())
-                hook_handle = self.model.encoder_layers[-1].register_forward_hook(hook)
+                # Register hooks on all encoder layers
+                hooks = []
+                for layer in self.model.encoder_layers:
+                    hook = layer.register_forward_hook(
+                        lambda module, input, output: all_feature_maps.append(output.detach())
+                    )
+                    hooks.append(hook)
 
                 # Forward pass
                 output = self.model(batch_tensor)
-                hook_handle.remove()
+
+                # Remove hooks
+                for hook in hooks:
+                    hook.remove()
 
                 # Process outputs
                 embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
@@ -398,55 +405,74 @@ class PredictionManager:
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
 
-                # Heatmap generation
+                # Enhanced heatmap generation
                 heatmap_paths = [''] * len(batch_files)
-                if heatmap_enabled and feature_maps:
+                if heatmap_enabled and all_feature_maps:
                     try:
-                        fm_tensor = feature_maps[0]
-                        heatmaps = torch.mean(fm_tensor, dim=1, keepdim=True)
-                        heatmaps = F.interpolate(
-                            heatmaps,
-                            size=self.config['dataset']['input_size'],
-                            mode='bilinear',
-                            align_corners=False
-                        ).squeeze(1).cpu().numpy()
+                        # Process multi-scale features
+                        combined_heatmaps = []
+                        layer_weights = torch.linspace(0.2, 1.0, len(all_feature_maps)).to(self.device)
 
+                        for idx, fm in enumerate(all_feature_maps):
+                            # Channel attention
+                            channel_weights = torch.mean(fm, dim=(2, 3))  # [B, C]
+                            weighted_fm = fm * channel_weights.unsqueeze(-1).unsqueeze(-1)
+
+                            # Spatial processing
+                            upsampled = F.interpolate(
+                                weighted_fm,
+                                size=input_size,
+                                mode='bilinear',
+                                align_corners=False
+                            )
+                            combined_heatmaps.append(upsampled * layer_weights[idx])
+
+                        # Combine across layers and channels
+                        heatmap = torch.sum(torch.stack(combined_heatmaps), dim=0)
+                        heatmap = torch.mean(heatmap, dim=1)  # Aggregate channels
+
+                        # Spatial softmax normalization
+                        heatmap = heatmap.view(heatmap.size(0), -1)
+                        heatmap = torch.softmax(heatmap, dim=-1)
+                        heatmap = heatmap.view(-1, *input_size).cpu().numpy()
+
+                        # Generate visualization
                         for j, filename in enumerate(batch_files):
-                            # Get original image
+                            # Process original image
                             img_tensor = batch_tensor[j].cpu()
                             img = img_tensor.numpy().transpose(1, 2, 0)
                             img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
                             img = np.clip(img, 0, 1)
-                            img = (img * 255).astype(np.uint8)
-                            pil_img = Image.fromarray(img, 'RGB')
+                            pil_img = Image.fromarray((img * 255).astype(np.uint8), 'RGB')
 
                             # Process heatmap
-                            hm = heatmaps[j]
+                            hm = heatmap[j]
                             hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
 
-                            # Create colored heatmap (red with alpha)
-                            heatmap_img = np.zeros((hm.shape[0], hm.shape[1], 4), dtype=np.uint8)
-                            heatmap_img[..., 0] = 255  # Red channel
-                            heatmap_img[..., 3] = (hm * 200).astype(np.uint8)  # Alpha channel (0-200)
+                            # Create overlay
+                            hm_img = plt.cm.viridis(hm)[..., :3]  # Use perceptually uniform colormap
+                            hm_img = (hm_img * 255).astype(np.uint8)
+                            overlay = Image.fromarray(hm_img).convert('RGBA')
+                            overlay.putalpha(int(0.6 * 255))  # 60% opacity
 
-                            # Convert to PIL and composite
-                            heatmap_pil = Image.fromarray(heatmap_img, 'RGBA')
-                            combined = Image.alpha_composite(pil_img.convert('RGBA'), heatmap_pil)
+                            # Composite images
+                            base_img = pil_img.convert('RGBA')
+                            combined = Image.alpha_composite(base_img, overlay)
                             combined = combined.convert('RGB')
 
                             # Save result
                             rel_path = os.path.relpath(filename, data_path)
                             heatmap_path = os.path.join(heatmap_base, rel_path)
-                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_overlay.jpg'
+                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
 
                             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
-                            combined.save(heatmap_path, quality=95)
+                            combined.save(heatmap_path, quality=95, optimize=True)
 
                             heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
-                            heatmap_paths[j] = os.path.join('data', self.config['dataset']['name'], 'heatmaps', rel_path)
-                            heatmap_paths[j] = os.path.splitext(heatmap_paths[j])[0] + '_heatmap.png'
+
                     except Exception as e:
-                        logger.error(f"Heatmap error: {str(e)}")
+                        logger.error(f"Heatmap generation error: {str(e)}")
+                        logger.error(traceback.format_exc())
 
             # CSV writing
             with open(output_csv, 'a', newline='') as csvfile:
@@ -459,7 +485,7 @@ class PredictionManager:
                     label_type = "predicted" if is_unknown else "true"
 
                     if label_type == "true":
-                        target = true_class  # Actual class name from directory
+                        target = true_class
                     else:
                         target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
 
@@ -1819,6 +1845,14 @@ class BaseAutoencoder(nn.Module):
             plt.savefig(save_path)
             logging.info(f"Reconstruction samples saved to {save_path}")
         plt.close()
+
+    def get_feature_maps(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Capture multi-scale feature maps from encoder"""
+        feature_maps = []
+        for layer in self.encoder_layers:
+            x = layer(x)
+            feature_maps.append(x)  # Store features from all layers
+        return feature_maps
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
         """
