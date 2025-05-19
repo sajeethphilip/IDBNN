@@ -364,7 +364,7 @@ class PredictionManager:
             gradients.append(grad_output[0].detach())
 
         forward_handle = target_layer.register_forward_hook(forward_hook)
-        backward_handle = target_layer.register_backward_hook(backward_hook)
+        backward_handle = target_layer.register_full_backward_hook(backward_hook)
 
         # Batch processing
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -392,14 +392,12 @@ class PredictionManager:
             # Forward pass
             output = self.model(batch_tensor)
             embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-            features = embedding.cpu().numpy()
+            features = embedding.detach().cpu().numpy()
 
             # Determine targets for Grad-CAM
             if 'class_logits' in output:
-                # Use classifier outputs if available
                 targets = output['class_logits'].argmax(dim=1)
             elif 'cluster_probabilities' in output:
-                # Fallback to cluster probabilities
                 targets = output['cluster_probabilities'].argmax(dim=1)
             else:
                 targets = torch.zeros(len(batch_tensor), dtype=torch.long, device=self.device)
@@ -408,23 +406,26 @@ class PredictionManager:
             one_hot = torch.zeros_like(embedding)
             for idx, target in enumerate(targets):
                 one_hot[idx, target] = 1
-            embedding.backward(gradient=one_hot, retain_graph=True)
+
+            # Retain graph only if needed
+            retain_graph = self.config['model'].get('retain_backward_graph', False)
+            embedding.backward(gradient=one_hot, retain_graph=retain_graph)
 
             # Process outputs
             cluster_assign = ['NA'] * len(batch_files)
             cluster_conf = ['NA'] * len(batch_files)
             if 'cluster_assignments' in output:
-                cluster_nums = output['cluster_assignments'].cpu().numpy()
+                cluster_nums = output['cluster_assignments'].detach().cpu().numpy()
                 cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+                cluster_conf = output['cluster_probabilities'].max(1)[0].detach().cpu().numpy()
 
             # Generate Grad-CAM heatmaps
             heatmap_paths = [''] * len(batch_files)
             if heatmap_enabled and feature_maps and gradients:
                 try:
-                    # Get feature maps and gradients
-                    fmaps = feature_maps[-1].cpu().numpy()
-                    grads = gradients[-1].cpu().numpy()
+                    # Get feature maps and gradients with proper detachment
+                    fmaps = feature_maps[-1].detach().cpu().numpy()
+                    grads = gradients[-1].detach().cpu().numpy()
 
                     # Pool gradients channel-wise
                     weights = np.mean(grads, axis=(2, 3), keepdims=True)
@@ -436,12 +437,13 @@ class PredictionManager:
                     # Process each image in batch
                     for j, filename in enumerate(batch_files):
                         # Resize CAM to input size
+                        cam_tensor = torch.from_numpy(cam[j:j+1].astype(np.float32)).unsqueeze(0)
                         cam_resized = F.interpolate(
-                            torch.from_numpy(cam[j:j+1].astype(np.float32)).unsqueeze(0),
+                            cam_tensor,
                             size=self.config['dataset']['input_size'],
                             mode='bilinear',
                             align_corners=False
-                        ).squeeze().numpy()
+                        ).squeeze().detach().numpy()
 
                         # Normalize heatmap
                         cam_norm = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
@@ -471,6 +473,8 @@ class PredictionManager:
 
                 except Exception as e:
                     logger.error(f"Grad-CAM error: {str(e)}")
+                    # Fallback to original image if heatmap generation fails
+                    heatmap_paths = [''] * len(batch_files)
 
             # Clear hooks for next batch
             feature_maps.clear()
