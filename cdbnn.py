@@ -352,6 +352,16 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv.writer(csvfile).writerow(csv_headers)
 
+        # Find the last convolutional layer
+        conv_layer = None
+        for layer in reversed(list(self.model.encoder_layers)):
+            if isinstance(layer, nn.Conv2d):
+                conv_layer = layer
+                break
+
+        if not conv_layer:
+            raise RuntimeError("No convolutional layer found in encoder")
+
         # Batch processing
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i+batch_size]
@@ -375,107 +385,105 @@ class PredictionManager:
             with torch.no_grad():
                 batch_tensor = torch.cat(batch_images, dim=0)
 
-                # Grad-CAM setup
-                feature_maps = []
-                gradients = []
+            # Grad-CAM setup
+            feature_maps = []
+            gradients = []
 
-                def forward_hook(module, input, output):
-                    feature_maps.append(output.detach())
+            def forward_hook(module, input, output):
+                feature_maps.append(output.detach())
 
-                def backward_hook(module, grad_input, grad_output):
-                    gradients.append(grad_output[0].detach())
+            def backward_hook(module, grad_input, grad_output):
+                gradients.append(grad_output[0].detach())
 
-                hook_handle = self.model.encoder_layers[-1].register_forward_hook(forward_hook)
-                hook_handle_backward = self.model.encoder_layers[-1].register_backward_hook(backward_hook)
+            forward_handle = conv_layer.register_forward_hook(forward_hook)
+            backward_handle = conv_layer.register_full_backward_hook(backward_hook)
 
-                # Forward pass
-                output = self.model(batch_tensor)
+            # Forward pass
+            output = self.model(batch_tensor)
 
-                # Get target for Grad-CAM
-                if 'class_logits' in output:
-                    # Use class predictions if available
-                    targets = output['class_logits'].argmax(dim=1)
-                    one_hot = torch.zeros_like(output['class_logits'])
-                    one_hot.scatter_(1, targets.unsqueeze(1), 1)
-                else:
-                    # Fallback to cluster probabilities
-                    targets = output['cluster_probabilities'].argmax(dim=1)
-                    one_hot = torch.zeros_like(output['cluster_probabilities'])
-                    one_hot.scatter_(1, targets.unsqueeze(1), 1)
+            # Get target for Grad-CAM
+            if 'class_logits' in output:
+                targets = output['class_logits'].argmax(dim=1)
+                one_hot = torch.zeros_like(output['class_logits'])
+                one_hot.scatter_(1, targets.unsqueeze(1), 1.0)
+            else:
+                targets = output['cluster_probabilities'].argmax(dim=1)
+                one_hot = torch.zeros_like(output['cluster_probabilities'])
+                one_hot.scatter_(1, targets.unsqueeze(1), 1.0)
 
-                # Backward pass for gradients
-                self.model.zero_grad()
-                output['embedding'].backward(gradient=one_hot, retain_graph=True)
+            # Backward pass for gradients
+            self.model.zero_grad()
+            output['embedding'].backward(gradient=one_hot, retain_graph=True)
 
-                hook_handle.remove()
-                hook_handle_backward.remove()
+            forward_handle.remove()
+            backward_handle.remove()
 
-                # Process outputs
-                embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                features = embedding.cpu().numpy()
+            # Process outputs
+            embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+            features = embedding.cpu().numpy()
 
-                # Cluster processing
-                if 'cluster_assignments' in output:
-                    cluster_nums = output['cluster_assignments'].cpu().numpy()
-                    cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                    cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
-                else:
-                    cluster_assign = ['NA'] * len(batch_files)
-                    cluster_conf = ['NA'] * len(batch_files)
+            # Cluster processing
+            if 'cluster_assignments' in output:
+                cluster_nums = output['cluster_assignments'].cpu().numpy()
+                cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
+                cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+            else:
+                cluster_assign = ['NA'] * len(batch_files)
+                cluster_conf = ['NA'] * len(batch_files)
 
-                # Grad-CAM heatmap generation
-                heatmap_paths = [''] * len(batch_files)
-                if heatmap_enabled and feature_maps and gradients:
-                    try:
-                        # Get features and gradients
-                        features = feature_maps[0].cpu().numpy()
-                        grads = gradients[0].cpu().numpy()
+            # Grad-CAM heatmap generation
+            heatmap_paths = [''] * len(batch_files)
+            if heatmap_enabled and feature_maps and gradients:
+                try:
+                    # Get features and gradients
+                    features = feature_maps[0].cpu().numpy()
+                    grads = gradients[0].cpu().numpy()
 
-                        # Pool gradients and weight features
-                        pooled_grads = np.mean(grads, axis=(2, 3), keepdims=True)
-                        weighted_features = np.mean(features * pooled_grads, axis=1)
+                    # Pool gradients and weight features
+                    pooled_grads = np.mean(grads, axis=(2, 3), keepdims=True)
+                    weighted_features = np.mean(features * pooled_grads, axis=1)
 
-                        # Apply ReLU and normalize
-                        heatmaps = np.maximum(weighted_features, 0)
-                        heatmaps = (heatmaps - np.min(heatmaps)) / (np.max(heatmaps) - np.min(heatmaps) + 1e-8)
+                    # Apply ReLU and normalize
+                    heatmaps = np.maximum(weighted_features, 0)
+                    heatmaps = (heatmaps - np.min(heatmaps)) / (np.max(heatmaps) - np.min(heatmaps) + 1e-8)
 
-                        # Resize to input size
-                        heatmaps = np.array([cv2.resize(hm, self.config['dataset']['input_size'],
-                                                      interpolation=cv2.INTER_CUBIC)
-                                           for hm in heatmaps])
+                    # Resize to input size
+                    heatmaps = np.array([cv2.resize(hm, self.config['dataset']['input_size'],
+                                                  interpolation=cv2.INTER_CUBIC)
+                                       for hm in heatmaps])
 
-                        for j, filename in enumerate(batch_files):
-                            # Get original image
-                            img_tensor = batch_tensor[j].cpu()
-                            img = img_tensor.numpy().transpose(1, 2, 0)
-                            img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
-                            img = np.clip(img, 0, 1)
-                            img = (img * 255).astype(np.uint8)
-                            pil_img = Image.fromarray(img, 'RGB')
+                    for j, filename in enumerate(batch_files):
+                        # Get original image
+                        img_tensor = batch_tensor[j].cpu()
+                        img = img_tensor.numpy().transpose(1, 2, 0)
+                        img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
+                        img = np.clip(img, 0, 1)
+                        img = (img * 255).astype(np.uint8)
+                        pil_img = Image.fromarray(img, 'RGB')
 
-                            # Create heatmap overlay
-                            hm = heatmaps[j]
-                            heatmap_img = cv2.applyColorMap(np.uint8(255 * hm), cv2.COLORMAP_JET)
-                            heatmap_img = cv2.cvtColor(heatmap_img, cv2.COLOR_BGR2RGB)
-                            heatmap_pil = Image.fromarray(heatmap_img)
-                            heatmap_pil = heatmap_pil.resize(pil_img.size, Image.Resampling.LANCZOS)
+                        # Create heatmap overlay
+                        hm = heatmaps[j]
+                        heatmap_img = cv2.applyColorMap(np.uint8(255 * hm), cv2.COLORMAP_JET)
+                        heatmap_img = cv2.cvtColor(heatmap_img, cv2.COLOR_BGR2RGB)
+                        heatmap_pil = Image.fromarray(heatmap_img)
+                        heatmap_pil = heatmap_pil.resize(pil_img.size, Image.Resampling.LANCZOS)
 
-                            # Blend images
-                            blended = Image.blend(pil_img, heatmap_pil, alpha=0.5)
+                        # Blend images
+                        blended = Image.blend(pil_img, heatmap_pil, alpha=0.5)
 
-                            # Save result
-                            rel_path = os.path.relpath(filename, data_path)
-                            heatmap_path = os.path.join(heatmap_base, rel_path)
-                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.jpg'
+                        # Save result
+                        rel_path = os.path.relpath(filename, data_path)
+                        heatmap_path = os.path.join(heatmap_base, rel_path)
+                        heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.jpg'
 
-                            os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
-                            blended.save(heatmap_path, quality=95)
+                        os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                        blended.save(heatmap_path, quality=95)
 
-                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                        heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
 
-                    except Exception as e:
-                        logger.error(f"Grad-CAM error: {str(e)}")
-                        traceback.print_exc()
+                except Exception as e:
+                    logger.error(f"Grad-CAM error: {str(e)}")
+                    traceback.print_exc()
 
             # CSV writing
             with open(output_csv, 'a', newline='') as csvfile:
