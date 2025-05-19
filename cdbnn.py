@@ -352,12 +352,12 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv.writer(csvfile).writerow(csv_headers)
 
-        # Find the last convolutional layer
+        # Find the last convolutional layer in encoder
         conv_layer = None
-        for layer in reversed(list(self.model.encoder_layers)):
-            if isinstance(layer, nn.Conv2d):
-                conv_layer = layer
-                break
+        for encoder_layer in self.model.encoder_layers:
+            for layer in encoder_layer:
+                if isinstance(layer, nn.Conv2d):
+                    conv_layer = layer
 
         if not conv_layer:
             raise RuntimeError("No convolutional layer found in encoder")
