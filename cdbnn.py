@@ -328,6 +328,7 @@ class PredictionManager:
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
+        current_working_dir = os.getcwd()  # Capture working directory at start
 
         # Get image files and validate
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
@@ -469,7 +470,8 @@ class PredictionManager:
                         os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
                         Image.fromarray(superimposed_img).save(heatmap_path, quality=95)
 
-                        heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+                        # Store path relative to working directory
+                        heatmap_paths[j] = os.path.relpath(heatmap_path, current_working_dir)  # Modified line
 
                 except Exception as e:
                     logger.error(f"Grad-CAM error: {str(e)}")
