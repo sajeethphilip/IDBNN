@@ -638,7 +638,7 @@ class PredictionManager:
 
                             heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
                             heatmap_paths[j] = os.path.join('data', self.config['dataset']['name'], 'heatmaps', rel_path)
-                            heatmap_paths[j] = os.path.splitext(heatmap_paths[j])[0] + '_heatmap.png'
+                            heatmap_paths[j] = os.path.splitext(heatmap_paths[j])[0] + '_overlay.jpg'
                     except Exception as e:
                         logger.error(f"Heatmap error: {str(e)}")
 
@@ -788,7 +788,7 @@ class PredictionManager:
                         for j, filename in enumerate(batch_files):
                             rel_path = os.path.relpath(filename, data_path)
                             heatmap_path = os.path.join(heatmap_base, rel_path)
-                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
+                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_overlay.jpg'
 
                             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
 
