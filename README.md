@@ -25,6 +25,11 @@ To train/predict using adbnn  (For Difference Boosting Neural Network
 
 
 ```
+The heatmap colour coding:
+
+![image](https://github.com/user-attachments/assets/431b04e5-7a60-49f1-ba2d-eb59d5aad434)
+
+
 ![image](https://github.com/user-attachments/assets/dfb40806-5bb2-4e19-afea-57c0f39145df)
 
 ![image](https://github.com/user-attachments/assets/48ce9afe-bbb8-4736-936c-e2754245437f)
