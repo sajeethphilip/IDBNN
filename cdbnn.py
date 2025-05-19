@@ -403,15 +403,15 @@ class PredictionManager:
                     # Forward pass
                     output = self.model(batch_tensor)
                     embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                    features = embedding.cpu().float().numpy()
+                    features = embedding.detach().cpu().float().numpy()
 
                     # Cluster processing
                     cluster_assign = ['NA'] * len(batch_files)
                     cluster_conf = ['NA'] * len(batch_files)
                     if 'cluster_assignments' in output:
-                        cluster_nums = output['cluster_assignments'].cpu().numpy()
+                        cluster_nums = output['cluster_assignments'].detach().cpu().numpy()  # Added detach()
                         cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                        cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+                        cluster_conf = output['cluster_probabilities'].detach().max(1)[0].cpu().numpy()
 
                     # Grad-CAM heatmap generation
                     heatmap_paths = [''] * len(batch_files)
@@ -419,18 +419,18 @@ class PredictionManager:
                         try:
                             # Get predicted class
                             if 'class_predictions' in output:
-                                pred_classes = output['class_predictions'].cpu().numpy()
+                                pred_classes = output['class_predictions'].detach().cpu().numpy()
                             else:
-                                pred_classes = output['cluster_assignments'].cpu().numpy()
+                                pred_classes = output['cluster_assignments'].detach().cpu().numpy()
 
                             # Backward pass for gradients
                             self.model.zero_grad()
                             if 'class_logits' in output:
-                                class_logits = output['class_logits']
+                                class_logits = output['class_logits'].detach()
                                 class_idx = torch.argmax(class_logits, dim=1)
                                 score = class_logits[torch.arange(class_logits.size(0)), class_idx].sum()
                             else:
-                                score = output['cluster_probabilities'][torch.arange(output['cluster_probabilities'].size(0)), pred_classes].sum()
+                                score = output['cluster_probabilities'].detach()[torch.arange(output['cluster_probabilities'].size(0)), pred_classes].sum()
 
                             score.backward(retain_graph=True)
 
