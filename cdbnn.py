@@ -322,8 +322,9 @@ class PredictionManager:
         return model
 
 #--------------------Prediction -----------------------
+    # Modified predict_images method in PredictionManager class
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with Grad-CAM explainable heatmaps"""
+        """Predict features with Grad-CAM explainable heatmaps - Fixed Version"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
         class_mapping = self._get_class_mapping(data_path)
@@ -352,15 +353,25 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv.writer(csvfile).writerow(csv_headers)
 
-        # Find the last convolutional layer in encoder
-        conv_layer = None
+        # --- Modified Conv Layer Selection ---
+        # Find ALL convolutional layers in encoder
+        conv_layers = []
         for encoder_layer in self.model.encoder_layers:
             for layer in encoder_layer:
                 if isinstance(layer, nn.Conv2d):
-                    conv_layer = layer
+                    conv_layers.append(layer)
 
-        if not conv_layer:
+        if not conv_layers:
             raise RuntimeError("No convolutional layer found in encoder")
+
+        # Select the last conv layer and verify dimensions
+        conv_layer = conv_layers[-1]
+        expected_channels = self.config['model']['feature_dims']
+        if conv_layer.out_channels != expected_channels:
+            raise ValueError(
+                f"Selected conv layer has {conv_layer.out_channels} channels, "
+                f"expected {expected_channels}. Check model configuration."
+            )
 
         # Batch processing
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
@@ -431,25 +442,28 @@ class PredictionManager:
                 cluster_assign = ['NA'] * len(batch_files)
                 cluster_conf = ['NA'] * len(batch_files)
 
-            # Grad-CAM heatmap generation
+            # --- Modified Heatmap Generation ---
             heatmap_paths = [''] * len(batch_files)
             if heatmap_enabled and feature_maps and gradients:
                 try:
-                    # Get features and gradients
-                    features = feature_maps[0].cpu().numpy()
-                    grads = gradients[0].cpu().numpy()
+                    # Get features and gradients with proper dimensions
+                    features = feature_maps[0].cpu().numpy()  # (batch, C, H, W)
+                    grads = gradients[0].cpu().numpy()         # (batch, C, H, W)
 
-                    # Pool gradients and weight features
-                    pooled_grads = np.mean(grads, axis=(2, 3), keepdims=True)
-                    weighted_features = np.mean(features * pooled_grads, axis=1)
+                    # Pool gradients while preserving channel dimension
+                    pooled_grads = np.mean(grads, axis=(2, 3), keepdims=True)  # (batch, C, 1, 1)
+
+                    # Weight features using broadcasted multiplication
+                    weighted_features = features * pooled_grads  # (batch, C, H, W)
+                    weighted_features = np.mean(weighted_features, axis=1)  # (batch, H, W)
 
                     # Apply ReLU and normalize
                     heatmaps = np.maximum(weighted_features, 0)
                     heatmaps = (heatmaps - np.min(heatmaps)) / (np.max(heatmaps) - np.min(heatmaps) + 1e-8)
 
-                    # Resize to input size
-                    heatmaps = np.array([cv2.resize(hm, self.config['dataset']['input_size'],
-                                                  interpolation=cv2.INTER_CUBIC)
+                    # Resize to input size using OpenCV
+                    input_size = tuple(self.config['dataset']['input_size'])
+                    heatmaps = np.array([cv2.resize(hm, input_size, interpolation=cv2.INTER_CUBIC)
                                        for hm in heatmaps])
 
                     for j, filename in enumerate(batch_files):
@@ -485,7 +499,7 @@ class PredictionManager:
                     logger.error(f"Grad-CAM error: {str(e)}")
                     traceback.print_exc()
 
-            # CSV writing
+            # CSV writing (unchanged)
             with open(output_csv, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 for j, (filename, orig_name, true_class) in enumerate(zip(
