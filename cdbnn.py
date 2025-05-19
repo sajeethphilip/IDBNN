@@ -330,10 +330,10 @@ class PredictionManager:
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
         input_size = tuple(self.config['dataset']['input_size'])
 
-        # Memory optimization: Reduce batch size for heatmap generation
-        safe_batch_size = min(batch_size, 16)  # Keep ≤16 for safety
+        # Memory safety adjustments
+        safe_batch_size = min(batch_size, 16)
         if batch_size != safe_batch_size:
-            logger.warning(f"Adjusting batch size from {batch_size} to {safe_batch_size} for memory safety")
+            logger.warning(f"Adjusting batch size from {batch_size} to {safe_batch_size}")
             batch_size = safe_batch_size
 
         # Get image files and validate
@@ -384,15 +384,15 @@ class PredictionManager:
                 batch_tensor = torch.cat(batch_images, dim=0)
                 all_feature_maps = []
 
-                # Register hooks with memory-efficient handling
+                # Register hooks for last 3 encoder layers only
                 hooks = []
                 def feature_hook(module, input, output):
-                    all_feature_maps.append(output.detach().half())  # Store as half-precision
-                    if len(all_feature_maps) > 3:  # Keep only last 3 layers
+                    all_feature_maps.append(output.detach().half())  # FP16 storage
+                    if len(all_feature_maps) > 3:
                         del all_feature_maps[0]
                         torch.cuda.empty_cache()
 
-                for layer in self.model.encoder_layers[-3:]:  # Only last 3 layers
+                for layer in self.model.encoder_layers[-3:]:  # Last 3 layers only
                     hooks.append(layer.register_forward_hook(feature_hook))
 
                 # Forward pass
@@ -404,7 +404,7 @@ class PredictionManager:
 
                 # Process outputs
                 embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                features = embedding.cpu().float().numpy()  # Convert back to float32
+                features = embedding.cpu().float().numpy()
 
                 # Cluster processing
                 cluster_assign = ['NA'] * len(batch_files)
@@ -414,23 +414,25 @@ class PredictionManager:
                     cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
                     cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
 
-                # Memory-optimized heatmap generation
+                # Fixed heatmap generation with dimension handling
                 heatmap_paths = [''] * len(batch_files)
                 if heatmap_enabled and all_feature_maps:
                     try:
-                        # Process features incrementally
                         heatmap = None
                         layer_weights = torch.linspace(0.3, 1.0, len(all_feature_maps), device=self.device)
 
                         for idx, fm in enumerate(all_feature_maps):
                             with torch.cuda.amp.autocast():
-                                # Channel attention with reduced precision
-                                channel_weights = torch.mean(fm.float(), dim=(2, 3))  # Convert to float32 temporarily
-                                weighted_fm = (fm.float() * channel_weights.unsqueeze(-1).unsqueeze(-1)).half()
+                                # Channel processing
+                                channel_weights = torch.mean(fm.float(), dim=(2, 3))  # [B, C]
+                                weighted_fm = fm.float() * channel_weights.unsqueeze(-1).unsqueeze(-1)
 
-                                # Spatial processing
+                                # Reduce to single channel before upsampling
+                                channel_sum = torch.sum(weighted_fm, dim=1, keepdim=True)  # [B, 1, H, W]
+
+                                # Upsample to input size
                                 upsampled = F.interpolate(
-                                    weighted_fm,
+                                    channel_sum.half(),  # FP16 for memory
                                     size=input_size,
                                     mode='bilinear',
                                     align_corners=False
@@ -444,35 +446,35 @@ class PredictionManager:
                                     heatmap += weighted
 
                                 # Cleanup
-                                del weighted_fm, upsampled, weighted
+                                del weighted_fm, channel_sum, upsampled, weighted
                                 torch.cuda.empty_cache()
 
-                        # Final normalization
+                        # Final processing
                         with torch.cuda.amp.autocast():
-                            heatmap = torch.mean(heatmap, dim=1)  # Aggregate channels
+                            heatmap = heatmap.squeeze(1)  # Remove channel dim [B, H, W]
                             heatmap = torch.softmax(heatmap.view(batch_size, -1), dim=-1)
                             heatmap_np = heatmap.cpu().float().numpy().reshape(-1, *input_size)
 
                         # Visualization
                         for j, filename in enumerate(batch_files):
-                            # Process original image
+                            # Original image
                             img_tensor = batch_tensor[j].cpu().float()
                             img = img_tensor.numpy().transpose(1, 2, 0)
                             img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
                             img = np.clip(img, 0, 1)
                             pil_img = Image.fromarray((img * 255).astype(np.uint8), 'RGB')
 
-                            # Process heatmap
+                            # Heatmap processing
                             hm = heatmap_np[j]
                             hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
 
                             # Create overlay
-                            hm_img = plt.cm.viridis(hm)[..., :3]  # Use perceptually uniform colormap
+                            hm_img = plt.cm.viridis(hm)[..., :3]
                             hm_img = (hm_img * 255).astype(np.uint8)
                             overlay = Image.fromarray(hm_img).convert('RGBA')
-                            overlay.putalpha(int(0.6 * 255))  # 60% opacity
+                            overlay.putalpha(int(0.6 * 255))
 
-                            # Composite images
+                            # Composite image
                             base_img = pil_img.convert('RGBA')
                             combined = Image.alpha_composite(base_img, overlay).convert('RGB')
 
@@ -483,20 +485,13 @@ class PredictionManager:
 
                             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
                             combined.save(heatmap_path, quality=95, optimize=True)
-
                             heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
 
-                            # Cleanup
-                            del img_tensor, hm, hm_img, overlay, base_img, combined
-                            torch.cuda.empty_cache()
-
                     except Exception as e:
-                        logger.error(f"Heatmap generation error: {str(e)}")
+                        logger.error(f"Heatmap error: {str(e)}")
                         logger.error(traceback.format_exc())
-                elif heatmap_enabled:
-                    logger.warning("No feature maps available for heatmap generation")
 
-                # Cleanup before next batch
+                # Cleanup
                 del all_feature_maps, batch_tensor, output
                 torch.cuda.empty_cache()
 
@@ -506,14 +501,10 @@ class PredictionManager:
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
-                    # Determine label type and target
+                    # Label determination
                     is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
                     label_type = "predicted" if is_unknown else "true"
-
-                    if label_type == "true":
-                        target = true_class
-                    else:
-                        target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
+                    target = true_class if label_type == "true" else cluster_assign[j] or "unknown"
 
                     # Build row
                     row = [
@@ -531,7 +522,7 @@ class PredictionManager:
                     writer.writerow(row)
 
             # Inter-batch cleanup
-            del batch_images, features, cluster_assign, cluster_conf
+            del batch_images, features
             torch.cuda.empty_cache()
 
         logger.info(f"Predictions saved to {output_csv}")
