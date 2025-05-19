@@ -323,12 +323,23 @@ class PredictionManager:
 
 #--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict features with actual class names and generate heatmaps"""
+        """Predict features with actual class names and generate Grad-CAM heatmaps"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
         input_size = tuple(self.config['dataset']['input_size'])
+
+        # Grad-CAM parameters
+        target_layer = self.model.encoder_layers[-1]  # Last encoder layer for Grad-CAM
+        grads = []
+        activations = []
+
+        def backward_hook(module, grad_input, grad_output):
+            grads.append(grad_output[0].detach())
+
+        def forward_hook(module, input, output):
+            activations.append(output.detach())
 
         # Memory safety adjustments
         safe_batch_size = min(batch_size, 16)
@@ -359,171 +370,161 @@ class PredictionManager:
         with open(output_csv, 'w', newline='') as csvfile:
             csv.writer(csvfile).writerow(csv_headers)
 
-        # Batch processing with memory monitoring
-        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
-            batch_files = image_files[i:i+batch_size]
-            batch_labels = class_labels[i:i+batch_size]
-            batch_filenames = original_filenames[i:i+batch_size]
-            batch_images = []
+        # Register hooks once
+        if heatmap_enabled:
+            handle_b = target_layer.register_backward_hook(backward_hook)
+            handle_f = target_layer.register_forward_hook(forward_hook)
 
-            # Load and transform images
-            for filename in batch_files:
-                try:
-                    with Image.open(filename) as img:
-                        image_tensor = self._get_transforms()(img.convert('RGB')).unsqueeze(0).to(self.device)
-                        batch_images.append(image_tensor)
-                except Exception as e:
-                    logger.error(f"Error loading {filename}: {str(e)}")
-                    continue
-            if not batch_images:
-                continue
+        try:
+            # Batch processing with memory monitoring
+            for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+                batch_files = image_files[i:i+batch_size]
+                batch_labels = class_labels[i:i+batch_size]
+                batch_filenames = original_filenames[i:i+batch_size]
+                batch_images = []
 
-            # Model inference with memory cleanup
-            with torch.no_grad(), torch.cuda.amp.autocast():
-                torch.cuda.empty_cache()
-                batch_tensor = torch.cat(batch_images, dim=0)
-                all_feature_maps = []
-
-                # Register hooks for last 3 encoder layers only
-                hooks = []
-                def feature_hook(module, input, output):
-                    all_feature_maps.append(output.detach().half())  # FP16 storage
-                    if len(all_feature_maps) > 3:
-                        del all_feature_maps[0]
-                        torch.cuda.empty_cache()
-
-                for layer in self.model.encoder_layers[-3:]:  # Last 3 layers only
-                    hooks.append(layer.register_forward_hook(feature_hook))
-
-                # Forward pass
-                output = self.model(batch_tensor)
-
-                # Remove hooks immediately
-                for hook in hooks:
-                    hook.remove()
-
-                # Process outputs
-                embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
-                features = embedding.cpu().float().numpy()
-
-                # Cluster processing
-                cluster_assign = ['NA'] * len(batch_files)
-                cluster_conf = ['NA'] * len(batch_files)
-                if 'cluster_assignments' in output:
-                    cluster_nums = output['cluster_assignments'].cpu().numpy()
-                    cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
-                    cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
-
-                # Fixed heatmap generation with dimension handling
-                heatmap_paths = [''] * len(batch_files)
-                if heatmap_enabled and all_feature_maps:
+                # Load and transform images
+                for filename in batch_files:
                     try:
-                        heatmap = None
-                        layer_weights = torch.linspace(0.3, 1.0, len(all_feature_maps), device=self.device)
-
-                        for idx, fm in enumerate(all_feature_maps):
-                            with torch.cuda.amp.autocast():
-                                # Channel processing
-                                channel_weights = torch.mean(fm.float(), dim=(2, 3))  # [B, C]
-                                weighted_fm = fm.float() * channel_weights.unsqueeze(-1).unsqueeze(-1)
-
-                                # Reduce to single channel before upsampling
-                                channel_sum = torch.sum(weighted_fm, dim=1, keepdim=True)  # [B, 1, H, W]
-
-                                # Upsample to input size
-                                upsampled = F.interpolate(
-                                    channel_sum.half(),  # FP16 for memory
-                                    size=input_size,
-                                    mode='bilinear',
-                                    align_corners=False
-                                )
-
-                                # Weighted aggregation
-                                weighted = upsampled * layer_weights[idx]
-                                if heatmap is None:
-                                    heatmap = weighted
-                                else:
-                                    heatmap += weighted
-
-                                # Cleanup
-                                del weighted_fm, channel_sum, upsampled, weighted
-                                torch.cuda.empty_cache()
-
-                        # Final processing
-                        with torch.cuda.amp.autocast():
-                            heatmap = heatmap.squeeze(1)  # Remove channel dim [B, H, W]
-                            heatmap = torch.softmax(heatmap.view(batch_size, -1), dim=-1)
-                            heatmap_np = heatmap.cpu().float().numpy().reshape(-1, *input_size)
-
-                        # Visualization
-                        for j, filename in enumerate(batch_files):
-                            # Original image
-                            img_tensor = batch_tensor[j].cpu().float()
-                            img = img_tensor.numpy().transpose(1, 2, 0)
-                            img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
-                            img = np.clip(img, 0, 1)
-                            pil_img = Image.fromarray((img * 255).astype(np.uint8), 'RGB')
-
-                            # Heatmap processing
-                            hm = heatmap_np[j]
-                            hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
-
-                            # Create overlay
-                            hm_img = plt.cm.viridis(hm)[..., :3]
-                            hm_img = (hm_img * 255).astype(np.uint8)
-                            overlay = Image.fromarray(hm_img).convert('RGBA')
-                            overlay.putalpha(int(0.6 * 255))
-
-                            # Composite image
-                            base_img = pil_img.convert('RGBA')
-                            combined = Image.alpha_composite(base_img, overlay).convert('RGB')
-
-                            # Save result
-                            rel_path = os.path.relpath(filename, data_path)
-                            heatmap_path = os.path.join(heatmap_base, rel_path)
-                            heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
-
-                            os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
-                            combined.save(heatmap_path, quality=95, optimize=True)
-                            heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
-
+                        with Image.open(filename) as img:
+                            image_tensor = self._get_transforms()(img.convert('RGB')).unsqueeze(0).to(self.device)
+                            batch_images.append(image_tensor)
                     except Exception as e:
-                        logger.error(f"Heatmap error: {str(e)}")
-                        logger.error(traceback.format_exc())
+                        logger.error(f"Error loading {filename}: {str(e)}")
+                        continue
+                if not batch_images:
+                    continue
 
-                # Cleanup
-                del all_feature_maps, batch_tensor, output
+                # Model inference with memory cleanup
+                with torch.cuda.amp.autocast():
+                    torch.cuda.empty_cache()
+                    batch_tensor = torch.cat(batch_images, dim=0)
+
+                    # Forward pass
+                    output = self.model(batch_tensor)
+                    embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+                    features = embedding.cpu().float().numpy()
+
+                    # Cluster processing
+                    cluster_assign = ['NA'] * len(batch_files)
+                    cluster_conf = ['NA'] * len(batch_files)
+                    if 'cluster_assignments' in output:
+                        cluster_nums = output['cluster_assignments'].cpu().numpy()
+                        cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
+                        cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+
+                    # Grad-CAM heatmap generation
+                    heatmap_paths = [''] * len(batch_files)
+                    if heatmap_enabled:
+                        try:
+                            # Get predicted class
+                            if 'class_predictions' in output:
+                                pred_classes = output['class_predictions'].cpu().numpy()
+                            else:
+                                pred_classes = output['cluster_assignments'].cpu().numpy()
+
+                            # Backward pass for gradients
+                            self.model.zero_grad()
+                            if 'class_logits' in output:
+                                class_logits = output['class_logits']
+                                class_idx = torch.argmax(class_logits, dim=1)
+                                score = class_logits[torch.arange(class_logits.size(0)), class_idx].sum()
+                            else:
+                                score = output['cluster_probabilities'][torch.arange(output['cluster_probabilities'].size(0)), pred_classes].sum()
+
+                            score.backward(retain_graph=True)
+
+                            # Process gradients and activations
+                            grads_val = grads[-1].cpu().numpy()
+                            acts_val = activations[-1].cpu().numpy()
+
+                            # Weight channels by global average-pooled gradients
+                            weights = np.mean(grads_val, axis=(2, 3), keepdims=True)
+                            cam = np.sum(weights * acts_val, axis=1)
+
+                            # Post-process CAM
+                            heatmaps = []
+                            for idx in range(cam.shape[0]):
+                                cam_img = cam[idx]
+                                cam_img = np.maximum(cam_img, 0)  # ReLU
+                                cam_img = (cam_img - cam_img.min()) / (cam_img.max() - cam_img.min() + 1e-8)
+                                cam_img = cv2.resize(cam_img, input_size)
+                                heatmaps.append(cam_img)
+
+                            # Visualization
+                            for j, filename in enumerate(batch_files):
+                                # Original image
+                                img_tensor = batch_tensor[j].cpu().float()
+                                img = img_tensor.numpy().transpose(1, 2, 0)
+                                img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
+                                img = np.clip(img, 0, 1)
+                                pil_img = Image.fromarray((img * 255).astype(np.uint8), 'RGB')
+
+                                # Heatmap processing
+                                hm = heatmaps[j]
+                                hm_img = plt.cm.jet(hm)[..., :3]  # Use higher contrast colormap
+                                hm_img = (hm_img * 255).astype(np.uint8)
+                                overlay = Image.fromarray(hm_img).convert('RGBA')
+                                overlay.putalpha(int(0.5 * 255))
+
+                                # Composite image
+                                base_img = pil_img.convert('RGBA')
+                                combined = Image.alpha_composite(base_img, overlay).convert('RGB')
+
+                                # Save result with proper relative path
+                                rel_path = os.path.relpath(filename, data_path)
+                                heatmap_path = os.path.join(heatmap_base, rel_path)
+                                heatmap_path = os.path.splitext(heatmap_path)[0] + '_heatmap.png'
+
+                                os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                                combined.save(heatmap_path, quality=95, optimize=True)
+
+                                # Store path relative to current working directory
+                                heatmap_paths[j] = os.path.relpath(heatmap_path)
+
+                        except Exception as e:
+                            logger.error(f"Heatmap error: {str(e)}")
+                            logger.error(traceback.format_exc())
+
+                    # Cleanup
+                    del batch_tensor, output
+                    torch.cuda.empty_cache()
+
+                # CSV writing
+                with open(output_csv, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for j, (filename, orig_name, true_class) in enumerate(zip(
+                        batch_files, batch_filenames, batch_labels)):
+
+                        # Label determination
+                        is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
+                        label_type = "predicted" if is_unknown else "true"
+                        target = true_class if label_type == "true" else cluster_assign[j] or "unknown"
+
+                        # Build row
+                        row = [
+                            orig_name,
+                            filename,
+                            label_type,
+                            target,
+                            cluster_assign[j],
+                            cluster_conf[j]
+                        ] + features[j].tolist()
+
+                        if heatmap_enabled:
+                            row.append(heatmap_paths[j])
+
+                        writer.writerow(row)
+
+                # Inter-batch cleanup
+                del batch_images, features
                 torch.cuda.empty_cache()
 
-            # CSV writing
-            with open(output_csv, 'a', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                for j, (filename, orig_name, true_class) in enumerate(zip(
-                    batch_files, batch_filenames, batch_labels)):
-
-                    # Label determination
-                    is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
-                    label_type = "predicted" if is_unknown else "true"
-                    target = true_class if label_type == "true" else cluster_assign[j] or "unknown"
-
-                    # Build row
-                    row = [
-                        orig_name,
-                        filename,
-                        label_type,
-                        target,
-                        cluster_assign[j],
-                        cluster_conf[j]
-                    ] + features[j].tolist()
-
-                    if heatmap_enabled:
-                        row.append(heatmap_paths[j])
-
-                    writer.writerow(row)
-
-            # Inter-batch cleanup
-            del batch_images, features
-            torch.cuda.empty_cache()
+        finally:
+            # Remove hooks after processing
+            if heatmap_enabled:
+                handle_b.remove()
+                handle_f.remove()
 
         logger.info(f"Predictions saved to {output_csv}")
 
@@ -1176,7 +1177,22 @@ class BaseAutoencoder(nn.Module):
         self.history = defaultdict(list)
         # Initialize clustering parameters
         self._initialize_clustering(config)
+#-------GradCam -----------------
+        self.gradients = None
+        self.activations = None
 
+     def activations_hook(self, grad):
+        self.gradients = grad
+
+    def get_activations_gradient(self):
+        return self.gradients
+
+    def get_activations(self, x):
+        # Choose target layer (e.g., last encoder layer)
+        with torch.no_grad():
+            for layer in self.encoder_layers[:-1]:
+                x = layer(x)
+            return self.encoder_layers[-1](x)
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
         """Identify high-confidence predictions for semi-supervised learning"""
