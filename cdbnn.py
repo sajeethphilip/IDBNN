@@ -323,6 +323,192 @@ class PredictionManager:
 
 #--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
+        """Predict features with actual class names and generate Grad-CAM heatmaps"""
+        # Configuration and initialization
+        heatmap_enabled = self.config['model'].get('heatmap_attn', True)
+        class_mapping = self._get_class_mapping(data_path)
+        reverse_class_mapping = {v: k for k, v in class_mapping.items()}
+
+        # Get image files and validate
+        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
+        if not image_files:
+            raise ValueError(f"No valid images found in {data_path}")
+
+        # Set output paths
+        if output_csv is None:
+            dataset_name = self.config['dataset']['name']
+            output_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        heatmap_base = os.path.join(os.path.dirname(output_csv), 'heatmaps')
+        os.makedirs(heatmap_base, exist_ok=True) if heatmap_enabled else None
+
+        # Prepare CSV headers
+        csv_headers = [
+            'original_filename', 'filepath', 'label_type', 'target',
+            'cluster_assignment', 'cluster_confidence'
+        ] + [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
+        if heatmap_enabled:
+            csv_headers.append('heatmap_path')
+
+        with open(output_csv, 'w', newline='') as csvfile:
+            csv.writer(csvfile).writerow(csv_headers)
+
+        # Batch processing
+        for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
+            batch_files = image_files[i:i+batch_size]
+            batch_labels = class_labels[i:i+batch_size]
+            batch_filenames = original_filenames[i:i+batch_size]
+            batch_images = []
+
+            # Load and transform images
+            for filename in batch_files:
+                try:
+                    with Image.open(filename) as img:
+                        image_tensor = self._get_transforms()(img.convert('RGB')).unsqueeze(0).to(self.device)
+                        batch_images.append(image_tensor)
+                except Exception as e:
+                    logger.error(f"Error loading {filename}: {str(e)}")
+                    continue
+            if not batch_images:
+                continue
+
+            # Model inference with gradients for Grad-CAM
+            with torch.enable_grad():  # Enable gradients for Grad-CAM
+                batch_tensor = torch.cat(batch_images, dim=0)
+                feature_maps = []
+                gradients = []
+
+                # Hook definitions
+                def forward_hook(module, input, output):
+                    feature_maps.append(output)
+
+                def backward_hook(module, grad_input, grad_output):
+                    gradients.append(grad_output[0].detach())
+
+                # Register hooks on last encoder layer
+                hook_handle = self.model.encoder_layers[-1].register_forward_hook(forward_hook)
+                grad_hook_handle = self.model.encoder_layers[-1].register_backward_hook(backward_hook)
+
+                # Forward pass
+                output = self.model(batch_tensor)
+
+                # Prepare for Grad-CAM
+                if 'class_logits' in output and self.model.use_class_encoding:
+                    # Create one-hot encoding from predictions
+                    pred_classes = output['class_logits'].argmax(dim=1)
+                    one_hot = torch.zeros_like(output['class_logits'])
+                    one_hot.scatter_(1, pred_classes.unsqueeze(1), 1.0)
+
+                    # Backward pass to compute gradients
+                    self.model.zero_grad()
+                    output['class_logits'].backward(gradient=one_hot, retain_graph=True)
+                else:
+                    heatmap_enabled = False  # Disable heatmap if no class logits
+                    logger.warning("Class logits unavailable - disabling Grad-CAM")
+
+                # Remove hooks
+                hook_handle.remove()
+                grad_hook_handle.remove()
+
+            # Process outputs
+            embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+            features = embedding.cpu().numpy()
+
+            # Cluster processing
+            if 'cluster_assignments' in output:
+                cluster_nums = output['cluster_assignments'].cpu().numpy()
+                cluster_assign = [f"Cluster_{int(c)}" for c in cluster_nums]
+                cluster_conf = output['cluster_probabilities'].max(1)[0].cpu().numpy()
+            else:
+                cluster_assign = ['NA'] * len(batch_files)
+                cluster_conf = ['NA'] * len(batch_files)
+
+            # Grad-CAM heatmap generation
+            heatmap_paths = [''] * len(batch_files)
+            if heatmap_enabled and feature_maps and gradients:
+                try:
+                    # Calculate Grad-CAM
+                    weights = torch.mean(gradients[0], dim=[2, 3])  # Global average pooling
+                    weighted_features = feature_maps[0] * weights.unsqueeze(-1).unsqueeze(-1)
+                    heatmaps = torch.sum(weighted_features, dim=1)
+                    heatmaps = F.relu(heatmaps)
+
+                    # Resize to input dimensions
+                    heatmaps = F.interpolate(
+                        heatmaps.unsqueeze(1),
+                        size=self.config['dataset']['input_size'],
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(1).cpu().numpy()
+
+                    for j, filename in enumerate(batch_files):
+                        # Process original image
+                        img_tensor = batch_tensor[j].cpu()
+                        img = img_tensor.numpy().transpose(1, 2, 0)
+                        img = (img * self.config['dataset']['std']) + self.config['dataset']['mean']
+                        img = np.clip(img, 0, 1)
+                        img = (img * 255).astype(np.uint8)
+                        pil_img = Image.fromarray(img, 'RGB')
+
+                        # Process heatmap
+                        hm = heatmaps[j]
+                        hm = (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+                        hm = np.uint8(255 * hm)
+
+                        # Apply color map
+                        heatmap_img = cv2.applyColorMap(hm, cv2.COLORMAP_JET)
+                        heatmap_img = cv2.cvtColor(heatmap_img, cv2.COLOR_BGR2RGB)
+                        heatmap_pil = Image.fromarray(heatmap_img)
+                        heatmap_pil = heatmap_pil.resize(pil_img.size, Image.Resampling.LANCZOS)
+
+                        # Blend with original image
+                        blended = Image.blend(pil_img, heatmap_pil, alpha=0.5)
+
+                        # Save result
+                        rel_path = os.path.relpath(filename, data_path)
+                        heatmap_path = os.path.join(heatmap_base, rel_path)
+                        heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.jpg'
+
+                        os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                        blended.save(heatmap_path, quality=95)
+
+                        heatmap_paths[j] = os.path.relpath(heatmap_path, os.path.dirname(output_csv))
+
+                except Exception as e:
+                    logger.error(f"Grad-CAM error: {str(e)}")
+
+            # CSV writing
+            with open(output_csv, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                for j, (filename, orig_name, true_class) in enumerate(zip(
+                    batch_files, batch_filenames, batch_labels)):
+
+                    # Determine label type and target
+                    is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
+                    label_type = "predicted" if is_unknown else "true"
+
+                    if label_type == "true":
+                        target = true_class  # Actual class name from directory
+                    else:
+                        target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
+
+                    # Build row
+                    row = [
+                        orig_name,
+                        filename,
+                        label_type,
+                        target,
+                        cluster_assign[j],
+                        cluster_conf[j]
+                    ] + features[j].tolist()
+
+                    if heatmap_enabled:
+                        row.append(heatmap_paths[j])
+
+                    writer.writerow(row)
+
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def predict_images_mean(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict features with actual class names and generate heatmaps"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
