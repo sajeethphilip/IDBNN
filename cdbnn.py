@@ -435,8 +435,8 @@ class PredictionManager:
                             score.backward(retain_graph=True)
 
                             # Process gradients and activations
-                            grads_val = grads[-1].cpu().numpy()
-                            acts_val = activations[-1].cpu().numpy()
+                            grads_val = grads[-1].detach().cpu().numpy()
+                            acts_val = activations[-1].detach().cpu().numpy()
 
                             # Weight channels by global average-pooled gradients
                             weights = np.mean(grads_val, axis=(2, 3), keepdims=True)
