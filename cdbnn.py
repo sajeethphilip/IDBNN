@@ -1181,7 +1181,7 @@ class BaseAutoencoder(nn.Module):
         self.gradients = None
         self.activations = None
 
-     def activations_hook(self, grad):
+    def activations_hook(self, grad):
         self.gradients = grad
 
     def get_activations_gradient(self):
