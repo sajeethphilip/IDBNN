@@ -1279,7 +1279,8 @@ class GPUDBNN:
         if  use_previous_model:
             # Load previous model state
             #self.label_encoder =load_label_encoder(dataset_name)
-            self._load_model_components()
+            #self._load_model_components()
+            pass
             #self._load_best_weights()
             #self._load_categorical_encoders()
         else:
@@ -1319,9 +1320,10 @@ class GPUDBNN:
 
         # Load dataset configuration and data
         #self.config = DatasetConfig.load_config(self.dataset_name)
+        self.target_column = self.config['target_column']
         self.data = self._load_dataset()
 
-        self.target_column = self.config['target_column']
+
 
         # Load saved weights and encoders
         self._load_best_weights()
@@ -1331,9 +1333,8 @@ class GPUDBNN:
         """Initialize components for fresh training"""
         # Load dataset configuration and data
         #self.config = DatasetConfig.load_config(self.dataset_name)
-        self.data = self._load_dataset()
-
         self.target_column = self.config['target_column']
+        self.data = self._load_dataset()
         if self.target_column not in self.data.columns:
             raise ValueError(
                 f"Target column '{self.target_column}' not found in dataset.\n"
@@ -1577,6 +1578,7 @@ class DBNN(GPUDBNN):
     def _preprocess_and_split_data(self):
         """Preprocess data and split into training and testing sets."""
         # Load dataset
+        self.target_column = self.config['target_column']
         self.data = self._load_dataset()
 
         # Preprocess features and target
@@ -1624,140 +1626,7 @@ class DBNN(GPUDBNN):
             )
         return self.invertible_model
 
-    def process_dataset(self, config_path: str) -> Dict:
-        """
-        Process dataset according to configuration file specifications
 
-        Args:
-            config_path: Path to JSON configuration file
-
-        Returns:
-            Dictionary containing processing results
-        """
-        # Load and validate configuration
-        try:
-            with open(config_path, 'r') as f:
-                config_text = f.read()
-            # Remove comments starting with _comment
-            config_lines = [line for line in config_text.split('\n') if not '"_comment"' in line]
-            clean_config = '\n'.join(config_lines)
-
-            self.data_config = json.loads(clean_config)
-        except Exception as e:
-            raise ValueError(f"Error reading configuration file: {str(e)}")
-        dataset_name = os.path.splitext(os.path.basename(config_path))[0]
-        # Ensure file_path is set
-        if not self.data_config.get('file_path'):
-            default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-            if os.path.exists(default_path):
-                self.data_config['file_path'] = default_path
-                print("\033[K" +f"Using default data file: {default_path}")
-            else:
-                raise ValueError(f"No data file found for {dataset_name}")
-        # Load or create the configuration file and update global variables
-        config = load_or_create_config(config_path=f'data/{dataset_name}/{dataset_name}.conf')
-        # Update global variables based on the configuration file
-        global Train_device,bin_sizes,n_bins_per_dim, Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
-        Train_device = config.get("compute_device", Train_device)
-        print(''f"The train device is set as {Train_device}")
-        self.device=Train_device
-        Trials = config.get("trials", Trials)
-        cardinality_threshold = config.get("cardinality_threshold", cardinality_threshold)
-        cardinality_tolerance = config.get("cardinality_tolerance", cardinality_tolerance)
-        bin_sizes = config.get("bin_sizes", 128)
-        n_bins_per_dim = config.get("n_bins_per_dim", 128)
-        LearningRate = config.get("learning_rate", LearningRate)
-        TrainingRandomSeed = config.get("random_seed", TrainingRandomSeed)
-        Epochs = config.get("epochs", Epochs)
-        TestFraction = config.get("test_fraction", TestFraction)
-        Train = config.get("train", Train)
-        Train_only = config.get("train_only", Train_only)
-        Predict = config.get("predict", Predict)
-        Gen_Samples = config.get("gen_samples", Gen_Samples)
-        EnableAdaptive = config.get("enable_adaptive", EnableAdaptive)
-        nokbd = config.get("nokbd", nokbd)
-        display = config.get("display", display)
-
-        # Convert dictionary config to DBNNConfig object
-        config_params = {
-            'epochs': self.data_config.get('training_params', {}).get('epochs', Epochs),
-            'learning_rate': self.data_config.get('training_params', {}).get('learning_rate', LearningRate),
-            'model_type': self.data_config.get('modelType', 'Histogram'),
-            'enable_adaptive': self.data_config.get('training_params', {}).get('enable_adaptive', EnableAdaptive),
-            'batch_size': self.data_config.get('training_params', {}).get('batch_size', 128),
-            'training_data_dir': self.data_config.get('training_params', {}).get('training_save_path', 'training_data')
-        }
-        self.model_config = DBNNConfig(**config_params)
-
-        # Create output directory structure
-        dataset_name = os.path.splitext(os.path.basename(self.data_config['file_path']))[0]
-        output_dir = os.path.join(self.model_config.training_data_dir, dataset_name)
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Update dataset name
-        self.dataset_name = dataset_name
-
-         # Load data using existing GPUDBNN method
-        self.data =self._load_dataset()
-        self.X_Orig =self.Original_data.drop(columns=[self.data_config['target_column']])
-        self.batch_size=self._calculate_optimal_batch_size(len(self.data))
-        # Add row tracking
-        self.data['original_index'] = range(len(self.data))
-
-        # Extract features and target
-
-        if 'target_column' not in self.data_config:
-            self.data_config['target_column'] = 'target'  # Set default target column
-            print("\033[K" +f"Using default target column: 'target'")
-
-        X = self.data.drop(columns=[self.data_config['target_column']])
-        y = self.data[self.data_config['target_column']]
-
-        # Initialize training log
-        log_file = os.path.join(output_dir, f'{dataset_name}_log.csv')
-        self.training_log = pd.DataFrame(columns=[
-            'timestamp', 'round', 'train_size', 'test_size',
-            'train_loss', 'test_loss', 'train_accuracy', 'test_accuracy',
-            'training_time'
-        ])
-
-        # Train model using existing GPUDBNN methods
-        if self.model_config.enable_adaptive:
-            results = self.adaptive_fit_predict(max_rounds=self.model_config.epochs)
-        else:
-            results = self.fit_predict()
-
-        # Preprocess features and convert to tensors
-        X_tensor = self._preprocess_data(X, is_training=True)  # Preprocess data
-        y_tensor = torch.tensor(self.label_encoder.transform(y), dtype=torch.long).to(self.device)  # Encode labels
-
-        # Generate predictions and true labels
-        predictions,posterior = self.predict(X_tensor, batch_size=self.batch_size)
-        true_labels = y_tensor.cpu().numpy()
-
-        # Generate detailed predictions
-        #predictions_df = self._generate_detailed_predictions(X_tensor, predictions, true_labels)
-        predictions_df = self._generate_detailed_predictions(self.X_Orig, predictions, true_labels,posterior)
-
-        # Save results
-        results_path = os.path.join(output_dir, f'{dataset_name}_predictions.csv')
-        predictions_df.to_csv(results_path, index=False)
-
-        # Save training log
-        self.training_log.to_csv(log_file, index=False)
-
-        # Count number of features actually used (excluding high cardinality and excluded features)
-        n_features = len(X.columns)
-        n_excluded = len(getattr(self, 'high_cardinality_columns', []))
-
-        return {
-            'results_path': results_path,
-            'log_path': log_file,
-            'n_samples': len(self.data),
-            'n_features': n_features,
-            'n_excluded': n_excluded,
-            'training_results': results
-        }
 
     def _generate_detailed_predictions(self,
                                      X_orig: Union[pd.DataFrame, torch.Tensor],
@@ -1888,7 +1757,8 @@ class DBNN(GPUDBNN):
             if predict_mode and self.target_column in df.columns:
 
                 if not self._validate_target_column(df[self.target_column]):
-                    print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
+
+                    #print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
                     # Get the current column names
                     column_names = df.columns.tolist()
                     # Find the index of the target column
@@ -5804,21 +5674,20 @@ class DBNN(GPUDBNN):
         """Check if target column values match label encoder classes"""
         # Handle case where label encoder isn't initialized
         if not hasattr(self.label_encoder, 'classes_'):
-            print(f"{Colors.RED}Label encoder not initialized!{Colors.ENDC}")
-            return False  # Or raise ValueError if critical
+            #print(f"{Colors.RED}Label encoder not initialized!{Colors.ENDC}")
+            return False
 
         # Handle empty classes
         if len(self.label_encoder.classes_) == 0:
             print(f"{Colors.RED}Label encoder has no classes!{Colors.ENDC}")
             return False
 
-        # Check value alignment
-        unique_values = set(y.unique())
-        encoder_classes = set(self.label_encoder.classes_)
-
-        # Allow validation in prediction mode (target column may not exist)
-        if self.mode == 'predict' and self.target_column not in y.name:
-            return True
+        # Convert all values to strings for consistent comparison
+        unique_values = {str(v) for v in y.unique()}
+        encoder_classes = {str(cls) for cls in self.label_encoder.classes_}
+        # Allow validation in prediction mode (target column may be dummy)
+        if self.mode == 'predict':
+            return True  # Skip strict validation during prediction
 
         return unique_values.issubset(encoder_classes)
 
@@ -6874,7 +6743,7 @@ def main():
                 #model._save_model_components()
                 #model._save_best_weights()
                 #save_label_encoder(model.label_encoder, dataset_name)
-                model._load_model_components()
+                #model._load_model_components()
                 #model.label_encoder = load_label_encoder(dataset_name)
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
