@@ -2172,7 +2172,7 @@ class DBNN(GPUDBNN):
         # Configuration parameters
         active_learning_config = self.config.get('active_learning', {})
         min_divergence = active_learning_config.get('min_divergence', 0.1)
-        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 100)
+        max_class_addition_percent = active_learning_config.get('max_class_addition_percent', 99)
 
         # Convert inputs to tensors on active device
         test_predictions = torch.as_tensor(test_predictions, device=self.device)
@@ -2541,7 +2541,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while  True: #adaptive_patience_counter <5:
+            while adaptive_patience_counter <500:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2591,7 +2591,7 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                        if adaptive_patience_counter >= 100:  # Using fixed value of 5 for adaptive patience
+                        if adaptive_patience_counter >= 500:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
                             print("\033[K" +"Stopping adaptive training.")
@@ -2653,11 +2653,12 @@ class DBNN(GPUDBNN):
 
                     # Update training and test sets with new samples
                     train_indices.extend(new_train_indices)
-                    prev_test_indices =test_indices
+                    test_indices_old=test_indices
                     test_indices = list(set(test_indices) - set(new_train_indices))
-                    if  test_indices ==prev_test_indices:
+                    if test_indices==test_indices_old:
                         break
                     print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
+
 
             # Record the end time
             end_time = time.time()
