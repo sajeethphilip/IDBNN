@@ -518,6 +518,28 @@ class PredictionManager:
 
         logger.info(f"Predictions saved to {output_csv}")
 
+
+    def _get_class_mapping(self, data_path: str) -> Dict[int, str]:
+        """Build class name to index mapping from directory structure"""
+        class_mapping = {}
+        class_dirs = []
+
+        if os.path.isdir(data_path):
+            # Get immediate subdirectories
+            with os.scandir(data_path) as entries:
+                for entry in entries:
+                    if entry.is_dir():
+                        class_dirs.append(entry.path)
+
+            # Sort alphabetically for consistent indexing
+            class_dirs = sorted(class_dirs, key=lambda x: os.path.basename(x))
+
+            # Create mapping
+            for idx, class_dir in enumerate(class_dirs):
+                class_name = os.path.basename(class_dir)
+                class_mapping[idx] = class_name
+
+        return class_mapping
 #-----------------------------------------------------------
 
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
