@@ -2613,6 +2613,11 @@ class DBNN(GPUDBNN):
                         # If predictions are numeric but stored as object, cast to int64
                         test_predictions = test_predictions.astype(np.int64)
 
+                    # Get new training samples from misclassified examples
+                    new_train_indices = self._select_samples_from_failed_classes(
+                        test_predictions, y_test, test_indices,results
+                    )
+
                     # Check if we've achieved perfect accuracy
                     if train_accuracy == 1.0:
                         if not new_train_indices:
@@ -2622,10 +2627,7 @@ class DBNN(GPUDBNN):
                                             adaptive_patience_counter = patience  # Trigger exit
                                             break
 
-                        # Get new training samples from misclassified examples
-                        new_train_indices = self._select_samples_from_failed_classes(
-                            test_predictions, y_test, test_indices,results
-                        )
+
 
                         if not new_train_indices:
                             print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
