@@ -2795,7 +2795,7 @@ class DBNN(GPUDBNN):
                     train_indices.extend(new_train_indices)
                     test_indices_old=test_indices
                     test_indices = list(set(test_indices) - set(new_train_indices))
-                    if test_indices==test_indices_old:
+                    if len(test_indices)==len(test_indices_old):
                         break
                     print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
 
