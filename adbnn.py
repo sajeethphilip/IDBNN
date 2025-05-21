@@ -2640,7 +2640,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <500:
+            while adaptive_patience_counter <=5:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2690,7 +2690,7 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                        if adaptive_patience_counter >= 500:  # Using fixed value of 5 for adaptive patience
+                        if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
                             print("\033[K" +"Stopping adaptive training.")
@@ -2755,6 +2755,7 @@ class DBNN(GPUDBNN):
                     test_indices_old=test_indices
                     test_indices = list(set(test_indices) - set(new_train_indices))
                     if len(test_indices)==len(test_indices_old):
+                        adaptive_patience_counter = 5
                         break
                     print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
 
