@@ -2615,9 +2615,12 @@ class DBNN(GPUDBNN):
 
                     # Check if we've achieved perfect accuracy
                     if train_accuracy == 1.0:
-                        if len(test_indices) == 0:
-                            print("\033[K" +"No more test samples available. Training complete.")
-                            break
+                         if not new_train_indices:
+                                        # Check if there are no test indices left
+                                        if len(test_indices) == 0:
+                                            print("\033[KNo failed examples remaining. Stopping adaptive training.")
+                                            adaptive_patience_counter = patience  # Trigger exit
+                                            break
 
                         # Get new training samples from misclassified examples
                         new_train_indices = self._select_samples_from_failed_classes(
