@@ -2541,7 +2541,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <5:
+            while  len(test_indices)>0:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
