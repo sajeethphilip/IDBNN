@@ -2640,7 +2640,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <=100:
+            while adaptive_patience_counter <100:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2715,6 +2715,7 @@ class DBNN(GPUDBNN):
                     # Check if we've achieved perfect accuracy
                     if train_accuracy == 1.0:
                         if len(test_indices) == 0:
+                            adaptive_patience_counter = 101
                             print("\033[K" +"No more test samples available. Training complete.")
                             break
 
@@ -2735,6 +2736,7 @@ class DBNN(GPUDBNN):
                         )
 
                         if not new_train_indices:
+                            adaptive_patience_counter = 101
                             print("\033[K" +"No suitable new samples found. Training complete.")
                             break
 
