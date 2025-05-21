@@ -328,7 +328,7 @@ class PredictionManager:
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
         class_mapping = self._get_class_mapping(data_path)
         reverse_class_mapping = {v: k for k, v in class_mapping.items()}
-        current_working_dir = os.getcwd()  # Capture working directory at start
+        current_working_dir = os.getcwd()
 
         # Get image files and validate
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
@@ -342,19 +342,22 @@ class PredictionManager:
         heatmap_base = os.path.join(os.path.dirname(output_csv), 'heatmaps')
         os.makedirs(heatmap_base, exist_ok=True) if heatmap_enabled else None
 
-        # Prepare CSV headers
-        csv_headers = [
+        # Prepare CSV headers with dynamic feature dimensions
+        base_headers = [
             'original_filename', 'filepath', 'label_type', 'target',
             'cluster_assignment', 'cluster_confidence'
-        ] + [f'feature_{i}' for i in range(self.config['model']['feature_dims'])]
-        if heatmap_enabled:
-            csv_headers.append('heatmap_path')
+        ]
+        csv_headers = base_headers.copy()
+        num_features = None  # Will be determined from first batch
+        placeholder_written = False
 
+        # Write initial file with placeholder
         with open(output_csv, 'w', newline='') as csvfile:
-            csv.writer(csvfile).writerow(csv_headers)
+            writer = csv.writer(csvfile)
+            writer.writerow(base_headers + ['features_placeholder'] + (['heatmap_path'] if heatmap_enabled else []))
 
         # Grad-CAM setup
-        target_layer = self.model.encoder_layers[-1][0]  # First layer of last encoder block
+        target_layer = self.model.encoder_layers[-1][0]
         feature_maps = []
         gradients = []
 
@@ -395,6 +398,18 @@ class PredictionManager:
             embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
             features = embedding.detach().cpu().numpy()
 
+            # Dynamic feature dimension detection
+            if num_features is None:
+                num_features = features.shape[1]
+                # Update headers with actual feature count
+                csv_headers = base_headers + [f'feature_{i}' for i in range(num_features)]
+                if heatmap_enabled:
+                    csv_headers.append('heatmap_path')
+                # Rewrite CSV with correct headers
+                with open(output_csv, 'w', newline='') as csvfile:
+                    csv.writer(csvfile).writerow(csv_headers)
+                placeholder_written = False
+
             # Determine targets for Grad-CAM
             if 'class_logits' in output:
                 targets = output['class_logits'].argmax(dim=1)
@@ -408,7 +423,6 @@ class PredictionManager:
             for idx, target in enumerate(targets):
                 one_hot[idx, target] = 1
 
-            # Retain graph only if needed
             retain_graph = self.config['model'].get('retain_backward_graph', False)
             embedding.backward(gradient=one_hot, retain_graph=retain_graph)
 
@@ -424,20 +438,13 @@ class PredictionManager:
             heatmap_paths = [''] * len(batch_files)
             if heatmap_enabled and feature_maps and gradients:
                 try:
-                    # Get feature maps and gradients with proper detachment
                     fmaps = feature_maps[-1].detach().cpu().numpy()
                     grads = gradients[-1].detach().cpu().numpy()
-
-                    # Pool gradients channel-wise
                     weights = np.mean(grads, axis=(2, 3), keepdims=True)
-
-                    # Compute Grad-CAM
                     cam = np.sum(fmaps * weights, axis=1)
-                    cam = np.maximum(cam, 0)  # ReLU
+                    cam = np.maximum(cam, 0)
 
-                    # Process each image in batch
                     for j, filename in enumerate(batch_files):
-                        # Resize CAM to input size
                         cam_tensor = torch.from_numpy(cam[j:j+1].astype(np.float32)).unsqueeze(0)
                         cam_resized = F.interpolate(
                             cam_tensor,
@@ -446,36 +453,27 @@ class PredictionManager:
                             align_corners=False
                         ).squeeze().detach().numpy()
 
-                        # Normalize heatmap
                         cam_norm = (cam_resized - cam_resized.min()) / (cam_resized.max() - cam_resized.min() + 1e-8)
-
-                        # Convert to heatmap overlay
                         heatmap = (cam_norm * 255).astype(np.uint8)
                         heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
-                        # Load original image
                         with Image.open(filename) as img:
                             img = img.convert('RGB').resize(self.config['dataset']['input_size'])
                             img_array = np.array(img)
 
-                        # Superimpose heatmap
                         superimposed_img = heatmap_colored * 0.4 + img_array * 0.6
                         superimposed_img = np.clip(superimposed_img, 0, 255).astype(np.uint8)
 
-                        # Save result
                         rel_path = os.path.relpath(filename, data_path)
                         heatmap_path = os.path.join(heatmap_base, rel_path)
                         heatmap_path = os.path.splitext(heatmap_path)[0] + '_gradcam.jpg'
 
                         os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
                         Image.fromarray(superimposed_img).save(heatmap_path, quality=95)
-
-                        # Store path relative to working directory
-                        heatmap_paths[j] = os.path.relpath(heatmap_path, current_working_dir)  # Modified line
+                        heatmap_paths[j] = os.path.relpath(heatmap_path, current_working_dir)
 
                 except Exception as e:
                     logger.error(f"Grad-CAM error: {str(e)}")
-                    # Fallback to original image if heatmap generation fails
                     heatmap_paths = [''] * len(batch_files)
 
             # Clear hooks for next batch
@@ -488,16 +486,10 @@ class PredictionManager:
                 for j, (filename, orig_name, true_class) in enumerate(zip(
                     batch_files, batch_filenames, batch_labels)):
 
-                    # Determine label type and target
                     is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
                     label_type = "predicted" if is_unknown else "true"
+                    target = true_class if label_type == "true" else cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
 
-                    if label_type == "true":
-                        target = true_class  # Actual class name from directory
-                    else:
-                        target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
-
-                    # Build row
                     row = [
                         orig_name,
                         filename,
@@ -505,7 +497,7 @@ class PredictionManager:
                         target,
                         cluster_assign[j],
                         cluster_conf[j]
-                    ] + features[j].tolist()
+                    ] + features[j].tolist()  # Now uses actual feature count
 
                     if heatmap_enabled:
                         row.append(heatmap_paths[j])
