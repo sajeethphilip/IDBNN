@@ -918,49 +918,66 @@ class BinWeightUpdater:
             print("\033[K" +f"adjustment: {adjustment}")
             raise
 
-    def update_histogram_weights(self, failed_case, true_class, pred_class,
-                                bin_indices, posteriors, learning_rate):
-        # Precompute all adjustments first
-        adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
+    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
+        """Strictly select from misclassified samples with enhanced validation"""
+        # Convert to tensor with original dataset indices
+        test_indices_t = torch.tensor(test_indices, device=self.device, dtype=torch.long)
 
-        # Batch indices and values
-        pair_indices = []
-        bin_is = []
-        bin_js = []
-        adjustments = []
+        # Get ground truth and predictions
+        y_true = self.y_tensor[test_indices_t]
+        y_pred = test_predictions.to(self.device)
 
-        for pair_idx, (bin_i, bin_j) in bin_indices.items():
-            # Get probabilities for both classes in this bin
-            try:
-                true_prob = self.likelihood_params['bin_probs'][pair_idx][true_class][bin_i, bin_j].item()
-                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_class][bin_i, bin_j].item()
-            except IndexError:
-                continue  # Skip invalid indices
+        # Create failed sample mask using tensor operations
+        failed_mask = y_pred != y_true
+        failed_indices = test_indices_t[failed_mask]
 
-            # Only update if true class's probability < predicted class's in this bin
-            if true_prob < pred_prob:
-                pair_indices.append(pair_idx)
-                bin_is.append(bin_i)
-                bin_js.append(bin_j)
-                adjustments.append(adjustment)
+        # Early exit if no failed samples
+        if len(failed_indices) == 0:
+            return []
 
-        # Convert to tensors
-        if pair_indices:  # Only process if updates needed
-            pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
-            b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
-            b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
-            adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
+        # Get failed samples' metadata
+        failed_df = results['all_predictions'].iloc[failed_indices.cpu().numpy()]
 
-            # Group by pair_idx
-            unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
+        # Create position mapping with direct tensor indexing
+        test_pos_map = torch.zeros_like(test_indices_t)
+        test_pos_map[test_indices_t] = torch.arange(len(test_indices_t), device=self.device)
 
-            for pair_id in unique_pairs:
-                mask = pair_ids == pair_id
-                self.histogram_weights[true_class][pair_id.item()].index_put_(
-                    indices=(b_i[mask], b_j[mask]),
-                    values=adjs[mask],
-                    accumulate=True
-                )
+        final_selected = []
+
+        # Process per-class with exact index matching
+        for class_id in torch.unique(y_true):
+            # Get class indices in original label space
+            true_class_id = self.label_encoder.transform([class_id])[0]
+
+            # Find failed samples for this class
+            class_mask = (failed_df['true_class'] == class_id).values
+            if not np.any(class_mask):
+                continue
+
+            # Convert to tensor indices using direct mapping
+            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
+            class_positions = test_pos_map[class_failed_indices]
+
+            # Batch process only misclassified samples
+            batch_selected = []
+            for batch_start in range(0, len(class_positions), self.batch_size):
+                batch_pos = class_positions[batch_start:batch_start+self.batch_size]
+                batch_indices = test_indices_t[batch_pos]
+
+                # Compute margin only for failed samples
+                posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
+                true_probs = posteriors[:, true_class_id]
+                max_probs = torch.max(posteriors, dim=1).values
+                margins = max_probs - true_probs
+
+                # Apply strict thresholding
+                eligible = batch_indices[(margins > 0.01) | (margins < -0.01)]
+                batch_selected.append(eligible)
+
+            if batch_selected:
+                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
+
+        return final_selected
 
     def update_histogram_weights_old(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
@@ -2209,145 +2226,65 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Cluster-based selection with strict failed-sample filtering"""
-        # Convert inputs to tensors on active device
-        test_predictions = torch.as_tensor(test_predictions, device=self.device)
-        y_test = torch.as_tensor(y_test, device=self.device)
-        test_indices = torch.as_tensor(test_indices, device=self.device)
+        """Strictly select from misclassified samples with enhanced validation"""
+        # Convert to tensor with original dataset indices
+        test_indices_t = torch.tensor(test_indices, device=self.device, dtype=torch.long)
 
-        # Get ONLY failed samples from test results
-        test_results = results['all_predictions'].iloc[self.test_indices]
-        failed_mask = (test_results['predicted_class'] != test_results['true_class'])
-        failed_results = test_results[failed_mask].copy()
+        # Get ground truth and predictions
+        y_true = self.y_tensor[test_indices_t]
+        y_pred = test_predictions.to(self.device)
 
-        # Create mapping from original indices to test set positions
-        test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
+        # Create failed sample mask using tensor operations
+        failed_mask = y_pred != y_true
+        failed_indices = test_indices_t[failed_mask]
 
-        final_selected_indices = []
-        unique_classes = failed_results['true_class'].unique()
+        # Early exit if no failed samples
+        if len(failed_indices) == 0:
+            return []
 
-        # Class processing progress bar
-        class_pbar = tqdm(
-            unique_classes,
-            desc="Processing classes",
-            leave=False,
-            position=0
-        )
+        # Get failed samples' metadata
+        failed_df = results['all_predictions'].iloc[failed_indices.cpu().numpy()]
 
-        for class_id in class_pbar:
-            class_pbar.set_postfix_str(f"Class {class_id}")
+        # Create position mapping with direct tensor indexing
+        test_pos_map = torch.zeros_like(test_indices_t)
+        test_pos_map[test_indices_t] = torch.arange(len(test_indices_t), device=self.device)
 
-            # Filter to ONLY failed samples for this class
-            class_failed_mask = (failed_results['true_class'] == class_id)
-            class_failed_indices = failed_results[class_failed_mask].index.tolist()
+        final_selected = []
 
-            if not class_failed_indices:
+        # Process per-class with exact index matching
+        for class_id in torch.unique(y_true):
+            # Get class indices in original label space
+            true_class_id = self.label_encoder.transform([class_id])[0]
+
+            # Find failed samples for this class
+            class_mask = (failed_df['true_class'] == class_id).values
+            if not np.any(class_mask):
                 continue
 
-            # Convert original indices to test set positions
-            class_positions = [test_pos_map[idx] for idx in class_failed_indices if idx in test_pos_map]
-            if not class_positions:
-                continue
+            # Convert to tensor indices using direct mapping
+            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
+            class_positions = test_pos_map[class_failed_indices]
 
-            # Convert to tensor with proper dtype
-            class_pos_tensor = torch.tensor(class_positions, dtype=torch.long, device=self.device)
-
-            # Batch processing
-            samples, margins, indices = [], [], []
-            batch_pbar = tqdm(
-                total=len(class_positions),
-                desc=f"Class {class_id} batches",
-                leave=False,
-                position=1,
-                unit='sample'
-            )
-
+            # Batch process only misclassified samples
+            batch_selected = []
             for batch_start in range(0, len(class_positions), self.batch_size):
-                batch_end = min(batch_start + self.batch_size, len(class_positions))
-                batch_pos = class_pos_tensor[batch_start:batch_end]
+                batch_pos = class_positions[batch_start:batch_start+self.batch_size]
+                batch_indices = test_indices_t[batch_pos]
 
-                # Get actual data indices
-                batch_indices = test_indices[batch_pos]
-                batch_X = self.X_tensor[batch_indices]
+                # Compute margin only for failed samples
+                posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
+                true_probs = posteriors[:, true_class_id]
+                max_probs = torch.max(posteriors, dim=1).values
+                margins = max_probs - true_probs
 
-                # Compute posteriors using encoded class ID
-                if self.model_type == "Histogram":
-                    posteriors, _ = self._compute_batch_posterior(batch_X)
-                else:
-                    posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                # Apply strict thresholding
+                eligible = batch_indices[(margins > 0.01) | (margins < -0.01)]
+                batch_selected.append(eligible)
 
-                # Device-stable calculations using encoded class ID
-                max_probs, _ = torch.max(posteriors, dim=1)
-                true_probs = posteriors[:, self.label_encoder.transform([class_id])[0]]
-                batch_margins = max_probs - true_probs
+            if batch_selected:
+                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
 
-                samples.append(batch_X)
-                margins.append(batch_margins)
-                indices.append(batch_indices)
-                batch_pbar.update(batch_end - batch_start)
-
-            batch_pbar.close()
-
-            if not samples:
-                continue
-
-            try:
-                # Concatenate tensors properly
-                margins = torch.cat(margins)
-                indices = torch.cat(indices)
-                samples = torch.cat(samples)
-            except RuntimeError:
-                continue
-
-            if indices.numel() == 0:
-                continue
-
-            # --- Threshold Logic ---
-            active_learning_config = self.config.get('active_learning', {})
-            strong_threshold = active_learning_config.get("strong_margin_threshold", 0.01)
-            marginal_threshold = active_learning_config.get("marginal_margin_threshold", 0.01)
-
-            # Get indices meeting threshold criteria FROM FAILED SAMPLES ONLY
-            strong_mask = margins >= strong_threshold
-            marginal_mask = margins <= marginal_threshold
-            combined_mask = strong_mask | marginal_mask
-
-            eligible_indices = indices[combined_mask]
-
-            # --- Cluster Processing ---
-            mandatory_indices = indices[torch.topk(margins, k=min(2, len(margins))).indices]
-
-            all_candidates = torch.cat([mandatory_indices, eligible_indices]).unique()
-            remaining_mask = ~torch.isin(indices, mandatory_indices)
-            candidate_samples = samples[remaining_mask]
-
-            if candidate_samples.numel() > 0:
-                div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
-                visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=self.device)
-                cluster_indices = []
-
-                for i in range(len(candidate_samples)):
-                    if not visited[i]:
-                        cluster_mask = div_matrix[i] < active_learning_config.get("min_divergence", 0.1)
-                        cluster_members = torch.where(cluster_mask)[0]
-                        if cluster_members.numel() > 0:
-                            cluster_indices.append(indices[remaining_mask][cluster_members[0]])
-                            visited[cluster_members] = True
-
-                if cluster_indices:
-                    selected = torch.cat([mandatory_indices, torch.stack(cluster_indices)]).unique()
-                else:
-                    selected = mandatory_indices
-            else:
-                selected = mandatory_indices
-
-            # Final selection with encoded class count check
-            class_count = (y_test == self.label_encoder.transform([class_id])[0]).sum().item()
-            max_samples = max(0, int(class_count * active_learning_config.get("max_class_addition_percent", 99) / 100))
-            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
-
-        class_pbar.close()
-        return final_selected_indices
+        return final_selected
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
