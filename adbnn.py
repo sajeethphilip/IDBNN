@@ -919,60 +919,55 @@ class BinWeightUpdater:
             raise
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Strictly select from misclassified samples with enhanced validation"""
-        # Convert to tensor with original dataset indices
-        test_indices_t = torch.tensor(test_indices, device=self.device, dtype=torch.long)
+        """Strictly select from misclassified samples with device-aware conversions"""
+        # Convert numpy arrays to tensors first
+        y_pred_tensor = torch.tensor(test_predictions, device=self.device)
+        y_test_tensor = torch.tensor(y_test, device=self.device)
+        test_indices_tensor = torch.tensor(test_indices, device=self.device)
 
-        # Get ground truth and predictions
-        y_true = self.y_tensor[test_indices_t]
-        y_pred = test_predictions.to(self.device)
-
-        # Create failed sample mask using tensor operations
-        failed_mask = y_pred != y_true
-        failed_indices = test_indices_t[failed_mask]
+        # Create failed sample mask
+        failed_mask = y_pred_tensor != y_test_tensor
+        failed_indices = test_indices_tensor[failed_mask]
 
         # Early exit if no failed samples
         if len(failed_indices) == 0:
             return []
 
-        # Get failed samples' metadata
-        failed_df = results['all_predictions'].iloc[failed_indices.cpu().numpy()]
-
-        # Create position mapping with direct tensor indexing
-        test_pos_map = torch.zeros_like(test_indices_t)
-        test_pos_map[test_indices_t] = torch.arange(len(test_indices_t), device=self.device)
+        # Get failed samples' metadata using numpy indices
+        failed_indices_np = failed_indices.cpu().numpy()
+        failed_df = results['all_predictions'].iloc[failed_indices_np]
 
         final_selected = []
 
         # Process per-class with exact index matching
-        for class_id in torch.unique(y_true):
-            # Get class indices in original label space
-            true_class_id = self.label_encoder.transform([class_id])[0]
+        for class_id in torch.unique(y_test_tensor):
+            # Convert tensor class ID to original label
+            class_label = self.label_encoder.inverse_transform([class_id.cpu().numpy()])[0]
 
             # Find failed samples for this class
-            class_mask = (failed_df['true_class'] == class_id).values
+            class_mask = (failed_df['true_class'] == class_label).values
             if not np.any(class_mask):
                 continue
 
-            # Convert to tensor indices using direct mapping
+            # Get indices for this class's failed samples
             class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
-            class_positions = test_pos_map[class_failed_indices]
 
             # Batch process only misclassified samples
             batch_selected = []
-            for batch_start in range(0, len(class_positions), self.batch_size):
-                batch_pos = class_positions[batch_start:batch_start+self.batch_size]
-                batch_indices = test_indices_t[batch_pos]
+            for batch_start in range(0, len(class_failed_indices), self.batch_size):
+                batch_end = batch_start + self.batch_size
+                batch_indices = class_failed_indices[batch_start:batch_end]
 
                 # Compute margin only for failed samples
-                posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
-                true_probs = posteriors[:, true_class_id]
-                max_probs = torch.max(posteriors, dim=1).values
-                margins = max_probs - true_probs
+                with torch.no_grad():
+                    posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
+                    true_probs = posteriors[:, class_id]
+                    max_probs, _ = torch.max(posteriors, dim=1)
+                    margins = max_probs - true_probs
 
                 # Apply strict thresholding
-                eligible = batch_indices[(margins > 0.01) | (margins < -0.01)]
-                batch_selected.append(eligible)
+                eligible_mask = (margins > 0.01) | (margins < -0.01)
+                batch_selected.append(batch_indices[eligible_mask])
 
             if batch_selected:
                 final_selected.extend(torch.cat(batch_selected).cpu().tolist())
@@ -2662,7 +2657,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <500:
+            while adaptive_patience_counter <=5:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2712,7 +2707,7 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                        if adaptive_patience_counter >= 500:  # Using fixed value of 5 for adaptive patience
+                        if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
                             print("\033[K" +"Stopping adaptive training.")
