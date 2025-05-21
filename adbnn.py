@@ -2220,66 +2220,6 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
-    def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Strictly select from misclassified samples with enhanced validation"""
-        # Convert to tensor with original dataset indices
-        test_indices_t = torch.tensor(test_indices, device=self.device, dtype=torch.long)
-
-        # Get ground truth and predictions
-        y_true = self.y_tensor[test_indices_t]
-        y_pred = test_predictions.to(self.device)
-
-        # Create failed sample mask using tensor operations
-        failed_mask = y_pred != y_true
-        failed_indices = test_indices_t[failed_mask]
-
-        # Early exit if no failed samples
-        if len(failed_indices) == 0:
-            return []
-
-        # Get failed samples' metadata
-        failed_df = results['all_predictions'].iloc[failed_indices.cpu().numpy()]
-
-        # Create position mapping with direct tensor indexing
-        test_pos_map = torch.zeros_like(test_indices_t)
-        test_pos_map[test_indices_t] = torch.arange(len(test_indices_t), device=self.device)
-
-        final_selected = []
-
-        # Process per-class with exact index matching
-        for class_id in torch.unique(y_true):
-            # Get class indices in original label space
-            true_class_id = self.label_encoder.transform([class_id])[0]
-
-            # Find failed samples for this class
-            class_mask = (failed_df['true_class'] == class_id).values
-            if not np.any(class_mask):
-                continue
-
-            # Convert to tensor indices using direct mapping
-            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
-            class_positions = test_pos_map[class_failed_indices]
-
-            # Batch process only misclassified samples
-            batch_selected = []
-            for batch_start in range(0, len(class_positions), self.batch_size):
-                batch_pos = class_positions[batch_start:batch_start+self.batch_size]
-                batch_indices = test_indices_t[batch_pos]
-
-                # Compute margin only for failed samples
-                posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
-                true_probs = posteriors[:, true_class_id]
-                max_probs = torch.max(posteriors, dim=1).values
-                margins = max_probs - true_probs
-
-                # Apply strict thresholding
-                eligible = batch_indices[(margins > 0.01) | (margins < -0.01)]
-                batch_selected.append(eligible)
-
-            if batch_selected:
-                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
-
-        return final_selected
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
