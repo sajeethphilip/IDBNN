@@ -920,47 +920,35 @@ class BinWeightUpdater:
 
     def update_histogram_weights(self, failed_case, true_class, pred_class,
                                 bin_indices, posteriors, learning_rate):
-        # Precompute all adjustments first
-        adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
+        # Get class indices in probability matrix
+        true_idx = self.label_encoder.transform([true_class])[0]
+        pred_idx = self.label_encoder.transform([pred_class])[0]
 
-        # Batch indices and values
-        pair_indices = []
-        bin_is = []
-        bin_js = []
-        adjustments = []
+        adjustment = learning_rate * (1.0 - (posteriors[true_idx]/posteriors[pred_idx]))
+
+        # Batch update storage
+        update_data = defaultdict(list)
 
         for pair_idx, (bin_i, bin_j) in bin_indices.items():
-            # Get probabilities for both classes in this bin
             try:
-                true_prob = self.likelihood_params['bin_probs'][pair_idx][true_class][bin_i, bin_j].item()
-                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_class][bin_i, bin_j].item()
+                # Direct tensor comparison without conversion
+                true_prob = self.likelihood_params['bin_probs'][pair_idx][true_idx][bin_i, bin_j]
+                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_idx][bin_i, bin_j]
+
+                if true_prob < pred_prob:
+                    update_data[pair_idx].append((bin_i, bin_j, adjustment))
             except IndexError:
-                continue  # Skip invalid indices
+                continue
 
-            # Only update if true class's probability < predicted class's in this bin
-            if true_prob < pred_prob:
-                pair_indices.append(pair_idx)
-                bin_is.append(bin_i)
-                bin_js.append(bin_j)
-                adjustments.append(adjustment)
-
-        # Convert to tensors
-        if pair_indices:  # Only process if updates needed
-            pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
-            b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
-            b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
-            adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
-
-            # Group by pair_idx
-            unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
-
-            for pair_id in unique_pairs:
-                mask = pair_ids == pair_id
-                self.histogram_weights[true_class][pair_id.item()].index_put_(
-                    indices=(b_i[mask], b_j[mask]),
-                    values=adjs[mask],
-                    accumulate=True
-                )
+        # Apply all valid updates
+        for pair_idx, updates in update_data.items():
+            bins_i, bins_j, adjs = zip(*updates)
+            self.histogram_weights[true_idx][pair_idx].index_put_(
+                indices=(torch.tensor(bins_i, device=self.device),
+                         torch.tensor(bins_j, device=self.device)),
+                values=torch.tensor(adjs, device=self.device),
+                accumulate=True
+            )
 
     def update_histogram_weights_old(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
