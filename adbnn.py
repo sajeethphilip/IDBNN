@@ -2591,11 +2591,6 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                        if adaptive_patience_counter >= 5 and test_accuracy==1.0:  # Using fixed value of 5 for adaptive patience
-                            print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
-                            print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
-                            print("\033[K" +"Stopping adaptive training.")
-                            break
 
                     # Evaluate test data using combined predictions from fit_predict
                     test_predictions = results['test_predictions']['predicted_class']
