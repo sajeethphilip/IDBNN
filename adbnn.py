@@ -2541,7 +2541,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while  len(test_indices)>0:
+            while adaptive_patience_counter <5:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2591,6 +2591,11 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                        if adaptive_patience_counter >= 100:  # Using fixed value of 5 for adaptive patience
+                            print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
+                            print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
+                            print("\033[K" +"Stopping adaptive training.")
+                            break
 
                     # Evaluate test data using combined predictions from fit_predict
                     test_predictions = results['test_predictions']['predicted_class']
@@ -2608,21 +2613,16 @@ class DBNN(GPUDBNN):
                         # If predictions are numeric but stored as object, cast to int64
                         test_predictions = test_predictions.astype(np.int64)
 
-                    # Get new training samples from misclassified examples
-                    new_train_indices = self._select_samples_from_failed_classes(
-                        test_predictions, y_test, test_indices,results
-                    )
-
                     # Check if we've achieved perfect accuracy
                     if train_accuracy == 1.0:
-                        if not new_train_indices:
-                                        # Check if there are no test indices left
-                                        if len(test_indices) == 0:
-                                            print("\033[KNo failed examples remaining. Stopping adaptive training.")
-                                            adaptive_patience_counter = patience  # Trigger exit
-                                            break
+                        if len(test_indices) == 0:
+                            print("\033[K" +"No more test samples available. Training complete.")
+                            break
 
-
+                        # Get new training samples from misclassified examples
+                        new_train_indices = self._select_samples_from_failed_classes(
+                            test_predictions, y_test, test_indices,results
+                        )
 
                         if not new_train_indices:
                             print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
@@ -2655,7 +2655,8 @@ class DBNN(GPUDBNN):
                     train_indices.extend(new_train_indices)
                     test_indices = list(set(test_indices) - set(new_train_indices))
                     print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
-
+                    if new_train_indices==0:
+                        break
 
             # Record the end time
             end_time = time.time()
