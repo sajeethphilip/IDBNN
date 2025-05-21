@@ -2299,7 +2299,7 @@ class DBNN(GPUDBNN):
 
             # Final selection with encoded class count check
             class_count = (y_test == self.label_encoder.transform([class_id])[0]).sum().item()
-            max_samples = max(2, int(class_count * active_learning_config.get("max_class_addition_percent", 99) / 100))
+            max_samples = max(0, int(class_count * active_learning_config.get("max_class_addition_percent", 99) / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
         class_pbar.close()
