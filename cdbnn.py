@@ -326,12 +326,10 @@ class PredictionManager:
         """Predict features with Grad-CAM explainable heatmaps"""
         # Configuration and initialization
         heatmap_enabled = self.config['model'].get('heatmap_attn', True)
-        class_mapping = self._get_class_mapping(data_path)
-        reverse_class_mapping = {v: k for k, v in class_mapping.items()}
         current_working_dir = os.getcwd()
 
-        # Get image files and validate
-        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
+        # Get image files - ignore directory-based class labels for prediction
+        image_files, _, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             raise ValueError(f"No valid images found in {data_path}")
 
@@ -348,7 +346,7 @@ class PredictionManager:
             'cluster_assignment', 'cluster_confidence'
         ]
         csv_headers = base_headers.copy()
-        num_features = None  # Will be determined from first batch
+        num_features = None
         placeholder_written = False
 
         # Write initial file with placeholder
@@ -373,7 +371,6 @@ class PredictionManager:
         # Batch processing
         for i in tqdm(range(0, len(image_files), batch_size), desc="Predicting features"):
             batch_files = image_files[i:i+batch_size]
-            batch_labels = class_labels[i:i+batch_size]
             batch_filenames = original_filenames[i:i+batch_size]
             batch_images = []
 
@@ -408,9 +405,8 @@ class PredictionManager:
                 # Rewrite CSV with correct headers
                 with open(output_csv, 'w', newline='') as csvfile:
                     csv.writer(csvfile).writerow(csv_headers)
-                placeholder_written = False
 
-            # Determine targets for Grad-CAM
+            # Get valid targets from model outputs
             if 'class_logits' in output:
                 targets = output['class_logits'].argmax(dim=1)
             elif 'cluster_probabilities' in output:
@@ -418,10 +414,15 @@ class PredictionManager:
             else:
                 targets = torch.zeros(len(batch_tensor), dtype=torch.long, device=self.device)
 
+            # Validate targets against model capacity
+            if hasattr(self.model, 'classifier'):
+                num_classes = self.model.classifier[-1].out_features
+                targets = torch.clamp(targets, 0, num_classes-1)
+
             # Backward pass for gradients
             one_hot = torch.zeros_like(embedding)
             for idx, target in enumerate(targets):
-                one_hot[idx, target] = 1
+                one_hot[idx, target] = 1  # Now guaranteed to be within valid range
 
             retain_graph = self.config['model'].get('retain_backward_graph', False)
             embedding.backward(gradient=one_hot, retain_graph=retain_graph)
@@ -483,12 +484,10 @@ class PredictionManager:
             # CSV writing
             with open(output_csv, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                for j, (filename, orig_name, true_class) in enumerate(zip(
-                    batch_files, batch_filenames, batch_labels)):
-
-                    is_unknown = true_class in ["unknown", ""] or true_class not in reverse_class_mapping
-                    label_type = "predicted" if is_unknown else "true"
-                    target = true_class if label_type == "true" else cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
+                for j, (filename, orig_name) in enumerate(zip(batch_files, batch_filenames)):
+                    # Prediction mode labels
+                    label_type = "predicted"
+                    target = cluster_assign[j] if cluster_assign[j] != 'NA' else "unknown"
 
                     row = [
                         orig_name,
@@ -497,7 +496,7 @@ class PredictionManager:
                         target,
                         cluster_assign[j],
                         cluster_conf[j]
-                    ] + features[j].tolist()  # Now uses actual feature count
+                    ] + features[j].tolist()
 
                     if heatmap_enabled:
                         row.append(heatmap_paths[j])
