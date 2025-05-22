@@ -2703,8 +2703,7 @@ class DBNN(GPUDBNN):
                             break
 
                     # Evaluate test data using combined predictions from fit_predict
-                    test_predictions, _ = self.predict(self.X_tensor[test_indices], batch_size=batch_size)
-                    test_predictions = test_predictions.cpu().numpy()
+                    test_predictions = results['test_predictions']['predicted_class']
                     y_test = self.y_tensor[test_indices].cpu().numpy()
 
                     # Convert test_predictions to a NumPy array if it's a Pandas Series
