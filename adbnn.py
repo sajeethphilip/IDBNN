@@ -293,6 +293,7 @@ class DatasetConfig:
         },
         "active_learning": {
             "tolerance": 1.0,
+             "similarity_threshold": 0.25,  # Bins with >25% probability in predicted class are considered similar
             "cardinality_threshold_percentile": 95
         },
         "training_params": {
@@ -374,7 +375,12 @@ class DatasetConfig:
             "use_previous_model": True
         }
 
-
+        config["anomaly_detection"]= {
+            "initial_weight": 1e-6,        # Near-zero initial weight
+            "threshold": 0.01,             # Posterior threshold for flagging anomalies
+            "missing_value": -99999,       # Special value indicating missing features
+            "missing_weight_multiplier": 0.1  # Additional penalty for missing values
+        }
         return config
 
 
@@ -766,60 +772,64 @@ class ComputationCache:
         return self.feature_group_cache[key]
 
 class BinWeightUpdater:
-    def __init__(self, n_classes, feature_pairs, n_bins_per_dim=128,batch_size=128):
+    def __init__(self, n_classes, feature_pairs, dataset_name, n_bins_per_dim=128, batch_size=128):
+        self.dataset_name = dataset_name
         self.n_classes = n_classes
         self.feature_pairs = feature_pairs
         self.n_bins_per_dim = n_bins_per_dim
-        self.device=Train_device
-        # Initialize histogram_weights as empty dictionary first
+        self.device = Train_device
+        self.batch_size = batch_size
+
+        # Get initial weight from config
+        self.initial_weight = self._get_initial_weight_from_config()
+
+        # Initialize histogram_weights with configurable initial value
         self.histogram_weights = {}
-        self.batch_size=batch_size
-        # Ensure all weight tensors are contiguous
-        for c in self.histogram_weights.values():
-            for p in c.values():
-                p = p.contiguous()
-        # Create weights for each class and feature pair
         for class_id in range(n_classes):
             self.histogram_weights[class_id] = {}
             for pair_idx in range(len(feature_pairs)):
-                # Initialize with default weight of 0.1
-                #print("\033[K" +f"[DEBUG] Creating weights for class {class_id}, pair {pair_idx}")
+                # Initialize with configurable initial weight
                 self.histogram_weights[class_id][pair_idx] = torch.full(
                     (n_bins_per_dim, n_bins_per_dim),
-                    0.1,
-                    dtype=torch.float32,
-                    device=self.device  # Ensure weights are created on correct device
-                ).contiguous()
-
-        # Initialize weights for each class and feature pair
-        self.gaussian_weights = {}
-        for class_id in range(n_classes):
-            self.gaussian_weights[class_id] = {}
-            for pair_idx in range(len(feature_pairs)):
-                # Initialize with default weight of 0.1
-                self.gaussian_weights[class_id][pair_idx] = torch.tensor(0.1,
+                    self.initial_weight,
                     dtype=torch.float32,
                     device=self.device
                 ).contiguous()
 
-        # Verify initialization
-        print("\033[K" +f"[DEBUG] Weight initialization complete. Structure:")
-        print("\033[K" +f"- Number of classes: {len(self.histogram_weights)}")
-        for class_id in self.histogram_weights:
-            print("\033[K" +f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
+        # Initialize gaussian weights with same initial value
+        self.gaussian_weights = {}
+        for class_id in range(n_classes):
+            self.gaussian_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                self.gaussian_weights[class_id][pair_idx] = torch.tensor(
+                    self.initial_weight,
+                    dtype=torch.float32,
+                    device=self.device
+                ).contiguous()
 
-        # Use a single contiguous tensor for all weights
+        # Unified weights tensor initialization
         self.weights = torch.full(
             (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
-            0.1,
+            self.initial_weight,
             dtype=torch.float32,
-            device=self.device  # Ensure weights are created on correct device
+            device=self.device
         ).contiguous()
 
         # Pre-allocate update buffers
-        self.update_indices = torch.zeros((3, 1000), dtype=torch.long)  # [dim, max_updates]
+        self.update_indices = torch.zeros((3, 1000), dtype=torch.long)
         self.update_values = torch.zeros(1000, dtype=torch.float32)
         self.update_count = 0
+
+        # Debug initialization
+        print("\033[K" + f"[DEBUG] Weight initialization complete with initial value: {self.initial_weight}")
+        print("\033[K" + f"- Number of classes: {len(self.histogram_weights)}")
+        for class_id in self.histogram_weights:
+            print("\033[K" + f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
+
+    def _get_initial_weight_from_config(self):
+        """Get initial weight value from configuration"""
+        config = DatasetConfig.load_config(self.dataset_name)
+        return config.get('anomaly_detection', {}).get('initial_weight', 1e-6)
 
     def _validate_update(old_weights, new_weights, updates):
         """Sanity check for update consistency"""
@@ -828,6 +838,7 @@ class BinWeightUpdater:
                 old_weights[class_id][pair_idx][bin_i, bin_j] + adj,
                 new_weights[class_id][pair_idx][bin_i, bin_j]
             ), "Update mismatch detected!"
+
     def batch_update_weights(self, class_indices, pair_indices, bin_indices, adjustments):
         # Convert to tensors first
         class_ids = torch.tensor(class_indices, dtype=torch.long, device=self.device)
@@ -1351,6 +1362,110 @@ class GPUDBNN:
         self.fresh_start = True
 
     def _compute_bin_edges(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
+        """
+        Vectorized computation of bin edges with missing value handling.
+
+        Args:
+            dataset: Input tensor of shape [n_samples, n_features]
+            bin_sizes: List of integers specifying bin sizes
+
+        Returns:
+            List of lists containing bin edge tensors for each feature pair
+        """
+        DEBUG.log("Starting vectorized _compute_bin_edges with missing value handling")
+
+        # Get configuration parameters
+        config = self.config.get('anomaly_detection', {})
+        missing_value = config.get('missing_value', -99999)
+        mv_epsilon = 1e-6  # Small buffer around missing value
+
+        # Memory management parameters
+        MAX_GPU_MEM = 0.8 * torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 1e10
+        SAFETY_FACTOR = 0.7  # Use only 70% of available memory
+
+        # Calculate memory requirements per feature pair
+        bytes_per_pair = 2 * 4 * len(bin_sizes)  # 2 edges, 4 bytes per float, per dimension
+        max_pairs_per_batch = int((MAX_GPU_MEM * SAFETY_FACTOR) / bytes_per_pair)
+        max_pairs_per_batch = max(1, min(max_pairs_per_batch, len(self.feature_pairs)))
+
+        bin_edges = []
+
+        # Process in memory-managed batches
+        for batch_start in range(0, len(self.feature_pairs), max_pairs_per_batch):
+            batch_end = min(batch_start + max_pairs_per_batch, len(self.feature_pairs))
+            batch_pairs = self.feature_pairs[batch_start:batch_end]
+
+            # Vectorized min/max computation for the batch
+            with torch.no_grad():
+                # Stack all features needed in this batch
+                feature_indices = torch.unique(torch.cat([torch.as_tensor(pair, device=self.device)
+                                        for pair in batch_pairs]))
+                batch_data = dataset[:, feature_indices]
+
+                # Compute min/max for all features in batch
+                mins = batch_data.min(dim=0)[0]
+                maxs = batch_data.max(dim=0)[0]
+
+                # Create mapping from feature index to its position in batch_data
+                feat_to_idx = {int(f): i for i, f in enumerate(feature_indices)}
+
+                # Process each pair in batch
+                for pair in batch_pairs:
+                    pair_edges = []
+                    for dim, feat in enumerate(pair):
+                        feat_idx = feat_to_idx[int(feat)]
+                        dim_min = mins[feat_idx]
+                        dim_max = maxs[feat_idx]
+                        padding = max((dim_max - dim_min) * 0.01, 1e-6)
+
+                        # Get bin size for this dimension
+                        bin_size = bin_sizes[0] if len(bin_sizes) == 1 else bin_sizes[dim]
+
+                        # Compute initial edges
+                        edges = torch.linspace(
+                            dim_min - padding,
+                            dim_max + padding,
+                            bin_size + 1,
+                            device=self.device
+                        ).contiguous()
+
+                        # Check for missing values in original dataset
+                        has_missing = torch.any(dataset[:, feat] == missing_value)
+
+                        if has_missing:
+                            # Calculate missing value bin boundaries
+                            mv_low = torch.tensor(missing_value - mv_epsilon, device=self.device)
+                            mv_high = torch.tensor(missing_value + mv_epsilon, device=self.device)
+
+                            # Determine insertion position
+                            if missing_value < edges[0]:
+                                # Prepend missing value bin
+                                edges = torch.cat([mv_low.unsqueeze(0), mv_high.unsqueeze(0), edges])
+                            elif missing_value > edges[-1]:
+                                # Append missing value bin
+                                edges = torch.cat([edges, mv_low.unsqueeze(0), mv_high.unsqueeze(0)])
+                            else:
+                                # Find insertion point and split existing bins
+                                insert_pos = torch.searchsorted(edges, mv_high, right=True)
+                                edges = torch.cat([
+                                    edges[:insert_pos],
+                                    mv_low.unsqueeze(0),
+                                    mv_high.unsqueeze(0),
+                                    edges[insert_pos:]
+                                ])
+
+                            # Maintain sorted order
+                            edges, _ = torch.sort(edges)
+
+                        pair_edges.append(edges)
+
+                    bin_edges.append(pair_edges)
+
+                torch.cuda.empty_cache()  # Free memory between batches
+
+        return bin_edges
+
+    def _compute_bin_edges_old(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
         """
         Vectorized computation of bin edges with GPU memory management.
 
@@ -2390,12 +2505,12 @@ class DBNN(GPUDBNN):
         # Reset weight updater
         if self.weight_updater is not None:
             self.weight_updater = BinWeightUpdater(
-                n_classes=n_classes,
+                n_classes=len(self.label_encoder.classes_),
                 feature_pairs=self.feature_pairs,
+                dataset_name=self.dataset_name,  # Pass dataset name
                 n_bins_per_dim=self.n_bins_per_dim,
                 batch_size=self.batch_size
             )
-
 
         DEBUG.log("Model reset to initial state.")
 
@@ -3908,11 +4023,88 @@ class DBNN(GPUDBNN):
         self.weight_updater = BinWeightUpdater(
             n_classes=len(self.label_encoder.classes_),
             feature_pairs=self.feature_pairs,
-            n_bins_per_dim=n_bins_per_dim,  # Now matches likelihood bins
+            dataset_name=self.dataset_name,  # Pass dataset name
+            n_bins_per_dim=self.n_bins_per_dim,
             batch_size=self.batch_size
         )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
+        """Vectorized weight updates with similarity-based filtering"""
+        n_failed = len(failed_cases)
+        if n_failed == 0:
+            self.consecutive_successes += 1
+            return
+
+        self.consecutive_successes = 0
+        self.learning_rate = max(self.learning_rate / 2, 1e-6)
+
+        # Stack all features and convert classes at once
+        features = torch.stack([case[0] for case in failed_cases]).to(self.device)
+        true_classes = torch.tensor([int(case[1]) for case in failed_cases], device=self.device)
+
+        # Compute posteriors and predictions
+        if self.model_type == "Histogram":
+            posteriors, bin_indices = self._compute_batch_posterior(features)
+        else:  # Gaussian model
+            posteriors, _ = self._compute_batch_posterior_std(features)
+            return
+
+        pred_classes = torch.argmax(posteriors, dim=1)
+
+        # Calculate adjustments for all cases
+        true_posteriors = posteriors[torch.arange(n_failed), true_classes]
+        pred_posteriors = posteriors[torch.arange(n_failed), pred_classes]
+        adjustments = self.learning_rate * (1.0 - (true_posteriors / pred_posteriors))
+
+        # Get similarity threshold from config
+        sim_threshold = self.config.get('active_learning', {}).get('similarity_threshold', 0.25)
+
+        # Process each feature group with similarity filtering
+        if bin_indices is not None:
+            for group_idx in bin_indices:
+                bin_i, bin_j = bin_indices[group_idx]
+
+                # Get predicted class probabilities for these bins
+                with torch.no_grad():
+                    # pred_classes shape: [n_failed]
+                    # bin_i/bin_j shape: [n_failed]
+                    pred_probs = self.likelihood_params['bin_probs'][group_idx][
+                        pred_classes, bin_i, bin_j
+                    ]
+
+                # Create mask for dissimilar bins (predicted class probability < threshold)
+                dissimilar_mask = pred_probs < sim_threshold
+
+                if not dissimilar_mask.any():
+                    continue  # Skip group if no dissimilar bins
+
+                # Filter elements using mask
+                mask_true_classes = true_classes[dissimilar_mask]
+                mask_bin_i = bin_i[dissimilar_mask]
+                mask_bin_j = bin_j[dissimilar_mask]
+                mask_adjustments = adjustments[dissimilar_mask]
+
+                # Group updates by class using vectorized operations
+                unique_classes, inverse = torch.unique(mask_true_classes, return_inverse=True)
+
+                for cls_idx, class_id in enumerate(unique_classes):
+                    cls_mask = inverse == cls_idx
+                    if not cls_mask.any():
+                        continue
+
+                    # Get class-specific updates
+                    cls_bin_i = mask_bin_i[cls_mask]
+                    cls_bin_j = mask_bin_j[cls_mask]
+                    cls_adjustments = mask_adjustments[cls_mask]
+
+                    # Update weights using vectorized index_put_
+                    self.weight_updater.histogram_weights[class_id.item()][group_idx].index_put_(
+                        indices=(cls_bin_i, cls_bin_j),
+                        values=cls_adjustments,
+                        accumulate=True
+                    )
+
+    def _update_priors_parallel_old(self, failed_cases: List[Tuple], batch_size: int = 128):
         """Vectorized weight updates with proper error handling"""
         n_failed = len(failed_cases)
         if n_failed == 0:
@@ -6426,10 +6618,17 @@ def load_or_create_config(config_path: str) -> dict:
         },
         "active_learning": {
             "tolerance": 1.0,
+             "similarity_threshold": 0.25,  # Bins with >25% probability in predicted class are considered similar
             "cardinality_threshold_percentile": 95,
             "strong_margin_threshold": 0.01,           # Consider only a margin of 1% of the max for divergence computation and sample selection.
             "marginal_margin_threshold": 0.01,
             "min_divergence": 0.1
+        },
+        "anomaly_detection": {
+            "initial_weight": 1e-6,        # Near-zero initial weight
+            "threshold": 0.01,             # Posterior threshold for flagging anomalies
+            "missing_value": -99999,       # Special value indicating missing features
+            "missing_weight_multiplier": 0.1  # Additional penalty for missing values
         },
         "execution_flags": {
             "train": True,
