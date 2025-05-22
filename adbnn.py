@@ -919,38 +919,6 @@ class BinWeightUpdater:
             raise
 
     def update_histogram_weights(self, failed_case, true_class, pred_class,
-                                bin_indices, posteriors, learning_rate):
-        # Get class indices in probability matrix
-        true_idx = self.label_encoder.transform([true_class])[0]
-        pred_idx = self.label_encoder.transform([pred_class])[0]
-
-        adjustment = learning_rate * (1.0 - (posteriors[true_idx]/posteriors[pred_idx]))
-
-        # Batch update storage
-        update_data = defaultdict(list)
-
-        for pair_idx, (bin_i, bin_j) in bin_indices.items():
-            try:
-                # Direct tensor comparison without conversion
-                true_prob = self.likelihood_params['bin_probs'][pair_idx][true_idx][bin_i, bin_j]
-                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_idx][bin_i, bin_j]
-
-                if true_prob < pred_prob:
-                    update_data[pair_idx].append((bin_i, bin_j, adjustment))
-            except IndexError:
-                continue
-
-        # Apply all valid updates
-        for pair_idx, updates in update_data.items():
-            bins_i, bins_j, adjs = zip(*updates)
-            self.histogram_weights[true_idx][pair_idx].index_put_(
-                indices=(torch.tensor(bins_i, device=self.device),
-                         torch.tensor(bins_j, device=self.device)),
-                values=torch.tensor(adjs, device=self.device),
-                accumulate=True
-            )
-
-    def update_histogram_weights_old(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
         # Precompute all adjustments first
         adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
@@ -2196,81 +2164,8 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
+
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Strictly select from misclassified samples with device-aware conversions"""
-        # Convert numpy arrays to tensors first
-        y_pred_tensor = torch.tensor(test_predictions, device=self.device)
-        y_test_tensor = torch.tensor(y_test, device=self.device)
-        test_indices_tensor = torch.tensor(test_indices, device=self.device)
-
-        # Debug: Check lengths
-        assert len(test_predictions) == len(y_test), "Mismatch between test_predictions and y_test lengths"
-
-        # Create failed sample mask
-        failed_mask = y_pred_tensor != y_test_tensor
-        failed_indices = test_indices_tensor[failed_mask]
-
-        # Debug: Print number of failed samples
-        print(f"\033[KNumber of failed test samples: {len(failed_indices)}")
-
-        # Early exit if no failed samples
-        if len(failed_indices) == 0:
-            return []
-
-        # Get failed samples' metadata using numpy indices
-        failed_indices_np = failed_indices.cpu().numpy()
-        failed_df = results['all_predictions'].iloc[failed_indices_np]
-
-        # Debug: Print failed samples' true and predicted classes
-        print("\033[KFailed samples' class distribution:")
-        print(failed_df[['true_class', 'predicted_class']].value_counts())
-
-        final_selected = []
-
-        # Process per-class with exact index matching
-        for class_id in torch.unique(y_test_tensor):
-            # Convert tensor class ID to original label
-            class_label = self.label_encoder.inverse_transform([class_id.cpu().numpy()])[0]
-            print(f"\033[KProcessing class {class_label} (ID: {class_id})")
-
-            # Find failed samples for this class
-            class_mask = (failed_df['true_class'] == class_label).values
-            if not np.any(class_mask):
-                print(f"\033[KNo failed samples for class {class_label}")
-                continue
-
-            # Get indices for this class's failed samples
-            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
-            print(f"\033[KFound {len(class_failed_indices)} failed samples for class {class_label}")
-
-            # Batch process only misclassified samples
-            batch_selected = []
-            for batch_start in range(0, len(class_failed_indices), self.batch_size):
-                batch_end = batch_start + self.batch_size
-                batch_indices = class_failed_indices[batch_start:batch_end]
-
-                # Compute margin only for failed samples
-                with torch.no_grad():
-                    posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
-                    true_probs = posteriors[:, class_id]
-                    max_probs, _ = torch.max(posteriors, dim=1)
-                    margins = max_probs - true_probs
-
-                # Apply strict thresholding and ensure we only select from current test failures
-                eligible_mask = (margins > 0.01) | (margins < -0.01)
-                eligible_samples = batch_indices[eligible_mask]
-                print(f"\033[KAdding {len(eligible_samples)} eligible samples from batch")
-                batch_selected.append(eligible_samples)
-
-            if batch_selected:
-                final_selected_batch = torch.cat(batch_selected).cpu().tolist()
-                final_selected.extend(final_selected_batch)
-                print(f"\033[KAdded {len(final_selected_batch)} samples from class {class_label}")
-
-        print(f"\033[KTotal samples added: {len(final_selected)}")
-        return final_selected
-
-    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
 
@@ -2290,6 +2185,7 @@ class DBNN(GPUDBNN):
         # Create boolean mask using numpy arrays to avoid chained indexing
         misclassified_mask = test_results['predicted_class'].to_numpy() != test_results['true_class'].to_numpy()
         misclassified_indices = test_results.index[misclassified_mask].tolist()
+        #print(f"{Colors.YELLOW} The misclassified examples have indices [{misclassified_indices}]{Colors.ENDC}")
 
         # Create mapping from original indices to test set positions
         test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
@@ -2646,7 +2542,7 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <100:
+            while adaptive_patience_counter <5:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2665,6 +2561,7 @@ class DBNN(GPUDBNN):
                     # Train the model
                     save_path = f"data/{self.dataset_name}/Predictions/"
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
                     self.train_indices = train_indices
                     self.test_indices = test_indices
                     results = self.fit_predict(batch_size=batch_size, save_path=save_path)
@@ -2695,8 +2592,8 @@ class DBNN(GPUDBNN):
                         print("\033[K" + "Saved model and data due to improved training accuracy")
                     else:
                         adaptive_patience_counter += 1
-                        print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/100")
-                        if adaptive_patience_counter >= 100:  # Using fixed value of 5 for adaptive patience
+                        print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                        if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
                             print("\033[K" +"Stopping adaptive training.")
@@ -2721,7 +2618,6 @@ class DBNN(GPUDBNN):
                     # Check if we've achieved perfect accuracy
                     if train_accuracy == 1.0:
                         if len(test_indices) == 0:
-                            adaptive_patience_counter = 101
                             print("\033[K" +"No more test samples available. Training complete.")
                             break
 
@@ -2729,7 +2625,6 @@ class DBNN(GPUDBNN):
                         new_train_indices = self._select_samples_from_failed_classes(
                             test_predictions, y_test, test_indices,results
                         )
-
                         if not new_train_indices:
                             print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
                             self.in_adaptive_fit = False
@@ -2742,10 +2637,10 @@ class DBNN(GPUDBNN):
                         )
 
                         if not new_train_indices:
-                            adaptive_patience_counter = 101
                             print("\033[K" +"No suitable new samples found. Training complete.")
                             break
 
+                   #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
                     if new_train_indices:
                         # Reset to the best round's initial conditions
@@ -2759,14 +2654,13 @@ class DBNN(GPUDBNN):
 
 
                     # Update training and test sets with new samples
-                    train_indices.extend(new_train_indices)
-                    test_indices_old=test_indices
-                    test_indices = list(set(test_indices) - set(new_train_indices))
-                    if len(test_indices)==len(test_indices_old):
-                        adaptive_patience_counter = 101
-                        break
+                    #train_indices.extend(new_train_indices)
+                    #test_indices = list(set(test_indices) - set(new_train_indices))
                     print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
 
+                    # Update training and test indices with original indices
+                    train_indices = list(set(train_indices + new_train_indices))
+                    test_indices = list(set(test_indices) - set(new_train_indices))
 
             # Record the end time
             end_time = time.time()
@@ -4459,7 +4353,6 @@ class DBNN(GPUDBNN):
 
         # Print precision row at the bottom
         print("\033[K" + f"{Colors.BOLD}{'Precision':<15}{Colors.ENDC}", end='')
-        overall_prec = 0
         for j in range(n_classes):
             tp = cm[j, j]
             fp = cm[:, j].sum() - tp
@@ -4471,10 +4364,8 @@ class DBNN(GPUDBNN):
                 prec_color = Colors.YELLOW
             else:
                 prec_color = Colors.BLUE
-            overall_prec +=prec
 
             print("\033[K" + f"{prec_color}{prec:>8.2%}{Colors.ENDC}", end='')
-        overall_prec = overall_prec/n_classes
         print("\033[K" + "")  # New line after precision row
 
         # Print overall accuracy and precision
@@ -4483,7 +4374,7 @@ class DBNN(GPUDBNN):
         if total_samples > 0:
             overall_acc = total_correct / total_samples
             # Micro-averaged precision (same as accuracy in multi-class)
-
+            overall_prec = total_correct / total_samples
 
             print("\033[K" + "-" * (15 + 8 * n_classes + 20))
             acc_color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
@@ -5297,6 +5188,18 @@ class DBNN(GPUDBNN):
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
             all_results = self._generate_detailed_predictions(self.X_Orig, all_pred_classes, y_all, all_posteriors)
+
+            # Convert train/test indices to list of integers
+            train_indices = self.train_indices
+            if isinstance(train_indices, torch.Tensor):
+                train_indices = train_indices.cpu().tolist()
+            elif isinstance(train_indices, np.ndarray):
+                train_indices = train_indices.tolist()
+
+            # Add split information to results
+            all_results['split'] = 'test'
+            all_results.loc[train_indices, 'split'] = 'train'
+
             train_results = all_results.iloc[self.train_indices]
             test_results = all_results.iloc[self.test_indices]
             # Filter failed examples (where predicted class != true class)
