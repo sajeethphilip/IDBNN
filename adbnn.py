@@ -4485,7 +4485,7 @@ class DBNN(GPUDBNN):
                 prec_color = Colors.YELLOW
             else:
                 prec_color = Colors.BLUE
-            overall_prec +=
+            overall_prec +=prec
             print("\033[K" + f"{prec_color}{prec:>8.2%}{Colors.ENDC}", end='')
         overall_prec = overall_prec/n_classes
         print("\033[K" + "")  # New line after precision row
