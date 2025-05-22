@@ -828,6 +828,37 @@ class BinWeightUpdater:
                 old_weights[class_id][pair_idx][bin_i, bin_j] + adj,
                 new_weights[class_id][pair_idx][bin_i, bin_j]
             ), "Update mismatch detected!"
+    def batch_update_weights(self, class_indices, pair_indices, bin_indices, adjustments):
+        # Convert to tensors first
+        class_ids = torch.tensor(class_indices, dtype=torch.long, device=self.device)
+        pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
+        bin_is = torch.tensor([bi[0] if isinstance(bi, (list, tuple)) else bi
+                              for bi in bin_indices], device=self.device)
+        bin_js = torch.tensor([bj[1] if isinstance(bj, (list, tuple)) else bj
+                              for bj in bin_indices], device=self.device)
+        adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
+
+        # Group updates by (class, pair)
+        unique_pairs, inverse = torch.unique(
+            torch.stack([class_ids, pair_ids]), dim=1, return_inverse=True
+        )
+
+        for group_idx in range(unique_pairs.shape[1]):
+            class_id, pair_id = unique_pairs[:, group_idx]
+            mask = inverse == group_idx
+
+            # Get all updates for this (class, pair)
+            b_i = bin_is[mask]
+            b_j = bin_js[mask]
+            adj = adjs[mask]
+
+            # Vectorized update
+            self.histogram_weights[class_id.item()][pair_id.item()].index_put_(
+                indices=(b_i, b_j),
+                values=adj,
+                accumulate=True
+            )
+
 
     def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
         """Get weights ensuring proper dimensions"""
@@ -864,8 +895,62 @@ class BinWeightUpdater:
                 device=self.batch_indices_buffer.device
             ).contiguous()
 
+    def update_weight(self, class_id: int, pair_idx: int, bin_i: int, bin_j: int, adjustment: float):
+        """Single weight update with proper error handling"""
+        try:
+            # Convert all indices to integers
+            class_id = int(class_id)
+            pair_idx = int(pair_idx)
+            bin_i = int(bin_i)
+            bin_j = int(bin_j)
+
+            # Ensure indices are within bounds
+            bin_i = min(max(0, bin_i), self.n_bins_per_dim - 1)
+            bin_j = min(max(0, bin_j), self.n_bins_per_dim - 1)
+
+            # Update the weight
+            self.histogram_weights[class_id][pair_idx][bin_i, bin_j] += adjustment
+
+        except Exception as e:
+            print("\033[K" +f"Error updating weight: {str(e)}")
+            print("\033[K" +f"class_id: {class_id}, pair_idx: {pair_idx}")
+            print("\033[K" +f"bin_i: {bin_i}, bin_j: {bin_j}")
+            print("\033[K" +f"adjustment: {adjustment}")
+            raise
 
     def update_histogram_weights(self, failed_case, true_class, pred_class,
+                                bin_indices, posteriors, learning_rate):
+        # Get class indices in probability matrix
+        true_idx = self.label_encoder.transform([true_class])[0]
+        pred_idx = self.label_encoder.transform([pred_class])[0]
+
+        adjustment = learning_rate * (1.0 - (posteriors[true_idx]/posteriors[pred_idx]))
+
+        # Batch update storage
+        update_data = defaultdict(list)
+
+        for pair_idx, (bin_i, bin_j) in bin_indices.items():
+            try:
+                # Direct tensor comparison without conversion
+                true_prob = self.likelihood_params['bin_probs'][pair_idx][true_idx][bin_i, bin_j]
+                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_idx][bin_i, bin_j]
+
+                if true_prob < pred_prob:
+                    update_data[pair_idx].append((bin_i, bin_j, adjustment))
+            except IndexError:
+                continue
+
+        # Apply all valid updates
+        for pair_idx, updates in update_data.items():
+            bins_i, bins_j, adjs = zip(*updates)
+            self.histogram_weights[true_idx][pair_idx].index_put_(
+                indices=(torch.tensor(bins_i, device=self.device),
+                         torch.tensor(bins_j, device=self.device)),
+                values=torch.tensor(adjs, device=self.device),
+                accumulate=True
+            )
+
+    def update_histogram_weights_old(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
         # Precompute all adjustments first
         adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
@@ -969,6 +1054,52 @@ class BinWeightUpdater:
             DEBUG.log(" Traceback:", traceback.format_exc())
             raise
 
+    # Modified posterior computation for Histogram model
+    def compute_histogram_posterior(self, features, bin_indices):
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+        for group_idx, feature_group in enumerate(self.likelihood_params['feature_pairs']):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            bin_probs = self.likelihood_params['bin_probs'][group_idx]
+
+            # Get bin-specific weights
+            bin_weights = self.weight_updater.get_histogram_weights(
+                class_idx,
+                group_idx
+            )[bin_indices[group_idx]]
+
+            # Apply bin-specific weights to probabilities
+            weighted_probs = bin_probs * bin_weights.unsqueeze(0)
+
+            # Continue with regular posterior computation...
+            group_log_likelihoods = torch.log(weighted_probs + epsilon)
+            log_likelihoods.add_(group_log_likelihoods)
+
+        return log_likelihoods
+
+    # Modified posterior computation for Gaussian model
+    def compute_gaussian_posterior(self, features, component_responsibilities):
+        batch_size = features.shape[0]
+        n_classes = len(self.likelihood_params['classes'])
+        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+        for group_idx, feature_group in enumerate(self.likelihood_params['feature_pairs']):
+            # Get component-specific weights
+            component_weights = self.weight_updater.get_gaussian_weights(
+                class_idx,
+                group_idx
+            )
+
+            # Weight the Gaussian components
+            weighted_resp = component_responsibilities[group_idx] * component_weights
+
+            # Continue with regular posterior computation...
+            group_log_likelihoods = torch.log(weighted_resp.sum() + epsilon)
+            log_likelihoods.add_(group_log_likelihoods)
+
+        return log_likelihoods
 #----------------------------------------------------------------------------------------------------------------------------
 import torch
 import torch.nn as nn
@@ -2065,9 +2196,63 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
-
-
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
+        """Strictly select from misclassified samples with device-aware conversions"""
+        # Convert numpy arrays to tensors first
+        y_pred_tensor = torch.tensor(test_predictions, device=self.device)
+        y_test_tensor = torch.tensor(y_test, device=self.device)
+        test_indices_tensor = torch.tensor(test_indices, device=self.device)
+
+        # Create failed sample mask
+        failed_mask = y_pred_tensor != y_test_tensor
+        failed_indices = test_indices_tensor[failed_mask]
+
+        # Early exit if no failed samples
+        if len(failed_indices) == 0:
+            return []
+
+        # Get failed samples' metadata using numpy indices
+        failed_indices_np = failed_indices.cpu().numpy()
+        failed_df = results['all_predictions'].iloc[failed_indices_np]
+
+        final_selected = []
+
+        # Process per-class with exact index matching
+        for class_id in torch.unique(y_test_tensor):
+            # Convert tensor class ID to original label
+            class_label = self.label_encoder.inverse_transform([class_id.cpu().numpy()])[0]
+
+            # Find failed samples for this class
+            class_mask = (failed_df['true_class'] == class_label).values
+            if not np.any(class_mask):
+                continue
+
+            # Get indices for this class's failed samples
+            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
+
+            # Batch process only misclassified samples
+            batch_selected = []
+            for batch_start in range(0, len(class_failed_indices), self.batch_size):
+                batch_end = batch_start + self.batch_size
+                batch_indices = class_failed_indices[batch_start:batch_end]
+
+                # Compute margin only for failed samples
+                with torch.no_grad():
+                    posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
+                    true_probs = posteriors[:, class_id]
+                    max_probs, _ = torch.max(posteriors, dim=1)
+                    margins = max_probs - true_probs
+
+                # Apply strict thresholding
+                eligible_mask = (margins > 0.01) | (margins < -0.01)
+                batch_selected.append(batch_indices[eligible_mask])
+
+            if batch_selected:
+                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
+
+        return final_selected
+
+    def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
         from tqdm import tqdm
 
@@ -2217,6 +2402,7 @@ class DBNN(GPUDBNN):
 
         class_pbar.close()
         return final_selected_indices
+
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
                                 reconstructed_features: np.ndarray,
@@ -4255,7 +4441,6 @@ class DBNN(GPUDBNN):
 
         # Print precision row at the bottom
         print("\033[K" + f"{Colors.BOLD}{'Precision':<15}{Colors.ENDC}", end='')
-        overall_prec = 0
         for j in range(n_classes):
             tp = cm[j, j]
             fp = cm[:, j].sum() - tp
@@ -4267,9 +4452,8 @@ class DBNN(GPUDBNN):
                 prec_color = Colors.YELLOW
             else:
                 prec_color = Colors.BLUE
-            overall_prec +=prec
+
             print("\033[K" + f"{prec_color}{prec:>8.2%}{Colors.ENDC}", end='')
-        overall_prec = overall_prec/n_classes
         print("\033[K" + "")  # New line after precision row
 
         # Print overall accuracy and precision
@@ -4278,7 +4462,7 @@ class DBNN(GPUDBNN):
         if total_samples > 0:
             overall_acc = total_correct / total_samples
             # Micro-averaged precision (same as accuracy in multi-class)
-
+            overall_prec = total_correct / total_samples
 
             print("\033[K" + "-" * (15 + 8 * n_classes + 20))
             acc_color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
