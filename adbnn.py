@@ -926,7 +926,9 @@ class BinWeightUpdater:
 
         adjustment = learning_rate * (1.0 - (posteriors[true_idx]/posteriors[pred_idx]))
 
-        # Batch update storage
+        # Tolerance for identical feature pairs
+        epsilon = 1e-6  # Numerical stability threshold
+
         update_data = defaultdict(list)
 
         for pair_idx, (bin_i, bin_j) in bin_indices.items():
@@ -935,12 +937,17 @@ class BinWeightUpdater:
                 true_prob = self.likelihood_params['bin_probs'][pair_idx][true_idx][bin_i, bin_j]
                 pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_idx][bin_i, bin_j]
 
+                # Skip updates for identical/near-identical feature pairs
+                if abs(true_prob - pred_prob) < epsilon:
+                    continue  # Identical contribution to both classes
+
+                # Only update if true class is less confident
                 if true_prob < pred_prob:
                     update_data[pair_idx].append((bin_i, bin_j, adjustment))
             except IndexError:
                 continue
 
-        # Apply all valid updates
+        # Apply updates for dissimilar pairs only
         for pair_idx, updates in update_data.items():
             bins_i, bins_j, adjs = zip(*updates)
             self.histogram_weights[true_idx][pair_idx].index_put_(
@@ -2197,60 +2204,50 @@ class DBNN(GPUDBNN):
             return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Strictly select from misclassified samples with device-aware conversions"""
-        # Convert numpy arrays to tensors first
+        """Select ALL failed examples, prioritized by margin proximity"""
+        # Convert to tensors on correct device
         y_pred_tensor = torch.tensor(test_predictions, device=self.device)
         y_test_tensor = torch.tensor(y_test, device=self.device)
         test_indices_tensor = torch.tensor(test_indices, device=self.device)
 
-        # Create failed sample mask
+        # Identify all failed samples
         failed_mask = y_pred_tensor != y_test_tensor
         failed_indices = test_indices_tensor[failed_mask]
 
-        # Early exit if no failed samples
         if len(failed_indices) == 0:
             return []
 
-        # Get failed samples' metadata using numpy indices
-        failed_indices_np = failed_indices.cpu().numpy()
-        failed_df = results['all_predictions'].iloc[failed_indices_np]
+        # Storage for prioritization
+        margin_data = []
 
-        final_selected = []
-
-        # Process per-class with exact index matching
+        # Process all failed examples across classes
         for class_id in torch.unique(y_test_tensor):
-            # Convert tensor class ID to original label
             class_label = self.label_encoder.inverse_transform([class_id.cpu().numpy()])[0]
+            class_mask = (results['all_predictions']['true_class'] == class_label).values
+            class_failed = failed_indices[torch.tensor(class_mask, device=self.device)]
 
-            # Find failed samples for this class
-            class_mask = (failed_df['true_class'] == class_label).values
-            if not np.any(class_mask):
-                continue
-
-            # Get indices for this class's failed samples
-            class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
-
-            # Batch process only misclassified samples
-            batch_selected = []
-            for batch_start in range(0, len(class_failed_indices), self.batch_size):
+            # Batch process ALL failed examples in class
+            for batch_start in range(0, len(class_failed), self.batch_size):
                 batch_end = batch_start + self.batch_size
-                batch_indices = class_failed_indices[batch_start:batch_end]
+                batch_indices = class_failed[batch_start:batch_end]
 
-                # Compute margin only for failed samples
+                # Compute margins for ALL examples
                 with torch.no_grad():
                     posteriors, _ = self._compute_batch_posterior(self.X_tensor[batch_indices])
                     true_probs = posteriors[:, class_id]
                     max_probs, _ = torch.max(posteriors, dim=1)
                     margins = max_probs - true_probs
 
-                # Apply strict thresholding
-                eligible_mask = (margins > 0.01) | (margins < -0.01)
-                batch_selected.append(batch_indices[eligible_mask])
+                # Store for prioritization (abs distance from 0.01 threshold)
+                for idx, margin in zip(batch_indices, margins):
+                    priority = abs(abs(margin.item()) - 0.01)  # Closest to threshold first
+                    margin_data.append((idx.item(), priority))
 
-            if batch_selected:
-                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
+        # Sort by margin proximity to threshold (most ambiguous first)
+        margin_data.sort(key=lambda x: x[1])
 
-        return final_selected
+        # Return ALL failed indices in priority order
+        return [idx for idx, _ in margin_data]
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
         """Cluster-based selection with device-aware processing"""
