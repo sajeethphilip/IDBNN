@@ -2211,14 +2211,18 @@ class DBNN(GPUDBNN):
 
         # Validate test indices against dataset size
         max_valid_idx = len(self.data) - 1
-        valid_mask = (test_indices <= max_valid_idx)
+        valid_mask = [idx <= max_valid_idx for idx in test_indices]
         valid_test_indices = [idx for idx, valid in zip(test_indices, valid_mask) if valid]
 
         # Convert to tensor after validation
         test_indices_tensor = torch.tensor(valid_test_indices, device=self.device)
 
-        # Find failed samples using validated indices
-        failed_mask = (y_pred_tensor[valid_mask] != y_test_tensor[valid_mask])
+        # Rest of the function remains unchanged...
+        y_pred_tensor = torch.tensor(test_predictions, device=self.device)
+        y_test_tensor = torch.tensor(y_test, device=self.device)
+
+        # Find failed samples using VALIDATED indices
+        failed_mask = (y_pred_tensor != y_test_tensor)
         failed_indices = test_indices_tensor[failed_mask]
 
         if len(failed_indices) == 0:
