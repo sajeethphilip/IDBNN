@@ -2203,9 +2203,15 @@ class DBNN(GPUDBNN):
         y_test_tensor = torch.tensor(y_test, device=self.device)
         test_indices_tensor = torch.tensor(test_indices, device=self.device)
 
+        # Debug: Check lengths
+        assert len(test_predictions) == len(y_test), "Mismatch between test_predictions and y_test lengths"
+
         # Create failed sample mask
         failed_mask = y_pred_tensor != y_test_tensor
         failed_indices = test_indices_tensor[failed_mask]
+
+        # Debug: Print number of failed samples
+        print(f"\033[KNumber of failed test samples: {len(failed_indices)}")
 
         # Early exit if no failed samples
         if len(failed_indices) == 0:
@@ -2215,20 +2221,27 @@ class DBNN(GPUDBNN):
         failed_indices_np = failed_indices.cpu().numpy()
         failed_df = results['all_predictions'].iloc[failed_indices_np]
 
+        # Debug: Print failed samples' true and predicted classes
+        print("\033[KFailed samples' class distribution:")
+        print(failed_df[['true_class', 'predicted_class']].value_counts())
+
         final_selected = []
 
         # Process per-class with exact index matching
         for class_id in torch.unique(y_test_tensor):
             # Convert tensor class ID to original label
             class_label = self.label_encoder.inverse_transform([class_id.cpu().numpy()])[0]
+            print(f"\033[KProcessing class {class_label} (ID: {class_id})")
 
             # Find failed samples for this class
             class_mask = (failed_df['true_class'] == class_label).values
             if not np.any(class_mask):
+                print(f"\033[KNo failed samples for class {class_label}")
                 continue
 
             # Get indices for this class's failed samples
             class_failed_indices = failed_indices[torch.tensor(class_mask, device=self.device)]
+            print(f"\033[KFound {len(class_failed_indices)} failed samples for class {class_label}")
 
             # Batch process only misclassified samples
             batch_selected = []
@@ -2243,13 +2256,18 @@ class DBNN(GPUDBNN):
                     max_probs, _ = torch.max(posteriors, dim=1)
                     margins = max_probs - true_probs
 
-                # Apply strict thresholding
+                # Apply strict thresholding and ensure we only select from current test failures
                 eligible_mask = (margins > 0.01) | (margins < -0.01)
-                batch_selected.append(batch_indices[eligible_mask])
+                eligible_samples = batch_indices[eligible_mask]
+                print(f"\033[KAdding {len(eligible_samples)} eligible samples from batch")
+                batch_selected.append(eligible_samples)
 
             if batch_selected:
-                final_selected.extend(torch.cat(batch_selected).cpu().tolist())
+                final_selected_batch = torch.cat(batch_selected).cpu().tolist()
+                final_selected.extend(final_selected_batch)
+                print(f"\033[KAdded {len(final_selected_batch)} samples from class {class_label}")
 
+        print(f"\033[KTotal samples added: {len(final_selected)}")
         return final_selected
 
     def _select_samples_from_failed_classes_old(self, test_predictions, y_test, test_indices, results):
@@ -2685,7 +2703,8 @@ class DBNN(GPUDBNN):
                             break
 
                     # Evaluate test data using combined predictions from fit_predict
-                    test_predictions = results['test_predictions']['predicted_class']
+                    test_predictions, _ = self.predict(self.X_tensor[test_indices], batch_size=batch_size)
+                    test_predictions = test_predictions.cpu().numpy()
                     y_test = self.y_tensor[test_indices].cpu().numpy()
 
                     # Convert test_predictions to a NumPy array if it's a Pandas Series
