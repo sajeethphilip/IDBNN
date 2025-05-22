@@ -4441,6 +4441,7 @@ class DBNN(GPUDBNN):
 
         # Print precision row at the bottom
         print("\033[K" + f"{Colors.BOLD}{'Precision':<15}{Colors.ENDC}", end='')
+        overall_prec = 0
         for j in range(n_classes):
             tp = cm[j, j]
             fp = cm[:, j].sum() - tp
@@ -4452,8 +4453,10 @@ class DBNN(GPUDBNN):
                 prec_color = Colors.YELLOW
             else:
                 prec_color = Colors.BLUE
+            overall_prec +=prec
 
             print("\033[K" + f"{prec_color}{prec:>8.2%}{Colors.ENDC}", end='')
+        overall_prec = overall_prec/n_classes
         print("\033[K" + "")  # New line after precision row
 
         # Print overall accuracy and precision
@@ -4462,7 +4465,7 @@ class DBNN(GPUDBNN):
         if total_samples > 0:
             overall_acc = total_correct / total_samples
             # Micro-averaged precision (same as accuracy in multi-class)
-            overall_prec = total_correct / total_samples
+
 
             print("\033[K" + "-" * (15 + 8 * n_classes + 20))
             acc_color = Colors.GREEN if overall_acc >= 0.9 else Colors.YELLOW if overall_acc >= 0.7 else Colors.BLUE
