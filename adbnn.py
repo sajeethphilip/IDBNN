@@ -2763,7 +2763,17 @@ class DBNN(GPUDBNN):
                     # Update training and test sets with new samples
                     #train_indices.extend(new_train_indices)
                     #test_indices = list(set(test_indices) - set(new_train_indices))
-                    print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
+                    #print("\033[K" +f"Added {len(new_train_indices)} new samples to training set")
+                    if new_train_indices:
+                        # Get class distribution of new samples
+                        new_samples = self.data.iloc[new_train_indices][self.target_column]
+                        class_counts = new_samples.value_counts().to_dict()
+
+                        # Format class distribution string
+                        class_dist = ", ".join([f"{cls}: {count}" for cls, count in class_counts.items()])
+
+                        print(f"\033[KAdded {len(new_train_indices)} new samples ({class_dist})")
+                        print(f"\033[KClass distribution of new samples: {class_dist}")
 
                     # Update training and test indices with original indices
                     train_indices = list(set(train_indices + new_train_indices))
