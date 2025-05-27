@@ -1538,7 +1538,8 @@ class DBNNConfig:
         self.test_fraction = kwargs.get('test_fraction', 0.2)
         self.enable_adaptive = kwargs.get('enable_adaptive', True)
         self.batch_size = kwargs.get('batch_size', 128)
-
+        self.patience = self.config['training_params'].get('patience', Trials)
+        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 5)
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
         self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 128)
@@ -2647,7 +2648,8 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
             # Continue with training loop...
-            while adaptive_patience_counter <5:
+            patience = self.adaptive_patience if self.in_adaptive_fit else self.patience
+            while adaptive_patience_counter <patience:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2698,7 +2700,7 @@ class DBNN(GPUDBNN):
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
-                        if adaptive_patience_counter >= 5:  # Using fixed value of 5 for adaptive patience
+                        if adaptive_patience_counter >= patience:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
                             print("\033[K" +"Stopping adaptive training.")
@@ -4563,7 +4565,7 @@ class DBNN(GPUDBNN):
         best_test_accuracy = 0.0
 
         if self.in_adaptive_fit:
-            patience = 5
+            patience = self.adaptive_patience if self.in_adaptive_fit else self.patience
         else:
             patience = Trials
 
@@ -6542,6 +6544,8 @@ def load_or_create_config(config_path: str) -> dict:
         "display": None,
         "training_params": {
             "batch_size": None,  # Batch size will be dynamically calculated if not provided
+            "patience": 100,  # Default epochs to wait
+            "adaptive_patience": 5,  # Patience during adaptive training
             "n_bins_per_dim": 128,
             "minimum_training_accuracy": 0.95,
             "invert_DBNN": True,
