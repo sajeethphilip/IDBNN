@@ -1058,8 +1058,42 @@ class BinWeightUpdater:
             DEBUG.log(" Traceback:", traceback.format_exc())
             raise
 
-    # Modified posterior computation for Histogram model
+    def _get_overlapping_bins_for_pair(self, pair_idx):
+        """Return bins shared by any two classes for this feature pair"""
+        all_class_bins = [self.class_bins[cls][pair_idx] for cls in self.class_bins]
+
+        # Find bins present in at least two classes
+        overlapping = set()
+        for i, bins_i in enumerate(all_class_bins):
+            for j, bins_j in enumerate(all_class_bins[i+1:]):
+                overlapping.update(bins_i & bins_j)
+
+        return torch.tensor(list(overlapping), device=self.device)  # shape [n_overlapping, 2]
+
     def compute_histogram_posterior(self, features, bin_indices):
+        config = DatasetConfig.load_config(self.dataset_name)
+        update_condition = config['active_learning'].get('update_condition', 'bin_overlap')
+
+        log_likelihoods = torch.zeros((features.shape[0], self.n_classes), device=self.device)
+
+        for group_idx, feature_group in enumerate(self.feature_pairs):
+            # Existing probability calculation
+            bin_probs = self.likelihood_params['bin_probs'][group_idx]
+            bin_weights = self.weight_updater.get_histogram_weights(class_idx, group_idx)
+            weighted_probs = bin_probs * bin_weights.unsqueeze(0)
+
+            # New: Zero probabilities in overlapping bins if using bin_overlap
+            if update_condition == "bin_overlap":
+                # Get overlapping bins between any class pairs
+                overlapping_bins = self._get_overlapping_bins_for_pair(group_idx)
+                weighted_probs[:, overlapping_bins[:,0], overlapping_bins[:,1]] = 0
+
+            log_likelihoods += torch.log(weighted_probs + epsilon)
+
+        return log_likelihoods
+
+    # Modified posterior computation for Histogram model
+    def compute_histogram_posterior_old(self, features, bin_indices):
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
