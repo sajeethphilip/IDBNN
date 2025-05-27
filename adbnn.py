@@ -1628,7 +1628,7 @@ class DBNN(GPUDBNN):
         self.training_log = pd.DataFrame()
         self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
         self.patience = self.config['training_params'].get('patience', Trials)
-        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 5)
+        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 25)
 
         # Add new attributes to track the best round
         self.best_round = None  # Track the best round number
