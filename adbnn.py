@@ -2787,7 +2787,7 @@ class DBNN(GPUDBNN):
                         # Format class distribution string
                         class_dist = self._format_class_distribution(new_train_indices)
                         print(f"\033[KAdded {len(new_train_indices)} new samples - Class distribution: {class_dist}")
-                        print(f"\033[KClass distribution of new samples: {class_dist}")
+                        #print(f"\033[KClass distribution of new samples: {class_dist}")
 
                     # Update training and test indices with original indices
                     train_indices = list(set(train_indices + new_train_indices))
