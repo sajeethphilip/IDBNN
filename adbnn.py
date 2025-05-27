@@ -2504,6 +2504,21 @@ class DBNN(GPUDBNN):
             )
 
         DEBUG.log("Model reset to initial state.")
+    def _format_class_distribution(self, indices):
+        """Helper to format class distribution for given indices"""
+        if not indices:
+            return "No samples added"
+
+        class_counts = self.data.iloc[indices][self.target_column].value_counts()
+        total = len(indices)
+
+        # Create distribution string with percentages
+        dist = []
+        for cls, count in class_counts.items():
+            percentage = (count / total) * 100
+            dist.append(f"{cls}: {count} ({percentage:.1f}%)")
+
+        return ", ".join(dist)
 
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.0001,
@@ -2770,9 +2785,8 @@ class DBNN(GPUDBNN):
                         class_counts = new_samples.value_counts().to_dict()
 
                         # Format class distribution string
-                        class_dist = ", ".join([f"{cls}: {count}" for cls, count in class_counts.items()])
-
-                        print(f"\033[KAdded {len(new_train_indices)} new samples ({class_dist})")
+                        class_dist = self._format_class_distribution(new_train_indices)
+                        print(f"\033[KAdded {len(new_train_indices)} new samples - Class distribution: {class_dist}")
                         print(f"\033[KClass distribution of new samples: {class_dist}")
 
                     # Update training and test indices with original indices
