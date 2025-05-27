@@ -933,8 +933,8 @@ class BinWeightUpdater:
                                bin_indices, posteriors, learning_rate):
         # Get config parameters
         config = DatasetConfig.load_config(self.dataset_name)
-        #update_condition = config['active_learning'].get('update_condition', 'probability_threshold')
-        update_condition = config['active_learning'].get('update_condition', 'bin_overlap')
+        update_condition = config['active_learning'].get('update_condition', 'probability_threshold')
+        #update_condition = config['active_learning'].get('update_condition', 'bin_overlap')
         similarity_threshold = config['active_learning'].get('similarity_threshold', 0.25)
 
         # Precompute base adjustment
