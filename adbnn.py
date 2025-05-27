@@ -1538,8 +1538,6 @@ class DBNNConfig:
         self.test_fraction = kwargs.get('test_fraction', 0.2)
         self.enable_adaptive = kwargs.get('enable_adaptive', True)
         self.batch_size = kwargs.get('batch_size', 128)
-        self.patience = self.config['training_params'].get('patience', Trials)
-        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 5)
         # Model parameters
         self.model_type = kwargs.get('model_type', 'Histogram')  # or 'Gaussian'
         self.n_bins_per_dim = kwargs.get('n_bins_per_dim', 128)
@@ -1629,6 +1627,8 @@ class DBNN(GPUDBNN):
         self.model_config = config
         self.training_log = pd.DataFrame()
         self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
+        self.patience = self.config['training_params'].get('patience', Trials)
+        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 5)
 
         # Add new attributes to track the best round
         self.best_round = None  # Track the best round number
