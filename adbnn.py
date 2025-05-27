@@ -931,14 +931,8 @@ class BinWeightUpdater:
 
     def update_histogram_weights(self, failed_case, true_class, pred_class,
                                bin_indices, posteriors, learning_rate):
-        # Get config parameters
-        config = DatasetConfig.load_config(self.dataset_name)
-        #update_condition = config['active_learning'].get('update_condition', 'probability_threshold')
-        update_condition = config['active_learning'].get('update_condition', 'bin_overlap')
-        similarity_threshold = config['active_learning'].get('similarity_threshold', 0.25)
-
-        # Precompute base adjustment
-        base_adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
+        # Precompute all adjustments first
+        adjustment = learning_rate * (1.0 - (posteriors[true_class] / posteriors[pred_class]))
 
         # Batch indices and values
         pair_indices = []
@@ -947,46 +941,27 @@ class BinWeightUpdater:
         adjustments = []
 
         for pair_idx, (bin_i, bin_j) in bin_indices.items():
-            # Check update condition
-            should_update = False
+            pair_indices.append(pair_idx)
+            bin_is.append(bin_i)
+            bin_js.append(bin_j)
+            adjustments.append(adjustment)
 
-            if update_condition == "bin_overlap":
-                # Get class-specific bins for this feature pair
-                true_bins = self.class_bins.get(true_class, {}).get(pair_idx, set())
-                pred_bins = self.class_bins.get(pred_class, {}).get(pair_idx, set())
+        # Convert to tensors
+        pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
+        b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
+        b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
+        adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
 
-                # Update only if no bin overlap between classes
-                if (bin_i, bin_j) not in pred_bins:
-                    should_update = True
-            else:  # Default probability threshold
-                # Get predicted class probability in this bin
-                pred_prob = self.likelihood_params['bin_probs'][pair_idx][pred_class][bin_i, bin_j]
-                if pred_prob < similarity_threshold:
-                    should_update = True
+        # Group by pair_idx
+        unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
 
-            if should_update:
-                pair_indices.append(pair_idx)
-                bin_is.append(bin_i)
-                bin_js.append(bin_j)
-                adjustments.append(base_adjustment)
-
-        # Convert to tensors if we have updates
-        if pair_indices:
-            pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
-            b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
-            b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
-            adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
-
-            # Group by pair_idx
-            unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
-
-            for pair_id in unique_pairs:
-                mask = pair_ids == pair_id
-                self.histogram_weights[true_class][pair_id.item()].index_put_(
-                    indices=(b_i[mask], b_j[mask]),
-                    values=adjs[mask],
-                    accumulate=True
-                )
+        for pair_id in unique_pairs:
+            mask = pair_ids == pair_id
+            self.histogram_weights[true_class][pair_id.item()].index_put_(
+                indices=(b_i[mask], b_j[mask]),
+                values=adjs[mask],
+                accumulate=True
+            )
 
 
     def update_gaussian_weights(self, failed_case, true_class, pred_class,
@@ -1490,6 +1465,75 @@ class GPUDBNN:
 
         return bin_edges
 
+    def _compute_bin_edges_old(self, dataset: torch.Tensor, bin_sizes: List[int]) -> List[List[torch.Tensor]]:
+        """
+        Vectorized computation of bin edges with GPU memory management.
+
+        Args:
+            dataset: Input tensor of shape [n_samples, n_features]
+            bin_sizes: List of integers specifying bin sizes
+
+        Returns:
+            List of lists containing bin edge tensors for each feature pair
+        """
+        DEBUG.log("Starting vectorized _compute_bin_edges")
+
+        # Memory management parameters
+        MAX_GPU_MEM = 0.8 * torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 1e10
+        SAFETY_FACTOR = 0.7  # Use only 70% of available memory
+
+        # Calculate memory requirements per feature pair
+        bytes_per_pair = 2 * 4 * len(bin_sizes)  # 2 edges, 4 bytes per float, per dimension
+        max_pairs_per_batch = int((MAX_GPU_MEM * SAFETY_FACTOR) / bytes_per_pair)
+        max_pairs_per_batch = max(1, min(max_pairs_per_batch, len(self.feature_pairs)))
+
+        bin_edges = []
+
+        # Process in memory-managed batches
+        for batch_start in range(0, len(self.feature_pairs), max_pairs_per_batch):
+            batch_end = min(batch_start + max_pairs_per_batch, len(self.feature_pairs))
+            batch_pairs = self.feature_pairs[batch_start:batch_end]
+
+            # Vectorized min/max computation for the batch
+            with torch.no_grad():
+                # Stack all features needed in this batch
+                feature_indices = torch.unique(torch.cat([torch.as_tensor(pair, device=self.device)
+                                        for pair in batch_pairs]))
+                batch_data = dataset[:, feature_indices]
+
+                # Compute min/max for all features in batch
+                mins = batch_data.min(dim=0)[0]
+                maxs = batch_data.max(dim=0)[0]
+
+                # Create mapping from feature index to its position in batch_data
+                feat_to_idx = {int(f): i for i, f in enumerate(feature_indices)}
+
+                # Process each pair in batch
+                for pair in batch_pairs:
+                    pair_edges = []
+                    for dim, feat in enumerate(pair):
+                        feat_idx = feat_to_idx[int(feat)]
+                        dim_min = mins[feat_idx]
+                        dim_max = maxs[feat_idx]
+                        padding = max((dim_max - dim_min) * 0.01, 1e-6)
+
+                        # Get bin size for this dimension
+                        bin_size = bin_sizes[0] if len(bin_sizes) == 1 else bin_sizes[dim]
+
+                        # Vectorized edge computation
+                        edges = torch.linspace(
+                            dim_min - padding,
+                            dim_max + padding,
+                            bin_size + 1,
+                            device=self.device
+                        ).contiguous()
+                        pair_edges.append(edges)
+
+                    bin_edges.append(pair_edges)
+
+            torch.cuda.empty_cache()  # Free memory between batches
+
+        return bin_edges
 #---------------------- -------------------------------------DBNN Class -------------------------------
 class DBNNConfig:
     """Configuration class for DBNN parameters"""
@@ -3619,14 +3663,12 @@ class DBNN(GPUDBNN):
         """GPU-optimized version with dimension consistency fixes"""
         DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
 
-        # Initialize class-bin tracking structure
-        self.class_bins = defaultdict(lambda: defaultdict(set))  # {class: {pair_idx: set((bin_i, bin_j))}}
-
         # Ensure tensors are contiguous on the computation device
         dataset = dataset.contiguous()
         labels = labels.contiguous()
 
         # Validate class consistency
+        #unique_classes = torch.unique(labels)
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
         n_samples = len(dataset)
@@ -3635,6 +3677,7 @@ class DBNN(GPUDBNN):
 
         # Get bin configuration from model parameters
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
+        #n_bins = bin_sizes[0]  # Use first element of bin_sizes array
         n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
         self.n_bins_per_dim = n_bins
 
@@ -3644,12 +3687,19 @@ class DBNN(GPUDBNN):
         all_bin_counts = []
         all_bin_probs = []
 
+        # Add progress bar
         with tqdm(total=len(self.feature_pairs), desc="Pairwise likelihood", leave=False) as pbar:
+
+            # Process each feature pair with dimension checks
             for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
+                # Use precomputed bin edges that match weight dimensions
                 edges = self.bin_edges[pair_idx]
+
+                # Validate bin dimensions match weight updater settings
                 assert len(edges[0]) == self.weight_updater.n_bins_per_dim + 1, \
                     f"Bin edges dimension mismatch: {len(edges[0])-1} vs {self.weight_updater.n_bins_per_dim}"
 
+                # Initialize counts tensor with proper dimensions
                 pair_counts = torch.zeros((n_classes, n_bins, n_bins),
                                         dtype=torch.float32,
                                         device=self.device)
@@ -3659,36 +3709,30 @@ class DBNN(GPUDBNN):
                     if not torch.any(cls_mask):
                         continue
 
+                    # Process data on GPU
                     data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                    # Get bin indices for this class
+                    # GPU-accelerated bucketization
                     indices = [
                         torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
                         torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
                     ]
 
-                    # Track used bins for this class and pair
-                    unique_bins = torch.unique(
-                        torch.stack(indices, dim=1),
-                        dim=0
-                    ).cpu().numpy()
-                    self.class_bins[cls.item()][pair_idx].update(
-                        {tuple(bin) for bin in unique_bins}
-                    )
-
-                    # Continue with original count logic
+                    # Flat indices computation
                     flat_indices = indices[0] * n_bins + indices[1]
+
+                    # Bincount with validated dimensions
                     counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
                     pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-                # Laplace smoothing and probability calculation
+                # Laplace smoothing with dimension preservation
                 smoothed = pair_counts + 1.0
                 probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
                 all_bin_counts.append(smoothed)
                 all_bin_probs.append(probs)
                 pbar.update(1)
-
+        pbar.close()
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
@@ -4060,6 +4104,55 @@ class DBNN(GPUDBNN):
                         accumulate=True
                     )
 
+    def _update_priors_parallel_old(self, failed_cases: List[Tuple], batch_size: int = 128):
+        """Vectorized weight updates with proper error handling"""
+        n_failed = len(failed_cases)
+        if n_failed == 0:
+            self.consecutive_successes += 1
+            return
+
+        self.consecutive_successes = 0
+        self.learning_rate = max(self.learning_rate / 2, 1e-6)
+
+        # Stack all features and convert classes at once
+        features = torch.stack([case[0] for case in failed_cases]).to(self.device)
+        true_classes = torch.tensor([int(case[1]) for case in failed_cases], device=self.device)
+
+        # Compute posteriors for all cases at once
+        if self.model_type == "Histogram":
+            posteriors, bin_indices = self._compute_batch_posterior(features)
+        else:  # Gaussian model
+            posteriors, _ = self._compute_batch_posterior_std(features)
+            return  # Gaussian model doesn't need bin-based updates
+
+        pred_classes = torch.argmax(posteriors, dim=1)
+
+        # Compute adjustments for all cases at once
+        true_posteriors = posteriors[torch.arange(n_failed), true_classes]
+        pred_posteriors = posteriors[torch.arange(n_failed), pred_classes]
+        adjustments = self.learning_rate * (1.0 - (true_posteriors / pred_posteriors))
+
+        # Update weights for each feature group
+        if bin_indices is not None:  # Only proceed if we have bin indices (Histogram model)
+            for group_idx in bin_indices:
+                bin_i, bin_j = bin_indices[group_idx]
+
+                # Group updates by class for vectorization
+                for class_id in range(self.weight_updater.n_classes):
+                    class_mask = true_classes == class_id
+                    if not class_mask.any():
+                        continue
+
+                    # Get relevant indices and adjustments for this class
+                    class_bin_i = bin_i[class_mask]
+                    class_bin_j = bin_j[class_mask]
+                    class_adjustments = adjustments[class_mask]
+
+                    # Update weights for this class
+                    weights = self.weight_updater.histogram_weights[class_id][group_idx]
+                    for idx in range(len(class_adjustments)):
+                        i, j = class_bin_i[idx], class_bin_j[idx]
+                        weights[i, j] += class_adjustments[idx]
 
 #------------------------------------------Boost weights------------------------------------------
 
@@ -6525,7 +6618,6 @@ def load_or_create_config(config_path: str) -> dict:
         },
         "active_learning": {
             "tolerance": 1.0,
-            "update_condition": "bin_overlap",  # or "probability_threshold"
              "similarity_threshold": 0.25,  # Bins with >25% probability in predicted class are considered similar
             "cardinality_threshold_percentile": 95,
             "strong_margin_threshold": 0.01,           # Consider only a margin of 1% of the max for divergence computation and sample selection.
