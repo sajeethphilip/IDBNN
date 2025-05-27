@@ -2699,7 +2699,7 @@ class DBNN(GPUDBNN):
                         print("\033[K" + "Saved model and data due to improved training accuracy")
                     else:
                         adaptive_patience_counter += 1
-                        print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/5")
+                        print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/{patience}")
                         if adaptive_patience_counter >= patience:  # Using fixed value of 5 for adaptive patience
                             print("\033[K" +f"No improvement in accuracy after 5 rounds of adding samples.")
                             print("\033[K" +f"Best training accuracy achieved: {best_train_accuracy:.4f}")
