@@ -6545,7 +6545,7 @@ def load_or_create_config(config_path: str) -> dict:
         "training_params": {
             "batch_size": None,  # Batch size will be dynamically calculated if not provided
             "patience": 100,  # Default epochs to wait
-            "adaptive_patience": 5,  # Patience during adaptive training
+            "adaptive_patience": 25,  # Patience during adaptive training
             "n_bins_per_dim": 128,
             "minimum_training_accuracy": 0.95,
             "invert_DBNN": True,
