@@ -14,12 +14,25 @@ class Interactive3DVisualizer:
         self.config_file = config_file
         self.df = None
         self.target_column = None
-        self.feature_columns = None  # New: store feature columns from config
+        self.column_names = None  # Store all column names from config
         self.features = None
         self.labels = None
         self.projected_data = None
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
+
+        # PCA model storage
+        self.pca_model = None
+
+        # Feature vector visualization
+        self.show_feature_vectors = False
+        self.feature_vectors = None
+        self.feature_names = None
+        self.vector_scale = 1.0
+
+        # Axis properties
+        self.axis_length = 1.5  # Length of each axis
+        self.axis_labels = ['X', 'Y', 'Z']
 
         # PyGame setup
         pygame.init()
@@ -44,16 +57,26 @@ class Interactive3DVisualizer:
         self.project_data()
 
     def load_config(self):
-        """Load dataset configuration to identify target and feature columns"""
+        """Load dataset configuration to identify columns"""
         with open(self.config_file, 'r') as f:
             config = json.load(f)
         self.target_column = config['target_column']
-        # Get feature columns if specified in config
-        self.feature_columns = config.get('features')  # Returns None if not found
+        self.column_names = config.get('column_names')  # Get all column names
 
     def load_data(self):
-        """Load CSV data and separate features from target using config"""
-        self.df = pd.read_csv(self.data_file)
+        """Load CSV data using config to select columns"""
+        # Read only specified columns if available
+        if self.column_names:
+            # Ensure target column is included
+            if self.target_column not in self.column_names:
+                self.column_names.append(self.target_column)
+
+            self.df = pd.read_csv(self.data_file, usecols=self.column_names)
+            print(f"Using {len(self.column_names)} columns from config")
+        else:
+            self.df = pd.read_csv(self.data_file)
+            print("Using all columns from CSV")
+
         print(f"Columns in dataset: {list(self.df.columns)}")
 
         # Verify target column exists
@@ -61,27 +84,16 @@ class Interactive3DVisualizer:
             print(f"\nError: Target column '{self.target_column}' not found in dataset.")
             sys.exit(1)
 
-        # Use feature columns if specified in config
-        if self.feature_columns:
-            # Verify all feature columns exist
-            missing = [col for col in self.feature_columns if col not in self.df.columns]
-            if missing:
-                print(f"\nError: Feature columns not found in dataset: {missing}")
-                sys.exit(1)
+        # Create feature list (all columns except target)
+        feature_columns = [col for col in self.df.columns if col != self.target_column]
 
-            # Verify target isn't included in features
-            if self.target_column in self.feature_columns:
-                print(f"\nNote: Target column '{self.target_column}' found in feature list. Removing it.")
-                self.feature_columns = [col for col in self.feature_columns if col != self.target_column]
+        # Handle case where column_names included target
+        if self.target_column in feature_columns:
+            feature_columns.remove(self.target_column)
 
-            self.features = self.df[self.feature_columns]
-            self.labels = self.df[self.target_column]
-            print(f"Using {len(self.feature_columns)} feature columns from config")
-        else:
-            # Use all columns except target as features
-            self.features = self.df.drop(columns=[self.target_column])
-            self.labels = self.df[self.target_column]
-            print(f"Using all columns except target ({self.target_column}) as features")
+        self.features = self.df[feature_columns]
+        self.labels = self.df[self.target_column]
+        print(f"Using {len(feature_columns)} feature columns")
 
     def preprocess(self):
         """Standardize features and encode labels"""
@@ -102,10 +114,57 @@ class Interactive3DVisualizer:
                 int(255 * (0.5 + 0.5 * (label % 2)))
             )
 
+    def draw_axes(self):
+        """Draw 3D axes that rotate with the view"""
+        # Define axis endpoints in 3D space
+        axes = [
+            (self.axis_length, 0, 0),  # X-axis
+            (0, self.axis_length, 0),  # Y-axis
+            (0, 0, self.axis_length)   # Z-axis
+        ]
+
+        axis_colors = [
+            (255, 50, 50),    # Red for X
+            (50, 255, 50),    # Green for Y
+            (50, 100, 255)    # Blue for Z
+        ]
+
+        # Draw origin point
+        origin_rot = self.rotate_point([0, 0, 0], self.rotation_x, self.rotation_y)
+        origin_2d, origin_size = self.project_to_2d(origin_rot)
+        pygame.draw.circle(self.screen, (200, 200, 200),
+                          (int(origin_2d[0]), int(origin_2d[1])),
+                          max(2, origin_size))
+
+        # Draw each axis
+        for i, axis in enumerate(axes):
+            # Rotate and project axis endpoint
+            axis_rot = self.rotate_point(axis, self.rotation_x, self.rotation_y)
+            axis_2d, axis_size = self.project_to_2d(axis_rot)
+
+            # Only draw if in front of camera
+            if axis_rot[2] > -4:
+                # Draw axis line
+                pygame.draw.line(self.screen, axis_colors[i],
+                                (int(origin_2d[0]), int(origin_2d[1])),
+                                (int(axis_2d[0]), int(axis_2d[1])),
+                                2)
+
+                # Draw axis label
+                offset_x = 10 if axis_2d[0] > origin_2d[0] else -30
+                offset_y = 10 if axis_2d[1] > origin_2d[1] else -30
+
+                label = self.font.render(self.axis_labels[i], True, axis_colors[i])
+                self.screen.blit(label, (axis_2d[0] + offset_x, axis_2d[1] + offset_y))
+
     def project_data(self):
         """Project data to 3D using PCA"""
         pca = PCA(n_components=3)
         self.projected_data = pca.fit_transform(self.features)
+        self.pca_model = pca  # Store PCA model for reverse mapping
+
+        # Create feature vectors
+        self.create_feature_vectors()
 
         # Normalize to [-1, 1] range
         min_vals = self.projected_data.min(axis=0)
@@ -113,6 +172,61 @@ class Interactive3DVisualizer:
         self.projected_data = 2 * (self.projected_data - min_vals) / (max_vals - min_vals) - 1
 
         print(f"Data projected to 3D with shape: {self.projected_data.shape}")
+
+    def create_feature_vectors(self):
+        """Create vectors representing original features in PCA space"""
+        # Get feature names from DataFrame
+        if hasattr(self.features, 'columns'):
+            self.feature_names = self.features.columns.tolist()
+        else:
+            self.feature_names = [f"Feature {i}" for i in range(self.features.shape[1])]
+
+        # Create unit vectors for each feature in original space
+        identity_matrix = np.eye(self.features.shape[1])
+
+        # Transform to PCA space
+        self.feature_vectors = self.pca_model.transform(identity_matrix)
+
+        # Normalize vectors for consistent scaling
+        norms = np.linalg.norm(self.feature_vectors, axis=1)
+        self.feature_vectors = self.feature_vectors / norms[:, np.newaxis] * 0.5
+
+    def draw_feature_vectors(self):
+        """Draw vectors representing original features in PCA space"""
+        if self.feature_vectors is None or not self.show_feature_vectors or len(self.feature_vectors) == 0:
+            return
+
+        # Get origin point
+        origin = np.array([0, 0, 0])
+        origin_rot = self.rotate_point(origin, self.rotation_x, self.rotation_y)
+        origin_2d, _ = self.project_to_2d(origin_rot)
+
+        # Draw each feature vector
+        for i, vec in enumerate(self.feature_vectors):
+            # Scale vector
+            scaled_vec = vec * self.vector_scale
+
+            # Rotate and project vector endpoint
+            vec_rot = self.rotate_point(scaled_vec, self.rotation_x, self.rotation_y)
+            vec_2d, size = self.project_to_2d(vec_rot)
+
+            # Only draw if in front of camera
+            if vec_rot[2] > -4:
+                # Draw vector line
+                pygame.draw.line(self.screen, (255, 255, 100),
+                                (int(origin_2d[0]), int(origin_2d[1])),
+                                (int(vec_2d[0]), int(vec_2d[1])),
+                                2)
+
+                # Draw feature name
+                name = self.feature_names[i]
+                label = self.font.render(name, True, (255, 255, 200))
+                self.screen.blit(label, (int(vec_2d[0] + 5), int(vec_2d[1] - 10)))
+
+                # Draw vector head
+                pygame.draw.circle(self.screen, (255, 200, 50),
+                                  (int(vec_2d[0]), int(vec_2d[1])), 4)
+
 
     def rotate_point(self, point, rx, ry):
         """Rotate point around X and Y axes"""
@@ -173,6 +287,12 @@ class Interactive3DVisualizer:
             text_surf = self.font.render(text, True, (200, 200, 255))
             self.screen.blit(text_surf, (20, 150 + i*20))
 
+        # Add feature vector info if enabled
+        if self.show_feature_vectors:
+            vec_text = f"Feature Vectors: ON (Scale: {self.vector_scale:.1f})"
+            text_surf = self.font.render(vec_text, True, (255, 255, 100))
+            self.screen.blit(text_surf, (20, 230))
+
     def draw_legend(self):
         """Draw legend showing class colors"""
         unique_labels = np.unique(self.labels)
@@ -219,6 +339,12 @@ class Interactive3DVisualizer:
                         self.translation = [0, 0]
                     elif event.key == K_c:  # Change color mapping
                         self.preprocess()
+                    elif event.key == K_v:  # Toggle feature vectors
+                        self.show_feature_vectors = not self.show_feature_vectors
+                    elif event.key == K_PLUS or event.key == K_EQUALS:  # Increase vector scale
+                        self.vector_scale *= 1.2
+                    elif event.key == K_MINUS:  # Decrease vector scale
+                        self.vector_scale /= 1.2
 
                 # Handle mouse input
                 elif event.type == MOUSEBUTTONDOWN:
@@ -254,6 +380,12 @@ class Interactive3DVisualizer:
                 if rotated[2] > -4:
                     color = self.colors[self.labels[i]]
                     pygame.draw.circle(self.screen, color, (int(pos_2d[0]), int(pos_2d[1])), size)
+
+            # Draw feature vectors
+            self.draw_feature_vectors()
+
+            # Draw 3D axes
+            self.draw_axes()
 
             # Draw UI elements
             self.draw_info_panel()
