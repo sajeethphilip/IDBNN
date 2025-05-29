@@ -7,7 +7,38 @@ import os
 import sys
 import json
 from pygame.locals import *
+'''
+    Vector Direction:
 
+        Features pointing in the same direction are positively correlated
+
+        Features pointing in opposite directions are negatively correlated
+
+        Orthogonal features are uncorrelated
+
+    Vector Length:
+
+        Longer vectors indicate features with larger variances
+
+        Shorter vectors indicate features with smaller variances
+
+        The length represents the feature's contribution to the PCA components
+
+    Component Contribution:
+
+        Vectors aligned with the X-axis contribute most to PC1
+
+        Vectors aligned with the Y-axis contribute most to PC2
+
+        Vectors aligned with the Z-axis contribute most to PC3
+
+    Cluster Interpretation:
+
+        Data points clustered along a vector direction are primarily influenced by that feature
+
+        Features pointing toward cluster centers are key discriminators
+
+'''
 class Interactive3DVisualizer:
     def __init__(self, data_file, config_file):
         self.data_file = data_file
