@@ -2766,15 +2766,6 @@ class DBNN(GPUDBNN):
 
                    #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
-                    if new_train_indices:
-                        # Reset to the best round's initial conditions
-                        if self.best_round_initial_conditions is not None:
-                            print("\033[K" +f"Resetting to initial conditions of best round {self.best_round}")
-                            self.current_W = self.best_round_initial_conditions['weights'].clone()
-                            self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
-                            self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
-                            self.bin_edges = self.best_round_initial_conditions['bin_edges']
-                            self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
 
 
                     # Update training and test sets with new samples
