@@ -87,12 +87,63 @@ class Interactive3DVisualizer:
         self.preprocess()
         self.project_data()
 
+        # Hover information
+        self.hover_index = None
+        self.hover_threshold = 20  # pixels
+        self.metadata_columns = []  # Columns to show in metadata
+        self.current_mouse_pos = (0, 0)  # Track mouse position
+
+
     def load_config(self):
-        """Load dataset configuration to identify columns"""
+        """Load dataset configuration including metadata columns"""
         with open(self.config_file, 'r') as f:
             config = json.load(f)
         self.target_column = config['target_column']
-        self.column_names = config.get('column_names')  # Get all column names
+        self.column_names = config.get('column_names')
+        self.metadata_columns = config.get('metadata_columns', [])
+        # Add target to metadata if not already included
+        if self.target_column not in self.metadata_columns:
+            self.metadata_columns.append(self.target_column)
+
+    def draw_hover_info(self):
+        """Display metadata for the point under the mouse cursor"""
+        if self.hover_index is None:
+            return
+
+        point = self.df.iloc[self.hover_index]
+        x, y = self.current_hover_pos
+
+        # Create info box
+        box_width = 300
+        box_height = 150
+        box_x = min(x + 20, self.width - box_width - 10)
+        box_y = min(y + 20, self.height - box_height - 10)
+
+        # Draw box background
+        pygame.draw.rect(self.screen, (30, 30, 40),
+                        (box_x, box_y, box_width, box_height))
+        pygame.draw.rect(self.screen, (100, 150, 255),
+                        (box_x, box_y, box_width, box_height), 2)
+
+        # Draw point index
+        idx_text = self.font.render(f"Index: {self.hover_index}", True, (255, 200, 100))
+        self.screen.blit(idx_text, (box_x + 10, box_y + 10))
+
+        # Draw class label
+        class_name = self.label_encoder.inverse_transform([self.labels[self.hover_index]])[0]
+        class_text = self.font.render(f"Class: {class_name}", True, self.colors[self.labels[self.hover_index]])
+        self.screen.blit(class_text, (box_x + 10, box_y + 35))
+
+        # Draw metadata
+        y_offset = 60
+        for col in self.metadata_columns[:3]:  # Show up to 3 metadata columns
+            if col in self.df.columns:
+                value = point[col]
+                if isinstance(value, float):
+                    value = f"{value:.4f}"
+                text = self.font.render(f"{col}: {value}", True, (200, 200, 200))
+                self.screen.blit(text, (box_x + 10, box_y + y_offset))
+                y_offset += 20
 
     def load_data(self):
         """Load CSV data using config to select columns"""
@@ -398,19 +449,40 @@ class Interactive3DVisualizer:
                         self.translation[0] += dx
                         self.translation[1] += dy
                         self.last_mouse_pos = event.pos
+                else:
+                    # Find closest point to mouse
+                    self.hover_index = None
+                    min_distance = float('inf')
 
             # Clear screen
             self.screen.fill((20, 20, 30))
 
+            # Find closest point to mouse
+            self.hover_index = None
+            min_distance = float('inf')
+
+
             # Draw data points
             for i, point in enumerate(self.projected_data):
                 rotated = self.rotate_point(point, self.rotation_x, self.rotation_y)
-                pos_2d, size = self.project_to_2d(rotated)
+                # Only consider points in front of camera
+                if rotated[2] <= -4:
+                    continue
+
 
                 # Only draw points in front of camera
                 if rotated[2] > -4:
+                    pos_2d, size = self.project_to_2d(rotated)
                     color = self.colors[self.labels[i]]
                     pygame.draw.circle(self.screen, color, (int(pos_2d[0]), int(pos_2d[1])), size)
+                    dx = pos_2d[0] - self.current_mouse_pos[0]
+                    dy = pos_2d[1] - self.current_mouse_pos[1]
+                    distance = dx*dx + dy*dy
+
+                    if distance < min_distance and distance < self.hover_threshold**2:
+                        min_distance = distance
+                        self.hover_index = i
+                        self.current_hover_pos = pos_2d
 
             # Draw feature vectors
             self.draw_feature_vectors()
@@ -421,6 +493,9 @@ class Interactive3DVisualizer:
             # Draw UI elements
             self.draw_info_panel()
             self.draw_legend()
+
+            # Draw hover information
+            self.draw_hover_info()
 
             pygame.display.flip()
             self.clock.tick(60)
