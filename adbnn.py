@@ -2418,9 +2418,7 @@ class DBNN(GPUDBNN):
             # Final selection with encoded class count check
             class_count = (y_test == encoded_class_id).sum().item()  # Use encoded class ID
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
-            # Convert tensor indices back to original dataset indices
-            original_indices = [self.test_indices[idx.item()] for idx in selected[:max_samples]]
-            final_selected_indices.extend(original_indices)
+            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
 
         class_pbar.close()
         return final_selected_indices
@@ -2766,6 +2764,15 @@ class DBNN(GPUDBNN):
 
                    #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
+                    if new_train_indices:
+                        # Reset to the best round's initial conditions
+                        if self.best_round_initial_conditions is not None:
+                            print("\033[K" +f"Resetting to initial conditions of best round {self.best_round}")
+                            self.current_W = self.best_round_initial_conditions['weights'].clone()
+                            self.likelihood_params = self.best_round_initial_conditions['likelihood_params']
+                            self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
+                            self.bin_edges = self.best_round_initial_conditions['bin_edges']
+                            self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
 
 
                     # Update training and test sets with new samples
@@ -2784,7 +2791,7 @@ class DBNN(GPUDBNN):
 
                     # Update training and test indices with original indices
                     train_indices = list(set(train_indices + new_train_indices))
-                    test_indices = [idx for idx in test_indices if idx not in new_train_indices]
+                    test_indices = list(set(test_indices) - set(new_train_indices))
 
             # Record the end time
             end_time = time.time()
