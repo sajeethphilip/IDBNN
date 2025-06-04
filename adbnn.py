@@ -2763,7 +2763,7 @@ class DBNN(GPUDBNN):
                             print("\033[K" +"No suitable new samples found. Training complete.")
                             break
 
-                   print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
+                    print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
 
 
