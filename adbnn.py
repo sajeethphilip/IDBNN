@@ -2291,7 +2291,7 @@ class DBNN(GPUDBNN):
         # Create boolean mask using numpy arrays to avoid chained indexing
         misclassified_mask = test_results['predicted_class'].to_numpy() != test_results['true_class'].to_numpy()
         misclassified_indices = test_results.index[misclassified_mask].tolist()
-        #print(f"{Colors.YELLOW} The misclassified examples have indices [{misclassified_indices}]{Colors.ENDC}")
+        print(f"{Colors.YELLOW} The misclassified examples have indices [{misclassified_indices}]{Colors.ENDC}")
 
         # Create mapping from original indices to test set positions
         test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
@@ -2419,6 +2419,7 @@ class DBNN(GPUDBNN):
             class_count = (y_test == encoded_class_id).sum().item()  # Use encoded class ID
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
             final_selected_indices.extend(selected[:max_samples].cpu().tolist())
+            print(f"{Colors.GREEN}Adding {len(final_selected_indices)} samples to training (global indices): {final_selected_indices}{Colors.ENDC}")
 
         class_pbar.close()
         return final_selected_indices
@@ -2762,7 +2763,7 @@ class DBNN(GPUDBNN):
                             print("\033[K" +"No suitable new samples found. Training complete.")
                             break
 
-                   #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
+                   print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
 
 
