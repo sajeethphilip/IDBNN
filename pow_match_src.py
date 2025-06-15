@@ -45,10 +45,11 @@ with open('predictions.csv', 'r') as f:
     reader = csv.DictReader(f)
     power_columns = [f'Power_{i}' for i in range(1, 95)]  # Power_1 to Power_94
 
-    for row in reader:
+    for row_idx, row in enumerate(reader):
         try:
             # Get power features and normalize
             power_vals = [float(row[col]) for col in power_columns]
+            original_power = power_vals  # Store original values for output
             normalized_power = normalize_power(np.array(power_vals))
 
             label_val = int(row['label'])
@@ -58,10 +59,12 @@ with open('predictions.csv', 'r') as f:
             continue
 
         predictions.append({
-            'power': normalized_power,
+            'original_power': original_power,
+            'normalized_power': normalized_power,
             'label': label_val,
             'predicted_class': pred_class,
-            'confidence': confidence_val
+            'confidence': confidence_val,
+            'row_id': row_idx  # Track row for reference
         })
 
 # Group predictions by label for faster matching
@@ -72,18 +75,20 @@ for pred in predictions:
 # Tolerance for floating point comparison
 TOLERANCE = 1e-5
 
-# Prepare output data structure
-source_predictions = defaultdict(list)
-header = ['s_name', 'true_label'] + [f'Power_{i}' for i in range(1, 95)] + ['confidence', 'Winner']
-
-# For confusion matrix
-true_labels = []
-predicted_labels = []
+# Prepare data structures
+source_matches = defaultdict(list)  # {s_name: [list of matched prediction rows]}
+source_winners = {}  # {s_name: winner_class}
+source_true_labels = {}  # {s_name: true_label}
+source_winner_confidences = {}  # {s_name: winner_confidence (fraction)}
 
 # Match sources to predictions
 for source in sources:
     source_label = source['label']
     source_power = source['power']
+    s_name = source['s_name']
+
+    # Store true label for this source
+    source_true_labels[s_name] = source_label
 
     # Skip if no predictions with matching label
     if source_label not in grouped_predictions:
@@ -92,58 +97,101 @@ for source in sources:
     # Find all matching predictions
     for pred in grouped_predictions[source_label]:
         # Compare normalized power spectra
-        if np.allclose(source_power, pred['power'], atol=TOLERANCE):
-            source_predictions[source['s_name']].append({
-                'predicted_class': pred['predicted_class'],
-                'confidence': pred['confidence']
-            })
+        if np.allclose(source_power, pred['normalized_power'], atol=TOLERANCE):
+            source_matches[s_name].append(pred)
 
-# Prepare final output rows
-output_rows = []
-for source in sources:
-    s_name = source['s_name']
-
-    # Skip if no predictions for this source
-    if s_name not in source_predictions or not source_predictions[s_name]:
+# Determine winner and winner confidence for each source
+for s_name, matches in source_matches.items():
+    if not matches:
         continue
-
-    preds = source_predictions[s_name]
 
     # Count votes for each class
     vote_count = defaultdict(int)
-    for pred in preds:
+    for pred in matches:
         vote_count[pred['predicted_class']] += 1
 
     # Determine winner (majority vote)
-    winner = max(vote_count.items(), key=lambda x: x[1])[0]
+    winner, winner_votes = max(vote_count.items(), key=lambda x: x[1])
+    total_votes = len(matches)
+    winner_confidence = winner_votes / total_votes  # Fraction of votes for winner
 
-    # Calculate average confidence for winner class
-    winner_confidences = [p['confidence'] for p in preds if p['predicted_class'] == winner]
-    avg_confidence = sum(winner_confidences) / len(winner_confidences) if winner_confidences else 0.0
+    source_winners[s_name] = winner
+    source_winner_confidences[s_name] = winner_confidence
 
-    # Store labels for confusion matrix
-    true_labels.append(source['label'])
-    predicted_labels.append(winner)
+# Prepare detailed output rows
+detailed_header = ['s_name', 'true_label', 'row_id'] + \
+                  [f'Power_{i}' for i in range(1, 95)] + \
+                  ['confidence', 'predicted_class', 'Winner', 'winner_confidence']
 
-    # Prepare output row: source name, true label, power features, confidence, winner
-    output_row = [s_name, source['label']] + source['power'].tolist() + [avg_confidence, winner]
-    output_rows.append(output_row)
+detailed_rows = []
+for s_name, matches in source_matches.items():
+    true_label = source_true_labels[s_name]
+    winner = source_winners[s_name]
+    winner_confidence = source_winner_confidences[s_name]
 
-# Write results to file
-with open('Source_wise_predictions.csv', 'w', newline='') as f:
+    for pred in matches:
+        row = [
+            s_name,
+            true_label,
+            pred['row_id'],
+            *pred['original_power'],  # Original power values from predictions.csv
+            pred['confidence'],
+            pred['predicted_class'],
+            winner,
+            winner_confidence
+        ]
+        detailed_rows.append(row)
+
+# Write detailed results to file
+with open('Source_wise_predictions_detailed.csv', 'w', newline='') as f:
     writer = csv.writer(f)
-    writer.writerow(header)
-    writer.writerows(output_rows)
+    writer.writerow(detailed_header)
+    writer.writerows(detailed_rows)
 
-print(f"Successfully saved {len(output_rows)} matched sources to Source_wise_predictions.csv")
+# Prepare summary output (one row per source)
+summary_header = ['s_name', 'true_label', 'Winner', 'total_votes',
+                  'votes_0', 'votes_1', 'winner_confidence']
+summary_rows = []
+for s_name in source_matches.keys():
+    matches = source_matches[s_name]
+    true_label = source_true_labels[s_name]
+    winner = source_winners[s_name]
+    winner_confidence = source_winner_confidences[s_name]
+
+    # Count votes
+    vote_count = defaultdict(int)
+    for pred in matches:
+        vote_count[pred['predicted_class']] += 1
+
+    summary_rows.append([
+        s_name,
+        true_label,
+        winner,
+        len(matches),
+        vote_count.get(0, 0),
+        vote_count.get(1, 0),
+        winner_confidence
+    ])
+
+# Write summary results to file
+with open('Source_wise_predictions_summary.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(summary_header)
+    writer.writerows(summary_rows)
 
 # Generate confusion matrix and metrics
-if true_labels and predicted_labels:
+true_labels = []
+predicted_winners = []
+for s_name in source_matches.keys():
+    true_labels.append(source_true_labels[s_name])
+    predicted_winners.append(source_winners[s_name])
+
+if true_labels and predicted_winners:
     # Initialize confusion matrix
     cm = np.zeros((2, 2), dtype=int)
 
     # Populate confusion matrix
-    for true, pred in zip(true_labels, predicted_labels):
+    for true, pred in zip(true_labels, predicted_winners):
         cm[true][pred] += 1
 
     # Calculate metrics
@@ -176,5 +224,10 @@ if true_labels and predicted_labels:
     print(f"Precision: {precision:.4f}")
     print(f"Recall:    {recall:.4f}")
     print(f"F1 Score:  {f1:.4f}")
+
+    print(f"\nDetailed output saved to Source_wise_predictions_detailed.csv ({len(detailed_rows)} rows)")
+    print(f"Summary output saved to Source_wise_predictions_summary.csv ({len(summary_rows)} rows)")
 else:
     print("No matched sources found for evaluation metrics")
+
+print("Processing complete!")
