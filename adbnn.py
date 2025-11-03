@@ -166,6 +166,7 @@ import os
 from typing import Union, List, Dict, Optional
 from collections import defaultdict
 
+
 def get_dataset_name_from_path(file_path):
     """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
     # Normalize path and split into parts
@@ -308,6 +309,7 @@ class DatasetConfig:
         "training_params": {
             "save_plots": False,  # Parameter to save plots
             "Save_training_epochs": False,  # Save the epochs parameter
+             "enable_visualization": False,
             "training_save_path": "data"  # Save epochs path parameter
         }
     }
@@ -2490,7 +2492,7 @@ class DBNN(GPUDBNN):
             final_selected = selected[:max_samples].cpu().tolist()
             final_selected_indices.extend(final_selected)
 
-            print(f"{Colors.GREEN}Adding {len(final_selected)} samples to training (global indices): {final_selected}{Colors.ENDC}")
+            #print(f"{Colors.GREEN}Adding {len(final_selected)} samples to training (global indices): {final_selected}{Colors.ENDC}")
 
         class_pbar.close()
         return final_selected_indices
@@ -2834,7 +2836,7 @@ class DBNN(GPUDBNN):
                             print("\033[K" +"No suitable new samples found. Training complete.")
                             break
 
-                    print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
+                    #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
 
 
 
@@ -2850,7 +2852,7 @@ class DBNN(GPUDBNN):
 
                         # Format class distribution string
                         class_dist = self._format_class_distribution(new_train_indices)
-                        print(f"\033[KAdded {len(new_train_indices)} new samples - Class distribution: {class_dist}")
+                        #print(f"\033[KAdded {len(new_train_indices)} new samples - Class distribution: {class_dist}")
                         #print(f"\033[KClass distribution of new samples: {class_dist}")
 
                     # Update training and test indices with original indices
@@ -4636,6 +4638,11 @@ class DBNN(GPUDBNN):
         """Optimized training loop with vectorized operations and proper error handling"""
         print("\033[K" + "Starting training...", end="\r", flush=True)
 
+        # Initialize visualization if enabled
+        enable_visualization = self.config.get('training_params', {}).get('enable_visualization', True)
+        if enable_visualization and not hasattr(self, 'visualizer'):
+            self.visualizer = DBNNGeometricVisualizer(self)
+
         # Initialize tracking variables
         if not hasattr(self, 'best_combined_accuracy'):
             self.best_combined_accuracy = 0.0
@@ -4735,6 +4742,21 @@ class DBNN(GPUDBNN):
                 train_accuracy = (train_pred_classes == y_train.cpu()).float().mean()
 
                 self.current_W = orig_weights
+
+            # CAPTURE VISUALIZATION DATA HERE
+            if enable_visualization and hasattr(self, 'visualizer'):
+                try:
+                    # Compute overall accuracy for visualization
+                    X_all = torch.cat([X_train, X_test], dim=0)
+                    y_all = torch.cat([y_train, y_test], dim=0)
+                    all_pred, _ = self.predict(X_all, batch_size=batch_size)
+                    overall_accuracy = (all_pred.cpu() == y_all.cpu()).float().mean().item()
+
+                    # Capture snapshot every 5 epochs to avoid too much data
+                    if epoch % 5 == 0 or epoch == self.max_epochs - 1:
+                        self.visualizer.capture_epoch_snapshot(epoch, overall_accuracy)
+                except Exception as e:
+                    print(f"\033[KVisualization capture skipped: {str(e)}")
 
             # Update best accuracies
             best_train_accuracy = max(best_train_accuracy, train_accuracy)
@@ -6356,7 +6378,357 @@ class DBNN(GPUDBNN):
             print(f"Error loading model: {str(e)}")
             traceback.print_exc()
             return False
-#---------------------------------------------------DBNN Prediction Functions  Ends--------------------------------
+
+    def generate_training_visualization(self):
+        """Generate interactive visualization after training"""
+        if hasattr(self, 'visualizer'):
+            return self.visualizer.create_interactive_visualization()
+        else:
+            print("\033[KNo visualization data available. Train the model first or enable visualization in config.")
+            return None
+
+#----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
+
+
+class DBNNGeometricVisualizer:
+    """Interactive geometric visualization of DBNN tensor orthogonalization"""
+
+    def __init__(self, dbnn_model, output_dir: str = None):
+        self.dbnn = dbnn_model
+        if output_dir is None:
+            # Create visualization directory in data folder
+            dataset_name = os.path.splitext(os.path.basename(self.dbnn.dataset_name))[0]
+            self.output_dir = os.path.join('data', dataset_name, 'Visualization')
+        else:
+            self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Storage for tensor evolution data
+        self.tensor_evolution = []
+        self.orthogonality_metrics = []
+
+    def _compute_tensor_representation(self, epoch: int) -> Dict:
+        """Compute 5D tensor representation and extract geometric properties"""
+        try:
+            # Extract tensor components from the model
+            n_classes = len(self.dbnn.label_encoder.classes_)
+            n_pairs = len(self.dbnn.feature_pairs)
+            n_bins = self.dbnn.n_bins_per_dim
+
+            # Initialize tensor representation
+            tensor_5d = np.zeros((n_pairs, n_bins, n_bins, n_classes), dtype=complex)
+
+            # Fill tensor with weighted probabilities
+            for class_idx in range(n_classes):
+                for pair_idx in range(n_pairs):
+                    if self.dbnn.model_type == "Histogram":
+                        # Get bin probabilities and weights
+                        bin_probs = self.dbnn.likelihood_params['bin_probs'][pair_idx][class_idx]
+                        weights = self.dbnn.weight_updater.get_histogram_weights(class_idx, pair_idx)
+
+                        # Create complex representation
+                        weighted_probs = bin_probs.cpu().numpy() * weights.cpu().numpy()
+
+                        # Convert to complex: real = weighted probability, imag = weight component
+                        for i in range(min(n_bins, weighted_probs.shape[0])):
+                            for j in range(min(n_bins, weighted_probs.shape[1])):
+                                magnitude = weighted_probs[i, j]
+                                phase = weights.cpu().numpy()[i, j] * 2 * np.pi
+                                tensor_5d[pair_idx, i, j, class_idx] = magnitude * np.exp(1j * phase)
+
+            return {
+                'epoch': epoch,
+                'tensor': tensor_5d,
+                'flattened_vectors': self._flatten_tensor(tensor_5d),
+                'orthogonality_metrics': self._compute_orthogonality_metrics(tensor_5d)
+            }
+        except Exception as e:
+            print(f"\033[KVisualization warning: {str(e)}")
+            # Return empty structure if visualization fails
+            return {
+                'epoch': epoch,
+                'tensor': np.zeros((1, 1, 1, 1), dtype=complex),
+                'flattened_vectors': np.zeros((1, 1), dtype=complex),
+                'orthogonality_metrics': {'mean_angle': 0, 'orthogonality_score': 90, 'pairwise_angles': []}
+            }
+
+    def _flatten_tensor(self, tensor_5d: np.ndarray) -> np.ndarray:
+        """Flatten 5D tensor to 2D matrix for geometric analysis"""
+        n_pairs, n_bins_i, n_bins_j, n_classes = tensor_5d.shape
+        flattened = tensor_5d.reshape(n_pairs * n_bins_i * n_bins_j, n_classes)
+        return flattened
+
+    def _compute_orthogonality_metrics(self, tensor_5d: np.ndarray) -> Dict:
+        """Compute orthogonality metrics between class tensors"""
+        try:
+            n_classes = tensor_5d.shape[3]
+            flattened = self._flatten_tensor(tensor_5d)
+
+            metrics = {
+                'pairwise_angles': [],
+                'mean_angle': 0,
+                'orthogonality_score': 0,
+                'condition_number': 0
+            }
+
+            if n_classes < 2:
+                return metrics
+
+            # Compute pairwise angles between class vectors
+            angles = []
+            for i in range(n_classes):
+                for j in range(i + 1, n_classes):
+                    vec_i = flattened[:, i]
+                    vec_j = flattened[:, j]
+
+                    # Compute angle between complex vectors
+                    dot_product = np.vdot(vec_i, vec_j)
+                    norm_i = np.linalg.norm(vec_i)
+                    norm_j = np.linalg.norm(vec_j)
+
+                    if norm_i > 1e-10 and norm_j > 1e-10:
+                        cosine_sim = np.abs(dot_product) / (norm_i * norm_j)
+                        angle = np.arccos(np.clip(cosine_sim, -1, 1))
+                        angles.append(np.degrees(angle))
+
+            metrics['pairwise_angles'] = angles
+            metrics['mean_angle'] = np.mean(angles) if angles else 0
+            metrics['orthogonality_score'] = np.mean([abs(90 - angle) for angle in angles]) if angles else 90
+
+            # Compute condition number of the class matrix
+            if n_classes > 1:
+                class_matrix = flattened.T
+                metrics['condition_number'] = np.linalg.cond(class_matrix)
+
+            return metrics
+        except Exception as e:
+            print(f"\033[KOrthogonality computation warning: {str(e)}")
+            return {'mean_angle': 0, 'orthogonality_score': 90, 'pairwise_angles': [], 'condition_number': 0}
+
+    def capture_epoch_snapshot(self, epoch: int, accuracy: float):
+        """Capture tensor state at each epoch"""
+        snapshot = self._compute_tensor_representation(epoch)
+        snapshot['accuracy'] = accuracy
+        self.tensor_evolution.append(snapshot)
+        self.orthogonality_metrics.append({
+            'epoch': epoch,
+            'accuracy': accuracy,
+            'mean_angle': snapshot['orthogonality_metrics']['mean_angle'],
+            'orthogonality_score': snapshot['orthogonality_metrics']['orthogonality_score'],
+            'condition_number': snapshot['orthogonality_metrics']['condition_number']
+        })
+
+    def create_interactive_visualization(self) -> str:
+        """Create comprehensive interactive visualization"""
+        try:
+            if not self.tensor_evolution:
+                print("\033[KNo visualization data available")
+                return None
+
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import plotly.express as px
+
+            # Create main figure with subplots
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=[
+                    'Tensor Evolution in Polar Coordinates',
+                    'Orthogonality Progress',
+                    'Class Separation Angles',
+                    'Accuracy vs Orthogonality'
+                ],
+                specs=[
+                    [{"type": "scatterpolar"}, {"type": "scatter"}],
+                    [{"type": "scatter"}, {"type": "scatter"}]
+                ]
+            )
+
+            # 1. Polar coordinate visualization
+            self._add_polar_visualization(fig, row=1, col=1)
+
+            # 2. Orthogonality progress
+            self._add_orthogonality_progress(fig, row=1, col=2)
+
+            # 3. Class separation angles
+            self._add_class_separation_angles(fig, row=2, col=1)
+
+            # 4. Accuracy vs orthogonality correlation
+            self._add_accuracy_correlation(fig, row=2, col=2)
+
+            # Update layout
+            fig.update_layout(
+                title=f"DBNN Tensor Orthogonalization - {os.path.basename(self.dbnn.dataset_name)}",
+                height=1000,
+                showlegend=True,
+                template="plotly_white"
+            )
+
+            # Save interactive HTML
+            output_file = os.path.join(self.output_dir, "tensor_orthogonalization_evolution.html")
+            fig.write_html(output_file)
+
+            print(f"\033[K{Colors.GREEN}Interactive visualization saved to: {output_file}{Colors.ENDC}")
+            return output_file
+
+        except Exception as e:
+            print(f"\033[K{Colors.RED}Visualization creation failed: {str(e)}{Colors.ENDC}")
+            return None
+
+    def _add_polar_visualization(self, fig, row: int, col: int):
+        """Add polar coordinate visualization"""
+        try:
+            # Extract key epochs for visualization
+            n_snapshots = len(self.tensor_evolution)
+            if n_snapshots == 0:
+                return
+
+            key_epochs = [0, n_snapshots//4, n_snapshots//2, n_snapshots*3//4, n_snapshots-1]
+            key_epochs = [min(epoch, n_snapshots-1) for epoch in key_epochs]
+
+            colors = px.colors.qualitative.Set1
+
+            for idx, epoch_idx in enumerate(key_epochs):
+                snapshot = self.tensor_evolution[epoch_idx]
+                flattened = snapshot['flattened_vectors']
+                n_classes = flattened.shape[1]
+
+                for class_idx in range(min(n_classes, 4)):  # Show first 4 classes
+                    class_vector = flattened[:, class_idx]
+
+                    # Convert to polar coordinates
+                    magnitudes = np.abs(class_vector)
+                    phases = np.angle(class_vector)
+
+                    # Sample points for cleaner visualization
+                    sample_size = min(50, len(magnitudes))
+                    sample_indices = np.random.choice(len(magnitudes), size=sample_size, replace=False)
+
+                    fig.add_trace(
+                        go.Scatterpolar(
+                            r=magnitudes[sample_indices],
+                            theta=np.degrees(phases[sample_indices]),
+                            mode='markers',
+                            name=f'E{snapshot["epoch"]} C{class_idx}',
+                            marker=dict(
+                                color=colors[idx % len(colors)],
+                                size=6,
+                                opacity=0.6,
+                                symbol=class_idx
+                            ),
+                            showlegend=True
+                        ),
+                        row=row, col=col
+                    )
+        except Exception as e:
+            print(f"\033[KPolar visualization error: {str(e)}")
+
+    def _add_orthogonality_progress(self, fig, row: int, col: int):
+        """Add orthogonality progress over epochs"""
+        try:
+            if not self.orthogonality_metrics:
+                return
+
+            epochs = [m['epoch'] for m in self.orthogonality_metrics]
+            mean_angles = [m['mean_angle'] for m in self.orthogonality_metrics]
+            orth_scores = [m['orthogonality_score'] for m in self.orthogonality_metrics]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=mean_angles,
+                    mode='lines+markers',
+                    name='Mean Angle Between Classes',
+                    line=dict(color='blue', width=2),
+                    marker=dict(size=4)
+                ),
+                row=row, col=col
+            )
+
+            # Add secondary y-axis for orthogonality score
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=orth_scores,
+                    mode='lines+markers',
+                    name='Orthogonality Score',
+                    line=dict(color='red', width=2, dash='dash'),
+                    marker=dict(size=4)
+                ),
+                row=row, col=col
+            )
+
+            fig.update_xaxes(title_text='Epoch', row=row, col=col)
+            fig.update_yaxes(title_text='Mean Angle (degrees)', row=row, col=col)
+
+        except Exception as e:
+            print(f"\033[KOrthogonality progress error: {str(e)}")
+
+    def _add_class_separation_angles(self, fig, row: int, col: int):
+        """Add class separation angle distribution"""
+        try:
+            if not self.tensor_evolution:
+                return
+
+            # Get final epoch angles
+            final_snapshot = self.tensor_evolution[-1]
+            angles = final_snapshot['orthogonality_metrics']['pairwise_angles']
+
+            if angles:
+                fig.add_trace(
+                    go.Histogram(
+                        x=angles,
+                        name='Final Separation Angles',
+                        nbinsx=20,
+                        marker_color='green',
+                        opacity=0.7
+                    ),
+                    row=row, col=col
+                )
+
+                # Add ideal orthogonality line
+                fig.add_vline(x=90, line_dash="dash", line_color="red",
+                             annotation_text="Ideal Orthogonality", row=row, col=col)
+
+                fig.update_xaxes(title_text='Separation Angle (degrees)', row=row, col=col)
+                fig.update_yaxes(title_text='Frequency', row=row, col=col)
+
+        except Exception as e:
+            print(f"\033[KClass separation error: {str(e)}")
+
+    def _add_accuracy_correlation(self, fig, row: int, col: int):
+        """Add accuracy vs orthogonality correlation"""
+        try:
+            if not self.orthogonality_metrics:
+                return
+
+            accuracies = [m['accuracy'] for m in self.orthogonality_metrics]
+            orth_scores = [m['orthogonality_score'] for m in self.orthogonality_metrics]
+            mean_angles = [m['mean_angle'] for m in self.orthogonality_metrics]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=orth_scores,
+                    y=accuracies,
+                    mode='markers+lines',
+                    name='Accuracy vs Orthogonality',
+                    marker=dict(
+                        size=8,
+                        color=mean_angles,
+                        colorscale='Viridis',
+                        showscale=True,
+                        colorbar=dict(title="Mean Angle")
+                    ),
+                    text=[f'Epoch {m["epoch"]}' for m in self.orthogonality_metrics]
+                ),
+                row=row, col=col
+            )
+
+            fig.update_xaxes(title_text='Orthogonality Score (lower = better)', row=row, col=col)
+            fig.update_yaxes(title_text='Accuracy', row=row, col=col)
+
+        except Exception as e:
+            print(f"\033[KAccuracy correlation error: {str(e)}")
 
 def create_prediction_mosaic(
         image_dir: list,  # List of dictionary rows (with filepath and original_filename)
@@ -6624,7 +6996,8 @@ def load_or_create_config(config_path: str) -> dict:
             "compute_device": "auto",
             "use_interactive_kbd": False,
             "modelType": "Histogram",
-            "class_preference": True
+            "class_preference": True,
+             "enable_visualization": False
         },
         "active_learning": {
             "tolerance": 1.0,
@@ -6840,15 +7213,79 @@ def validate_config(config: dict) -> dict:
     return validated_config
 
 def main():
-    parser = argparse.ArgumentParser(description='Process ML datasets')
-    parser.add_argument("--file_path", nargs='?', help="Path to dataset CSV file in data folder")
+    # Available datasets section will be populated dynamically
+    dataset_info = "    Available datasets will be listed here when using --list_datasets"
+
+    parser = argparse.ArgumentParser(
+        description='🚀 DBNN - Deep Bayesian Neural Network Processor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+📚 COMMAND EXAMPLES:
+
+  Interactive Mode:
+    {Colors.GREEN}python adbnn.py --interactive{Colors.ENDC}
+        💬 Guided setup with configuration options
+
+  Training & Visualization:
+    {Colors.GREEN}python adbnn.py --mode train --model_type Gaussian --visualize{Colors.ENDC}
+        🧠 Train with Gaussian model + generate tensor visualization
+
+    {Colors.GREEN}python adbnn.py --file_path data/mydata/mydata.csv --mode train_predict --visualize{Colors.ENDC}
+        📊 Train & predict on specific dataset with visualization
+
+  Dataset Management:
+    {Colors.GREEN}python adbnn.py --list_datasets{Colors.ENDC}
+        📋 Show all available datasets with statistics
+
+  Prediction:
+    {Colors.GREEN}python adbnn.py --mode predict --file_path data/mydata/mydata.csv{Colors.ENDC}
+        🔮 Make predictions using trained model
+
+  Feature Reconstruction:
+    {Colors.GREEN}python adbnn.py --mode invertDBNN{Colors.ENDC}
+        🔄 Reconstruct features using inverse DBNN
+
+📖 AVAILABLE MODES:
+  train         - Train model only
+  train_predict - Train and then predict (default)
+  predict       - Predict using trained model
+  invertDBNN    - Reconstruct features using inverse model
+
+🎯 QUICK START:
+  1. Add your dataset to the 'data' folder as 'data/dataset_name/dataset_name.csv'
+  2. Run: {Colors.GREEN}python adbnn.py --interactive{Colors.ENDC}
+  3. Or run: {Colors.GREEN}python adbnn.py --list_datasets{Colors.ENDC} to see available datasets
+
+{dataset_info}
+        """
+    )
+
+    parser.add_argument("--file_path", nargs='?', help="📁 Path to dataset CSV file")
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict'],
-                       required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
-    parser.add_argument('--interactive', action='store_true', help="Enable interactive mode to modify settings.")
+                       default='train_predict', help="🎯 Operation mode")
+    parser.add_argument('--interactive', action='store_true', help="💬 Enable interactive configuration")
     parser.add_argument('--model_type', type=str, choices=['Histogram', 'Gaussian'],
-                        help='Override model type (Histogram/Gaussian)')
+                        default='Histogram', help='🧠 Model architecture type')
+    parser.add_argument('--visualize', action='store_true', help="📊 Generate training visualization")
+    parser.add_argument('--list_datasets', action='store_true', help="📋 List available datasets")
     args = parser.parse_args()
+
     processor = DatasetProcessor()
+
+    def print_banner():
+        """Print beautiful banner"""
+        banner = f"""
+{Colors.BOLD}{Colors.RED}
+╔════════════════════════════════════════════════════════════════╗
+║                                                                ║
+║    🧠   Difference Boosting Bayesian Neural Network            ║
+║                 Author :nsp@airis4d.com                        ║
+║               Python Implementation: DeepSeek                  ║
+║    Advanced Tensor Orthogonalization & Adaptive Learning       ║
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝{Colors.ENDC}
+        """
+        print(banner)
 
     def validate_config(config):
         """Ensure required configuration parameters exist"""
@@ -6880,9 +7317,10 @@ def main():
                 os.makedirs(os.path.dirname(config_path), exist_ok=True)
                 with open(config_path, 'w') as f:
                     json.dump(config, f, indent=2)
+                print(f"📄 Created default configuration: {config_path}")
                 return config
         except Exception as e:
-            print(f"\033[K{Colors.RED}Error loading/creating config: {str(e)}{Colors.ENDC}")
+            print(f"❌ {Colors.RED}Error loading/creating config: {str(e)}{Colors.ENDC}")
             raise
 
     def find_dataset_pairs():
@@ -6902,107 +7340,172 @@ def main():
 
         return dataset_pairs
 
+    def display_dataset_menu(dataset_pairs):
+        """Display beautiful dataset selection menu"""
+        print(f"\n{Colors.BOLD}📊 Available Datasets:{Colors.ENDC}")
+        print(f"{Colors.BLUE}╔══════════════════════════════════════════════════════════════════════════{Colors.ENDC}")
+
+        for i, (dataset_name, conf_path, csv_path) in enumerate(dataset_pairs):
+            # Get dataset info
+            try:
+                config = load_or_create_config(conf_path)
+                n_samples = len(pd.read_csv(csv_path))
+                n_features = len(pd.read_csv(csv_path, nrows=0).columns) - 1
+                model_type = config.get('modelType', 'Histogram')
+
+                print(f"{Colors.BLUE}║ {Colors.ENDC}{i+1:2d}. {Colors.GREEN}{dataset_name:<20}{Colors.ENDC} "
+                      f"Samples: {n_samples:>5} Features: {n_features:>3} "
+                      f"Model: {model_type:<10}")#" #{Colors.BLUE} ║{Colors.ENDC}")
+
+            except Exception as e:
+                print(f"{Colors.BLUE}║ {Colors.ENDC}{i+1:2d}. {Colors.RED}{dataset_name:<20}{Colors.ENDC} "
+                      f"Error loading dataset {Colors.RED}{str(e)[:30]:<30}{Colors.ENDC} {Colors.BLUE}║{Colors.ENDC}")
+
+        print(f"{Colors.BLUE}╚══════════════════════════════════════════════════════════════════════════{Colors.ENDC}")
+    print()
+
     def process_datasets():
         """Process all found datasets"""
         dataset_pairs = find_dataset_pairs()
 
         if not dataset_pairs:
-            print("\033[K" + f"{Colors.RED}No valid dataset/config pairs found in data folder.{Colors.ENDC}")
+            print(f"❌ {Colors.RED}No valid dataset/config pairs found in data folder.{Colors.ENDC}")
             return
 
-        for i, (dataset_name, conf_path, csv_path) in enumerate(dataset_pairs):
-            print(f"\033[K{Colors.BOLD}{i+1}. Found dataset: {dataset_name}{Colors.ENDC}")
+        display_dataset_menu(dataset_pairs)
 
-        choice = input("\033[K" + f"{Colors.BOLD}Select dataset to process (1-{len(dataset_pairs)} or 'all'): {Colors.ENDC}").strip()
+        choice = input(f"\n🎯 {Colors.BOLD}Select dataset (1-{len(dataset_pairs)}, 'all', 'h' for help, or 'q' to quit): {Colors.ENDC}").strip()
 
-        if choice.lower() == 'all':
+        if choice.lower() == 'q':
+            return
+        elif choice.lower() == 'h':
+            print(f"\n{Colors.BOLD}🚀 QUICK COMMAND EXAMPLES:{Colors.ENDC}")
+            print(f"  {Colors.GREEN}python adbnn.py --interactive{Colors.ENDC}")
+            print(f"  {Colors.GREEN}python adbnn.py --mode train --model_type Gaussian --visualize{Colors.ENDC}")
+            print(f"  {Colors.GREEN}python adbnn.py --list_datasets{Colors.ENDC}")
+            print(f"  {Colors.GREEN}python adbnn.py --file_path data/mydata/mydata.csv --mode train_predict --visualize{Colors.ENDC}")
+            input(f"\n{Colors.BOLD}Press Enter to continue...{Colors.ENDC}")
+            process_datasets()
+        elif choice.lower() == 'all':
+            print(f"\n🔄 {Colors.YELLOW}Processing all datasets...{Colors.ENDC}")
             for dataset_name, conf_path, csv_path in dataset_pairs:
-                process_single_dataset(dataset_name, conf_path, csv_path)
+                process_single_dataset(dataset_name, conf_path, csv_path, args.mode, args.model_type, args.visualize)
         elif choice.isdigit() and 1 <= int(choice) <= len(dataset_pairs):
             dataset_name, conf_path, csv_path = dataset_pairs[int(choice)-1]
-            process_single_dataset(dataset_name, conf_path, csv_path)
+            process_single_dataset(dataset_name, conf_path, csv_path, args.mode, args.model_type, args.visualize)
         else:
-            print("\033[K" + f"{Colors.RED}Invalid selection.{Colors.ENDC}")
+            print(f"❌ {Colors.RED}Invalid selection.{Colors.ENDC}")
 
-    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None, model_type="Histogram"):
+
+    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None, model_type="Histogram", generate_visualization=False):
         """Process a single dataset with given mode"""
         try:
             # Load config
             config = load_or_create_config(conf_path)
-
 
             # Determine mode if not provided
             if not mode:
                 mode = 'train_predict' if config.get('train', True) and config.get('predict', True) else \
                        'train' if config.get('train', True) else 'predict'
 
-            print(f"\033[K{Colors.BOLD}Processing {dataset_name} in {mode} mode{Colors.ENDC}")
+            print(f"\n{'='*80}")
+            print(f"🚀 {Colors.BOLD}Processing: {Colors.GREEN}{dataset_name}{Colors.ENDC}")
+            print(f"📋 {Colors.BOLD}Mode: {Colors.YELLOW}{mode}{Colors.ENDC}")
+            print(f"🧠 {Colors.BOLD}Model: {Colors.CYAN}{model_type}{Colors.ENDC}")
+            print(f"📊 {Colors.BOLD}Visualization: {Colors.MAGENTA}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
+            print(f"{'='*80}")
 
             # Create DBNN instance
-            if mode== 'train_predict' :
-                model = DBNN(dataset_name=dataset_name,mode='train',model_type=model_type)
+            if mode == 'train_predict':
+                model = DBNN(dataset_name=dataset_name, mode='train', model_type=model_type)
             else:
-                model = DBNN(dataset_name=dataset_name,mode=mode,model_type=model_type)
+                model = DBNN(dataset_name=dataset_name, mode=mode, model_type=model_type)
 
             if mode in ['train', 'train_predict']:
                 # Training phase
                 start_time = datetime.now()
+                print(f"\n⏳ {Colors.BOLD}Starting training phase...{Colors.ENDC}")
 
-                if config.get('enable_adaptive', True):
+                if config.get('training_params', {}).get('enable_adaptive', True):
+                    print(f"🔄 {Colors.YELLOW}Using adaptive training{Colors.ENDC}")
                     results = model.adaptive_fit_predict()
                 else:
+                    print(f"⚡ {Colors.YELLOW}Using standard training{Colors.ENDC}")
                     results = model.fit_predict()
 
                 end_time = datetime.now()
+                training_time = (end_time - start_time).total_seconds()
 
                 # Print results
-                print("\033[K" + "Training complete!")
-                print("\033[K" + f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+                print(f"\n✅ {Colors.GREEN}Training completed!{Colors.ENDC}")
+                print(f"⏱️  {Colors.BOLD}Time taken: {Colors.CYAN}{training_time:.1f} seconds{Colors.ENDC}")
 
-                if 'results_path' in results:
-                    print("\033[K" + f"Results saved to: {results['results_path']}")
-                if 'log_path' in results:
-                    print("\033[K" + f"Training log saved to: {results['log_path']}")
+                if results and 'test_accuracy' in results:
+                    accuracy_color = Colors.GREEN if results['test_accuracy'] > 0.9 else Colors.YELLOW if results['test_accuracy'] > 0.7 else Colors.RED
+                    print(f"🎯 {Colors.BOLD}Test Accuracy: {accuracy_color}{results['test_accuracy']:.2%}{Colors.ENDC}")
+
+                # Generate visualization if requested
+                if generate_visualization and hasattr(model, 'generate_training_visualization'):
+                    print(f"\n📊 {Colors.BOLD}Generating training visualization...{Colors.ENDC}")
+                    try:
+                        viz_file = model.generate_training_visualization()
+                        if viz_file:
+                            print(f"🖼️  {Colors.GREEN}Visualization saved: {Colors.CYAN}{viz_file}{Colors.ENDC}")
+                    except Exception as e:
+                        print(f"⚠️  {Colors.YELLOW}Visualization failed: {str(e)}{Colors.ENDC}")
 
                 # Save model components
-                #model._save_model_components()
-                #model._save_best_weights()
-                #save_label_encoder(model.label_encoder, dataset_name)
-                #model._load_model_components()
-                #model.label_encoder = load_label_encoder(dataset_name)
+                try:
+                    model._save_model_components()
+                    model._save_best_weights()
+                    print(f"💾 {Colors.GREEN}Model components saved{Colors.ENDC}")
+                except Exception as e:
+                    print(f"⚠️  {Colors.YELLOW}Model save warning: {str(e)}{Colors.ENDC}")
+
             if mode in ['predict', 'train_predict']:
                 # Prediction phase
-                print("\033[K" + f"{Colors.BOLD}Starting prediction...{Colors.ENDC}")
+                print(f"\n🔮 {Colors.BOLD}Starting prediction phase...{Colors.ENDC}")
 
-                dataset_name = get_dataset_name_from_path(args.file_path)
-                predictor = DBNN(dataset_name=dataset_name,mode='predict',model_type=model_type)
-                print(f"Processing {dataset_name} in predict mode")
+                # Use either the provided CSV or default dataset CSV
+                input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
+                output_dir = os.path.join('data', dataset_name, 'Predictions')
+                os.makedirs(output_dir, exist_ok=True)
 
-                if predictor.load_model_for_prediction(dataset_name):
-                    # Use either the provided CSV or default dataset CSV
-                    input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
-                    output_dir = os.path.join('data', dataset_name, 'Predictions')
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, f'{dataset_name}')
+                print(f"📁 {Colors.BOLD}Input: {Colors.CYAN}{input_csv}{Colors.ENDC}")
+                print(f"📂 {Colors.BOLD}Output: {Colors.CYAN}{output_dir}{Colors.ENDC}")
 
-                    results = predictor.predict_from_file(input_csv, output_dir,model_type=model_type)
-                    print("\033[K" + f"Predictions saved to: {output_path}")
+                # For prediction mode, create a new predictor instance
+                if mode == 'predict':
+                    predictor = DBNN(dataset_name=dataset_name, mode='predict', model_type=model_type)
+                    model = predictor
+
+                results = model.predict_from_file(input_csv, output_dir, model_type=model_type)
+
+                if results:
+                    print(f"✅ {Colors.GREEN}Predictions completed successfully!{Colors.ENDC}")
+                    if 'metrics' in results and 'accuracy' in results['metrics']:
+                        acc = results['metrics']['accuracy']
+                        acc_color = Colors.GREEN if acc > 0.9 else Colors.YELLOW if acc > 0.7 else Colors.RED
+                        print(f"🎯 {Colors.BOLD}Prediction Accuracy: {acc_color}{acc:.2%}{Colors.ENDC}")
 
             if mode == 'invertDBNN':
                 # Invert DBNN mode
-                model._load_model_components()
-                #model.label_encoder = load_label_encoder(dataset_name)
+                print(f"\n🔄 {Colors.BOLD}Starting Inverse DBNN feature reconstruction...{Colors.ENDC}")
 
-                print("\033[K" + "DEBUG: Inverse DBNN Settings:")
+                model._load_model_components()
+
+                # Display inversion parameters
+                inv_params = config.get('training_params', {})
+                print(f"⚙️  {Colors.BOLD}Inversion Parameters:{Colors.ENDC}")
                 for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
-                    value = config.get('training_params', {}).get(param, 0.1)
-                    print("\033[K" + f"- {param}: {value}")
+                    value = inv_params.get(param, 'default')
+                    print(f"   {Colors.CYAN}{param}: {Colors.YELLOW}{value}{Colors.ENDC}")
 
                 inverse_model = InvertibleDBNN(
                     forward_model=model,
                     feature_dims=model.data.shape[1] - 1,
-                    reconstruction_weight=config['training_params'].get('reconstruction_weight', 0.5),
-                    feedback_strength=config['training_params'].get('feedback_strength', 0.3)
+                    reconstruction_weight=inv_params.get('reconstruction_weight', 0.5),
+                    feedback_strength=inv_params.get('feedback_strength', 0.3)
                 )
 
                 # Reconstruct features
@@ -7011,76 +7514,120 @@ def main():
                 reconstruction_features = inverse_model.reconstruct_features(test_probs)
 
                 # Save reconstructed features
-                output_dir = os.path.join('data', dataset_name, 'Predicted_features')
+                output_dir = os.path.join('data', dataset_name, 'Reconstructed_Features')
                 os.makedirs(output_dir, exist_ok=True)
-                output_file = os.path.join(output_dir, f'{dataset_name}.csv')
+                output_file = os.path.join(output_dir, f'{dataset_name}_reconstructed.csv')
 
                 feature_columns = model.data.drop(columns=[model.target_column]).columns
                 reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
                 reconstructed_df.to_csv(output_file, index=False)
 
-                print("\033[K" + f"Reconstructed features saved to {output_file}")
+                print(f"✅ {Colors.GREEN}Reconstructed features saved to {Colors.CYAN}{output_file}{Colors.ENDC}")
+
+            print(f"\n{'='*80}")
+            print(f"✅ {Colors.BOLD}{Colors.GREEN}Processing completed for {dataset_name}!{Colors.ENDC}")
+            print(f"{'='*80}\n")
 
         except Exception as e:
-            print(f"\033[K{Colors.RED}Error processing dataset {dataset_name}: {str(e)}{Colors.ENDC}")
+            print(f"\n❌ {Colors.RED}Error processing dataset {dataset_name}: {str(e)}{Colors.ENDC}")
             traceback.print_exc()
 
-    if args.interactive:
-        # Interactive mode
-        print("\033[K" + f"{Colors.BOLD}{Colors.BLUE}Interactive Mode{Colors.ENDC}")
-        dataset_name = input("\033[K" + f"{Colors.BOLD}Enter the name of the database:{Colors.ENDC}").strip().lower()
-        conf_path = f'data/{dataset_name}/{dataset_name}.conf'
+    def interactive_mode():
+        """Enhanced interactive mode"""
+        print(f"\n💬 {Colors.BOLD}{Colors.BLUE}INTERACTIVE MODE{Colors.ENDC}")
+        print(f"{Colors.BLUE}╔══════════════════════════════════════════════════════════════╗{Colors.ENDC}")
 
-        # Load or create config
+        # List available datasets
+        dataset_pairs = find_dataset_pairs()
+        if not dataset_pairs:
+            print(f"❌ {Colors.RED}No datasets found. Please add datasets to the data folder.{Colors.ENDC}")
+            return
+
+        display_dataset_menu(dataset_pairs)
+
+        # Dataset selection
+        while True:
+            choice = input(f"\n🎯 {Colors.BOLD}Select dataset (1-{len(dataset_pairs)}): {Colors.ENDC}").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(dataset_pairs):
+                dataset_name, conf_path, csv_path = dataset_pairs[int(choice)-1]
+                break
+            else:
+                print(f"❌ {Colors.RED}Invalid selection. Please try again.{Colors.ENDC}")
+
+        # Load config
         config = load_or_create_config(conf_path)
 
         # Display current configuration
-        print("\033[K" + f"{Colors.BOLD}Current Configuration:{Colors.ENDC}")
-        print("\033[K" + f"- Device: {config.get('compute_device', 'cuda' if torch.cuda.is_available() else 'cpu')}")
-        print("\033[K" + f"- Mode: {'Train' if config.get('train', True) else 'Predict'}")
-        print("\033[K" + f"- Learning Rate: {config.get('training_params', {}).get('learning_rate', 0.1)}")
-        print("\033[K" + f"- Epochs: {config.get('training_params', {}).get('epochs', 1000)}")
-        print("\033[K" + f"- Test Fraction: {config.get('training_params', {}).get('test_fraction', 0.2)}")
-        print("\033[K" + f"- Enable Adaptive: {config.get('training_params', {}).get('enable_adaptive', True)}")
-        print("\033[K" + f"- Enable class-wise preference in training: {config.get('training_params', {}).get('class_preference',True )}")
+        print(f"\n⚙️  {Colors.BOLD}Current Configuration:{Colors.ENDC}")
+        config_display = [
+            ("Device", config.get('compute_device', 'cuda' if torch.cuda.is_available() else 'cpu')),
+            ("Learning Rate", config.get('training_params', {}).get('learning_rate', 0.1)),
+            ("Epochs", config.get('training_params', {}).get('epochs', 1000)),
+            ("Test Fraction", config.get('training_params', {}).get('test_fraction', 0.2)),
+            ("Adaptive Training", config.get('training_params', {}).get('enable_adaptive', True)),
+            ("Class Preference", config.get('training_params', {}).get('class_preference', True)),
+            ("Model Type", config.get('modelType', 'Histogram'))
+        ]
 
-        # Get mode
-        mode = input("\033[K" + f"{Colors.BOLD}Enter mode (train/train_predict/predict/invertDBNN): {Colors.ENDC}").strip().lower()
-        while mode not in ['train', 'train_predict', 'predict', 'invertDBNN']:
-            print("\033[K" + f"{Colors.RED}Invalid mode. Please enter 'train', 'train_predict', 'predict', or 'invertDBNN'.{Colors.ENDC}")
-            mode = input("\033[K" + f"{Colors.BOLD}Enter mode: {Colors.ENDC}").strip().lower()
+        for param, value in config_display:
+            color = Colors.GREEN if value else Colors.YELLOW
+            print(f"   {Colors.CYAN}{param:<20}: {color}{value}{Colors.ENDC}")
 
-        # Update config based on mode
+        # Mode selection
+        print(f"\n🎯 {Colors.BOLD}Operation Mode:{Colors.ENDC}")
+        modes = [
+            ("1", "Train", "Train model only"),
+            ("2", "Train & Predict", "Train then predict (recommended)"),
+            ("3", "Predict", "Predict using trained model"),
+            ("4", "Invert DBNN", "Reconstruct features")
+        ]
+
+        for num, name, desc in modes:
+            print(f"   {Colors.YELLOW}{num}. {name:<15} {Colors.WHITE}- {desc}{Colors.ENDC}")
+
+        mode_choice = input(f"\n🎯 {Colors.BOLD}Select mode (1-4): {Colors.ENDC}").strip()
+        mode_map = {"1": "train", "2": "train_predict", "3": "predict", "4": "invertDBNN"}
+        mode = mode_map.get(mode_choice, "train_predict")
+
+        # Model type selection
+        print(f"\n🧠 {Colors.BOLD}Model Type:{Colors.ENDC}")
+        model_choice = input(f"Select model type (1: Histogram, 2: Gaussian) [1]: {Colors.ENDC}").strip()
+        model_type = "Gaussian" if model_choice == "2" else "Histogram"
+
+        # Visualization option
+        viz_choice = input(f"\n📊 {Colors.BOLD}Generate training visualization? (y/N): {Colors.ENDC}").strip().lower()
+        generate_viz = viz_choice in ['y', 'yes']
+
+        # Update config based on selections
         config['train'] = mode in ['train', 'train_predict']
         config['predict'] = mode in ['predict', 'train_predict']
-
-        # For predict mode, get input file
-        input_csv = None
-        if mode == 'predict':
-            input_csv = input("\033[K" + f"{Colors.BOLD}Enter path to input CSV file (or press Enter to use default): {Colors.ENDC}").strip()
-            if not input_csv:
-                dataset_pairs = find_dataset_pairs()
-                if dataset_pairs:
-                    input_csv = dataset_pairs[0][2]  # Use first found CSV
-                    print("\033[K" + f"{Colors.YELLOW}Using default CSV file: {input_csv}{Colors.ENDC}")
-                else:
-                    print("\033[K" + f"{Colors.RED}No default CSV file found.{Colors.ENDC}")
-                    return
+        config['modelType'] = model_type
 
         # Save updated config
         with open(conf_path, 'w') as f:
             json.dump(config, f, indent=2)
 
-        print("\033[K" + f"{Colors.GREEN}Configuration updated.{Colors.ENDC}")
+        print(f"✅ {Colors.GREEN}Configuration updated.{Colors.ENDC}")
 
         # Process the dataset
-        csv_path = input_csv if input_csv else f'data/{dataset_name}/{dataset_name}.csv'
-        process_single_dataset(dataset_name, conf_path, csv_path, mode)
+        process_single_dataset(dataset_name, conf_path, csv_path, mode, model_type, generate_viz)
 
-    elif not args.file_path and not args.mode:
+    # Main execution flow
+    print_banner()
+
+    if args.list_datasets:
+        dataset_pairs = find_dataset_pairs()
+        if dataset_pairs:
+            display_dataset_menu(dataset_pairs)
+        else:
+            print(f"❌ {Colors.RED}No datasets found.{Colors.ENDC}")
+        return
+
+    if args.interactive:
+        interactive_mode()
+
+    elif not args.file_path and args.mode == 'train_predict':
         # No arguments provided - search for datasets
-        parser.print_help()
-        input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
         process_datasets()
 
     elif args.mode:
@@ -7089,35 +7636,36 @@ def main():
             if not args.file_path:
                 dataset_pairs = find_dataset_pairs()
                 if dataset_pairs:
-                    args.file_path = dataset_pairs[0][2]  # Use first found CSV
-                    print("\033[K" + f"{Colors.YELLOW}Using default CSV file: {args.file_path}{Colors.ENDC}")
+                    args.file_path = dataset_pairs[0][2]
+                    print(f"📁 {Colors.YELLOW}Using default CSV file: {args.file_path}{Colors.ENDC}")
                 else:
-                    print("\033[K" + f"{Colors.RED}No datasets found for inversion.{Colors.ENDC}")
+                    print(f"❌ {Colors.RED}No datasets found for inversion.{Colors.ENDC}")
                     return
 
             basename = os.path.splitext(os.path.basename(args.file_path))[0]
             conf_path = os.path.join('data', basename, f'{basename}.conf')
             csv_path = os.path.join('data', basename, f'{basename}.csv')
-            process_single_dataset(basename, conf_path, csv_path, 'invertDBNN', model_type=args.model_type)
+            process_single_dataset(basename, conf_path, csv_path, 'invertDBNN', args.model_type, args.visualize)
 
         elif args.mode in ['train', 'train_predict', 'predict']:
             if args.file_path:
-                basename =get_dataset_name_from_path(args.file_path)
-                workfile=os.path.splitext(os.path.basename(args.file_path))[0]
+                basename = get_dataset_name_from_path(args.file_path)
+                workfile = os.path.splitext(os.path.basename(args.file_path))[0]
                 conf_path = os.path.join('data', basename, f'{basename}.conf')
                 csv_path = os.path.join('data', basename, f'{workfile}.csv')
-                process_single_dataset(basename, conf_path, csv_path, args.mode, model_type=args.model_type)
+                process_single_dataset(basename, conf_path, csv_path, args.mode, args.model_type, args.visualize)
             else:
                 dataset_pairs = find_dataset_pairs()
                 if dataset_pairs:
                     basename, conf_path, csv_path = dataset_pairs[0]
-                    print("\033[K" + f"{Colors.YELLOW}Using default dataset: {basename}{Colors.ENDC}")
-                    process_single_dataset(basename, conf_path, csv_path, args.mode, model_type=args.model_type)
+                    print(f"📁 {Colors.YELLOW}Using default dataset: {basename}{Colors.ENDC}")
+                    process_single_dataset(basename, conf_path, csv_path, args.mode, args.model_type, args.visualize)
                 else:
-                    print("\033[K" + f"{Colors.RED}No datasets found.{Colors.ENDC}")
+                    print(f"❌ {Colors.RED}No datasets found.{Colors.ENDC}")
 
     else:
         parser.print_help()
+        print(f"\n💡 {Colors.YELLOW}Tip: Use --interactive for guided mode or --list_datasets to see available datasets.{Colors.ENDC}")
 
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
