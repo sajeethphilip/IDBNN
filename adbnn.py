@@ -7411,8 +7411,8 @@ def main():
             print(f"\n{'='*80}")
             print(f"🚀 {Colors.BOLD}Processing: {Colors.GREEN}{dataset_name}{Colors.ENDC}")
             print(f"📋 {Colors.BOLD}Mode: {Colors.YELLOW}{mode}{Colors.ENDC}")
-            print(f"🧠 {Colors.BOLD}Model: {Colors.CYAN}{model_type}{Colors.ENDC}")
-            print(f"📊 {Colors.BOLD}Visualization: {Colors.MAGENTA}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
+            print(f"🧠 {Colors.BOLD}Model: {Colors.YELLOW}{model_type}{Colors.ENDC}")
+            print(f"📊 {Colors.BOLD}Visualization: {Colors.GREEN}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
             print(f"{'='*80}")
 
             # Create DBNN instance
