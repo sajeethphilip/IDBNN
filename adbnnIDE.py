@@ -3236,7 +3236,6 @@ class AdaptiveDBNNGUI:
         except Exception as e:
             self.log_output(f"⚠️ Prediction summary error: {e}")
 
-
     def verify_feature_columns(self):
         """Verify feature columns exactly match training configuration"""
         try:
@@ -3941,8 +3940,6 @@ class AdaptiveDBNNGUI:
             else:
                 var.set(False)
 
-
-
     def load_data_file(self):
         """Load data file and populate feature selection with FITS support."""
         file_path = self.data_file_var.get()
@@ -4239,7 +4236,7 @@ class AdaptiveDBNNGUI:
             self.log_output(f"❌ Error applying hyperparameters: {e}")
 
     def initialize_model(self):
-        """Initialize the Adaptive DBNN model with proper configuration"""
+        """Lightweight initialization - ensure GUI parameters are synchronized"""
         try:
             # Get dataset name from current file
             if hasattr(self, 'current_data_file') and self.current_data_file:
@@ -4256,58 +4253,58 @@ class AdaptiveDBNNGUI:
             self.feature_columns = [col for col, var in self.feature_vars.items()
                                   if var.get() and (self.target_column is None or col != self.target_column)]
 
-            print(f"🎯 Initializing model for: {self.dataset_name}")
+            print(f"🎯 Preparing for command-line execution: {self.dataset_name}")
             print(f"📊 Target: {self.target_column}")
             print(f"🔧 Features: {len(self.feature_columns)}")
 
-            # Create proper configuration dictionary
+            # Create comprehensive config with ALL GUI parameters
             config_dict = {
                 'dataset_name': self.dataset_name,
                 'target_column': self.target_column,
                 'feature_columns': self.feature_columns,
 
-                # DBNN Core Parameters
-                'resol': int(self.config_vars.get("dbnn_resolution", tk.StringVar(value="100")).get()),
-                'gain': float(self.config_vars.get("dbnn_gain", tk.StringVar(value="2.0")).get()),
-                'margin': float(self.config_vars.get("dbnn_margin", tk.StringVar(value="0.2")).get()),
-                'patience': int(self.config_vars.get("dbnn_patience", tk.StringVar(value="10")).get()),
-                'max_epochs': int(self.config_vars.get("dbnn_max_epochs", tk.StringVar(value="100")).get()),
-                'min_improvement': float(self.config_vars.get("dbnn_min_improvement", tk.StringVar(value="0.0000001")).get()),
+                # Core DBNN parameters from GUI
+                'resol': int(self.config_vars["dbnn_resolution"].get()),
+                'gain': float(self.config_vars["dbnn_gain"].get()),
+                'margin': float(self.config_vars["dbnn_margin"].get()),
+                'patience': int(self.config_vars["dbnn_patience"].get()),
+                'max_epochs': int(self.config_vars["dbnn_max_epochs"].get()),
+                'min_improvement': float(self.config_vars["dbnn_min_improvement"].get()),
 
-                # Adaptive Learning Parameters
-                'initial_samples_per_class': int(self.initial_samples_var.get()),
-                'max_adaptive_rounds': int(self.max_rounds_var.get()),
-                'max_margin_samples_per_class': int(self.max_samples_var.get()),
-                'enable_acid_test': self.enable_acid_var.get(),
-                'enable_kl_divergence': self.enable_kl_var.get(),
-                'disable_sample_limit': self.disable_sample_limit_var.get(),
-                'enable_visualization': self.enable_visualization_var.get(),
-
-                # DBNN-specific parameters from your config
-                'model_type': 'Histogram',
-                'mode': 'train_predict',
-                'learning_rate': 0.001,
-                'epochs': 1000,
-                'test_fraction': 0.2,
-                'random_seed': 42,
-                'enable_adaptive': True
+                # Adaptive learning configuration from GUI
+                'adaptive_learning': {
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
+                    'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                    'training_convergence_epochs': int(self.config_vars["adaptive_training_convergence_epochs"].get()),
+                    'min_training_accuracy': float(self.config_vars["adaptive_min_training_accuracy"].get()),
+                    'adaptive_margin_relaxation': float(self.config_vars["adaptive_adaptive_margin_relaxation"].get()),
+                }
             }
 
-            self.log_output("🎯 Creating AdaptiveDBNN with proper configuration...")
-
-            # Initialize with config dictionary
             self.adaptive_model = AdaptiveDBNN(config=config_dict)
 
-            self.log_output("✅ Adaptive DBNN initialized successfully")
-            self.model_initialized = True
-
-            # Store the data in adaptive model if available
+            # Store the original data in the adaptive model for command-line saving
             if hasattr(self, 'original_data') and self.original_data is not None:
                 self.adaptive_model.original_data = self.original_data
-                self.log_output("✅ Data linked to adaptive model")
+
+                # Also store feature info for visualization
+                if self.target_column and self.target_column in self.original_data.columns:
+                    self.adaptive_model.X_full = self.original_data[self.feature_columns].values
+                    self.adaptive_model.y_full = self.original_data[self.target_column].values
+                    self.adaptive_model.feature_columns = self.feature_columns
+
+            self.log_output("✅ Ready for command-line adaptive learning")
+            self.log_output(f"🔧 Configuration: {self.max_rounds_var.get()} rounds, {self.initial_samples_var.get()} initial samples")
+            self.model_initialized = True
 
         except Exception as e:
-            self.log_output(f"❌ Error initializing Adaptive DBNN: {str(e)}")
+            self.log_output(f"❌ Error initializing for command-line: {str(e)}")
             import traceback
             self.log_output(traceback.format_exc())
             self.model_initialized = False
@@ -4393,107 +4390,53 @@ class AdaptiveDBNNGUI:
         self.results_text.config(state=tk.DISABLED)
 
     def run_adaptive_learning(self):
-        """Run adaptive learning using the AdaptiveDBNN instance (REPLACES current method)"""
+        """Run adaptive learning with model conflict handling"""
         if not self.model_initialized or self.adaptive_model is None:
             messagebox.showwarning("Warning", "Please initialize the model first.")
             return
 
         try:
-            self.update_status("Starting adaptive learning...")
-            self.log_message("🚀 STARTING REAL ADAPTIVE LEARNING")
-            self.log_message("=" * 60)
+            self.update_status("Checking for existing models...")
 
-            # Update the adaptive model configuration with current GUI values
-            config_updates = {
-                'dataset_name': self.dataset_name,
-                'target_column': self.target_column,
-                'feature_columns': self.feature_columns,
+            # Check for existing models and handle conflicts
+            choice = self._check_and_handle_existing_models_gui()
+            if choice == "cancel":
+                self.update_status("Training cancelled")
+                return
 
-                # DBNN Core Parameters
-                'resol': int(self.config_vars.get("dbnn_resolution", tk.StringVar(value="100")).get()),
-                'gain': float(self.config_vars.get("dbnn_gain", tk.StringVar(value="2.0")).get()),
-                'margin': float(self.config_vars.get("dbnn_margin", tk.StringVar(value="0.2")).get()),
-                'patience': int(self.config_vars.get("dbnn_patience", tk.StringVar(value="10")).get()),
-                'max_epochs': int(self.config_vars.get("dbnn_max_epochs", tk.StringVar(value="100")).get()),
-                'min_improvement': float(self.config_vars.get("dbnn_min_improvement", tk.StringVar(value="0.0000001")).get()),
+            # Get model files for handling the choice
+            has_existing, model_files = self.adaptive_model._check_existing_model()
 
-                # Adaptive Learning Parameters
-                'initial_samples_per_class': int(self.initial_samples_var.get()),
-                'max_adaptive_rounds': int(self.max_rounds_var.get()),
-                'max_margin_samples_per_class': int(self.max_samples_var.get()),
-                'enable_acid_test': self.enable_acid_var.get(),
-                'enable_kl_divergence': self.enable_kl_var.get(),
-                'disable_sample_limit': self.disable_sample_limit_var.get(),
-                'enable_visualization': self.enable_visualization_var.get(),
-            }
+            # Handle the user's choice
+            success = self._handle_model_choice(choice, model_files)
+            if not success:
+                self.log_output("❌ Failed to handle model configuration")
+                return
 
-            # Update the model configuration
-            self.adaptive_model.config.update(config_updates)
+            self.update_status("Starting adaptive learning via command-line...")
+            self.log_output("🚀 STARTING ADAPTIVE LEARNING")
+            self.log_output("=" * 60)
 
-            # Update adaptive config specifically
-            if hasattr(self.adaptive_model, 'adaptive_config'):
-                adaptive_updates = {
-                    'initial_samples_per_class': int(self.initial_samples_var.get()),
-                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
-                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
-                    'enable_acid_test': self.enable_acid_var.get(),
-                    'enable_kl_divergence': self.enable_kl_var.get(),
-                    'disable_sample_limit': self.disable_sample_limit_var.get(),
-                    'enable_visualization': self.enable_visualization_var.get(),
-                }
-                self.adaptive_model.adaptive_config.update(adaptive_updates)
+            # Execute command-line process
+            success = self._execute_adaptive_via_command_line()
 
-            # Set progress callback for real-time updates
-            def progress_callback(message):
-                self.log_message(f"🔄 {message}")
-                self.root.update()
+            if success:
+                # Load results for GUI analysis
+                self._load_training_results()
 
-            self.adaptive_model.set_progress_callback(progress_callback)
+                # Generate GUI visualizations
+                self._generate_gui_analysis()
 
-            # Display configuration
-            self.log_message("🎯 Adaptive Learning Configuration:")
-            self.log_message(f"   Dataset: {self.dataset_name}")
-            self.log_message(f"   Target: {self.target_column}")
-            self.log_message(f"   Features: {len(self.feature_columns)}")
-            self.log_message(f"   Max Rounds: {self.max_rounds_var.get()}")
-            self.log_message(f"   Initial Samples/Class: {self.initial_samples_var.get()}")
-            self.log_message(f"   Max Samples/Round: {self.max_samples_var.get()}")
-            self.log_message(f"   Acid Test: {'Enabled' if self.enable_acid_var.get() else 'Disabled'}")
-            self.log_message(f"   Visualization: {'Enabled' if self.enable_visualization_var.get() else 'Disabled'}")
-
-            # CALL THE REAL ADAPTIVE LEARNING METHOD FROM AdaptiveDBNN CLASS
-            self.log_message("\n🎯 Calling AdaptiveDBNN.adaptive_learn()...")
-
-            # This calls the actual adaptive_learn method that does real sample selection rounds
-            results = self.adaptive_model.adaptive_learn(
-                feature_columns=self.feature_columns
-            )
-
-            # Handle the results
-            if results and len(results) == 4:  # Should return (X_train, y_train, X_test, y_test)
-                X_train, y_train, X_test, y_test = results
-
-                # Store results
-                self.X_train = X_train
-                self.y_train = y_train
-                self.X_test = X_test
-                self.y_test = y_test
-
-                self.log_message(f"✅ Adaptive learning completed successfully!")
-                self.log_message(f"📊 Final training set: {len(X_train)} samples")
-                self.log_message(f"📊 Final test set: {len(X_test)} samples")
-
-                # Display comprehensive results
-                self.display_adaptive_results()
+                self.model_trained = True
+                self.update_status("Adaptive learning completed!")
+                self.log_output("✅ Adaptive learning completed successfully!")
             else:
-                self.log_message("⚠️ Adaptive learning completed but returned unexpected results")
-
-            self.model_trained = True
-            self.update_status("Adaptive learning completed!")
+                self.update_status("Command-line execution failed")
+                self.log_output("❌ Command-line execution failed")
 
         except Exception as e:
-            self.update_status("Error in adaptive training")
-            self.log_message(f"❌ Error during adaptive learning: {str(e)}")
+            self.update_status("Error in adaptive learning")
+            self.log_output(f"❌ Adaptive learning error: {str(e)}")
             import traceback
             traceback.print_exc()
 
@@ -4611,6 +4554,459 @@ class AdaptiveDBNNGUI:
             if hasattr(self.adaptive_model, 'X_full'):
                 print(f"X_full: {self.adaptive_model.X_full.shape if self.adaptive_model.X_full is not None else 'None'}")
 
+    def _save_for_command_line_execution(self):
+        """Save configuration and data for command-line execution with COMPLETE DBNN config structure"""
+        try:
+            # Save data to CSV
+            if hasattr(self, 'original_data') and self.original_data is not None:
+                data_dir = Path('data') / self.dataset_name
+                data_dir.mkdir(parents=True, exist_ok=True)
+                csv_path = data_dir / f"{self.dataset_name}.csv"
+                self.original_data.to_csv(csv_path, index=False)
+                self.log_output(f"💾 Data saved for command-line: {csv_path}")
+
+            # Save configuration with COMPLETE DBNN structure
+            config_path = data_dir / f"{self.dataset_name}.conf"
+
+            # Build COMPREHENSIVE configuration matching DBNN expectations
+            config = {
+                'dataset_name': self.dataset_name,
+                'file_path': f"{self.dataset_name}.csv",
+                'target_column': self.target_column,
+                'separator': ",",
+                'has_header': True,
+                'modelType': 'Histogram',
+
+                # Execution flags - CRITICAL for fresh start
+                'execution_flags': {
+                    'train': True,
+                    'train_only': False,
+                    'predict': True,
+                    'fresh_start': True,  # Fresh start for new training
+                    'use_previous_model': False,  # Don't use previous model
+                    'gen_samples': False
+                },
+
+                # Complete training parameters as expected by DBNN
+                'training_params': {
+                    # Core DBNN parameters from GUI
+                    "override_global_cardinality": False,
+                    "trials": 100,
+                    "cardinality_threshold": 0.9,
+                    "minimum_training_accuracy": 0.95,
+                    "cardinality_tolerance": 8,
+                    "learning_rate": 0.001,
+                    "random_seed": 42,
+                    "epochs": 1000,
+                    "test_fraction": 0.2,
+                    "n_bins_per_dim": 21,  # This might be equivalent to 'resol'
+                    "enable_adaptive": True,
+                    "compute_device": "auto",
+                    "invert_DBNN": True,
+                    "reconstruction_weight": 0.5,
+                    "feedback_strength": 0.3,
+                    "inverse_learning_rate": 0.001,
+                    "save_plots": False,
+                    "class_preference": True,
+
+                    # Additional parameters that might be needed
+                    "resol": int(self.config_vars["dbnn_resolution"].get()),  # Keep both for compatibility
+                    "gain": float(self.config_vars["dbnn_gain"].get()),
+                    "margin": float(self.config_vars["dbnn_margin"].get()),
+                    "patience": int(self.config_vars["dbnn_patience"].get()),
+                    "max_epochs": int(self.config_vars["dbnn_max_epochs"].get()),
+                    "min_improvement": float(self.config_vars["dbnn_min_improvement"].get()),
+
+                    # Adaptive learning parameters from GUI
+                    'adaptive_rounds': int(self.max_rounds_var.get()),
+                    'initial_samples': int(self.initial_samples_var.get()),
+                    'max_samples_per_round': int(self.max_samples_var.get()),
+
+                    # Adaptive learning options from GUI
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+
+                    # Additional adaptive parameters from GUI
+                    'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
+                    'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                    'training_convergence_epochs': int(self.config_vars["adaptive_training_convergence_epochs"].get()),
+                    'min_training_accuracy': float(self.config_vars["adaptive_min_training_accuracy"].get()),
+                    'adaptive_margin_relaxation': float(self.config_vars["adaptive_adaptive_margin_relaxation"].get()),
+                },
+
+                # Active learning configuration
+                'active_learning': {
+                    "tolerance": 1.0,
+                    "cardinality_threshold_percentile": 95,
+                    "strong_margin_threshold": 0.01,
+                    "marginal_margin_threshold": 0.01,
+                    "min_divergence": 0.1
+                },
+
+                # Anomaly detection configuration
+                'anomaly_detection': {
+                    "initial_weight": 1e-6,
+                    "threshold": 0.01,
+                    "missing_value": -99999,
+                    "missing_weight_multiplier": 0.1
+                },
+
+                'column_names': self.feature_columns + [self.target_column]
+            }
+
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            self.log_output(f"💾 COMPLETE DBNN configuration saved: {config_path}")
+            self.log_output(f"🔧 Execution flags: fresh_start=True, use_previous_model=False")
+            self.log_output(f"🔧 Adaptive rounds: {self.max_rounds_var.get()}")
+            self.log_output(f"🔧 Initial samples: {self.initial_samples_var.get()}")
+            self.log_output(f"🔧 Max samples/round: {self.max_samples_var.get()}")
+            self.log_output(f"🔧 Model type: Histogram")
+            self.log_output(f"🔧 Core parameters: resol={self.config_vars['dbnn_resolution'].get()}, gain={self.config_vars['dbnn_gain'].get()}")
+
+            return True
+
+        except Exception as e:
+            self.log_output(f"❌ Error saving complete DBNN config: {e}")
+            return False
+
+    def _execute_adaptive_via_command_line(self):
+        """Execute adaptive learning via command-line with real-time output"""
+        try:
+            import subprocess
+            import sys
+
+            # Build command
+            cmd = [
+                sys.executable, "-m", "adbnn",
+                "--mode", "train_predict",
+                "--file_path", str(Path('data') / self.dataset_name / f"{self.dataset_name}.csv")
+            ]
+
+            self.log_output(f"🔧 Executing command-line DBNN: {' '.join(cmd)}")
+
+            # Execute with real-time output
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1,
+                encoding='utf-8',
+                errors='replace'
+            )
+
+            # Stream output to GUI in real-time
+            def stream_output():
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        # Use thread-safe GUI update
+                        self.root.after(0, lambda l=line: self.log_output(f"CLI: {l}"))
+                process.wait()
+
+            # Start output streaming in separate thread
+            import threading
+            output_thread = threading.Thread(target=stream_output, daemon=True)
+            output_thread.start()
+
+            # Wait for process completion with timeout
+            try:
+                process.wait(timeout=3600)  # 1 hour timeout
+                return process.returncode == 0
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                self.log_output("❌ Command-line process timed out")
+                return False
+
+        except Exception as e:
+            self.log_output(f"❌ Command-line execution error: {e}")
+            return False
+
+    def _load_training_results(self):
+        """Load training results from command-line output"""
+        try:
+            results_dir = Path('data') / self.dataset_name / 'Results'
+
+            # Load training history
+            history_file = results_dir / 'training_history.json'
+            if history_file.exists():
+                with open(history_file, 'r') as f:
+                    self.training_history = json.load(f)
+                self.log_output(f"📊 Loaded training history: {len(self.training_history)} rounds")
+
+            # Load round statistics
+            stats_file = results_dir / 'round_stats.json'
+            if stats_file.exists():
+                with open(stats_file, 'r') as f:
+                    self.round_stats = json.load(f)
+                self.log_output(f"📈 Loaded round statistics: {len(self.round_stats)} entries")
+
+            # Load adaptive results
+            results_file = results_dir / 'adaptive_results.json'
+            if results_file.exists():
+                with open(results_file, 'r') as f:
+                    adaptive_results = json.load(f)
+                if 'best_accuracy' in adaptive_results:
+                    self.log_output(f"🏆 Best accuracy: {adaptive_results['best_accuracy']:.4f}")
+
+            self.log_output("📊 Training results loaded for GUI analysis")
+
+        except Exception as e:
+            self.log_output(f"⚠️ Error loading training results: {e}")
+
+    def _generate_gui_analysis(self):
+        """Generate GUI-specific analysis and visualizations"""
+        try:
+            if (hasattr(self.adaptive_model, 'X_full') and
+                hasattr(self.adaptive_model, 'y_full') and
+                self.training_history and self.round_stats):
+
+                # Initialize visualizers if not already done
+                if not hasattr(self, 'comprehensive_visualizer'):
+                    self.comprehensive_visualizer = ComprehensiveAdaptiveVisualizer(self.dataset_name)
+
+                if not hasattr(self, 'advanced_visualizer'):
+                    self.advanced_visualizer = AdvancedInteractiveVisualizer(self.dataset_name)
+
+                # Generate comprehensive visualizations
+                self.comprehensive_visualizer.create_comprehensive_visualizations(
+                    self.adaptive_model,
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full,
+                    self.training_history,
+                    self.round_stats,
+                    self.adaptive_model.feature_columns
+                )
+
+                # Generate advanced 3D visualizations
+                self.advanced_visualizer.create_advanced_3d_dashboard(
+                    self.adaptive_model.X_full,
+                    self.adaptive_model.y_full,
+                    self.training_history,
+                    self.adaptive_model.feature_columns
+                )
+
+                self.log_output("🎨 GUI analysis and visualizations completed!")
+
+                # Open visualization location
+                self.open_visualization_location()
+
+        except Exception as e:
+            self.log_output(f"⚠️ GUI analysis error: {e}")
+
+    def _save_config_for_continued_training(self):
+        """Save configuration for continued training with GUI parameters"""
+        try:
+            # Save data to CSV
+            if hasattr(self, 'original_data') and self.original_data is not None:
+                csv_path = self.config_dir / f"{self.dataset_name}.csv"
+                self.original_data.to_csv(csv_path, index=False)
+                print(f"💾 Data saved for continued training: {csv_path}")
+
+            # Update config for continued training
+            config_path = self.config_dir / f"{self.dataset_name}.conf"
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+            else:
+                config = {}
+
+            # Set execution flags for continued training
+            if 'execution_flags' not in config:
+                config['execution_flags'] = {}
+
+            config['execution_flags'].update({
+                'train': True,
+                'train_only': False,
+                'predict': True,
+                'fresh_start': False,  # Continue from previous model
+                'use_previous_model': True  # Use previous model
+            })
+
+            # Update training parameters with GUI values
+            if 'training_params' not in config:
+                config['training_params'] = {}
+
+            # Get adaptive learning parameters from GUI config
+            adaptive_config = self.config.get('adaptive_learning', {})
+
+            config['training_params'].update({
+                # Update adaptive parameters from GUI
+                'enable_adaptive': True,
+                'adaptive_rounds': int(adaptive_config.get('max_adaptive_rounds', 20)),
+                'initial_samples': int(adaptive_config.get('initial_samples_per_class', 5)),
+                'max_samples_per_round': int(adaptive_config.get('max_margin_samples_per_class', 25)),
+
+                # Adaptive learning options from GUI
+                'enable_acid_test': adaptive_config.get('enable_acid_test', True),
+                'enable_kl_divergence': adaptive_config.get('enable_kl_divergence', False),
+                'disable_sample_limit': adaptive_config.get('disable_sample_limit', False),
+            })
+
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            print(f"💾 Config updated for CONTINUED training: {config_path}")
+            print(f"🔧 Execution flags: fresh_start=False, use_previous_model=True")
+            print(f"🔧 Adaptive rounds: {config['training_params']['adaptive_rounds']}")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error saving config for continued training: {e}")
+            return False
+
+    def _check_and_handle_existing_models_gui(self):
+        """Check for existing models and handle conflicts in GUI mode"""
+        try:
+            if not hasattr(self, 'adaptive_model') or not self.adaptive_model:
+                return "fresh_start"  # No model initialized, proceed with fresh start
+
+            # Use the adaptive model's method to check for existing models
+            has_existing, model_files = self.adaptive_model._check_existing_model()
+
+            if not has_existing:
+                self.log_output("✅ No existing models found - starting fresh training")
+                return "fresh_start"
+
+            # Show interactive dialog in GUI
+            return self._show_model_conflict_dialog(model_files)
+
+        except Exception as e:
+            self.log_output(f"⚠️ Error checking existing models: {e}")
+            return "fresh_start"  # Default to fresh start on error
+
+    def _show_model_conflict_dialog(self, model_files):
+        """Show dialog to user about existing model conflicts"""
+        try:
+            # Create a custom dialog
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Existing Models Found")
+            dialog.geometry("600x400")
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            # Center the dialog
+            dialog.update_idletasks()
+            x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+            y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+            dialog.geometry(f"+{x}+{y}")
+
+            # Dialog content
+            ttk.Label(dialog, text="🚨 Existing Model Files Detected!",
+                     font=('Arial', 12, 'bold'), foreground='red').pack(pady=10)
+
+            ttk.Label(dialog, text="The following model files already exist:",
+                     font=('Arial', 10)).pack(pady=5)
+
+            # List model files
+            list_frame = ttk.Frame(dialog)
+            list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+            listbox = tk.Listbox(list_frame, height=8)
+            scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+            listbox.configure(yscrollcommand=scrollbar.set)
+
+            for model_file in model_files:
+                file_size = os.path.getsize(model_file) / 1024  # KB
+                display_text = f"{model_file} ({file_size:.1f} KB)"
+                listbox.insert(tk.END, display_text)
+
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            ttk.Label(dialog, text="Choose how to proceed:",
+                     font=('Arial', 10, 'bold')).pack(pady=10)
+
+            # Store user choice
+            user_choice = tk.StringVar(value="fresh_start")
+
+            # Option frames
+            options_frame = ttk.Frame(dialog)
+            options_frame.pack(fill=tk.X, padx=20, pady=5)
+
+            ttk.Radiobutton(options_frame, text="🔄 Continue Training - Use existing model and continue training",
+                           variable=user_choice, value="continue_training").pack(anchor=tk.W, pady=2)
+
+            ttk.Radiobutton(options_frame, text="🆕 Fresh Start - Backup and delete existing models",
+                           variable=user_choice, value="fresh_start").pack(anchor=tk.W, pady=2)
+
+            ttk.Radiobutton(options_frame, text="💾 Rename Model - Save with timestamp to preserve existing",
+                           variable=user_choice, value="rename").pack(anchor=tk.W, pady=2)
+
+            # Action buttons
+            button_frame = ttk.Frame(dialog)
+            button_frame.pack(fill=tk.X, padx=20, pady=10)
+
+            def on_ok():
+                dialog.user_choice = user_choice.get()
+                dialog.destroy()
+
+            def on_cancel():
+                dialog.user_choice = "cancel"
+                dialog.destroy()
+
+            ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT, padx=5)
+            ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=5)
+
+            # Wait for dialog response
+            self.root.wait_window(dialog)
+
+            if hasattr(dialog, 'user_choice'):
+                choice = dialog.user_choice
+                if choice == "cancel":
+                    self.log_output("❌ Training cancelled by user")
+                    return "cancel"
+                else:
+                    self.log_output(f"✅ User choice: {choice}")
+                    return choice
+            else:
+                self.log_output("❌ Dialog closed without selection")
+                return "cancel"
+
+        except Exception as e:
+            self.log_output(f"⚠️ Error showing conflict dialog: {e}")
+            return "fresh_start"
+
+    def _handle_model_choice(self, choice, model_files):
+        """Handle the user's choice about existing models"""
+        try:
+            if choice == "continue_training":
+                self.log_output("🔄 Continuing training with existing model...")
+                # Update config for continued training
+                return self.adaptive_model._save_config_for_continued_training()
+
+            elif choice == "fresh_start":
+                self.log_output("🆕 Starting fresh training...")
+                # Backup and delete existing models
+                self.adaptive_model._backup_existing_models(model_files)
+                self.adaptive_model._delete_existing_models(model_files)
+                # Save config for fresh start
+                return self.adaptive_model._save_config_for_command_line()
+
+            elif choice == "rename":
+                self.log_output("💾 Renaming model with timestamp...")
+                # Rename the dataset to create a new model
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                old_dataset_name = self.dataset_name
+                self.dataset_name = f"{self.dataset_name}_{timestamp}"
+                self.log_output(f"📝 Renamed dataset: {old_dataset_name} -> {self.dataset_name}")
+                # Update adaptive model with new name
+                self.adaptive_model.dataset_name = self.dataset_name
+                self.adaptive_model.config['dataset_name'] = self.dataset_name
+                # Save config for fresh start with new name
+                return self.adaptive_model._save_config_for_command_line()
+
+            else:  # cancel
+                return False
+
+        except Exception as e:
+            self.log_output(f"❌ Error handling model choice: {e}")
+            return False
+
 class DataPreprocessor:
     """Placeholder for data preprocessing functionality"""
 
@@ -4651,11 +5047,501 @@ class AdaptiveDBNN:
 
         self.progress_callback = None
 
-        # Initialize using robust approach
-        self._initialize_robust()
+        # Initialize using minimal approach for command-line delegation
+        self._initialize_minimal()
         self._initialize_adaptive_state()
 
+    def _initialize_minimal(self):
+        """Minimal initialization for command-line delegation"""
+        try:
+            print(f"🔧 Initializing Adaptive DBNN for command-line execution: {self.dataset_name}")
 
+            # Only create the basic structure needed for command-line
+            self.config_dir = Path('data') / self.dataset_name
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create minimal config for command-line
+            self._create_minimal_config()
+
+            # Mark as ready for command-line execution
+            self._ready_for_command_line = True
+            print(f"✅ Adaptive DBNN ready for command-line execution: {self.dataset_name}")
+
+        except Exception as e:
+            print(f"⚠️ Minimal initialization failed: {e}")
+            self._ready_for_command_line = False
+
+    def _create_minimal_config(self):
+        """Create COMPLETE configuration for command-line execution matching DBNN expectations"""
+        config_path = self.config_dir / f"{self.dataset_name}.conf"
+
+        complete_config = {
+            'dataset_name': self.dataset_name,
+            'file_path': f"{self.dataset_name}.csv",
+            'target_column': self.config.get('target_column', 'target'),
+            'separator': ",",
+            'has_header': True,
+            'modelType': 'Histogram',
+            'execution_flags': {
+                'train': True,
+                'train_only': False,
+                'predict': True,
+                'fresh_start': True,  # ALWAYS fresh start for new training
+                'use_previous_model': False,  # Don't use previous models
+                'gen_samples': False
+            },
+            'training_params': {
+                # Core DBNN parameters for Histogram model
+                "override_global_cardinality": False,
+                "trials": 100,
+                "cardinality_threshold": 0.9,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_tolerance": 8,
+                "learning_rate": 0.001,
+                "random_seed": 42,
+                "epochs": 1000,
+                "test_fraction": 0.2,
+                "n_bins_per_dim": 21,
+                "enable_adaptive": True,
+                "compute_device": "auto",
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.001,
+                "save_plots": False,
+                "class_preference": True,
+
+                # Additional parameters for compatibility
+                "resol": int(self.config.get('resol', 100)),
+                "gain": float(self.config.get('gain', 2.0)),
+                "margin": float(self.config.get('margin', 0.2)),
+
+                # Adaptive learning parameters
+                'adaptive_rounds': int(self.config.get('adaptive_learning', {}).get('max_adaptive_rounds', 20)),
+                'initial_samples': int(self.config.get('adaptive_learning', {}).get('initial_samples_per_class', 5)),
+                'max_samples_per_round': int(self.config.get('adaptive_learning', {}).get('max_margin_samples_per_class', 25)),
+            },
+            'active_learning': {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.01,
+                "marginal_margin_threshold": 0.01,
+                "min_divergence": 0.1
+            },
+            'anomaly_detection': {
+                "initial_weight": 1e-6,
+                "threshold": 0.01,
+                "missing_value": -99999,
+                "missing_weight_multiplier": 0.1
+            },
+            'column_names': self.config.get('feature_columns', []) + [self.config.get('target_column', 'target')]
+        }
+
+        with open(config_path, 'w') as f:
+            json.dump(complete_config, f, indent=2)
+
+        print(f"💾 COMPLETE DBNN config saved: {config_path}")
+        print(f"🔧 Model type: {complete_config['modelType']}")
+        print(f"🔧 Fresh start: {complete_config['execution_flags']['fresh_start']}")
+        print(f"🔧 Adaptive rounds: {complete_config['training_params']['adaptive_rounds']}")
+
+    def _initialize_adaptive_state(self):
+        """Initialize adaptive learning state variables"""
+        self.adaptive_round = 0
+        self.best_accuracy = 0.0
+        self.best_round = 0
+        self.best_model_state = None
+        self.training_history = []
+        self.round_stats = []
+        self.convergence_count = 0
+
+        # Data storage (will be populated later)
+        self.X_full = None
+        self.y_full = None
+        self.feature_columns = []
+        self.target_column = self.config.get('target_column', 'target')
+
+        # Visualization components (will be initialized when needed)
+        self.comprehensive_visualizer = None
+        self.advanced_visualizer = None
+
+    def set_progress_callback(self, callback):
+        """Set callback for progress updates"""
+        self.progress_callback = callback
+
+    def _report_progress(self, message: str):
+        """Report progress through callback"""
+        if self.progress_callback:
+            self.progress_callback(message)
+        else:
+            print(f"📊 {message}")
+
+    def load_and_preprocess_data(self, file_path: str = None, feature_columns: List[str] = None):
+        """Load and preprocess data - minimal implementation for GUI"""
+        self._report_progress("Loading and preprocessing data for GUI...")
+
+        try:
+            # If we have original data from GUI, use it
+            if hasattr(self, 'original_data') and self.original_data is not None:
+                self._use_gui_data(feature_columns)
+                return self.X_full, self.y_full, self.feature_columns
+
+            # Otherwise try to load from file
+            if file_path and os.path.exists(file_path):
+                self._load_from_file(file_path, feature_columns)
+            else:
+                # For command-line delegation, we don't need full data loading
+                self._report_progress("Data will be loaded by command-line DBNN")
+                return None, None, []
+
+            self._report_progress(f"Data loaded: {self.X_full.shape[0]} samples, {self.X_full.shape[1]} features")
+            return self.X_full, self.y_full, self.feature_columns
+
+        except Exception as e:
+            self._report_progress(f"Note: Data loading deferred to command-line: {e}")
+            return None, None, []
+
+    def _use_gui_data(self, feature_columns: List[str] = None):
+        """Use data provided through GUI"""
+        if feature_columns is None:
+            feature_columns = self.config.get('feature_columns', [])
+
+        if not feature_columns:
+            # Use all columns except target
+            feature_columns = [col for col in self.original_data.columns
+                             if col != self.target_column]
+
+        self.feature_columns = feature_columns
+        self.X_full = self.original_data[feature_columns].values
+        self.y_full = self.original_data[self.target_column].values
+
+    def _load_from_file(self, file_path: str, feature_columns: List[str] = None):
+        """Load data from file"""
+        import pandas as pd
+        data = pd.read_csv(file_path)
+
+        if feature_columns is None:
+            feature_columns = [col for col in data.columns
+                             if col != self.target_column]
+
+        self.feature_columns = feature_columns
+        self.X_full = data[feature_columns].values
+        self.y_full = data[self.target_column].values
+
+    def adaptive_learn(self, feature_columns: List[str] = None):
+        """
+        Main adaptive learning method - delegates to command-line
+        """
+        self._report_progress("🚀 DELEGATING TO COMMAND-LINE DBNN FOR ADAPTIVE LEARNING")
+        self._report_progress("=" * 60)
+
+        try:
+            # 1. Save configuration for command-line
+            success = self._save_config_for_command_line()
+            if not success:
+                raise Exception("Failed to save configuration for command-line")
+
+            # 2. Execute command-line DBNN
+            success = self._execute_command_line_adaptive()
+            if not success:
+                raise Exception("Command-line execution failed")
+
+            # 3. Load results back for GUI analysis
+            self._load_command_line_results()
+
+            # 4. Generate GUI-specific visualizations
+            self._generate_gui_visualizations()
+
+            self._report_progress("✅ Command-line adaptive learning completed successfully!")
+            return self._get_final_datasets()
+
+        except Exception as e:
+            self._report_progress(f"❌ Error in command-line delegation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None, None, None
+
+    def _save_config_for_command_line(self):
+        """Save current configuration for command-line execution with COMPLETE DBNN structure"""
+        try:
+            # First check for existing models
+            has_existing_models, model_files = self._check_existing_model()
+
+            if has_existing_models:
+                # Prompt user (in command-line mode, we'll just log and proceed)
+                user_choice = self._prompt_user_about_existing_models(model_files)
+
+                if user_choice == "fresh_start":
+                    # Backup and delete existing models
+                    self._backup_existing_models(model_files)
+                    self._delete_existing_models(model_files)
+                elif user_choice == "continue_training":
+                    # Set config for continued training
+                    return self._save_config_for_continued_training()
+
+            # Save data to CSV for command-line
+            if hasattr(self, 'original_data') and self.original_data is not None:
+                csv_path = self.config_dir / f"{self.dataset_name}.csv"
+                self.original_data.to_csv(csv_path, index=False)
+                print(f"💾 Data saved for command-line: {csv_path}")
+
+            # Update config with COMPLETE DBNN structure
+            config_path = self.config_dir / f"{self.dataset_name}.conf"
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+            else:
+                # Create complete default config structure matching DBNN expectations
+                config = {
+                    'dataset_name': self.dataset_name,
+                    'file_path': f"{self.dataset_name}.csv",
+                    'target_column': self.config.get('target_column', 'target'),
+                    'separator': ",",
+                    'has_header': True,
+                    'modelType': 'Histogram',
+                    'training_params': {},
+                    'execution_flags': {},
+                    'active_learning': {},
+                    'anomaly_detection': {},
+                    'column_names': self.config.get('feature_columns', []) + [self.config.get('target_column', 'target')]
+                }
+
+            # Update execution flags - SET FRESH_START
+            config['execution_flags'] = {
+                'train': True,
+                'train_only': False,
+                'predict': True,
+                'fresh_start': True,  # Always fresh start after handling conflicts
+                'use_previous_model': False,
+                'gen_samples': False
+            }
+
+            # Get adaptive learning parameters from GUI config
+            adaptive_config = self.config.get('adaptive_learning', {})
+
+            # Update COMPLETE training parameters as expected by DBNN
+            config['training_params'] = {
+                # Core DBNN parameters as expected by Histogram model
+                "override_global_cardinality": False,
+                "trials": 100,
+                "cardinality_threshold": 0.9,
+                "minimum_training_accuracy": 0.95,
+                "cardinality_tolerance": 8,
+                "learning_rate": 0.001,
+                "random_seed": 42,
+                "epochs": 1000,
+                "test_fraction": 0.2,
+                "n_bins_per_dim": 21,
+                "enable_adaptive": True,
+                "compute_device": "auto",
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.001,
+                "save_plots": False,
+                "class_preference": True,
+
+                # Additional parameters from GUI (for compatibility)
+                "resol": int(self.config.get('resol', 100)),
+                "gain": float(self.config.get('gain', 2.0)),
+                "margin": float(self.config.get('margin', 0.2)),
+                "patience": int(self.config.get('patience', 10)),
+                "max_epochs": int(self.config.get('max_epochs', 100)),
+                "min_improvement": float(self.config.get('min_improvement', 0.0000001)),
+
+                # Adaptive learning parameters from GUI
+                'adaptive_rounds': int(adaptive_config.get('max_adaptive_rounds', 20)),
+                'initial_samples': int(adaptive_config.get('initial_samples_per_class', 5)),
+                'max_samples_per_round': int(adaptive_config.get('max_margin_samples_per_class', 25)),
+
+                # Adaptive learning options from GUI
+                'enable_acid_test': adaptive_config.get('enable_acid_test', True),
+                'enable_kl_divergence': adaptive_config.get('enable_kl_divergence', False),
+                'disable_sample_limit': adaptive_config.get('disable_sample_limit', False),
+
+                # Additional adaptive parameters from GUI
+                'margin_tolerance': float(adaptive_config.get('margin_tolerance', 0.15)),
+                'kl_threshold': float(adaptive_config.get('kl_threshold', 0.1)),
+                'training_convergence_epochs': int(adaptive_config.get('training_convergence_epochs', 50)),
+                'min_training_accuracy': float(adaptive_config.get('min_training_accuracy', 0.95)),
+                'adaptive_margin_relaxation': float(adaptive_config.get('adaptive_margin_relaxation', 0.1)),
+            }
+
+            # Ensure active_learning section exists
+            config['active_learning'] = {
+                "tolerance": 1.0,
+                "cardinality_threshold_percentile": 95,
+                "strong_margin_threshold": 0.01,
+                "marginal_margin_threshold": 0.01,
+                "min_divergence": 0.1
+            }
+
+            # Ensure anomaly_detection section exists
+            config['anomaly_detection'] = {
+                "initial_weight": 1e-6,
+                "threshold": 0.01,
+                "missing_value": -99999,
+                "missing_weight_multiplier": 0.1
+            }
+
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            print(f"💾 COMPLETE DBNN config saved: {config_path}")
+            print(f"🔧 Model type: {config['modelType']}")
+            print(f"🔧 Adaptive rounds: {config['training_params']['adaptive_rounds']}")
+            print(f"🔧 Initial samples: {config['training_params']['initial_samples']}")
+            print(f"🔧 Fresh start: {config['execution_flags']['fresh_start']}")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error saving complete DBNN config: {e}")
+            return False
+
+    def _execute_command_line_adaptive(self):
+        """Use the DBNN class directly instead of command-line"""
+        try:
+            from adbnn import DBNN
+
+            self._report_progress("🔧 Using DBNN class directly for adaptive learning...")
+
+            # Create DBNN instance
+            dbnn = DBNN(
+                dataset_name=self.dataset_name,
+                mode='train_predict',
+                model_type='Histogram'
+            )
+
+            # Run adaptive learning
+            results = dbnn.adaptive_fit_predict()
+
+            if results:
+                self._report_progress("✅ Direct DBNN adaptive learning completed successfully!")
+
+                # Extract results for our tracking
+                if isinstance(results, dict):
+                    self.best_accuracy = results.get('best_accuracy', 0.0)
+                    self.training_history = results.get('training_history', [])
+                    self.round_stats = results.get('round_stats', [])
+
+                return True
+            else:
+                self._report_progress("❌ Direct DBNN execution returned no results")
+                return False
+
+        except Exception as e:
+            self._report_progress(f"❌ Direct DBNN execution error: {e}")
+            # Fallback to trying command-line approach
+            return self._execute_command_line_fallback()
+
+    def _load_command_line_results(self):
+        """Load results from command-line execution"""
+        try:
+            results_dir = Path('data') / self.dataset_name / 'Results'
+
+            # Load training history if available
+            history_file = results_dir / 'training_history.json'
+            if history_file.exists():
+                with open(history_file, 'r') as f:
+                    self.training_history = json.load(f)
+                self._report_progress(f"📊 Loaded training history: {len(self.training_history)} rounds")
+
+            # Load round statistics
+            stats_file = results_dir / 'round_stats.json'
+            if stats_file.exists():
+                with open(stats_file, 'r') as f:
+                    self.round_stats = json.load(f)
+                self._report_progress(f"📈 Loaded round statistics: {len(self.round_stats)} entries")
+
+            # Load model results
+            results_file = results_dir / 'adaptive_results.json'
+            if results_file.exists():
+                with open(results_file, 'r') as f:
+                    results = json.load(f)
+                    self.best_accuracy = results.get('best_accuracy', 0.0)
+                    self.best_round = results.get('best_round', 0)
+                self._report_progress(f"🏆 Best accuracy: {self.best_accuracy:.4f}")
+
+            self._report_progress("📊 Loaded command-line results for GUI analysis")
+
+        except Exception as e:
+            self._report_progress(f"⚠️ Error loading command-line results: {e}")
+
+    def _generate_gui_visualizations(self):
+        """Generate GUI-specific visualizations from command-line results"""
+        try:
+            if (hasattr(self, 'X_full') and hasattr(self, 'y_full') and
+                hasattr(self, 'training_history') and hasattr(self, 'round_stats')):
+
+                # Initialize visualizers
+                self.comprehensive_visualizer = ComprehensiveAdaptiveVisualizer(self.dataset_name)
+                self.advanced_visualizer = AdvancedInteractiveVisualizer(self.dataset_name)
+
+                # Generate comprehensive visualizations
+                self.comprehensive_visualizer.create_comprehensive_visualizations(
+                    self, self.X_full, self.y_full, self.training_history,
+                    self.round_stats, self.feature_columns
+                )
+
+                # Generate advanced 3D visualizations
+                self.advanced_visualizer.create_advanced_3d_dashboard(
+                    self.X_full, self.y_full, self.training_history,
+                    self.feature_columns
+                )
+
+                self._report_progress("🎨 GUI visualizations generated from command-line results")
+
+        except Exception as e:
+            self._report_progress(f"⚠️ GUI visualization error: {e}")
+
+    def _get_final_datasets(self):
+        """Extract final training and test datasets"""
+        try:
+            if hasattr(self, 'X_full') and hasattr(self, 'y_full'):
+                from sklearn.model_selection import train_test_split
+
+                X_train, X_test, y_train, y_test = train_test_split(
+                    self.X_full, self.y_full, test_size=0.2, random_state=42, stratify=self.y_full
+                )
+
+                return X_train, y_train, X_test, y_test
+            else:
+                return None, None, None, None
+
+        except Exception as e:
+            self._report_progress(f"⚠️ Error extracting datasets: {str(e)}")
+            return None, None, None, None
+
+    def get_adaptive_summary(self):
+        """Get summary of adaptive learning process"""
+        if not self.round_stats:
+            return "No adaptive learning performed"
+
+        summary = f"""
+📊 ADAPTIVE LEARNING SUMMARY - {self.dataset_name}
+{'=' * 50}
+Total Rounds: {len(self.round_stats)}
+Best Accuracy: {self.best_accuracy:.4f}
+Final Training Size: {self.training_history[-1] if self.training_history else 0}
+
+Round Statistics:
+"""
+        for stat in self.round_stats:
+            summary += (f"  Round {stat['round']}: {stat['training_size']} samples, "
+                       f"{stat.get('accuracy', stat.get('test_accuracy', 0)):.4f} accuracy\n")
+
+        return summary
+
+    # Maintain compatibility
+    def prepare_full_data(self, feature_columns: List[str] = None):
+        """Compatibility method"""
+        return self.load_and_preprocess_data(feature_columns=feature_columns)
+
+    # COMPREHENSIVE ADAPTIVE LEARNING METHOD (delegates to command-line)
+    def adaptive_learn_comprehensive(self, feature_columns: List[str] = None):
+        """COMPREHENSIVE adaptive learning implementation - delegates to command-line"""
+        return self.adaptive_learn(feature_columns=feature_columns)
 
     def _create_new_config(self) -> dict:
         """Create new configuration with current feature selection"""
@@ -4767,46 +5653,24 @@ class AdaptiveDBNN:
             return False
 
     def _initialize_robust(self):
-        """Robust initialization that handles GUI environment constraints"""
+        """Minimal initialization - just prepare for command-line execution"""
         try:
-            # Try to import DBNN
-            try:
-                from adbnn import DBNN, DatasetConfig
-                self._has_proper_dbnn = True
-            except ImportError as e:
-                print(f"⚠️ DBNN import failed: {e}")
-                self._has_proper_dbnn = False
-                self._initialize_fallback()
-                return
+            print(f"🔧 Initializing Adaptive DBNN for command-line execution: {self.dataset_name}")
 
-            print(f"🔧 Initializing Adaptive DBNN for: {self.dataset_name}")
+            # Only create the basic config structure needed for command-line
+            self.config_dir = Path('data') / self.dataset_name
+            self.config_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create configuration with proper target column
-            dbnn_config = self._create_or_load_config()
+            # Create minimal config for command-line
+            self._create_minimal_config()
 
-            # Ensure target column is correct before initializing DBNN
-            dbnn_config = self._fix_target_column(dbnn_config)
-
-            # Determine mode
-            mode = self._determine_mode(dbnn_config)
-            model_type = dbnn_config.get('modelType', 'Histogram')
-
-            print(f"🎯 Mode: {mode}, Model Type: {model_type}")
-
-            # Initialize DBNN with error handling for GUI environment
-            self.model = self._initialize_dbnn_safely(dbnn_config, mode, model_type)
-
-            # Load data using the proper method
-            self._load_data_robust()
-
-            print(f"✅ Adaptive DBNN initialized successfully for: {self.dataset_name}")
+            # Mark as ready for command-line execution
+            self._ready_for_command_line = True
+            print(f"✅ Adaptive DBNN ready for command-line execution: {self.dataset_name}")
 
         except Exception as e:
-            print(f"⚠️ DBNN initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            print("🔄 Falling back to simplified adaptive learning")
-            self._initialize_fallback()
+            print(f"⚠️ Minimal initialization failed: {e}")
+            self._ready_for_command_line = False
 
     def _fix_target_column(self, dbnn_config: dict) -> dict:
         """Ensure target column in config matches the actual data"""
@@ -5029,102 +5893,11 @@ class AdaptiveDBNN:
         except Exception as e:
             print(f"⚠️ Feature extraction error: {e}")
 
-    def _initialize_adaptive_state(self):
-        """Initialize adaptive learning state variables"""
-        self.adaptive_round = 0
-        self.best_accuracy = 0.0
-        self.best_round = 0
-        self.best_model_state = None
-        self.training_history = []
-        self.round_stats = []
-        self.convergence_count = 0
-
-        # Data storage (will be populated later)
-        self.X_full = None
-        self.y_full = None
-        self.feature_columns = []
-        self.target_column = self.config.get('target_column', 'target')
-
-        # Visualization components
-        self.comprehensive_visualizer = ComprehensiveAdaptiveVisualizer(self.dataset_name)
-        self.advanced_visualizer = AdvancedInteractiveVisualizer(self.dataset_name)
-
     def _initialize_fallback(self):
         """Fallback initialization when main approach fails"""
         print("🔄 Using DBNN Wrapper as fallback")
         self.model = DBNNWrapper(self.dataset_name, self.config)
         self._has_proper_dbnn = False
-
-    def set_progress_callback(self, callback):
-        """Set callback for progress updates"""
-        self.progress_callback = callback
-
-    def _report_progress(self, message: str):
-        """Report progress through callback"""
-        if self.progress_callback:
-            self.progress_callback(message)
-        else:
-            print(f"📊 {message}")
-
-    def load_and_preprocess_data(self, file_path: str = None, feature_columns: List[str] = None):
-        """Load and preprocess data - robust implementation"""
-        self._report_progress("Loading and preprocessing data...")
-
-        try:
-            # If we have original data from GUI, use it
-            if hasattr(self, 'original_data') and self.original_data is not None:
-                self._use_gui_data(feature_columns)
-                return self.X_full, self.y_full, self.feature_columns
-
-            # Otherwise try to load from file or model
-            if file_path and os.path.exists(file_path):
-                self._load_from_file(file_path, feature_columns)
-            elif hasattr(self.model, 'data') and self.model.data is not None:
-                self._extract_from_model_data(feature_columns)
-            else:
-                raise ValueError("No data available for adaptive learning")
-
-            self._report_progress(f"Data loaded: {self.X_full.shape[0]} samples, {self.X_full.shape[1]} features")
-            return self.X_full, self.y_full, self.feature_columns
-
-        except Exception as e:
-            self._report_progress(f"Error loading data: {e}")
-            raise
-
-    def _use_gui_data(self, feature_columns: List[str] = None):
-        """Use data provided through GUI"""
-        if feature_columns is None:
-            feature_columns = self.config.get('feature_columns', [])
-
-        if not feature_columns:
-            # Use all columns except target
-            feature_columns = [col for col in self.original_data.columns
-                             if col != self.target_column]
-
-        self.feature_columns = feature_columns
-        self.X_full = self.original_data[feature_columns].values
-        self.y_full = self.original_data[self.target_column].values
-
-        # Update model data if possible
-        if hasattr(self.model, 'data'):
-            self.model.data = self.original_data
-
-    def _load_from_file(self, file_path: str, feature_columns: List[str] = None):
-        """Load data from file"""
-        import pandas as pd
-        data = pd.read_csv(file_path)
-
-        if feature_columns is None:
-            feature_columns = [col for col in data.columns
-                             if col != self.target_column]
-
-        self.feature_columns = feature_columns
-        self.X_full = data[feature_columns].values
-        self.y_full = data[self.target_column].values
-
-        # Update model data if possible
-        if hasattr(self.model, 'data'):
-            self.model.data = data
 
     def _extract_from_model_data(self, feature_columns: List[str] = None):
         """Extract data from model's existing data"""
@@ -5135,29 +5908,6 @@ class AdaptiveDBNN:
         self.feature_columns = feature_columns
         self.X_full = self.model.data[feature_columns].values
         self.y_full = self.model.data[self.target_column].values
-
-    def adaptive_learn(self, feature_columns: List[str] = None):
-        """
-        Main adaptive learning method - uses proper DBNN or fallback
-        """
-        self._report_progress("🚀 STARTING ADAPTIVE LEARNING")
-        self._report_progress("=" * 50)
-
-        try:
-            # Load data first
-            self.load_and_preprocess_data(feature_columns=feature_columns)
-
-            # Choose implementation based on available DBNN
-            if self._has_proper_dbnn and hasattr(self.model, 'adaptive_fit_predict'):
-                return self._adaptive_learn_proper()
-            else:
-                return self._adaptive_learn_fallback()
-
-        except Exception as e:
-            self._report_progress(f"❌ Error in adaptive learning: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None, None, None, None
 
     def _adaptive_learn_proper(self):
         """Use proper DBNN adaptive learning"""
@@ -5270,49 +6020,6 @@ class AdaptiveDBNN:
 
         except Exception as e:
             self._report_progress(f"⚠️ Visualization error: {str(e)}")
-
-    def _get_final_datasets(self):
-        """Extract final training and test datasets"""
-        try:
-            if hasattr(self, 'X_full') and hasattr(self, 'y_full'):
-                from sklearn.model_selection import train_test_split
-
-                X_train, X_test, y_train, y_test = train_test_split(
-                    self.X_full, self.y_full, test_size=0.2, random_state=42, stratify=self.y_full
-                )
-
-                return X_train, y_train, X_test, y_test
-            else:
-                return None, None, None, None
-
-        except Exception as e:
-            self._report_progress(f"⚠️ Error extracting datasets: {str(e)}")
-            return None, None, None, None
-
-    def get_adaptive_summary(self):
-        """Get summary of adaptive learning process"""
-        if not self.round_stats:
-            return "No adaptive learning performed"
-
-        summary = f"""
-📊 ADAPTIVE LEARNING SUMMARY - {self.dataset_name}
-{'=' * 50}
-Total Rounds: {len(self.round_stats)}
-Best Accuracy: {self.best_accuracy:.4f}
-Final Training Size: {self.training_history[-1] if self.training_history else 0}
-
-Round Statistics:
-"""
-        for stat in self.round_stats:
-            summary += (f"  Round {stat['round']}: {stat['training_size']} samples, "
-                       f"{stat.get('accuracy', stat.get('test_accuracy', 0)):.4f} accuracy\n")
-
-        return summary
-
-    # Maintain compatibility
-    def prepare_full_data(self, feature_columns: List[str] = None):
-        """Compatibility method"""
-        return self.load_and_preprocess_data(feature_columns=feature_columns)
 
     def _select_initial_samples(self, samples_per_class: int = 5):
         """Select initial diverse training samples using stratification"""
@@ -5573,163 +6280,6 @@ Round Statistics:
         except Exception as e:
             self._report_progress(f"⚠️ Error generating report: {e}")
 
-    # COMPREHENSIVE ADAPTIVE LEARNING METHOD (the main one that was referenced but missing)
-    def adaptive_learn_comprehensive(self, feature_columns: List[str] = None):
-        """COMPREHENSIVE adaptive learning implementation - the main method"""
-        self._report_progress("🚀 STARTING COMPREHENSIVE ADAPTIVE LEARNING")
-        self._report_progress("=" * 50)
-
-        # Initialize adaptive config
-        self.adaptive_config = self._setup_proper_adaptive_config()
-
-        # Load data if not already loaded
-        if self.X_full is None or self.y_full is None:
-            self.load_and_preprocess_data(feature_columns=feature_columns)
-
-        X, y = self.X_full, self.y_full
-
-        # Initialize tracking
-        self.training_history = []
-        self.round_stats = []
-        self.best_accuracy = 0.0
-        self.best_round = 0
-        self.best_model_state = None
-
-        # Step 1: Select initial training set
-        initial_samples = self.adaptive_config['initial_samples_per_class']
-        X_train, y_train, current_indices = self._select_initial_samples(initial_samples)
-        self.training_history.append(current_indices.copy())
-
-        max_rounds = self.adaptive_config['max_adaptive_rounds']
-        patience = self.adaptive_config['patience']
-        convergence_threshold = self.adaptive_config['convergence_threshold']
-        enable_acid_test = self.adaptive_config['enable_acid_test']
-        enable_visualization = self.adaptive_config['enable_visualization']
-
-        self._report_progress(f"Adaptive learning configuration:")
-        self._report_progress(f"  Max rounds: {max_rounds}")
-        self._report_progress(f"  Patience: {patience}")
-        self._report_progress(f"  Initial samples: {len(X_train)}")
-
-        patience_counter = 0
-        start_time = datetime.now()
-
-        for round_num in range(1, max_rounds + 1):
-            self.adaptive_round = round_num
-            self._report_progress(f"🎯 Round {round_num}/{max_rounds}")
-            self._report_progress("-" * 40)
-
-            # Train model on current training set
-            train_accuracy = self._train_current_model(X_train, y_train, reset_weights=True)
-
-            if train_accuracy == 0:
-                self._report_progress("❌ Training failed in this round")
-                break
-
-            # Evaluate model
-            if enable_acid_test:
-                current_accuracy = self._evaluate_model(X, y, "full (acid test)")
-                accuracy_type = "acid_test"
-            else:
-                remaining_indices = [i for i in range(len(X)) if i not in current_indices]
-                if remaining_indices:
-                    X_remaining = X[remaining_indices]
-                    y_remaining = y[remaining_indices]
-                    current_accuracy = self._evaluate_model(X_remaining, y_remaining, "remaining")
-                    accuracy_type = "remaining"
-                else:
-                    current_accuracy = 1.0
-                    accuracy_type = "complete"
-
-            # Store round statistics
-            round_stat = {
-                'round': round_num,
-                'training_size': len(X_train),
-                'train_accuracy': train_accuracy,
-                'test_accuracy': current_accuracy,
-                'accuracy_type': accuracy_type,
-                'new_samples': 0,
-                'improvement': 0.0
-            }
-
-            # Check for convergence
-            if current_accuracy >= convergence_threshold:
-                self._report_progress(f"🎉 CONVERGENCE ACHIEVED: {current_accuracy:.4f} >= {convergence_threshold}")
-                self._update_best_model(current_accuracy, round_num)
-                round_stat['improvement'] = current_accuracy - self.best_accuracy
-                self.round_stats.append(round_stat)
-                break
-
-            # Update best model
-            improvement = current_accuracy - self.best_accuracy
-            round_stat['improvement'] = improvement
-
-            if current_accuracy > self.best_accuracy:
-                self._update_best_model(current_accuracy, round_num)
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                self._report_progress(f"📉 No improvement - Patience: {patience_counter}/{patience}")
-
-            # Stop if no improvement for patience rounds
-            if patience_counter >= patience:
-                self._report_progress(f"🛑 Early stopping: no improvement for {patience} rounds")
-                break
-
-            # Find informative samples to add
-            max_new_samples = self.adaptive_config['max_samples_per_round']
-            new_indices = self._find_informative_samples(current_indices, max_new_samples)
-
-            if not new_indices:
-                self._report_progress("💤 No more informative samples found")
-                break
-
-            # Add samples to training set
-            current_indices.extend(new_indices)
-            X_train = X[current_indices]
-            y_train = y[current_indices]
-
-            # Update history and statistics
-            self.training_history.append(current_indices.copy())
-            round_stat['new_samples'] = len(new_indices)
-
-            self._report_progress(f"📈 Added {len(new_indices)} samples. New training size: {len(X_train)}")
-            self.round_stats.append(round_stat)
-
-            # Create visualizations if enabled
-            if enable_visualization and self._should_create_visualizations(round_num):
-                self._create_intermediate_visualizations(round_num)
-
-        # Finalize adaptive learning
-        total_time = (datetime.now() - start_time).total_seconds()
-        self._report_progress(f"🎉 Adaptive learning completed after {self.adaptive_round} rounds")
-        self._report_progress(f"🏆 Best accuracy: {self.best_accuracy:.4f} (round {self.best_round})")
-        self._report_progress(f"📊 Final training set: {len(self.training_history[-1])} samples")
-
-        # Restore best model state if available
-        if self.best_model_state is not None:
-            self._restore_best_model_state()
-
-        # Return final training and test sets
-        final_train_indices = self.training_history[-1]
-        final_test_indices = [i for i in range(len(X)) if i not in final_train_indices]
-
-        X_train_final = X[final_train_indices]
-        y_train_final = y[final_train_indices]
-        X_test_final = X[final_test_indices] if final_test_indices else np.array([])
-        y_test_final = y[final_test_indices] if final_test_indices else np.array([])
-
-        # Store test sets for evaluation
-        self.X_test = X_test_final
-        self.y_test = y_test_final
-
-        # Generate final visualizations
-        if enable_visualization:
-            self._finalize_adaptive_learning()
-
-        return X_train_final, y_train_final, X_test_final, y_test_final
-
-
     def _initialize_from_main_function(self):
         """Initialize using the main function's configuration approach"""
         try:
@@ -5800,7 +6350,6 @@ Round Statistics:
             print("🔄 Falling back to simplified adaptive learning")
             self._initialize_fallback()
 
-
     def _determine_mode(self, config: dict) -> str:
         """Determine mode like main function does"""
         train = config.get('train', True)
@@ -5812,6 +6361,125 @@ Round Statistics:
             return 'train'
         else:
             return 'predict'
+
+    def _check_existing_model(self):
+        """Check if there are existing model files and warn user"""
+        try:
+            model_files = []
+
+            # Check for common model file patterns
+            model_patterns = [
+                f"Model/Best_Histogram_{self.dataset_name}_components.pkl",
+                f"Model/Best_Histogram_{self.dataset_name}_weights.pkl",
+                f"data/{self.dataset_name}/Best_Histogram_{self.dataset_name}_components.pkl",
+                f"Models/Best_Histogram_{self.dataset_name}_components.pkl",
+                f"*.pkl"  # General pattern in Model directory
+            ]
+
+            # Also check in the dataset directory
+            dataset_model_dir = Path('data') / self.dataset_name
+            if dataset_model_dir.exists():
+                for pkl_file in dataset_model_dir.glob("*.pkl"):
+                    if "Best_Histogram" in pkl_file.name or "model" in pkl_file.name.lower():
+                        model_files.append(str(pkl_file))
+
+            # Check in Model directory
+            model_dir = Path('Model')
+            if model_dir.exists():
+                for pkl_file in model_dir.glob("*.pkl"):
+                    if self.dataset_name in pkl_file.name:
+                        model_files.append(str(pkl_file))
+
+            # Check in Models directory
+            models_dir = Path('Models')
+            if models_dir.exists():
+                for pkl_file in models_dir.glob("*.pkl"):
+                    if self.dataset_name in pkl_file.name:
+                        model_files.append(str(pkl_file))
+
+            if model_files:
+                self._report_progress("⚠️ EXISTING MODELS FOUND:")
+                for model_file in model_files:
+                    file_size = os.path.getsize(model_file) / 1024  # Size in KB
+                    self._report_progress(f"   📁 {model_file} ({file_size:.2f} KB)")
+
+                return True, model_files
+            else:
+                self._report_progress("✅ No existing models found - starting fresh")
+                return False, []
+
+        except Exception as e:
+            self._report_progress(f"⚠️ Error checking for existing models: {e}")
+            return False, []
+
+    def _prompt_user_about_existing_models(self, model_files):
+        """Prompt user about what to do with existing models"""
+        try:
+            # For command-line execution, we'll log the warning and proceed with fresh start
+            self._report_progress("🚨 WARNING: Existing model files detected!")
+            self._report_progress("   You have the following options:")
+            self._report_progress("   1. CONTINUE TRAINING: Use existing model and continue training")
+            self._report_progress("   2. FRESH START: Delete existing models and start fresh")
+            self._report_progress("   3. RENAME MODEL: Save with a different name to preserve existing")
+
+            # Since we're in command-line mode, we'll default to fresh start but log strongly
+            self._report_progress("💡 Defaulting to FRESH START (existing models may be overwritten)")
+            self._report_progress("💡 Use 'Continue Training' option if you want to continue from existing model")
+
+            return "fresh_start"  # Default to fresh start in command-line mode
+
+        except Exception as e:
+            self._report_progress(f"⚠️ Error prompting user: {e}")
+            return "fresh_start"
+
+    def _backup_existing_models(self, model_files):
+        """Backup existing models before fresh start"""
+        try:
+            backup_dir = Path('Model_Backups') / self.dataset_name
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backed_up_files = []
+
+            for model_file in model_files:
+                if os.path.exists(model_file):
+                    file_path = Path(model_file)
+                    backup_name = f"{file_path.stem}_{timestamp}{file_path.suffix}"
+                    backup_path = backup_dir / backup_name
+
+                    import shutil
+                    shutil.copy2(model_file, backup_path)
+                    backed_up_files.append(str(backup_path))
+
+                    self._report_progress(f"💾 Backed up: {model_file} -> {backup_path}")
+
+            if backed_up_files:
+                self._report_progress(f"✅ Backed up {len(backed_up_files)} model files to {backup_dir}")
+                return True
+            else:
+                self._report_progress("⚠️ No model files needed backup")
+                return False
+
+        except Exception as e:
+            self._report_progress(f"⚠️ Error backing up models: {e}")
+            return False
+
+    def _delete_existing_models(self, model_files):
+        """Delete existing model files for fresh start"""
+        try:
+            deleted_count = 0
+            for model_file in model_files:
+                if os.path.exists(model_file):
+                    os.remove(model_file)
+                    deleted_count += 1
+                    self._report_progress(f"🗑️ Deleted: {model_file}")
+
+            self._report_progress(f"✅ Deleted {deleted_count} existing model files")
+            return deleted_count > 0
+
+        except Exception as e:
+            self._report_progress(f"❌ Error deleting model files: {e}")
+            return False
 
 
 class DBNNWrapper:
@@ -7812,7 +8480,7 @@ class FunctionalIntegratedAdaptiveDBNN:
 
             # Try to initialize DBNN with the filtered data
             try:
-                from dbnn import DBNN
+                from adbnn import DBNN
 
                 # Initialize DBNN
                 self.adaptive_model = DBNN(
@@ -8325,7 +8993,7 @@ class FunctionalIntegratedAdaptiveDBNN:
                 self.topcat_integration = TOPCATIntegration(self.adaptive_model)
             else:
                 # Create a minimal adaptive model for TOPCAT integration
-                from dbnn import DBNN
+                from adbnn import DBNN
                 try:
                     temp_model = DBNN(dataset_name=self.dataset_name, mode='predict')
                     self.topcat_integration = TOPCATIntegration(temp_model)
@@ -8492,23 +9160,11 @@ class FunctionalIntegratedAdaptiveDBNN:
         self.stats_text.config(state=tk.DISABLED)
 
     def initialize_model(self):
-        """Initialize the Adaptive DBNN model with proper configuration"""
+        """Lightweight initialization - ensure GUI parameters are synchronized"""
         try:
             # Get dataset name from current file
             if hasattr(self, 'current_data_file') and self.current_data_file:
-                file_basename = os.path.splitext(os.path.basename(self.current_data_file))[0]
-                self.dataset_name = file_basename
-
-                # Ensure data directory structure exists
-                data_dir = Path('data') / self.dataset_name
-                data_dir.mkdir(parents=True, exist_ok=True)
-
-                # Copy the data file to the expected location if needed
-                expected_csv_path = data_dir / f"{self.dataset_name}.csv"
-                if not expected_csv_path.exists():
-                    import shutil
-                    shutil.copy2(self.current_data_file, expected_csv_path)
-                    self.log_output(f"💾 Copied data file to: {expected_csv_path}")
+                self.dataset_name = os.path.splitext(os.path.basename(self.current_data_file))[0]
             else:
                 self.dataset_name = "unknown_dataset"
 
@@ -8521,43 +9177,58 @@ class FunctionalIntegratedAdaptiveDBNN:
             self.feature_columns = [col for col, var in self.feature_vars.items()
                                   if var.get() and (self.target_column is None or col != self.target_column)]
 
-            self.log_output(f"🎯 Initializing model for: {self.dataset_name}")
-            self.log_output(f"📊 Target: {self.target_column}")
-            self.log_output(f"🔧 Features: {len(self.feature_columns)}")
+            print(f"🎯 Preparing for command-line execution: {self.dataset_name}")
+            print(f"📊 Target: {self.target_column}")
+            print(f"🔧 Features: {len(self.feature_columns)}")
 
-            # Create configuration with essential parameters
+            # Create comprehensive config with ALL GUI parameters
             config_dict = {
                 'dataset_name': self.dataset_name,
                 'target_column': self.target_column,
                 'feature_columns': self.feature_columns,
 
-                # Essential adaptive parameters
-                'initial_samples_per_class': int(self.initial_samples_var.get()),
-                'max_adaptive_rounds': int(self.max_rounds_var.get()),
-                'max_margin_samples_per_class': int(self.max_samples_var.get()),
-                'enable_acid_test': self.enable_acid_var.get(),
-                'enable_visualization': self.enable_visualization_var.get(),
+                # Core DBNN parameters from GUI
+                'resol': int(self.config_vars["dbnn_resolution"].get()),
+                'gain': float(self.config_vars["dbnn_gain"].get()),
+                'margin': float(self.config_vars["dbnn_margin"].get()),
+                'patience': int(self.config_vars["dbnn_patience"].get()),
+                'max_epochs': int(self.config_vars["dbnn_max_epochs"].get()),
+                'min_improvement': float(self.config_vars["dbnn_min_improvement"].get()),
 
-                # DBNN-specific parameters
-                'modelType': 'Histogram',
-                'mode': 'train_predict',
+                # Adaptive learning configuration from GUI
+                'adaptive_learning': {
+                    'max_adaptive_rounds': int(self.max_rounds_var.get()),
+                    'initial_samples_per_class': int(self.initial_samples_var.get()),
+                    'max_margin_samples_per_class': int(self.max_samples_var.get()),
+                    'enable_acid_test': self.enable_acid_var.get(),
+                    'enable_kl_divergence': self.enable_kl_var.get(),
+                    'disable_sample_limit': self.disable_sample_limit_var.get(),
+                    'margin_tolerance': float(self.config_vars["adaptive_margin_tolerance"].get()),
+                    'kl_threshold': float(self.config_vars["adaptive_kl_threshold"].get()),
+                    'training_convergence_epochs': int(self.config_vars["adaptive_training_convergence_epochs"].get()),
+                    'min_training_accuracy': float(self.config_vars["adaptive_min_training_accuracy"].get()),
+                    'adaptive_margin_relaxation': float(self.config_vars["adaptive_adaptive_margin_relaxation"].get()),
+                }
             }
 
-            self.log_output("🎯 Creating AdaptiveDBNN with DatasetConfig...")
-
-            # Initialize AdaptiveDBNN
             self.adaptive_model = AdaptiveDBNN(config=config_dict)
 
-            # Link data if available
+            # Store the original data in the adaptive model for command-line saving
             if hasattr(self, 'original_data') and self.original_data is not None:
                 self.adaptive_model.original_data = self.original_data
-                self.log_output("✅ Data linked to adaptive model")
 
-            self.log_output("✅ Adaptive DBNN initialized successfully")
+                # Also store feature info for visualization
+                if self.target_column and self.target_column in self.original_data.columns:
+                    self.adaptive_model.X_full = self.original_data[self.feature_columns].values
+                    self.adaptive_model.y_full = self.original_data[self.target_column].values
+                    self.adaptive_model.feature_columns = self.feature_columns
+
+            self.log_output("✅ Ready for command-line adaptive learning")
+            self.log_output(f"🔧 Configuration: {self.max_rounds_var.get()} rounds, {self.initial_samples_var.get()} initial samples")
             self.model_initialized = True
 
         except Exception as e:
-            self.log_output(f"❌ Error initializing Adaptive DBNN: {str(e)}")
+            self.log_output(f"❌ Error initializing for command-line: {str(e)}")
             import traceback
             self.log_output(traceback.format_exc())
             self.model_initialized = False

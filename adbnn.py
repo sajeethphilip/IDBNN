@@ -2349,7 +2349,7 @@ class DBNN(GPUDBNN):
         # Create boolean mask using numpy arrays to avoid chained indexing
         misclassified_mask = test_results['predicted_class'].to_numpy() != test_results['true_class'].to_numpy()
         misclassified_indices = test_results.index[misclassified_mask].tolist()
-        print(f"{Colors.YELLOW} The misclassified examples have indices [{misclassified_indices}]{Colors.ENDC}")
+        #print(f"{Colors.YELLOW} The misclassified examples have indices [{misclassified_indices}]{Colors.ENDC}")
 
         # Create mapping from original indices to test set positions
         test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
