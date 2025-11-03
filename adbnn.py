@@ -1,3 +1,12 @@
+#-------- Memory and Computation optimiations 3 Nov 2025 -----------------------------------------
+# Replaced:
+# _compute_batch_posterior
+# _update_priors_parallel
+# _compute_pairwise_likelihood_parallel
+# _compute_sample_divergence
+# train
+# _compute_sample_divergence
+# _select_samples_from_failed_classes
 #--------------------------Fully Functional bug fixed version  with heatmaps----------------------------
 #----------------------------------------------May 18 2025 23:41 IST------------------------------------------------
 
@@ -1568,8 +1577,6 @@ class DBNNConfig:
             config_data = json.load(f)
         return cls(**config_data)
 
-
-
 class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
 
@@ -1950,83 +1957,64 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Optimized batch posterior with vectorized operations"""
-        # Ensure input features are on the correct device
+        """Optimized vectorized batch posterior computation with consistent return type"""
         features = features.to(self.device)
-
-        # Safety checks
-        if self.weight_updater is None:
-            DEBUG.log(" Weight updater not initialized, initializing now...")
-            self._initialize_bin_weights()
-            if self.weight_updater is None:
-                raise RuntimeError("Failed to initialize weight updater")
-
-        if self.likelihood_params is None:
-            raise RuntimeError("Likelihood parameters not initialized")
-
-        batch_size = features.shape[0]
+        batch_size, n_features = features.shape
         n_classes = len(self.likelihood_params['classes'])
+        n_pairs = len(self.feature_pairs)
 
-        # Pre-allocate tensors on the correct device
+        # Pre-allocate all feature groups at once
+        feature_groups = torch.stack([
+            features[:, pair].contiguous()
+            for pair in self.feature_pairs
+        ])  # [n_pairs, batch_size, 2]
+
+        # Vectorized binning for all pairs - return as dictionary for compatibility
+        bin_indices_dict = {}
+        for group_idx in range(n_pairs):
+            bin_edges = self.likelihood_params['bin_edges'][group_idx]
+            edges = torch.stack([edge.contiguous() for edge in bin_edges])
+
+            # Vectorized bucketize for both dimensions
+            indices_0 = torch.bucketize(feature_groups[group_idx, :, 0], edges[0]) - 1
+            indices_1 = torch.bucketize(feature_groups[group_idx, :, 1], edges[1]) - 1
+            indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
+            indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
+
+            bin_indices_dict[group_idx] = (indices_0, indices_1)
+
+        # Vectorized probability computation
         log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-        # Process all feature pairs at once
-        feature_groups = torch.stack([
-            features[:, pair].contiguous().to(self.device)  # Ensure on correct device
-            for pair in self.likelihood_params['feature_pairs']
-        ]).transpose(0, 1)  # [batch_size, n_pairs, 2]
+        # Process pairs in optimal batches for memory efficiency
+        pair_batch_size = min(50, n_pairs)  # Adjust based on memory
+        for batch_start in range(0, n_pairs, pair_batch_size):
+            batch_end = min(batch_start + pair_batch_size, n_pairs)
 
-        # Compute all bin indices at once
-        bin_indices_dict = {}
-        for group_idx in range(len(self.likelihood_params['feature_pairs'])):
-            bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            edges = torch.stack([edge.contiguous().to(self.device) for edge in bin_edges])  # Ensure on correct device
-
-            # Vectorized binning with contiguous tensors
-            indices = torch.stack([
-                torch.bucketize(
-                    feature_groups[:, group_idx, dim].contiguous(),
-                    edges[dim].contiguous()
-                ).sub_(1).clamp_(0, self.n_bins_per_dim - 1)
-                for dim in range(2)
-            ])  # Shape: (2, batch_size)
-            bin_indices_dict[group_idx] = indices
-
-        # Add progress bar for feature pair processing
-        n_pairs = len(self.likelihood_params['feature_pairs'])
-        with tqdm(total=n_pairs, desc="Processing feature pairs", leave=False) as pbar:
-            # Process all classes simultaneously
-            for group_idx in range(n_pairs):
-                bin_probs = self.likelihood_params['bin_probs'][group_idx]  # [n_classes, n_bins, n_bins]
-                indices = bin_indices_dict[group_idx]  # [2, batch_size]
-
-                # Get all weights at once
-                weights = torch.stack([
+            for group_idx in range(batch_start, batch_end):
+                bin_probs = self.likelihood_params['bin_probs'][group_idx]
+                bin_weights = torch.stack([
                     self.weight_updater.get_histogram_weights(c, group_idx)
                     for c in range(n_classes)
-                ])  # [n_classes, n_bins, n_bins]
+                ])
 
-                # Ensure weights are contiguous
-                if not weights.is_contiguous():
-                    weights = weights.contiguous()
+                indices_0, indices_1 = bin_indices_dict[group_idx]
 
-                # Apply weights to probabilities
-                weighted_probs = bin_probs * weights  # [n_classes, n_bins, n_bins]
-
-                # Gather probabilities for all samples and classes at once
-                probs = weighted_probs[:, indices[0], indices[1]]  # [n_classes, batch_size]
+                # Vectorized probability gathering
+                weighted_probs = bin_probs * bin_weights
+                probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
                 log_likelihoods += torch.log(probs.t() + epsilon)
 
-                pbar.update(1)  # Update progress bar
+            # Memory cleanup between batches
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        # Compute posteriors efficiently
+        # Vectorized softmax
         max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
         posteriors = torch.exp(log_likelihoods - max_log_likelihood)
         posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-        return posteriors, bin_indices_dict if self.model_type == "Histogram" else None
-
- #----------------------
+        return posteriors, bin_indices_dict  # Return as dictionary for compatibility
 
     def set_feature_bounds(self, dataset):
         """Initialize global feature bounds from complete dataset"""
@@ -2058,7 +2046,6 @@ class DBNN(GPUDBNN):
                     print("\033[K" +f"Removed existing model file: {file}")
         except Exception as e:
             print("\033[K" +f"Warning: Error cleaning model files: {str(e)}")
-
 
     #------------------------------------------Adaptive Learning--------------------------------------
     def save_epoch_data(self, epoch: int, train_indices: list, test_indices: list):
@@ -2151,41 +2138,117 @@ class DBNN(GPUDBNN):
 
         return threshold
 #--------------------compute sample divergence -----------------------
+
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
-        """Optimized divergence computation with batched feature processing"""
+        """Memory-optimized divergence computation with chunked processing"""
         device = sample_data.device
         n_samples = sample_data.shape[0]
 
         if n_samples <= 1:
             return torch.zeros((1, 1), device=device)
 
-        # Use mixed precision with memory-efficient accumulation
-        dtype = torch.float16 if device.type == 'cuda' else torch.float32
+        # For very large sample sizes, use chunked processing
+        if n_samples > 1000:  # Use chunking for large datasets
+            return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
+
+        # For smaller datasets, use the optimized vectorized approach
+        n_pairs = len(feature_pairs)
         distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float32)
 
-        # Process feature pairs in memory-optimized batches
-        batch_size = self._get_feature_batch_size(n_samples, len(feature_pairs))
+        # Process all feature pairs in one batch if memory allows
+        if n_pairs <= 100 and n_samples <= 500:  # Conservative limits
+            try:
+                # Stack all feature pairs data
+                all_pair_data = torch.stack([sample_data[:, pair] for pair in feature_pairs])  # [n_pairs, n_samples, 2]
 
-        with torch.no_grad():
-            for i in range(0, len(feature_pairs), batch_size):
-                batch_pairs = feature_pairs[i:i+batch_size]
+                # Memory-efficient pairwise distance calculation
+                # Instead of creating huge 4D tensor, compute distances pair by pair
+                for i in range(n_pairs):
+                    pair_data = all_pair_data[i]  # [n_samples, 2]
 
-                # Get batch data in reduced precision
-                batch_data = sample_data[:, batch_pairs].to(dtype)
+                    # Efficient pairwise Euclidean distance
+                    diff = pair_data.unsqueeze(0) - pair_data.unsqueeze(1)  # [n_samples, n_samples, 2]
+                    pair_dist = torch.norm(diff, p=2, dim=2)  # [n_samples, n_samples]
+                    distances += pair_dist
 
-                # Vectorized pairwise distance calculation
-                diff = batch_data.unsqueeze(1) - batch_data.unsqueeze(0)  # [n_samples, n_samples, batch_size, 2]
-                batch_dist = torch.norm(diff, p=2, dim=-1)  # [n_samples, n_samples, batch_size]
+                distances /= n_pairs
 
-                # Accumulate with proper type casting
-                distances += batch_dist.mean(dim=-1).to(torch.float32)
-
-                # Explicit memory cleanup
-                del batch_data, diff, batch_dist
-                torch.cuda.empty_cache()
+            except RuntimeError as e:
+                if "alloc" in str(e).lower():
+                    # Fall back to chunked processing if memory fails
+                    return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
+                else:
+                    raise
+        else:
+            # Use chunked processing for larger cases
+            return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
 
         # Normalize while maintaining numerical stability
-        distances /= len(feature_pairs)
+        max_val = distances.max()
+        return distances / (max_val + 1e-7) if max_val > 0 else distances
+
+    def _compute_sample_divergence_chunked(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
+        """Memory-safe chunked version for large datasets"""
+        device = sample_data.device
+        n_samples = sample_data.shape[0]
+        n_pairs = len(feature_pairs)
+
+        # Initialize distances matrix
+        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float32)
+
+        # Determine optimal chunk size based on available memory
+        if n_samples > 5000:
+            chunk_size = 100  # Very conservative for huge datasets
+        elif n_samples > 1000:
+            chunk_size = 200
+        else:
+            chunk_size = 500
+
+        # Process feature pairs in batches
+        pair_batch_size = min(50, n_pairs)
+
+        with torch.no_grad():
+            for pair_start in range(0, n_pairs, pair_batch_size):
+                pair_end = min(pair_start + pair_batch_size, n_pairs)
+                batch_pairs = feature_pairs[pair_start:pair_end]
+
+                # Get batch data
+                batch_data = sample_data[:, batch_pairs]  # [n_samples, batch_size, 2]
+
+                # Process samples in chunks to avoid memory explosion
+                for i_start in range(0, n_samples, chunk_size):
+                    i_end = min(i_start + chunk_size, n_samples)
+
+                    for j_start in range(0, n_samples, chunk_size):
+                        j_end = min(j_start + chunk_size, n_samples)
+
+                        # Compute distances for this chunk
+                        chunk_i = batch_data[i_start:i_end]  # [chunk_size, batch_size, 2]
+                        chunk_j = batch_data[j_start:j_end]  # [chunk_size, batch_size, 2]
+
+                        # Expand for pairwise comparison
+                        chunk_i_expanded = chunk_i.unsqueeze(1)  # [chunk_size, 1, batch_size, 2]
+                        chunk_j_expanded = chunk_j.unsqueeze(0)  # [1, chunk_size, batch_size, 2]
+
+                        # Compute differences and distances
+                        diff = chunk_i_expanded - chunk_j_expanded  # [chunk_size, chunk_size, batch_size, 2]
+                        chunk_dist = torch.norm(diff, p=2, dim=3)  # [chunk_size, chunk_size, batch_size]
+
+                        # Average across feature pairs and accumulate
+                        chunk_avg_dist = chunk_dist.mean(dim=2)  # [chunk_size, chunk_size]
+
+                        # Update the main distances matrix
+                        distances[i_start:i_end, j_start:j_end] += chunk_avg_dist
+
+                # Memory cleanup
+                del batch_data, chunk_i, chunk_j, diff, chunk_dist, chunk_avg_dist
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        # Normalize by number of pair batches
+        distances /= (n_pairs / pair_batch_size)
+
+        # Final normalization
         max_val = distances.max()
         return distances / (max_val + 1e-7) if max_val > 0 else distances
 
@@ -2204,10 +2267,6 @@ class DBNN(GPUDBNN):
         max_batches = available_mem // per_pair_mem
 
         return min(max(1, int(max_batches)), 256)  # Limit between 1-256
-
-
-#---------------------------------------------------------------------------------------
-
 
     def _compute_feature_cardinalities(self, samples_data: torch.Tensor) -> torch.Tensor:
         """
@@ -2270,9 +2329,8 @@ class DBNN(GPUDBNN):
             print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
             return 128  # Fallback value
 
-
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Cluster-based selection with device-aware processing"""
+        """Memory-optimized sample selection with chunked divergence computation"""
         from tqdm import tqdm
 
         # Configuration parameters
@@ -2322,10 +2380,17 @@ class DBNN(GPUDBNN):
             if not class_positions:
                 continue
 
+            # Limit the number of samples per class to avoid memory issues
+            max_samples_per_class = min(100, len(class_positions))  # Prevent memory explosion
+            if len(class_positions) > max_samples_per_class:
+                # Randomly sample to avoid bias
+                class_positions = random.sample(class_positions, max_samples_per_class)
+                print(f"{Colors.YELLOW} Limited class {class_id} from {len(class_positions)} to {max_samples_per_class} samples for memory safety{Colors.ENDC}")
+
             # Convert to tensor with proper dtype
             class_pos_tensor = torch.tensor(class_positions, dtype=torch.long, device=self.device)
 
-            # Batch processing
+            # Batch processing with memory limits
             samples, margins, indices = [], [], []
             batch_pbar = tqdm(
                 total=len(class_positions),
@@ -2388,7 +2453,7 @@ class DBNN(GPUDBNN):
 
             eligible_indices = indices[combined_mask]
 
-            # --- Cluster Processing ---
+            # --- Cluster Processing with Memory Safety ---
             mandatory_indices = indices[torch.topk(margins, k=min(2, len(margins))).indices]
 
             all_candidates = torch.cat([mandatory_indices, eligible_indices]).unique()
@@ -2396,11 +2461,15 @@ class DBNN(GPUDBNN):
             candidate_samples = samples[remaining_mask]
 
             if candidate_samples.numel() > 0:
+                # Use memory-safe divergence computation
                 div_matrix = self._compute_sample_divergence(candidate_samples, self.feature_pairs)
+
+                # Limit cluster processing for memory safety
+                max_clusters = min(50, len(candidate_samples))
                 visited = torch.zeros(len(candidate_samples), dtype=torch.bool, device=self.device)
                 cluster_indices = []
 
-                for i in range(len(candidate_samples)):
+                for i in range(min(max_clusters, len(candidate_samples))):
                     if not visited[i]:
                         cluster_mask = div_matrix[i] < min_divergence
                         cluster_members = torch.where(cluster_mask)[0]
@@ -2418,12 +2487,13 @@ class DBNN(GPUDBNN):
             # Final selection with encoded class count check
             class_count = (y_test == encoded_class_id).sum().item()  # Use encoded class ID
             max_samples = max(2, int(class_count * max_class_addition_percent / 100))
-            final_selected_indices.extend(selected[:max_samples].cpu().tolist())
-            print(f"{Colors.GREEN}Adding {len(final_selected_indices)} samples to training (global indices): {final_selected_indices}{Colors.ENDC}")
+            final_selected = selected[:max_samples].cpu().tolist()
+            final_selected_indices.extend(final_selected)
+
+            print(f"{Colors.GREEN}Adding {len(final_selected)} samples to training (global indices): {final_selected}{Colors.ENDC}")
 
         class_pbar.close()
         return final_selected_indices
-
 
     def _save_reconstruction_plots(self, original_features: np.ndarray,
                                 reconstructed_features: np.ndarray,
@@ -2505,6 +2575,7 @@ class DBNN(GPUDBNN):
             )
 
         DEBUG.log("Model reset to initial state.")
+
     def _format_class_distribution(self, indices):
         """Helper to format class distribution for given indices"""
         if not indices:
@@ -2817,7 +2888,6 @@ class DBNN(GPUDBNN):
 
     #------------------------------------------Adaptive Learning--------------------------------------
 
-
     def _calculate_cardinality_threshold(self):
         """Calculate appropriate cardinality threshold based on dataset characteristics"""
         n_samples = len(self.data)
@@ -2845,7 +2915,6 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"- Adjusted threshold: {adjusted_threshold}")
 
         return   base_threshold  #adjusted_threshold
-
 
     def _round_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Round features based on cardinality_tolerance"""
@@ -3272,7 +3341,6 @@ class DBNN(GPUDBNN):
                 return Paragraph(f"Invalid heatmap\n{os.path.basename(heat_path)}", style)
         return Paragraph("No heatmap available", style)
 
-
     #---------------------------------------------------------------------------------
     def generate_class_pdf_mosaics_old(self, predictions_df, output_dir, columns=4, rows=4):
         """
@@ -3679,13 +3747,13 @@ class DBNN(GPUDBNN):
         return list(samples)
 #-----------------------------------------------------------------------------Bin model ---------------------------
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """GPU-optimized version with dimension consistency fixes"""
-        DEBUG.log("Starting GPU-optimized _compute_pairwise_likelihood_parallel")
+        """Optimized vectorized pairwise likelihood computation"""
+        DEBUG.log("Starting optimized _compute_pairwise_likelihood_parallel")
 
         # Initialize class-bin tracking structure
-        self.class_bins = defaultdict(lambda: defaultdict(set))  # {class: {pair_idx: set((bin_i, bin_j))}}
+        self.class_bins = defaultdict(lambda: defaultdict(set))
 
-        # Ensure tensors are contiguous on the computation device
+        # Ensure tensors are contiguous
         dataset = dataset.contiguous()
         labels = labels.contiguous()
 
@@ -3693,64 +3761,42 @@ class DBNN(GPUDBNN):
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
         n_samples = len(dataset)
+
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Get bin configuration from model parameters
+        # Get bin configuration
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
         self.n_bins_per_dim = n_bins
 
-        # Initialize weights with consistent bin size
+        # Initialize weights
         self._initialize_bin_weights()
 
         all_bin_counts = []
         all_bin_probs = []
 
-        with tqdm(total=len(self.feature_pairs), desc="Pairwise likelihood", leave=False) as pbar:
-            for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
-                edges = self.bin_edges[pair_idx]
-                assert len(edges[0]) == self.weight_updater.n_bins_per_dim + 1, \
-                    f"Bin edges dimension mismatch: {len(edges[0])-1} vs {self.weight_updater.n_bins_per_dim}"
+        # Process pairs in optimized batches
+        n_pairs = len(self.feature_pairs)
+        pair_batch_size = min(20, n_pairs)  # Memory-optimized batch size
 
-                pair_counts = torch.zeros((n_classes, n_bins, n_bins),
-                                        dtype=torch.float32,
-                                        device=self.device)
+        with tqdm(total=n_pairs, desc="Pairwise likelihood", leave=False) as pbar:
+            for batch_start in range(0, n_pairs, pair_batch_size):
+                batch_end = min(batch_start + pair_batch_size, n_pairs)
+                batch_pairs = range(batch_start, batch_end)
 
-                for cls_idx, cls in enumerate(unique_classes):
-                    cls_mask = (labels == cls)
-                    if not torch.any(cls_mask):
-                        continue
+                # Process batch of pairs
+                batch_counts, batch_probs = self._process_pair_batch_optimized(
+                    dataset, labels, unique_classes, batch_pairs, n_bins, n_classes
+                )
 
-                    data = dataset[cls_mask][:, [f1, f2]].contiguous()
+                all_bin_counts.extend(batch_counts)
+                all_bin_probs.extend(batch_probs)
+                pbar.update(len(batch_pairs))
 
-                    # Get bin indices for this class
-                    indices = [
-                        torch.bucketize(data[:, 0], edges[0], out_int32=True).clamp(0, n_bins-1),
-                        torch.bucketize(data[:, 1], edges[1], out_int32=True).clamp(0, n_bins-1)
-                    ]
-
-                    # Track used bins for this class and pair
-                    unique_bins = torch.unique(
-                        torch.stack(indices, dim=1),
-                        dim=0
-                    ).cpu().numpy()
-                    self.class_bins[cls.item()][pair_idx].update(
-                        {tuple(bin) for bin in unique_bins}
-                    )
-
-                    # Continue with original count logic
-                    flat_indices = indices[0] * n_bins + indices[1]
-                    counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
-                    pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
-
-                # Laplace smoothing and probability calculation
-                smoothed = pair_counts + 1.0
-                probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
-
-                all_bin_counts.append(smoothed)
-                all_bin_probs.append(probs)
-                pbar.update(1)
+                # Memory cleanup
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         return {
             'bin_counts': all_bin_counts,
@@ -3759,6 +3805,49 @@ class DBNN(GPUDBNN):
             'feature_pairs': self.feature_pairs,
             'classes': unique_classes
         }
+
+    def _process_pair_batch_optimized(self, dataset, labels, unique_classes, batch_pairs, n_bins, n_classes):
+        """Process a batch of feature pairs efficiently"""
+        batch_counts = []
+        batch_probs = []
+
+        for pair_idx in batch_pairs:
+            f1, f2 = self.feature_pairs[pair_idx]
+            edges = self.bin_edges[pair_idx]
+
+            # Initialize counts for all classes
+            pair_counts = torch.zeros((n_classes, n_bins, n_bins),
+                                    dtype=torch.float32, device=self.device)
+
+            # Vectorized processing for all classes
+            for cls_idx, cls in enumerate(unique_classes):
+                cls_mask = (labels == cls)
+                if not torch.any(cls_mask):
+                    continue
+
+                data = dataset[cls_mask][:, [f1, f2]].contiguous()
+
+                # Get bin indices for this class
+                indices_0 = torch.bucketize(data[:, 0], edges[0]).clamp(0, n_bins-1)
+                indices_1 = torch.bucketize(data[:, 1], edges[1]).clamp(0, n_bins-1)
+
+                # Track used bins
+                unique_bins = torch.unique(torch.stack([indices_0, indices_1], dim=1), dim=0).cpu().numpy()
+                self.class_bins[cls.item()][pair_idx].update({tuple(bin) for bin in unique_bins})
+
+                # Vectorized counting
+                flat_indices = indices_0 * n_bins + indices_1
+                counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
+                pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
+
+            # Laplace smoothing and probability calculation
+            smoothed = pair_counts + 1.0
+            probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
+
+            batch_counts.append(smoothed)
+            batch_probs.append(probs)
+
+        return batch_counts, batch_probs
 
     def _process_pair_batch(self, dataset_cpu, labels_cpu, batch_pairs, unique_classes, bin_sizes):
         """Process a batch of feature pairs on CPU"""
@@ -4048,7 +4137,7 @@ class DBNN(GPUDBNN):
         )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
-        """Vectorized weight updates with similarity-based filtering"""
+        """Vectorized weight updates with memory optimization"""
         n_failed = len(failed_cases)
         if n_failed == 0:
             self.consecutive_successes += 1
@@ -4057,11 +4146,11 @@ class DBNN(GPUDBNN):
         self.consecutive_successes = 0
         self.learning_rate = max(self.learning_rate / 2, 1e-6)
 
-        # Stack all features and convert classes at once
+        # Stack all features and classes at once
         features = torch.stack([case[0] for case in failed_cases]).to(self.device)
         true_classes = torch.tensor([int(case[1]) for case in failed_cases], device=self.device)
 
-        # Compute posteriors and predictions
+        # Compute all posteriors in one batch
         if self.model_type == "Histogram":
             posteriors, bin_indices = self._compute_batch_posterior(features)
         else:  # Gaussian model
@@ -4070,7 +4159,7 @@ class DBNN(GPUDBNN):
 
         pred_classes = torch.argmax(posteriors, dim=1)
 
-        # Calculate adjustments for all cases
+        # Vectorized adjustment calculation
         true_posteriors = posteriors[torch.arange(n_failed), true_classes]
         pred_posteriors = posteriors[torch.arange(n_failed), pred_classes]
         adjustments = self.learning_rate * (1.0 - (true_posteriors / pred_posteriors))
@@ -4078,24 +4167,22 @@ class DBNN(GPUDBNN):
         # Get similarity threshold from config
         sim_threshold = self.config.get('active_learning', {}).get('similarity_threshold', 0.25)
 
-        # Process each feature group with similarity filtering
+        # Vectorized processing for all feature groups
         if bin_indices is not None:
             for group_idx in bin_indices:
                 bin_i, bin_j = bin_indices[group_idx]
 
                 # Get predicted class probabilities for these bins
                 with torch.no_grad():
-                    # pred_classes shape: [n_failed]
-                    # bin_i/bin_j shape: [n_failed]
                     pred_probs = self.likelihood_params['bin_probs'][group_idx][
                         pred_classes, bin_i, bin_j
                     ]
 
-                # Create mask for dissimilar bins (predicted class probability < threshold)
+                # Create mask for dissimilar bins
                 dissimilar_mask = pred_probs < sim_threshold
 
                 if not dissimilar_mask.any():
-                    continue  # Skip group if no dissimilar bins
+                    continue
 
                 # Filter elements using mask
                 mask_true_classes = true_classes[dissimilar_mask]
@@ -4116,7 +4203,7 @@ class DBNN(GPUDBNN):
                     cls_bin_j = mask_bin_j[cls_mask]
                     cls_adjustments = mask_adjustments[cls_mask]
 
-                    # Update weights using vectorized index_put_
+                    # Vectorized weight update
                     self.weight_updater.histogram_weights[class_id.item()][group_idx].index_put_(
                         indices=(cls_bin_i, cls_bin_j),
                         values=cls_adjustments,
@@ -4546,17 +4633,16 @@ class DBNN(GPUDBNN):
             print("\033[K" + f"Best Overall (Classwise) Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
-        """Training loop with proper weight handling and enhanced progress tracking"""
-        print("\033[K" +"Starting training..." , end="\r", flush=True)
-        # Initialize best combined accuracy if not already set
+        """Optimized training loop with vectorized operations and proper error handling"""
+        print("\033[K" + "Starting training...", end="\r", flush=True)
+
+        # Initialize tracking variables
         if not hasattr(self, 'best_combined_accuracy'):
             self.best_combined_accuracy = 0.0
-
-        # Initialize best model weights if not already set
         if not hasattr(self, 'best_model_weights'):
             self.best_model_weights = None
 
-        # Store initial conditions at the start of training
+        # Store initial conditions
         if self.best_round_initial_conditions is None:
             self.best_round_initial_conditions = {
                 'weights': self.current_W.clone(),
@@ -4566,35 +4652,20 @@ class DBNN(GPUDBNN):
                 'gaussian_params': self.gaussian_params
             }
 
-
-        # Initialize progress bar for epochs
-        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs",leave=False)
-
-        # Store current weights for prediction during training
+        # Initialize progress tracking
+        epoch_pbar = tqdm(total=self.max_epochs, desc="Training epochs", leave=False)
         train_weights = self.current_W.clone() if self.current_W is not None else None
 
         # Pre-allocate tensors for batch processing
         n_samples = len(X_train)
-        predictions = torch.empty(batch_size, dtype=torch.long, device=self.device)
-        batch_mask = torch.empty(batch_size, dtype=torch.bool, device=self.device)
-
-        # Initialize tracking variables
         error_rates = []
-        train_losses = []
-        test_losses = []
         train_accuracies = []
-        test_accuracies = []
         prev_train_error = float('inf')
         prev_train_accuracy = 0.0
-        prev_test_accuracy = 0.0
         patience_counter = 0
         best_train_accuracy = 0.0
-        best_test_accuracy = 0.0
 
-        if self.in_adaptive_fit:
-            patience = self.adaptive_patience if self.in_adaptive_fit else self.patience
-        else:
-            patience = Trials
+        patience = self.adaptive_patience if self.in_adaptive_fit else self.patience
 
         for epoch in range(self.max_epochs):
             # Save epoch data
@@ -4604,7 +4675,7 @@ class DBNN(GPUDBNN):
             failed_cases = []
             n_errors = 0
 
-            # Process training data in batches
+            # Process training data in optimized batches
             n_batches = (len(X_train) + batch_size - 1) // batch_size
             batch_pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1} batches", leave=False)
 
@@ -4615,78 +4686,68 @@ class DBNN(GPUDBNN):
                 batch_X = X_train[i:batch_end]
                 batch_y = y_train[i:batch_end]
 
-                # Compute posteriors for batch
-                if self.model_type == "Histogram":
-                    posteriors, bin_indices = self._compute_batch_posterior(batch_X)
-                elif self.model_type == "Gaussian":
-                    posteriors, comp_resp = self._compute_batch_posterior_std(batch_X)
+                # Compute posteriors for batch (uses optimized _compute_batch_posterior)
+                try:
+                    if self.model_type == "Histogram":
+                        posteriors, bin_indices = self._compute_batch_posterior(batch_X)
+                    elif self.model_type == "Gaussian":
+                        posteriors, comp_resp = self._compute_batch_posterior_std(batch_X)
+                    else:
+                        raise ValueError(f"Unknown model type: {self.model_type}")
+                except Exception as e:
+                    print(f"\033[KError computing posteriors: {str(e)}")
+                    continue
 
-                predictions[:current_batch_size] = torch.argmax(posteriors, dim=1)
-                batch_mask[:current_batch_size] = (predictions[:current_batch_size] != batch_y)
+                # Vectorized prediction and error calculation
+                predictions = torch.argmax(posteriors, dim=1)
+                batch_errors = (predictions != batch_y)
+                n_errors += batch_errors.sum().item()
 
-                n_errors += batch_mask[:current_batch_size].sum().item()
+                # Collect failed cases efficiently
+                if batch_errors.any():
+                    failed_indices = torch.where(batch_errors)[0]
+                    # Vectorized collection of failed cases
+                    failed_features = batch_X[failed_indices]
+                    failed_labels = batch_y[failed_indices]
+                    failed_posteriors = posteriors[failed_indices].cpu().numpy()
 
-                if batch_mask[:current_batch_size].any():
-                    failed_indices = torch.where(batch_mask[:current_batch_size])[0]
-                    for idx in failed_indices:
+                    for idx in range(len(failed_indices)):
                         failed_cases.append((
-                            batch_X[idx],
-                            batch_y[idx].item(),
-                            posteriors[idx].cpu().numpy()
+                            failed_features[idx],
+                            failed_labels[idx].item(),
+                            failed_posteriors[idx]
                         ))
+
                 batch_pbar.update(1)
 
             batch_pbar.close()
 
-            # Calculate training error rate
+            # Calculate metrics
             train_error_rate = n_errors / n_samples
             error_rates.append(train_error_rate)
 
-            # Calculate metrics using current weights
+            # Calculate training accuracy using optimized prediction
             with torch.no_grad():
-                # Temporarily set current_W for training metrics
                 orig_weights = self.current_W
                 self.current_W = train_weights
 
-                # Training metrics
-                #print("\033[K" +f"{Colors.GREEN}Predctions on Training data{Colors.ENDC}", end="\r", flush=True)
                 train_pred_classes, train_posteriors = self.predict(X_train, batch_size=batch_size)
                 train_accuracy = (train_pred_classes == y_train.cpu()).float().mean()
-                train_loss = n_errors / n_samples
 
-                # Restore original weights
                 self.current_W = orig_weights
 
             # Update best accuracies
             best_train_accuracy = max(best_train_accuracy, train_accuracy)
-
-            # Store metrics
-            train_losses.append(train_loss)
-
             train_accuracies.append(train_accuracy)
 
-
-            # Calculate training time
-            Trend_time = time.time()
-            training_time = Trend_time - Trstart_time
-
-            # Update progress display
+            # Update progress
             epoch_pbar.update(1)
             epoch_pbar.set_postfix({
-                'train_err': f"{train_error_rate:.4f} (best: {1-best_train_accuracy:.4f})",
-                'train_acc': f"{train_accuracy:.4f} (best: {best_train_accuracy:.4f})"
+                'train_err': f"{train_error_rate:.4f}",
+                'train_acc': f"{train_accuracy:.4f}"
             })
 
-            #print("\033[K" +f"Epoch {epoch + 1}/{self.max_epochs}:", end="\r", flush=True)
-            #print("\033[K" +f"Training time: {Colors.highlight_time(training_time)} seconds", end="\r", flush=True)
-            #print("\033[K" +f"Train error rate: {Colors.color_value(train_error_rate, prev_train_error, False)} (best: {1-best_train_accuracy:.4f})", end="\r", flush=True)
-            #print("\033[K" +f"Train accuracy: {Colors.color_value(train_accuracy, prev_train_accuracy, True)} (best: {Colors.GREEN}{best_train_accuracy:.4f}{Colors.ENDC})", end="\r", flush=True)
-
-            # Update previous values for next iteration
-            prev_train_error = train_error_rate
-            prev_train_accuracy = train_accuracy
-
-            # Check if this is the best round so far
+            # Check for best round
             if train_accuracy > best_train_accuracy:
                 best_train_accuracy = train_accuracy
                 self.best_round = epoch
@@ -4702,8 +4763,7 @@ class DBNN(GPUDBNN):
             if train_error_rate <= self.best_error:
                 improvement = self.best_error - train_error_rate
                 self.best_error = train_error_rate
-                self.best_W = self.current_W.clone()  # Save current weights as best
-                #self._save_best_weights()   # move it to train_fit
+                self.best_W = self.current_W.clone()
 
                 if improvement <= 0.001:
                     patience_counter += 1
@@ -4714,29 +4774,20 @@ class DBNN(GPUDBNN):
                 patience_counter += 1
 
             # Early stopping check
-            if patience_counter >= patience or  train_accuracy ==1.00:
-                print("\033[K" +f"{Colors.YELLOW} Early stopping.{Colors.ENDC}")
+            if patience_counter >= patience or train_accuracy == 1.00:
+                print("\033[K" + f"{Colors.YELLOW} Early stopping.{Colors.ENDC}")
                 break
 
-            # Update weights if there were failures
+            # Update weights using optimized method
             if failed_cases:
-                self._update_priors_parallel(failed_cases, batch_size)
-            # Save reconstruction plots if enabled
-            if self.save_plots:
-                # Reconstruct features from predictions
-                reconstructed_features = self.reconstruct_features(posteriors)
-                save_path=f"data/{self.dataset_name}/plots/epoch_{epoch+1}"
-                os.makedirs(save_path, exist_ok=True)
-                self._save_reconstruction_plots(
-                    original_features=X_train.cpu().numpy(),
-                    reconstructed_features=reconstructed_features.cpu().numpy(),
-                    true_labels=y_train.cpu().numpy(),
-                    save_path=save_path
-                )
+                try:
+                    self._update_priors_parallel(failed_cases, batch_size)
+                except Exception as e:
+                    print(f"\033[KWarning: Failed to update priors: {str(e)}")
+                    # Continue training even if weight update fails
 
         # Training complete
         epoch_pbar.close()
-        #self._save_model_components()
         return self.current_W.cpu(), error_rates
 
     #---------------------------------Train InvertableDBNN on the fly ------------------------------------
@@ -5021,7 +5072,6 @@ class DBNN(GPUDBNN):
 
         return likelihood_pdfs
 
-
     def _get_weights_filename(self):
         """Get the filename for saving/loading weights"""
         return os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
@@ -5029,9 +5079,6 @@ class DBNN(GPUDBNN):
     def _get_encoders_filename(self):
         """Get the filename for saving/loading categorical encoders"""
         return os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_encoders.json')
-
-
-
 
     def _remove_high_cardinality_columns(self, df: pd.DataFrame, threshold: float = 0.8) -> pd.DataFrame:
         """Remove high cardinality columns and round features with detailed debugging"""
@@ -5562,7 +5609,6 @@ class DBNN(GPUDBNN):
 
         return df_encoded
 
-
     def save_predictions(self, X: pd.DataFrame, predictions: torch.Tensor, output_file: str, true_labels: pd.Series = None):
         """Save predictions with proper class handling and probability computation"""
         predictions = predictions.cpu()
@@ -5650,7 +5696,6 @@ class DBNN(GPUDBNN):
             self.verify_classifications(X, true_labels, predictions)
 
         return result_df
-#--------------------------------------------------------------------------------------------------------------
 
     def _save_model_components(self):
         """Enhanced model component saving with validation and atomic writes"""
@@ -6416,7 +6461,6 @@ def create_prediction_mosaic(
         DEBUG.log(f"Error in create_prediction_mosaic: {str(e)}")
         raise RuntimeError(f"Prediction mosaic creation failed: {str(e)}")
 
-
 def plot_training_progress(error_rates: List[float], dataset_name: str):
     """Plot training error rates over epochs"""
     plt.figure(figsize=(10, 6))
@@ -6443,9 +6487,6 @@ def plot_confusion_matrix(confusion_mat: np.ndarray, class_names: np.ndarray, da
     plt.xlabel('Predicted Label')
     plt.show()
 
-
-
-
 def load_label_encoder(dataset_name,save_dir='Model',model_type='Histogram'):
     encoder_path = os.path.join(save_dir,  f'Best_{model_type}_{dataset_name}_label_encoder.pkl')
     if os.path.exists(encoder_path):
@@ -6455,7 +6496,6 @@ def load_label_encoder(dataset_name,save_dir='Model',model_type='Histogram'):
         return label_encoder
     else:
         raise FileNotFoundError(f"Label encoder file not found at {encoder_path}")
-
 
 def generate_test_datasets():
     """Generate XOR and 3D XOR test datasets"""
@@ -6503,7 +6543,6 @@ def generate_test_datasets():
         f.write('1,1,0,1\n')
         f.write('1,1,1,0\n')
 
-
 class DebugLogger:
     def __init__(self):
         self.enabled = False
@@ -6529,7 +6568,6 @@ def configure_debug(config):
         DEBUG.enable()
     else:
         DEBUG.disable()
-
 
 #-------------------------------------------------------unit test ----------------------------------
 import os
@@ -6741,7 +6779,6 @@ def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
 
     return dataset_pairs
 
-
 def validate_config(config: dict) -> dict:
     """
     Validate the configuration parameters, ensuring that only the batch size is dynamically updated.
@@ -6801,7 +6838,6 @@ def validate_config(config: dict) -> dict:
         validated_config["display"] = None
 
     return validated_config
-
 
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets')
