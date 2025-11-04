@@ -333,67 +333,7 @@ class DatasetConfig:
     @staticmethod
     def create_default_config(dataset_name: str) -> Dict:
         """Create a default configuration file with enhanced defaults"""
-        config = DatasetConfig.DEFAULT_CONFIG.copy()
-        config['file_path'] = f"{dataset_name}.csv"
-        print(f"{Colors.RED} Creating default configuration as the cofiguration file is invalid {Colors.ENDC}")
-        # Try to infer column names from CSV if it exists
-        if os.path.exists(config['file_path']):
-            try:
-                with open(config['file_path'], 'r') as f:
-                    header = f.readline().strip()
-                    config['column_names'] = header.split(config['separator'])
-                    if config['column_names']:
-                        config['target_column'] = config['column_names'][-1]
-            except Exception as e:
-                print("\033[K" +f"Warning: Could not read header from {config['file_path']}: {str(e)}")
-
-        # Add model type configuration
-        config['modelType'] = "Histogram"  # Default to Histogram model
-
-        # Add training parameters
-        config['training_params'] = {
-            "override_global_cardinality": False,
-            "trials": 100,
-            "cardinality_threshold": 0.9,
-            "minimum_training_accuracy": 0.95,
-            "cardinality_tolerance": 8,
-            "learning_rate": 0.001,
-            "random_seed": 42,
-            "epochs": 1000,
-            "test_fraction": 0.2,
-            "n_bins_per_dim": 21,
-            "enable_adaptive": True,
-            "compute_device": "auto",
-            "invert_DBNN": True,
-            "reconstruction_weight": 0.5,
-            "feedback_strength": 0.3,
-            "inverse_learning_rate": 0.001,
-            "save_plots": False,
-            "class_preference": True
-        }
-        config["active_learning"]= {
-            "tolerance": 1.0,
-            "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.01,
-            "marginal_margin_threshold": 0.01,
-            "min_divergence": 0.1
-        }
-        config["execution_flags"]= {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True
-        }
-
-        config["anomaly_detection"]= {
-            "initial_weight": 1e-6,        # Near-zero initial weight
-            "threshold": 0.01,             # Posterior threshold for flagging anomalies
-            "missing_value": -99999,       # Special value indicating missing features
-            "missing_weight_multiplier": 0.1  # Additional penalty for missing values
-        }
-        return config
-
+        return load_or_create_config(dataset_name)
 
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
@@ -520,6 +460,15 @@ class DatasetConfig:
             config = json.loads(clean_config)
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
+
+            # Ensure enable_visualization parameter exists in training_params
+            if 'training_params' not in validated_config:
+                validated_config['training_params'] = {}
+
+            # Set default enable_visualization if missing
+            if 'enable_visualization' not in validated_config['training_params']:
+                validated_config['training_params']['enable_visualization'] = DatasetConfig.DEFAULT_CONFIG['training_params']['enable_visualization']
+                print(f"\033[K[INFO] Added missing 'enable_visualization' parameter with default value: {validated_config['training_params']['enable_visualization']}")
 
             # Path handling
             if validated_config.get('file_path'):
@@ -832,10 +781,10 @@ class BinWeightUpdater:
         self.update_count = 0
 
         # Debug initialization
-        print("\033[K" + f"[DEBUG] Weight initialization complete with initial value: {self.initial_weight}")
-        print("\033[K" + f"- Number of classes: {len(self.histogram_weights)}")
-        for class_id in self.histogram_weights:
-            print("\033[K" + f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
+        # print("\033[K" + f"[DEBUG] Weight initialization complete with initial value: {self.initial_weight}")
+        #print("\033[K" + f"- Number of classes: {len(self.histogram_weights)}")
+        #for class_id in self.histogram_weights:
+        #   print("\033[K" + f"- Class {class_id}: {len(self.histogram_weights[class_id])} feature pairs")
 
     def _get_initial_weight_from_config(self):
         """Get initial weight value from configuration"""
@@ -2294,42 +2243,6 @@ class DBNN(GPUDBNN):
 
         return cardinalities
 
-    def _calculate_optimal_batch_size(self, sample_tensor_size):
-        """Calculate optimal batch size with more conservative estimates"""
-        if not torch.cuda.is_available():
-            return 128  # Default for CPU
-
-        try:
-            # Get memory stats
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            allocated = torch.cuda.memory_allocated(0)
-            reserved = torch.cuda.memory_reserved(0)
-            free_memory = total_memory - allocated - reserved
-
-            # Be more conservative - use only 30% of free memory
-            available_memory = free_memory * 0.3
-
-            # Calculate memory needed per sample (with safety factor)
-            memory_per_sample = sample_tensor_size * 8  # More conservative estimate
-
-            # Calculate optimal batch size
-            optimal_batch_size = int(available_memory / memory_per_sample)
-
-            # Enforce reasonable bounds
-            optimal_batch_size = max(32, min(optimal_batch_size, 2048))  # Reduced max from 4096
-
-            DEBUG.log(f"Memory Analysis:")
-            DEBUG.log(f"- Total GPU Memory: {total_memory / 1e9:.2f} GB")
-            DEBUG.log(f"- Free Memory: {free_memory / 1e9:.2f} GB")
-            DEBUG.log(f"- Available for batch: {available_memory / 1e9:.2f} GB")
-            DEBUG.log(f"- Memory per sample: {memory_per_sample / 1e6:.2f} MB")
-            print(f"{Colors.GREEN}The new Batch size is dynamically set to {optimal_batch_size}{Colors.ENDC}")
-
-            return optimal_batch_size
-
-        except Exception as e:
-            print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
-            return 128  # Fallback value
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
         """Memory-optimized sample selection with chunked divergence computation"""
@@ -5840,6 +5753,9 @@ class DBNN(GPUDBNN):
             if components['version'] < 2:
                 raise ValueError(f"Unsupported components version: {components['version']}")
 
+            # Store current visualization setting before loading config
+            current_visualization = self.config.get('training_params', {}).get('enable_visualization', False)
+
             # Load and validate label encoder
             if 'label_encoder' not in components or not components['label_encoder'].get('fitted', False):
                 raise ValueError("Label encoder not properly saved or not fitted")
@@ -5901,6 +5817,15 @@ class DBNN(GPUDBNN):
                         setattr(self, comp, gaussian_params)
                     else:
                         setattr(self, comp, components[comp])
+
+            # Load config but preserve current visualization setting
+            if 'config' in components:
+                # Update the config but preserve the current visualization setting
+                loaded_config = components['config']
+                if 'training_params' in loaded_config and 'training_params' in self.config:
+                    # Preserve the current visualization setting from the active config
+                    loaded_config['training_params']['enable_visualization'] = current_visualization
+                self.config.update(loaded_config)
 
             print(f"\033[K[SUCCESS] Loaded model components from {components_file}")
             return True
@@ -6951,6 +6876,42 @@ from datetime import datetime
 
 import json
 import os
+def _calculate_optimal_batch_size(sample_tensor_size):
+    """Calculate optimal batch size with more conservative estimates"""
+    if not torch.cuda.is_available():
+        return 128  # Default for CPU
+
+    try:
+        # Get memory stats
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        allocated = torch.cuda.memory_allocated(0)
+        reserved = torch.cuda.memory_reserved(0)
+        free_memory = total_memory - allocated - reserved
+
+        # Be more conservative - use only 30% of free memory
+        available_memory = free_memory * 0.3
+
+        # Calculate memory needed per sample (with safety factor)
+        memory_per_sample = sample_tensor_size * 8  # More conservative estimate
+
+        # Calculate optimal batch size
+        optimal_batch_size = int(available_memory / memory_per_sample)
+
+        # Enforce reasonable bounds
+        optimal_batch_size = max(32, min(optimal_batch_size, 2048))  # Reduced max from 4096
+
+        DEBUG.log(f"Memory Analysis:")
+        DEBUG.log(f"- Total GPU Memory: {total_memory / 1e9:.2f} GB")
+        DEBUG.log(f"- Free Memory: {free_memory / 1e9:.2f} GB")
+        DEBUG.log(f"- Available for batch: {available_memory / 1e9:.2f} GB")
+        DEBUG.log(f"- Memory per sample: {memory_per_sample / 1e6:.2f} MB")
+        print(f"{Colors.GREEN}The new Batch size is dynamically set to {optimal_batch_size}{Colors.ENDC}")
+
+        return optimal_batch_size
+
+    except Exception as e:
+        print(f"{Colors.RED}Error calculating batch size: {str(e)}{Colors.ENDC}")
+        return 128  # Fallback value
 
 def load_or_create_config(config_path: str) -> dict:
     """
@@ -7027,7 +6988,7 @@ def load_or_create_config(config_path: str) -> dict:
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             config = json.load(f)
-        print(f"Loaded configuration from {config_path}")
+        #print(f"Loaded configuration from {config_path}")
     else:
         config = default_config
         with open(config_path, 'w') as f:
@@ -7067,6 +7028,7 @@ def load_or_create_config(config_path: str) -> dict:
             config["training_params"]["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
 
     return config
+
 
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     """
@@ -7302,26 +7264,6 @@ def main():
                 for param in params:
                     if param not in config[section]:
                         raise ValueError(f"Missing required parameter '{param}' in section '{section}'")
-
-    def load_or_create_config(config_path):
-        """Load or create configuration with validation"""
-        try:
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                validate_config(config)
-                return config
-            else:
-                # Create default config
-                config = DatasetConfig.create_default_config(os.path.basename(config_path).split('.')[0])
-                os.makedirs(os.path.dirname(config_path), exist_ok=True)
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                print(f"📄 Created default configuration: {config_path}")
-                return config
-        except Exception as e:
-            print(f"❌ {Colors.RED}Error loading/creating config: {str(e)}{Colors.ENDC}")
-            raise
 
     def find_dataset_pairs():
         """Find matching dataset/config pairs in data folder"""
