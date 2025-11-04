@@ -1224,46 +1224,84 @@ class GPUDBNN:
         self.mode = mode
         self.dataset_name = dataset_name
         self.model_type = model_type  # Store model type as instance variable
-        self.device = Train_device
+
+        # Load configuration BEFORE any parameter setting
+        self.config = DatasetConfig.load_config(self.dataset_name)
+        if self.config is None:
+            raise ValueError(f"Failed to load configuration for dataset: {self.dataset_name}")
+
+        training_params = self.config.get('training_params', {})
+
+        # DEBUG: Print what we found in config
+        print(f"\033[K{Colors.YELLOW}[DEBUG] Config training_params: {training_params}{Colors.ENDC}")
+
+        # USE CONFIG VALUES DIRECTLY, ignore the passed parameters (they come from wrong source)
+        self.learning_rate = training_params.get('learning_rate', LearningRate)
+        self.max_epochs = training_params.get('epochs', Epochs)
+        self.test_size = training_params.get('test_fraction', TestFraction)
+        self.n_bins_per_dim = training_params.get('n_bins_per_dim', 128)
+        self.batch_size = training_params.get('batch_size', 128)
+
+        # Handle random_state specially (your code uses -1 for no shuffle)
+        config_random_seed = training_params.get('random_seed', TrainingRandomSeed)
+        if random_state is None:
+            self.random_state = config_random_seed
+        else:
+            self.random_state = random_state
+
+        self.shuffle_state = 1 if self.random_state != -1 else -1
+
+        # Device configuration - use config preference
+        compute_device = training_params.get('compute_device', 'auto')
+        if device is None:
+            if compute_device == 'auto':
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            else:
+                self.device = compute_device
+        else:
+            self.device = device
+
+        # Print verification of ACTUAL parameters being used
+        print(f"\033[K{Colors.GREEN}[GPUDBNN] ACTUAL PARAMETERS FROM CONFIG:{Colors.ENDC}")
+        print(f"\033[K  learning_rate: {self.learning_rate} (config: {training_params.get('learning_rate', 'default')})")
+        print(f"\033[K  max_epochs: {self.max_epochs} (config: {training_params.get('epochs', 'default')})")
+        print(f"\033[K  test_size: {self.test_size} (config: {training_params.get('test_fraction', 'default')})")
+        print(f"\033[K  n_bins_per_dim: {self.n_bins_per_dim} (config: {training_params.get('n_bins_per_dim', 'default')})")
+        print(f"\033[K  random_state: {self.random_state} (config: {training_params.get('random_seed', 'default')})")
+        print(f"\033[K  device: {self.device} (config: {training_params.get('compute_device', 'auto')})")
+
+        # Initialize computation cache with correct device
         self.computation_cache = ComputationCache(self.device)
+
         # Initialize train/test indices
         self.train_indices = []
         self.test_indices = None
-        self._last_metrics_printed =False
+        self._last_metrics_printed = False
+
         # Add new attribute for bin-specific weights
         self.weight_updater = None  # Will be initialized after computing likelihood params
 
-        # Load configuration before potential cleanup
-        self.config = DatasetConfig.load_config(self.dataset_name)
         self.feature_bounds = None  # Store global min/max for each
-        #self.n_bins_per_dim = n_bins_per_dim
-        self.n_bins_per_dim = self.config.get('likelihood_config', {}).get('n_bins_per_dim', 128)
 
-        # Initialize other attributes
+        # Use the n_bins_per_dim from config, not the parameter
+        self.n_bins_per_dim = training_params.get('n_bins_per_dim',
+                            self.config.get('likelihood_config', {}).get('n_bins_per_dim', 128))
 
-        self.learning_rate = learning_rate
-        self.max_epochs = max_epochs
-        self.test_size = test_size
-        if random_state !=-1:
-            self.random_state = random_state
-            self.shuffle_state =1
-        else:
-            self.random_state = -1
-            self.shuffle_state =-1
-        #self.compute_dtype = torch.float64  # Use double precision for computations
-        self.cardinality_tolerance = cardinality_tolerance  # Only for feature grouping
+        # Initialize other attributes that should use CONFIG values
+        self.cardinality_tolerance = training_params.get('cardinality_tolerance', cardinality_tolerance)
         self.fresh_start = fresh
         self.use_previous_model = use_previous_model
+
         # Create Model directory
         os.makedirs('Model', exist_ok=True)
 
         # Load configuration and data
-        # DatasetConfig.load_config(self.dataset_name)
         self.target_column = self.config['target_column']
 
         # Initialize model components
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
+
         # Handle label encoder initialization based on mode
         if mode == 'predict':
             # Strict validation for prediction mode
@@ -1304,36 +1342,73 @@ class GPUDBNN:
             self.pin_memory = True
             torch.cuda.empty_cache()
 
-        # Handle fresh start after configuration is loaded
         # Handle model state based on flags
-        if  use_previous_model:
+        if use_previous_model:
             # Load previous model state
-            #self.label_encoder =load_label_encoder(dataset_name)
-            #self._load_model_components()
             pass
-            #self._load_best_weights()
-            #self._load_categorical_encoders()
         else:
             # Complete fresh start
             self._clean_existing_model()
 
-
         #------------------------------------------Adaptive Learning--------------------------------------
-        super().__init__()
-        self.adaptive_learning = True
+        # Initialize adaptive learning parameters from config
+        self.adaptive_learning = training_params.get('enable_adaptive', True)
         self.base_save_path = './data'
         os.makedirs(self.base_save_path, exist_ok=True)
-        self.in_adaptive_fit=False # Set when we are in adaptive learning process
-        #------------------------------------------Adaptive Learning--------------------------------------
-        # Automatically select device if none specified
+        self.in_adaptive_fit = False  # Set when we are in adaptive learning process
+
+        # Store adaptive learning parameters from training_params
+        self.adaptive_rounds = training_params.get('adaptive_rounds', 100)
+        self.initial_samples = training_params.get('initial_samples', 50)
+        self.max_samples_per_round = training_params.get('max_samples_per_round', 500)
+        self.minimum_training_accuracy = training_params.get('minimum_training_accuracy', 0.95)
+
+        # Load active_learning config parameters and merge with training_params
+        active_learning_config = self.config.get('active_learning', {})
+        print(f"\033[K{Colors.YELLOW}[DEBUG] Active Learning Config: {active_learning_config}{Colors.ENDC}")
+
+        # Store active learning parameters (use training_params as primary, fallback to active_learning)
+        self.min_divergence = training_params.get('min_divergence',
+                            active_learning_config.get('min_divergence', 0.1))
+        self.max_class_addition_percent = training_params.get('max_class_addition_percent',
+                            active_learning_config.get('max_class_addition_percent', 99))
+        self.cardinality_threshold_percentile = training_params.get('cardinality_threshold_percentile',
+                            active_learning_config.get('cardinality_threshold_percentile', 95))
+        self.similarity_threshold = training_params.get('similarity_threshold',
+                            active_learning_config.get('similarity_threshold', 0.25))
+        self.strong_margin_threshold = training_params.get('strong_margin_threshold',
+                            active_learning_config.get('strong_margin_threshold', 0.01))
+        self.marginal_margin_threshold = training_params.get('marginal_margin_threshold',
+                            active_learning_config.get('marginal_margin_threshold', 0.01))
+        self.tolerance = training_params.get('tolerance',
+                            active_learning_config.get('tolerance', 1.0))
+
+        # CRITICAL: Initialize the missing attributes that DBNN expects
+        self.best_round = None
+        self.best_round_initial_conditions = None
+        self.best_combined_accuracy = 0.00
+        self.best_model_weights = None
+
+        # Print ALL adaptive parameters for verification
+        if self.adaptive_learning:
+            print(f"\033[K{Colors.BLUE}[ADAPTIVE] All Parameters:{Colors.ENDC}")
+            print(f"\033[K  From training_params:")
+            print(f"\033[K    adaptive_rounds: {self.adaptive_rounds}")
+            print(f"\033[K    initial_samples: {self.initial_samples}")
+            print(f"\033[K    max_samples_per_round: {self.max_samples_per_round}")
+            print(f"\033[K    minimum_training_accuracy: {self.minimum_training_accuracy}")
+            print(f"\033[K  From active_learning (merged):")
+            print(f"\033[K    min_divergence: {self.min_divergence}")
+            print(f"\033[K    max_class_addition_percent: {self.max_class_addition_percent}")
+            print(f"\033[K    cardinality_threshold_percentile: {self.cardinality_threshold_percentile}")
+            print(f"\033[K    similarity_threshold: {self.similarity_threshold}")
+            print(f"\033[K    strong_margin_threshold: {self.strong_margin_threshold}")
+            print(f"\033[K    marginal_margin_threshold: {self.marginal_margin_threshold}")
+            print(f"\033[K    tolerance: {self.tolerance}")
 
         print("\033[K" +f"Using device: {self.device}")
 
-        self.learning_rate = learning_rate
-        self.max_epochs = max_epochs
-        self.test_size = test_size
-
-        # Model components
+        # Model components (re-initialize to ensure consistency)
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         self.likelihood_params = None
@@ -1349,15 +1424,29 @@ class GPUDBNN:
         os.makedirs('Model', exist_ok=True)
 
         # Load dataset configuration and data
-        #self.config = DatasetConfig.load_config(self.dataset_name)
         self.target_column = self.config['target_column']
         self.data = self._load_dataset()
-
-
 
         # Load saved weights and encoders
         self._load_best_weights()
         self._load_categorical_encoders()
+
+        # Final verification
+        print(f"\033[K{Colors.GREEN}[FINAL] Training with:{Colors.ENDC}")
+        print(f"\033[K  Learning Rate: {self.learning_rate}")
+        print(f"\033[K  Max Epochs: {self.max_epochs}")
+        print(f"\033[K  Test Size: {self.test_size}")
+        print(f"\033[K  Bins per Dim: {self.n_bins_per_dim}")
+        print(f"\033[K  Random State: {self.random_state}")
+        print(f"\033[K  Adaptive: {self.adaptive_learning}")
+        print(f"\033[K  Initial Samples: {self.initial_samples}")
+        print(f"\033[K  Adaptive Rounds: {self.adaptive_rounds}")
+        print(f"\033[K  Max Samples Per Round: {self.max_samples_per_round}")
+
+        # CONFIG VERIFICATION
+        print(f"\033[K{Colors.GREEN}[CONFIG VERIFICATION]{Colors.ENDC}")
+        print(f"\033[K  Training Params keys: {list(training_params.keys())}")
+        print(f"\033[K  Active Learning keys: {list(active_learning_config.keys())}")
 
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
@@ -1534,86 +1623,80 @@ class DBNN(GPUDBNN):
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
                  dataset_name: Optional[str] = None, mode=None, model_type: Optional[str] = None):
 
-        """
-        Initialize DBNN with configuration
-
-        Args:
-            config: DBNNConfig object or dictionary of parameters
-            dataset_name: Name of the dataset (optional)
-        """
-        # Initialize configuration
-        if config is None:
-            config = DBNNConfig()
-        elif isinstance(config, dict):
-            config = DBNNConfig(**config)
-        if mode is None:
-            self.mode=None
-        else:
-            self.mode=mode
-
-        # First load the dataset configuration
-        self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
-        # Metadata storage (CPU only)
-        self._metadata = {
-            'sample_ids': [],          # Original dataset indices
-            'file_paths': [],          # Paths for image/data files
-            'class_names': [],         # String class labels
-            'feature_names': [],       # Column/feature names
-            'aux_data': {}             # Other non-computational data
-        }
-        # GPU Tensors (computational only)
-        self._gpu_tensors = {
-            'features': None,
-            'targets': None,
-            'weights': None
-        }
-        # Map DBNNConfig to GPUDBNN parameters
-        super().__init__(
-            dataset_name=dataset_name,
-            learning_rate=config.learning_rate,
-            max_epochs=config.epochs,
-            test_size=config.test_fraction,
-            random_state=config.random_seed,
-            fresh=config.fresh_start,
-            use_previous_model=config.use_previous_model,
-            model_type=model_type if model_type is not None else config.model_type,  # Pass model type from config
-            mode=self.mode
-        )
-        self.cardinality_threshold = self.config.get('training_params', {}).get('cardinality_threshold', 0.9)
-
-        # Store model configuration
-        self.model_config = config
-        self.training_log = pd.DataFrame()
-        self.save_plots = self.config.get('training_params', {}).get('save_plots', False)
-        self.patience = self.config['training_params'].get('patience', Trials)
-        self.adaptive_patience = self.config['training_params'].get('adaptive_patience', 25)
-
-        # Add new attributes to track the best round
-        self.best_round = None  # Track the best round number
-        self.best_round_initial_conditions = None  # Save initial conditions of the best round
-        self.best_combined_accuracy = 0.00
-        self.best_model_weights = None
-        self.data = None
-        self.global_mean = None  # Store global mean
-        self.global_std = None   # Store global standard deviation
-        self.global_stats_computed = False  # Flag to track if stats are computed
-
-        # Validate dataset_name
-        if not dataset_name or not isinstance(dataset_name, str):
-            raise ValueError("Invalid dataset_name provided. Must be a non-empty string.")
-
-        # Load configuration
+        # First load the actual dataset configuration
+        self.dataset_name = dataset_name
         self.config = DatasetConfig.load_config(dataset_name)
         if self.config is None:
             raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
 
-        # Initialize other attributes
-        self.target_column = self.config['target_column']
-        self.batch_size = self.config.get('batch_size',128)
-        self.invertible_model = None
-        # Preprocess data once during initialization
-        self._is_preprocessed = False  # Flag to track preprocessing
-        self._preprocess_and_split_data()  # Call preprocessing only once
+        # Get training parameters from the actual JSON config
+        training_params = self.config.get('training_params', {})
+
+        # Extract ALL parameters from JSON config with proper fallbacks
+        trials = training_params.get('trials', 100)
+        cardinality_threshold = training_params.get('cardinality_threshold', 0.9)
+        learning_rate = training_params.get('learning_rate', 0.001)
+        random_seed = training_params.get('random_seed', 42)
+        epochs = training_params.get('epochs', 1000)
+        test_fraction = training_params.get('test_fraction', 0.2)
+        n_bins_per_dim = training_params.get('n_bins_per_dim', 128)
+
+        # Handle the DBNNConfig parameter properly
+        if config is None:
+            # Create DBNNConfig using values from JSON config
+            config_dict = {
+                'trials': trials,
+                'cardinality_threshold': cardinality_threshold,
+                'learning_rate': learning_rate,
+                'random_seed': random_seed,
+                'epochs': epochs,
+                'test_fraction': test_fraction,
+                'n_bins_per_dim': n_bins_per_dim,
+                'enable_adaptive': training_params.get('enable_adaptive', True),
+                'train': training_params.get('train', True),
+                'train_only': training_params.get('train_only', False),
+                'predict': training_params.get('predict', True),
+                'fresh_start': training_params.get('fresh_start', False),
+                'use_previous_model': training_params.get('use_previous_model', True),
+                'model_type': model_type or training_params.get('model_type', 'Histogram')
+            }
+            config = DBNNConfig(**config_dict)
+        elif isinstance(config, dict):
+            # Merge with JSON config values
+            for key in ['learning_rate', 'epochs', 'test_fraction', 'random_seed', 'n_bins_per_dim']:
+                if key in training_params:
+                    config[key] = training_params[key]
+            config = DBNNConfig(**config)
+
+        # Now call parent with CORRECT parameters from JSON config
+        super().__init__(
+            dataset_name=dataset_name,
+            learning_rate=learning_rate,      # From JSON config
+            max_epochs=epochs,               # From JSON config
+            test_size=test_fraction,          # From JSON config
+            random_state=random_seed,         # From JSON config
+            fresh=config.fresh_start,
+            use_previous_model=config.use_previous_model,
+            n_bins_per_dim=n_bins_per_dim,    # From JSON config
+            model_type=model_type or training_params.get('model_type', 'Histogram'),
+            mode=mode
+        )
+
+        # Store the actual parameters that will be used
+        self.mode = mode
+        self.cardinality_threshold = cardinality_threshold
+        self.trials = trials
+        self.patience = trials
+        self.adaptive_patience = training_params.get('adaptive_patience', 25)
+
+        # Print verification
+        print(f"\033[K{Colors.GREEN}Using parameters from config file:{Colors.ENDC}")
+        print(f"\033[K  Learning rate: {self.learning_rate}")
+        print(f"\033[K  Epochs: {self.max_epochs}")
+        print(f"\033[K  Test fraction: {self.test_size}")
+        print(f"\033[K  Random seed: {self.random_state}")
+        print(f"\033[K  Bins per dim: {self.n_bins_per_dim}")
+        print(f"\033[K  Trials/Patience: {self.trials}")
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -1690,8 +1773,6 @@ class DBNN(GPUDBNN):
             )
         return self.invertible_model
 
-
-
     def _generate_detailed_predictions(self,
                                      X_orig: Union[pd.DataFrame, torch.Tensor],
                                      predictions: Union[torch.Tensor, np.ndarray],
@@ -1700,57 +1781,76 @@ class DBNN(GPUDBNN):
                                      ) -> pd.DataFrame:
         """
         Robust predictions generator that preserves original feature values.
-
-        Args:
-            X_orig: Original input features (before preprocessing)
-            predictions: Model predictions (numeric or string)
-            true_labels: True labels if available (numeric or string)
-
-        Returns:
-            DataFrame with predictions and original features
         """
         # Convert predictions to numpy if they're tensors
         predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else np.array(predictions)
+
         # Convert posteriors if provided
         posteriors_np = posteriors.cpu().numpy() if torch.is_tensor(posteriors) else np.array(posteriors) if posteriors is not None else None
-        pred_classes = predictions.cpu().numpy()
+
+        # Verify sizes match
+        if len(predictions_np) != len(X_orig):
+            print(f"\033[K{Colors.RED}[ERROR] Size mismatch: predictions={len(predictions_np)}, X_orig={len(X_orig)}{Colors.ENDC}")
+            # Truncate or pad to match (this should not happen, but handle it)
+            min_len = min(len(predictions_np), len(X_orig))
+            predictions_np = predictions_np[:min_len]
+            if posteriors_np is not None:
+                posteriors_np = posteriors_np[:min_len]
+            print(f"\033[K{Colors.YELLOW}[WARNING] Truncated to {min_len} samples{Colors.ENDC}")
 
         # Create results DataFrame from original features
         if isinstance(X_orig, pd.DataFrame):
-            results_df = X_orig.copy()
+            results_df = X_orig.iloc[:len(predictions_np)].copy()  # Ensure we only take matching rows
         else:
             # Handle tensor/numpy array input
             X_orig_np = X_orig.cpu().numpy() if torch.is_tensor(X_orig) else np.array(X_orig)
+            X_orig_np = X_orig_np[:len(predictions_np)]  # Truncate to match predictions
             results_df = pd.DataFrame(X_orig_np,
                                     columns=getattr(self, 'feature_columns',
                                                   [f'feature_{i}' for i in range(X_orig_np.shape[1])]))
 
-        #true_classes=results_df['true_class']
         # Add predictions with label decoding if possible
         if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
             try:
+                # Ensure we don't have more predictions than we can handle
+                pred_classes = predictions_np[:len(results_df)]
+
                 # Add predictions and confidence (max probability)
                 results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
 
                 # Add posteriors if available
                 if posteriors_np is not None:
+                    posteriors_np = posteriors_np[:len(results_df)]  # Truncate to match
                     for i, class_name in enumerate(self.label_encoder.classes_):
-                        results_df[f'prob_{class_name}'] = posteriors_np[:, i]
-                results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
+                        if i < posteriors_np.shape[1]:  # Safety check
+                            results_df[f'prob_{class_name}'] = posteriors_np[:, i]
+
+                    # Add prediction confidence
+                    confidence_indices = np.arange(len(pred_classes))
+                    results_df['prediction_confidence'] = posteriors_np[confidence_indices, pred_classes]
 
             except ValueError as e:
-                print(f"Note: Using raw predictions - {str(e)}")
-                results_df['predicted_class'] = predictions_np
-                results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
+                print(f"\033[K{Colors.YELLOW}Note: Using raw predictions - {str(e)}{Colors.ENDC}")
+                results_df['predicted_class'] = predictions_np[:len(results_df)]
+                if posteriors_np is not None:
+                    posteriors_np = posteriors_np[:len(results_df)]
+                    confidence_indices = np.arange(len(predictions_np[:len(results_df)]))
+                    results_df['prediction_confidence'] = posteriors_np[confidence_indices, predictions_np[:len(results_df)]]
         else:
-            results_df['predicted_class'] = predictions_np
-            results_df['prediction_confidence'] = posteriors_np[np.arange(len(pred_classes)), pred_classes]
+            results_df['predicted_class'] = predictions_np[:len(results_df)]
+            if posteriors_np is not None:
+                posteriors_np = posteriors_np[:len(results_df)]
+                confidence_indices = np.arange(len(predictions_np[:len(results_df)]))
+                results_df['prediction_confidence'] = posteriors_np[confidence_indices, predictions_np[:len(results_df)]]
 
         # Handle true labels if provided
         if true_labels is not None:
             true_labels_np = true_labels.cpu().numpy() if torch.is_tensor(true_labels) \
                             else true_labels.to_numpy() if isinstance(true_labels, (pd.Series, pd.DataFrame)) \
                             else np.array(true_labels)
+
+            # Truncate to match results_df
+            true_labels_np = true_labels_np[:len(results_df)]
 
             # Only try to decode if we have string labels and an encoder
             if (isinstance(true_labels_np.flat[0], str) and
@@ -1759,16 +1859,18 @@ class DBNN(GPUDBNN):
                 try:
                     results_df['true_class'] = true_labels_np  # Keep original strings
                 except Exception as e:
-                    print(f"Couldn't preserve true labels: {str(e)}")
+                    print(f"\033[K{Colors.YELLOW}Couldn't preserve true labels: {str(e)}{Colors.ENDC}")
             else:
-                #results_df['true_class'] = true_labels_np
-                results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
-                # Ensure predicted_class uses string labels
-                results_df['predicted_class'] = self.label_encoder.inverse_transform(pred_classes)
+                try:
+                    results_df['true_class'] = self.label_encoder.inverse_transform(true_labels_np)
+                except:
+                    results_df['true_class'] = true_labels_np
+
+        # Final size verification
+        if len(results_df) != len(predictions_np):
+            print(f"\033[K{Colors.YELLOW}[WARNING] Final size mismatch: results={len(results_df)}, predictions={len(predictions_np)}{Colors.ENDC}")
 
         return results_df
-
-
 
     def _update_training_log(self, round_num: int, metrics: Dict):
         """Update training log with current metrics"""
@@ -2632,19 +2734,117 @@ class DBNN(GPUDBNN):
 
             # Initialize training set if empty
             if len(train_indices) == 0:
-                print("\033[K" +"Initializing new training set with minimum samples")
-                # Select minimum samples from each class for initial training
+                # USE THE CONFIGURED INITIAL SAMPLES AS TOTAL, not per class
+                target_initial_samples = getattr(self, 'initial_samples', 50)
+                print(f"\033[KInitializing new training set with {target_initial_samples} TOTAL samples from config")
+
                 unique_classes = self.label_encoder.classes_
+                n_classes = len(unique_classes)
+
+                # Calculate minimum samples per class to ensure representation
+                min_samples_per_class = max(1, target_initial_samples // (n_classes * 2))  # Start with half to leave room for balancing
+                print(f"\033[K  Target: {target_initial_samples} total, starting with ~{min_samples_per_class} per class")
+
+                # First pass: add minimum samples from each class
+                initial_samples = []
+                class_sample_counts = {}
+
                 for class_label in unique_classes:
                     class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
-                    if len(class_indices) < 2:
-                        selected_indices = class_indices
-                    else:
-                        selected_indices = class_indices[:2]
-                    train_indices.extend(selected_indices)
 
-                # Update test indices
-                test_indices = list(set(range(len(X))) - set(train_indices))
+                    if len(class_indices) == 0:
+                        class_sample_counts[class_label] = 0
+                        continue
+
+                    if len(class_indices) <= min_samples_per_class:
+                        # Use all samples if class has fewer than target
+                        selected_indices = class_indices.tolist()
+                    else:
+                        # Randomly select the minimum number of samples
+                        selected_indices = np.random.choice(class_indices, min_samples_per_class, replace=False).tolist()
+
+                    initial_samples.extend(selected_indices)
+                    class_sample_counts[class_label] = len(selected_indices)
+                    print(f"\033[K  Class {class_label}: added {len(selected_indices)} initial samples")
+
+                current_total = len(initial_samples)
+                print(f"\033[K  After first pass: {current_total} samples")
+
+                # Second pass: distribute remaining samples to reach target
+                if current_total < target_initial_samples:
+                    remaining_needed = target_initial_samples - current_total
+                    print(f"\033[K  Distributing {remaining_needed} additional samples...")
+
+                    # Calculate how many more samples each class can take
+                    available_by_class = {}
+                    for class_label in unique_classes:
+                        class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
+                        current_count = class_sample_counts.get(class_label, 0)
+                        available = len(class_indices) - current_count
+                        if available > 0:
+                            available_by_class[class_label] = available
+
+                    # Distribute remaining samples proportionally
+                    if available_by_class:
+                        total_available = sum(available_by_class.values())
+
+                        for class_label, available in available_by_class.items():
+                            if remaining_needed <= 0:
+                                break
+
+                            # Calculate proportional allocation
+                            class_proportion = available / total_available
+                            class_allocation = max(1, min(available, int(remaining_needed * class_proportion)))
+
+                            if class_allocation > 0:
+                                class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
+                                current_train_for_class = [idx for idx in initial_samples
+                                                        if y_encoded[idx] == self.label_encoder.transform([class_label])[0]]
+                                available_indices = [idx for idx in class_indices if idx not in current_train_for_class]
+
+                                if available_indices:
+                                    # Take up to the allocated number
+                                    take_count = min(class_allocation, len(available_indices))
+                                    additional_indices = np.random.choice(available_indices, take_count, replace=False).tolist()
+                                    initial_samples.extend(additional_indices)
+                                    class_sample_counts[class_label] += take_count
+                                    remaining_needed -= take_count
+
+                                    print(f"\033[K    Class {class_label}: added {take_count} more samples")
+
+                        # If we still have samples to add, distribute them evenly
+                        if remaining_needed > 0:
+                            print(f"\033[K  Final distribution: adding {remaining_needed} samples evenly")
+
+                            classes_with_capacity = [cls for cls in unique_classes
+                                                  if available_by_class.get(cls, 0) > class_sample_counts.get(cls, 0)]
+
+                            while remaining_needed > 0 and classes_with_capacity:
+                                for class_label in classes_with_capacity.copy():
+                                    if remaining_needed <= 0:
+                                        break
+
+                                    class_indices = np.where(y_encoded == self.label_encoder.transform([class_label])[0])[0]
+                                    current_train_for_class = [idx for idx in initial_samples
+                                                            if y_encoded[idx] == self.label_encoder.transform([class_label])[0]]
+                                    available_indices = [idx for idx in class_indices if idx not in current_train_for_class]
+
+                                    if available_indices:
+                                        new_idx = np.random.choice(available_indices, 1)[0]
+                                        initial_samples.append(new_idx)
+                                        class_sample_counts[class_label] += 1
+                                        remaining_needed -= 1
+                                    else:
+                                        classes_with_capacity.remove(class_label)
+
+                train_indices = initial_samples
+
+                # Final verification
+                print(f"\033[K  Final training set: {len(train_indices)} TOTAL samples")
+                print(f"\033[K  Class distribution:")
+                for class_label in unique_classes:
+                    count = class_sample_counts.get(class_label, 0)
+                    print(f"\033[K    {class_label}: {count} samples")
 
             DEBUG.log(f" Initial training set size: {len(train_indices)}")
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
@@ -4048,7 +4248,7 @@ class DBNN(GPUDBNN):
             feature_pairs=self.feature_pairs,
             dataset_name=self.dataset_name,  # Pass dataset name
             n_bins_per_dim=self.n_bins_per_dim,
-            batch_size=self.batch_size
+            batch_size=getattr(self, 'batch_size', 128)  # Use instance batch_size
         )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
@@ -5276,10 +5476,19 @@ class DBNN(GPUDBNN):
 
             # Make predictions on the entire dataset
             print("\033[K" + f"{Colors.YELLOW}Generating predictions for the entire dataset{Colors.ENDC}", end='\r', flush=True)
-            X_all = torch.cat([X_train, X_test], dim=0)
-            y_all = torch.cat([y_train, y_test], dim=0)
+
+            # Use the original preprocessed data, not concatenated train/test
+            X_all = self.X_tensor  # This should have the correct size
+            y_all = self.y_tensor  # This should have the correct size
+
+            # Verify sizes match
+            print(f"\033[K[DEBUG] X_all shape: {X_all.shape}, y_all shape: {y_all.shape}")
+            print(f"\033[K[DEBUG] Original data shape: {self.X_Orig.shape}")
 
             all_pred_classes, all_posteriors = self.predict(X_all, batch_size=batch_size)
+
+            # Verify prediction sizes
+            print(f"\033[K[DEBUG] Predictions shape: {all_pred_classes.shape}, should be: {len(self.X_Orig)}")
 
             # Move tensors to CPU for accuracy calculation
             y_all_cpu = y_all.cpu()
@@ -5326,8 +5535,9 @@ class DBNN(GPUDBNN):
 
 
             # Extract predictions for training and test data using stored indices
-            y_train_pred =  all_pred_classes[:len(y_train)]  # Predictions for training data
-            y_test_pred =  all_pred_classes[len(y_train):]   # Predictions for test data
+            y_train_pred = all_pred_classes[self.train_indices]  # Predictions for training data
+            y_test_pred = all_pred_classes[self.test_indices]    # Predictions for test data
+
 
            # Generate detailed predictions for the entire dataset
             print("\033[K" + "Computing detailed predictions for the whole data", end='\r', flush=True)
@@ -5394,10 +5604,10 @@ class DBNN(GPUDBNN):
             y_train_cpu = y_train.cpu().numpy()
 
             # Convert numerical labels back to original classes
-            y_test_labels = self.label_encoder.inverse_transform(y_test_cpu)
-            y_train_labels = self.label_encoder.inverse_transform(y_train_cpu)
-            y_test_pred_labels = self.label_encoder.inverse_transform(y_test_pred)
-            y_train_pred_labels = self.label_encoder.inverse_transform(y_train_pred)
+            y_train_labels = self.label_encoder.inverse_transform(y_train.cpu().numpy())
+            y_test_labels = self.label_encoder.inverse_transform(y_test.cpu().numpy())
+            y_train_pred_labels = self.label_encoder.inverse_transform(y_train_pred.cpu().numpy())
+            y_test_pred_labels = self.label_encoder.inverse_transform(y_test_pred.cpu().numpy())
 
             # Prepare results
             print("\033[K" + "Preparing results of training", end='\r', flush=True)
@@ -6312,8 +6522,25 @@ class DBNN(GPUDBNN):
             print("\033[KNo visualization data available. Train the model first or enable visualization in config.")
             return None
 
-#----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
+    def _validate_training_parameters(self):
+        """Validate that all required training parameters are loaded"""
+        required_params = [
+            'trials', 'cardinality_threshold', 'learning_rate',
+            'max_epochs', 'test_size', 'n_bins_per_dim'
+        ]
 
+        for param in required_params:
+            if not hasattr(self, param) or getattr(self, param) is None:
+                print(f"\033[K{Colors.RED}Warning: Missing training parameter: {param}{Colors.ENDC}")
+
+        # Set default values for missing adaptive parameters
+        if not hasattr(self, 'adaptive_rounds'):
+            self.adaptive_rounds = 100
+        if not hasattr(self, 'initial_samples'):
+            self.initial_samples = 50
+        if not hasattr(self, 'max_samples_per_round'):
+            self.max_samples_per_round = 500
+#----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
 
 class DBNNGeometricVisualizer:
     """Interactive geometric visualization of DBNN tensor orthogonalization"""
