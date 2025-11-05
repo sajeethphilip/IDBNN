@@ -107,6 +107,17 @@ import os
 import pickle
 import configparser
 import traceback  # Add to provide debug
+#-----------------Visualisation imports ----------------------
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from pathlib import Path
+import seaborn as sns
+import networkx as nx
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.neighbors import NearestNeighbors
+
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
@@ -166,13 +177,1967 @@ import os
 from typing import Union, List, Dict, Optional
 from collections import defaultdict
 
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import numpy as np
+import torch
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import pandas as pd
+from tqdm import tqdm
+from pathlib import Path
 
-def get_dataset_name_from_path(file_path):
-    """Extracts dataset name from path (e.g., 'data/mnist/file.csv' -> 'mnist')"""
-    # Normalize path and split into parts
-    dataset_name=file_path.split('/')[1]
-    return dataset_name
+class GeometricADBNNVisualizer:
+    """Interactive geometric visualization of ADBNN's orthogonality process using FULL dataset"""
 
+    def __init__(self, dbnn_model, output_dir='geometric_visualizations'):
+        self.dbnn = dbnn_model
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+
+        # Color scheme for classes
+        self.colors = px.colors.qualitative.Set3 + px.colors.qualitative.Pastel
+
+    def create_geometric_evolution_dashboard(self, training_history, round_stats,
+                                           feature_pairs, likelihood_params):
+        """Create comprehensive geometric evolution dashboard using FULL dataset"""
+        print("🎨 Creating geometric evolution visualization with FULL dataset...")
+
+        # Extract tensor evolution data from FULL dataset
+        tensor_evolution = self._extract_tensor_evolution_full_data(training_history, feature_pairs, likelihood_params)
+
+        # Create main dashboard
+        self._create_interactive_evolution_plot(tensor_evolution, round_stats, training_history)
+
+        # Create polar coordinate visualization
+        self._create_polar_visualization(tensor_evolution, round_stats)
+
+        # Create 3D tensor space visualization
+        self._create_3d_tensor_visualization(tensor_evolution, round_stats)
+
+        # Create training sample evolution visualization
+        self._create_training_sample_evolution(training_history, round_stats)
+
+        print(f"✅ Geometric visualizations saved to: {self.output_dir}")
+
+    def _extract_tensor_evolution_full_data(self, training_history, feature_pairs, likelihood_params):
+        """Extract the evolution of 5D tensors across rounds using FULL dataset"""
+        tensor_evolution = {
+            'rounds': [],
+            'class_tensors': [],
+            'training_sizes': [],
+            'accuracies': [],
+            'training_times': [],
+            'full_data_tensors': []  # Tensors for entire dataset
+        }
+
+        # Get FULL dataset
+        X_full = self.dbnn.X_tensor
+        y_full = self.dbnn.y_tensor
+
+        for round_num, train_indices in enumerate(training_history):
+            if round_num >= len(round_stats):
+                continue
+
+            print(f"📊 Processing round {round_num} for geometric visualization...")
+
+            # Compute 5D tensor representation for ENTIRE dataset with current model state
+            full_data_tensors = self._compute_class_tensors(X_full, y_full, feature_pairs, likelihood_params)
+
+            # Also compute for training data only (for comparison)
+            train_tensors = self._compute_class_tensors(
+                X_full[train_indices],
+                y_full[train_indices],
+                feature_pairs,
+                likelihood_params
+            )
+
+            tensor_evolution['rounds'].append(round_num)
+            tensor_evolution['class_tensors'].append(train_tensors)
+            tensor_evolution['full_data_tensors'].append(full_data_tensors)
+            tensor_evolution['training_sizes'].append(len(train_indices))
+            tensor_evolution['accuracies'].append(round_stats[round_num]['test_accuracy'])
+            tensor_evolution['training_times'].append(round_stats[round_num].get('training_time', 0))
+
+        return tensor_evolution
+
+    def _compute_class_tensors(self, X, y, feature_pairs, likelihood_params):
+        """Compute 5D tensor representation for each class in the given data"""
+        unique_classes = torch.unique(y)
+        class_tensors = {}
+
+        for class_idx, class_id in enumerate(unique_classes):
+            class_mask = (y == class_id)
+            class_data = X[class_mask]
+
+            if len(class_data) == 0:
+                continue
+
+            # Compute feature pair distributions for this class
+            class_tensor = self._compute_feature_pair_tensor(class_data, feature_pairs, likelihood_params)
+            class_tensors[class_id.item()] = {
+                'tensor': class_tensor,
+                'sample_count': len(class_data)
+            }
+
+        return class_tensors
+
+    def _compute_feature_pair_tensor(self, class_data, feature_pairs, likelihood_params):
+        """Compute 2D histogram tensor for feature pairs"""
+        n_pairs = len(feature_pairs)
+        n_bins = self.dbnn.n_bins_per_dim
+
+        # Initialize tensor: (n_pairs, n_bins, n_bins)
+        feature_tensor = torch.zeros((n_pairs, n_bins, n_bins), device=self.dbnn.device)
+
+        for pair_idx, (f1, f2) in enumerate(feature_pairs):
+            if pair_idx >= len(likelihood_params['bin_edges']):
+                continue
+
+            pair_data = class_data[:, [f1, f2]]
+
+            # Get bin edges for this pair
+            bin_edges = likelihood_params['bin_edges'][pair_idx]
+
+            # Compute 2D histogram
+            hist = self._compute_2d_histogram(pair_data, bin_edges[0], bin_edges[1], n_bins)
+            feature_tensor[pair_idx] = hist
+
+        return feature_tensor
+
+    def _compute_2d_histogram(self, data, x_edges, y_edges, n_bins):
+        """Compute 2D histogram for feature pair"""
+        # Convert to numpy for histogram computation
+        data_np = data.cpu().numpy()
+        x_edges_np = x_edges.cpu().numpy()
+        y_edges_np = y_edges.cpu().numpy()
+
+        hist, _, _ = np.histogram2d(
+            data_np[:, 0], data_np[:, 1],
+            bins=[x_edges_np, y_edges_np]
+        )
+
+        return torch.tensor(hist, device=self.dbnn.device)
+
+    def _create_interactive_evolution_plot(self, tensor_evolution, round_stats, training_history):
+        """Create main interactive evolution plot with slider using FULL data"""
+
+        # Reduce dimensionality for visualization - using FULL dataset tensors
+        projected_tensors = self._project_tensors_to_2d(tensor_evolution['full_data_tensors'])
+        projected_training_tensors = self._project_tensors_to_2d(tensor_evolution['class_tensors'])
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                'Full Dataset: Tensor Orthogonality Evolution',
+                'Class Distribution in Training',
+                'Accuracy Evolution',
+                'Training Metrics'
+            ],
+            specs=[
+                [{"type": "scatter"}, {"type": "bar"}],
+                [{"type": "scatter"}, {"type": "scatter"}]
+            ]
+        )
+
+        # Create frames for animation
+        frames = []
+        unique_classes = list(tensor_evolution['full_data_tensors'][0].keys())
+
+        for round_num in range(len(tensor_evolution['rounds'])):
+            frame_data = []
+
+            # 1. Full dataset tensor orthogonality plot
+            current_projection = projected_tensors[round_num]
+            for class_idx, class_id in enumerate(unique_classes):
+                if class_id in current_projection:
+                    class_data = current_projection[class_id]
+                    scatter = go.Scatter(
+                        x=class_data[:, 0],
+                        y=class_data[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            size=10,
+                            color=self.colors[class_idx % len(self.colors)],
+                            opacity=0.8,
+                            symbol='circle'
+                        ),
+                        name=f'Class {class_id} (Full Data)',
+                        showlegend=(round_num == 0)
+                    )
+                    frame_data.append(scatter)
+
+            # 2. Training data overlay (smaller, different symbol)
+            current_train_projection = projected_training_tensors[round_num]
+            for class_idx, class_id in enumerate(unique_classes):
+                if class_id in current_train_projection:
+                    class_data = current_train_projection[class_id]
+                    scatter = go.Scatter(
+                        x=class_data[:, 0],
+                        y=class_data[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            size=6,
+                            color=self.colors[class_idx % len(self.colors)],
+                            opacity=0.9,
+                            symbol='star',
+                            line=dict(width=2, color='black')
+                        ),
+                        name=f'Class {class_id} (Training)',
+                        showlegend=(round_num == 0)
+                    )
+                    frame_data.append(scatter)
+
+            # Create frame
+            accuracy = tensor_evolution['accuracies'][round_num]
+            training_size = tensor_evolution['training_sizes'][round_num]
+            training_time = tensor_evolution['training_times'][round_num]
+
+            frame = go.Frame(
+                data=frame_data,
+                name=f"round_{round_num}",
+                layout=go.Layout(
+                    title=f"Round {round_num}<br>"
+                          f"Accuracy: {accuracy:.3f} | "
+                          f"Training Samples: {training_size} | "
+                          f"Time: {training_time:.1f}s"
+                )
+            )
+            frames.append(frame)
+
+        # Add initial data
+        self._add_initial_traces(fig, projected_tensors, projected_training_tensors, unique_classes)
+
+        # Add other plots
+        self._add_supporting_plots(fig, tensor_evolution, round_stats, training_history)
+
+        # Create slider with enhanced controls
+        sliders = self._create_slider_controls(len(frames))
+
+        # Create enhanced play button with speed control
+        updatemenus = self._create_playback_controls()
+
+        fig.update_layout(
+            title="ADBNN Geometric Evolution: Full Dataset Orthogonality Process",
+            width=1400,
+            height=900,
+            sliders=sliders,
+            updatemenus=updatemenus,
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+
+        fig.frames = frames
+        fig.write_html(self.output_dir / "full_data_geometric_evolution.html")
+
+    def _add_initial_traces(self, fig, full_projections, train_projections, unique_classes):
+        """Add initial traces for the visualization"""
+        initial_full = full_projections[0]
+        initial_train = train_projections[0]
+
+        for class_idx, class_id in enumerate(unique_classes):
+            if class_id in initial_full:
+                class_data = initial_full[class_id]
+                fig.add_trace(
+                    go.Scatter(
+                        x=class_data[:, 0],
+                        y=class_data[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            size=10,
+                            color=self.colors[class_idx % len(self.colors)],
+                            opacity=0.8,
+                            symbol='circle'
+                        ),
+                        name=f'Class {class_id} (Full Data)',
+                        visible=True
+                    ),
+                    row=1, col=1
+                )
+
+            if class_id in initial_train:
+                class_data = initial_train[class_id]
+                fig.add_trace(
+                    go.Scatter(
+                        x=class_data[:, 0],
+                        y=class_data[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            size=6,
+                            color=self.colors[class_idx % len(self.colors)],
+                            opacity=0.9,
+                            symbol='star',
+                            line=dict(width=2, color='black')
+                        ),
+                        name=f'Class {class_id} (Training)',
+                        visible=True
+                    ),
+                    row=1, col=1
+                )
+
+    def _project_tensors_to_2d(self, tensor_sequence):
+        """Project 5D tensors to 2D for visualization using PCA"""
+        projected_data = []
+
+        for round_data in tensor_sequence:
+            round_projection = {}
+
+            # Flatten tensors and stack for PCA
+            all_tensors = []
+            class_ids = []
+
+            for class_id, tensor_info in round_data.items():
+                tensor = tensor_info['tensor']
+                flattened = tensor.flatten().cpu().numpy()
+                all_tensors.append(flattened)
+                class_ids.append(class_id)
+
+            if len(all_tensors) == 0:
+                continue
+
+            all_tensors = np.array(all_tensors)
+
+            # Apply PCA
+            if len(all_tensors) > 1:
+                pca = PCA(n_components=2)
+                projected = pca.fit_transform(all_tensors)
+
+                # Group back by class
+                for i, class_id in enumerate(class_ids):
+                    round_projection[class_id] = projected[i:i+1]
+            else:
+                # Single class case
+                for i, class_id in enumerate(class_ids):
+                    round_projection[class_id] = np.array([[0, 0]])  # Default position
+
+            projected_data.append(round_projection)
+
+        return projected_data
+
+    def _add_supporting_plots(self, fig, tensor_evolution, round_stats, training_history):
+        """Add supporting plots to the main figure"""
+
+        rounds = tensor_evolution['rounds']
+        accuracies = tensor_evolution['accuracies']
+        training_sizes = tensor_evolution['training_sizes']
+        training_times = tensor_evolution['training_times']
+
+        # Accuracy evolution
+        fig.add_trace(
+            go.Scatter(
+                x=rounds,
+                y=accuracies,
+                mode='lines+markers',
+                name='Test Accuracy',
+                line=dict(color='blue', width=3),
+                marker=dict(size=6)
+            ),
+            row=2, col=1
+        )
+
+        # Training size growth
+        fig.add_trace(
+            go.Scatter(
+                x=rounds,
+                y=training_sizes,
+                mode='lines+markers',
+                name='Training Size',
+                line=dict(color='green', width=3),
+                marker=dict(size=6)
+            ),
+            row=2, col=2
+        )
+
+        # Training time
+        fig.add_trace(
+            go.Scatter(
+                x=rounds,
+                y=training_times,
+                mode='lines+markers',
+                name='Training Time (s)',
+                line=dict(color='red', width=2),
+                marker=dict(size=4),
+                yaxis='y2'
+            ),
+            row=2, col=2
+        )
+
+        # Class distribution (for current round - will update with animation)
+        if training_history:
+            self._add_class_distribution_plot(fig, training_history, 0, row=1, col=2)
+
+    def _add_class_distribution_plot(self, fig, training_history, round_num, row, col):
+        """Add class distribution plot for a specific round"""
+        train_indices = training_history[round_num]
+        labels = self.dbnn.y_tensor[train_indices].cpu().numpy()
+        unique, counts = np.unique(labels, return_counts=True)
+
+        class_names = [f'Class {cls}' for cls in unique]
+
+        fig.add_trace(
+            go.Bar(
+                x=class_names,
+                y=counts,
+                marker_color=[self.colors[i % len(self.colors)] for i in range(len(unique))],
+                name='Class Distribution',
+                showlegend=False
+            ),
+            row=row, col=col
+        )
+
+    def _create_slider_controls(self, n_frames):
+        """Create enhanced slider controls"""
+        return [{
+            'steps': [
+                {
+                    'args': [
+                        [f"round_{i}"],
+                        {
+                            'frame': {'duration': 500, 'redraw': True},
+                            'mode': 'immediate',
+                            'transition': {'duration': 300}
+                        }
+                    ],
+                    'label': f'Round {i}',
+                    'method': 'animate'
+                } for i in range(n_frames)
+            ],
+            'active': 0,
+            'currentvalue': {
+                'prefix': 'Round: ',
+                'font': {'size': 14}
+            },
+            'len': 0.9,
+            'x': 0.1,
+            'y': 0,
+            'ticklen': 10
+        }]
+
+    def _create_playback_controls(self):
+        """Create enhanced playback controls with speed options"""
+        return [{
+            'type': 'buttons',
+            'showactive': False,
+            'buttons': [
+                {
+                    'label': '▶️ Play',
+                    'method': 'animate',
+                    'args': [None, {
+                        'frame': {'duration': 800, 'redraw': True},
+                        'fromcurrent': True,
+                        'transition': {'duration': 400}
+                    }]
+                },
+                {
+                    'label': '⏸️ Pause',
+                    'method': 'animate',
+                    'args': [[None], {
+                        'frame': {'duration': 0, 'redraw': False},
+                        'mode': 'immediate',
+                        'transition': {'duration': 0}
+                    }]
+                },
+                {
+                    'label': '⏩ Fast',
+                    'method': 'animate',
+                    'args': [None, {
+                        'frame': {'duration': 300, 'redraw': True},
+                        'fromcurrent': True,
+                        'transition': {'duration': 200}
+                    }]
+                }
+            ],
+            'x': 0.1,
+            'y': 1.15,
+            'xanchor': 'left',
+            'yanchor': 'top'
+        }]
+
+    def _create_training_sample_evolution(self, training_history, round_stats):
+        """Create visualization showing training sample evolution"""
+        fig = go.Figure()
+
+        # Get all unique classes
+        all_labels = self.dbnn.y_tensor.cpu().numpy()
+        unique_classes = np.unique(all_labels)
+
+        # Calculate class distributions for each round
+        class_distributions = []
+        for round_num, train_indices in enumerate(training_history):
+            if round_num >= len(round_stats):
+                continue
+
+            round_labels = self.dbnn.y_tensor[train_indices].cpu().numpy()
+            class_counts = [np.sum(round_labels == cls) for cls in unique_classes]
+            class_distributions.append(class_counts)
+
+        class_distributions = np.array(class_distributions)
+        rounds = list(range(len(class_distributions)))
+
+        # Create stacked area plot
+        for i, class_id in enumerate(unique_classes):
+            fig.add_trace(go.Scatter(
+                x=rounds,
+                y=class_distributions[:, i],
+                mode='lines',
+                stackgroup='one',
+                name=f'Class {class_id}',
+                line=dict(width=0.5, color=self.colors[i % len(self.colors)]),
+                fillcolor=self.colors[i % len(self.colors)]
+            ))
+
+        fig.update_layout(
+            title='Training Sample Evolution by Class',
+            xaxis_title='Adaptive Round',
+            yaxis_title='Number of Training Samples',
+            showlegend=True,
+            width=1000,
+            height=500
+        )
+
+        fig.write_html(self.output_dir / "training_sample_evolution.html")
+
+# Integration with ADBNN
+def add_geometric_visualization_to_adbnn():
+    """Add geometric visualization capability to ADBNN class"""
+
+    def create_geometric_visualization(self, training_history, round_stats):
+        """Create geometric visualization of the orthogonality process using FULL data"""
+        print("🌐 Creating geometric visualization with FULL dataset...")
+        visualizer = GeometricADBNNVisualizer(self)
+        visualizer.create_geometric_evolution_dashboard(
+            training_history, round_stats,
+            self.feature_pairs, self.likelihood_params
+        )
+
+    # Add method to ADBNN class
+    if not hasattr(GPUDBNN, 'create_geometric_visualization'):
+        GPUDBNN.create_geometric_visualization = create_geometric_visualization
+
+
+class AdvancedInteractiveVisualizer:
+    """Advanced interactive 3D visualization with dynamic controls"""
+
+    def __init__(self, dataset_name, output_base_dir='Visualizer/adaptiveDBNN'):
+        self.dataset_name = dataset_name
+        self.output_dir = Path(output_base_dir) / dataset_name / 'interactive_3d'
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.colors = px.colors.qualitative.Set1 + px.colors.qualitative.Pastel
+
+    def create_advanced_3d_dashboard(self, X_full, y_full, training_history, feature_names, round_num=None):
+        """Create advanced interactive 3D dashboard with multiple visualization options"""
+        print("🌐 Creating advanced interactive 3D dashboard...")
+
+        # Create multiple visualization methods
+        self._create_pca_3d_plot(X_full, y_full, training_history, feature_names, round_num)
+        self._create_feature_space_3d(X_full, y_full, training_history, feature_names, round_num)
+        self._create_network_graph_3d(X_full, y_full, training_history, feature_names, round_num)
+        self._create_density_controlled_3d(X_full, y_full, training_history, feature_names, round_num)
+
+        # Create main dashboard that links all visualizations
+        self._create_main_dashboard(X_full, y_full, training_history, feature_names, round_num)
+
+    def _create_pca_3d_plot(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create PCA-based 3D plot with interactive controls"""
+        from sklearn.decomposition import PCA
+
+        # Reduce dimensions
+        pca = PCA(n_components=3, random_state=42)
+        X_3d = pca.fit_transform(X_full)
+        explained_var = pca.explained_variance_ratio_
+
+        # Create interactive plot
+        unique_classes = np.unique(y_full)
+        fig = go.Figure()
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_full == cls
+            scatter = go.Scatter3d(
+                x=X_3d[class_mask, 0],
+                y=X_3d[class_mask, 1],
+                z=X_3d[class_mask, 2],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color=self.colors[i % len(self.colors)],
+                    opacity=0.7,
+                    line=dict(width=0.5, color='black')
+                ),
+                name=f'Class {cls}',
+                text=[f'Class: {cls}<br>PC1: {x:.3f}<br>PC2: {y:.3f}<br>PC3: {z:.3f}'
+                      for x, y, z in zip(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2])],
+                hoverinfo='text'
+            )
+            fig.add_trace(scatter)
+
+        # Add network connections for training samples
+        if training_history and len(training_history) > 0:
+            training_indices = training_history[-1] if round_num is None else training_history[round_num]
+            self._add_network_connections_3d(fig, X_3d, y_full, training_indices)
+
+        fig.update_layout(
+            title=f'3D PCA Visualization - {self.dataset_name}<br>'
+                  f'Explained Variance: PC1: {explained_var[0]:.3f}, PC2: {explained_var[1]:.3f}, PC3: {explained_var[2]:.3f}',
+            scene=dict(
+                xaxis_title=f'PC1 ({explained_var[0]:.2%} variance)',
+                yaxis_title=f'PC2 ({explained_var[1]:.2%} variance)',
+                zaxis_title=f'PC3 ({explained_var[2]:.2%} variance)',
+            ),
+            width=1000,
+            height=800
+        )
+
+        filename = f'pca_3d_round_{round_num}.html' if round_num else 'pca_3d_final.html'
+        fig.write_html(self.output_dir / filename)
+
+    def _create_feature_space_3d(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create feature space 3D plot with selectable features"""
+        # Allow selection of any 3 features for visualization
+        if len(feature_names) >= 3:
+            # Use first 3 features by default, but create interface for selection
+            feature_indices = [0, 1, 2]
+            selected_features = [feature_names[i] for i in feature_indices]
+
+            fig = go.Figure()
+            unique_classes = np.unique(y_full)
+
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                scatter = go.Scatter3d(
+                    x=X_full[class_mask, feature_indices[0]],
+                    y=X_full[class_mask, feature_indices[1]],
+                    z=X_full[class_mask, feature_indices[2]],
+                    mode='markers',
+                    marker=dict(
+                        size=5,
+                        color=self.colors[i % len(self.colors)],
+                        opacity=0.6,
+                        symbol='circle'
+                    ),
+                    name=f'Class {cls}',
+                    text=[f'Class: {cls}<br>{selected_features[0]}: {x:.3f}<br>{selected_features[1]}: {y:.3f}<br>{selected_features[2]}: {z:.3f}'
+                          for x, y, z in zip(X_full[class_mask, feature_indices[0]],
+                                           X_full[class_mask, feature_indices[1]],
+                                           X_full[class_mask, feature_indices[2]])],
+                    hoverinfo='text'
+                )
+                fig.add_trace(scatter)
+
+            fig.update_layout(
+                title=f'3D Feature Space - {self.dataset_name}<br>Features: {selected_features}',
+                scene=dict(
+                    xaxis_title=selected_features[0],
+                    yaxis_title=selected_features[1],
+                    zaxis_title=selected_features[2],
+                ),
+                width=1000,
+                height=800
+            )
+
+            filename = f'feature_3d_round_{round_num}.html' if round_num else 'feature_3d_final.html'
+            fig.write_html(self.output_dir / filename)
+
+    def _add_network_connections_3d(self, fig, X_3d, y_full, training_indices):
+        """Add network connections between training samples"""
+        from scipy.spatial import distance_matrix
+        import networkx as nx
+
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            try:
+                # Create minimum spanning tree
+                dist_matrix = distance_matrix(class_points, class_points)
+                G = nx.Graph()
+
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        if dist_matrix[j, k] < np.percentile(dist_matrix, 25):  # Connect only close points
+                            G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                if G.number_of_edges() > 0:
+                    mst = nx.minimum_spanning_tree(G)
+
+                    # Add edges to plot
+                    for edge in mst.edges():
+                        x_edges = [class_points[edge[0], 0], class_points[edge[1], 0], None]
+                        y_edges = [class_points[edge[0], 1], class_points[edge[1], 1], None]
+                        z_edges = [class_points[edge[0], 2], class_points[edge[1], 2], None]
+
+                        fig.add_trace(go.Scatter3d(
+                            x=x_edges, y=y_edges, z=z_edges,
+                            mode='lines',
+                            line=dict(color=self.colors[i % len(self.colors)], width=2, opacity=0.6),
+                            showlegend=False,
+                            hoverinfo='none'
+                        ))
+            except Exception:
+                continue
+
+    def _create_density_controlled_3d(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create density-controlled 3D visualization with point skipping"""
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=3, random_state=42)
+        X_3d = pca.fit_transform(X_full)
+
+        # Apply density-based sampling
+        X_sampled, y_sampled = self._density_based_sampling(X_3d, y_full, max_points_per_class=100)
+
+        fig = go.Figure()
+        unique_classes = np.unique(y_sampled)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_sampled == cls
+            scatter = go.Scatter3d(
+                x=X_sampled[class_mask, 0],
+                y=X_sampled[class_mask, 1],
+                z=X_sampled[class_mask, 2],
+                mode='markers',
+                marker=dict(
+                    size=6,
+                    color=self.colors[i % len(self.colors)],
+                    opacity=0.8,
+                    line=dict(width=1, color='black')
+                ),
+                name=f'Class {cls} (density-controlled)',
+                text=[f'Class: {cls}' for _ in range(np.sum(class_mask))],
+                hoverinfo='text'
+            )
+            fig.add_trace(scatter)
+
+        fig.update_layout(
+            title=f'Density-Controlled 3D Visualization - {self.dataset_name}<br>'
+                  f'Points sampled to reduce overcrowding',
+            scene=dict(
+                xaxis_title='PC1',
+                yaxis_title='PC2',
+                zaxis_title='PC3',
+            ),
+            width=1000,
+            height=800
+        )
+
+        filename = f'density_3d_round_{round_num}.html' if round_num else 'density_3d_final.html'
+        fig.write_html(self.output_dir / filename)
+
+    def _density_based_sampling(self, X, y, max_points_per_class=100, min_distance_ratio=0.1):
+        """Sample points based on density to reduce overcrowding"""
+        from sklearn.neighbors import NearestNeighbors
+
+        unique_classes = np.unique(y)
+        X_sampled_list = []
+        y_sampled_list = []
+
+        for cls in unique_classes:
+            class_mask = y == cls
+            X_class = X[class_mask]
+
+            if len(X_class) <= max_points_per_class:
+                # No sampling needed
+                X_sampled_list.append(X_class)
+                y_sampled_list.append(np.full(len(X_class), cls))
+            else:
+                # Use k-nearest neighbors to sample diverse points
+                nbrs = NearestNeighbors(n_neighbors=min(10, len(X_class)), algorithm='auto').fit(X_class)
+                distances, indices = nbrs.kneighbors(X_class)
+
+                # Use average distance to neighbors as density measure
+                avg_distances = np.mean(distances, axis=1)
+
+                # Select points with higher average distances (less crowded)
+                density_scores = 1 / (avg_distances + 1e-8)  # Avoid division by zero
+
+                # Sample points inversely proportional to density
+                probabilities = 1 / (density_scores + 1e-8)
+                probabilities = probabilities / np.sum(probabilities)
+
+                selected_indices = np.random.choice(
+                    len(X_class),
+                    size=max_points_per_class,
+                    replace=False,
+                    p=probabilities
+                )
+
+                X_sampled_list.append(X_class[selected_indices])
+                y_sampled_list.append(np.full(max_points_per_class, cls))
+
+        return np.vstack(X_sampled_list), np.hstack(y_sampled_list)
+
+    def _create_main_dashboard(self, X_full, y_full, training_history, feature_names, round_num):
+        """Create main dashboard linking all visualizations"""
+        dashboard_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Advanced 3D Visualization Dashboard - {dataset_name}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                         color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+                .nav {{ display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }}
+                .nav-button {{ padding: 10px 20px; background: #4CAF50; color: white;
+                            border: none; border-radius: 5px; cursor: pointer; text-decoration: none; }}
+                .nav-button:hover {{ background: #45a049; }}
+                .iframe-container {{ border: 1px solid #ddd; border-radius: 5px; margin-bottom: 20px; }}
+                iframe {{ width: 100%; height: 800px; border: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🌐 Advanced 3D Visualization Dashboard</h1>
+                <h2>Dataset: {dataset_name}</h2>
+                <p>Round: {round_info} | Features: {feature_count} | Samples: {sample_count}</p>
+            </div>
+
+            <div class="nav">
+                <a class="nav-button" href="#pca">PCA 3D</a>
+                <a class="nav-button" href="#feature">Feature Space 3D</a>
+                <a class="nav-button" href="#density">Density-Controlled 3D</a>
+                <a class="nav-button" href="#network">Network Graph</a>
+            </div>
+
+            <div id="pca" class="iframe-container">
+                <h3>📊 PCA 3D Visualization</h3>
+                <iframe src="pca_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <div id="feature" class="iframe-container">
+                <h3>🔧 Feature Space 3D</h3>
+                <iframe src="feature_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <div id="density" class="iframe-container">
+                <h3>📈 Density-Controlled 3D</h3>
+                <iframe src="density_3d_{round_suffix}.html"></iframe>
+            </div>
+
+            <script>
+                // Smooth scrolling for navigation
+                document.querySelectorAll('.nav-button').forEach(button => {{
+                    button.addEventListener('click', function(e) {{
+                        e.preventDefault();
+                        const targetId = this.getAttribute('href').substring(1);
+                        document.getElementById(targetId).scrollIntoView({{
+                            behavior: 'smooth'
+                        }});
+                    }});
+                }});
+            </script>
+        </body>
+        </html>
+        """.format(
+            dataset_name=self.dataset_name,
+            round_info=f"Round {round_num}" if round_num else "Final",
+            feature_count=len(feature_names),
+            sample_count=len(X_full),
+            round_suffix=f"round_{round_num}" if round_num else "final"
+        )
+
+        with open(self.output_dir / f"dashboard_{'round_' + str(round_num) if round_num else 'final'}.html", "w") as f:
+            f.write(dashboard_html)
+
+class ComprehensiveAdaptiveVisualizer:
+    """Comprehensive visualization system for Adaptive DBNN with intuitive plots"""
+
+    def __init__(self, dataset_name, output_base_dir='Visualizer/adaptiveDBNN'):
+        self.dataset_name = dataset_name
+        self.output_dir = Path(output_base_dir) / dataset_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create subdirectories for different plot types
+        self.subdirs = {
+            'performance': self.output_dir / 'performance',
+            'samples': self.output_dir / 'sample_evolution',
+            'distributions': self.output_dir / 'distributions',
+            'networks': self.output_dir / 'networks',
+            'comparisons': self.output_dir / 'comparisons',
+            'interactive': self.output_dir / 'interactive'
+        }
+
+        for subdir in self.subdirs.values():
+            subdir.mkdir(exist_ok=True)
+
+        # Color schemes
+        self.colors = px.colors.qualitative.Set1
+        self.set_plot_style()
+
+        print(f"🎨 Comprehensive visualizer initialized for: {dataset_name}")
+        print(f"📁 Output directory: {self.output_dir}")
+
+    def set_plot_style(self):
+        """Set consistent plot style with safe colors"""
+        plt.style.use('default')
+        sns.set_palette("husl")
+        plt.rcParams['figure.figsize'] = [12, 8]
+        plt.rcParams['font.size'] = 10
+        plt.rcParams['axes.titlesize'] = 14
+        plt.rcParams['axes.labelsize'] = 12
+
+        # Use safe colors that work with both matplotlib and plotly
+        self.colors = [
+            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+        ]
+
+    def create_comprehensive_visualizations(self, adaptive_model, X_full, y_full,
+                                         training_history, round_stats, feature_names):
+        """Create all comprehensive visualizations"""
+        print("\n" + "="*60)
+        print("🎨 CREATING COMPREHENSIVE ADAPTIVE DBNN VISUALIZATIONS")
+        print("="*60)
+
+        # 1. Performance Evolution
+        self.plot_performance_evolution(round_stats)
+
+        # 2. Sample Selection Analysis
+        self.plot_sample_selection_analysis(training_history, y_full)
+
+        # 3. Training Sample Distributions
+        self.plot_training_sample_distributions(X_full, y_full, training_history, feature_names)
+
+        # 4. 3D Network Visualizations
+        self.plot_3d_networks(X_full, y_full, training_history, feature_names)
+
+        # 5. Feature Importance Analysis
+        self.plot_feature_importance_analysis(adaptive_model, X_full, y_full, feature_names)
+
+        # 6. Class Separation Analysis
+        self.plot_class_separation_analysis(X_full, y_full, training_history)
+
+        # 7. Confidence Evolution
+        self.plot_confidence_evolution(adaptive_model, X_full, y_full, training_history)
+
+        # 8. Interactive Dashboard
+        self.create_interactive_dashboard(round_stats, training_history, X_full, y_full, feature_names)
+
+        # 9. Final Model Analysis
+        self.plot_final_model_analysis(adaptive_model, X_full, y_full, feature_names)
+
+        print(f"✅ All visualizations saved to: {self.output_dir}")
+
+    def plot_performance_evolution(self, round_stats):
+        """Plot comprehensive performance evolution across rounds - OPTIMIZED"""
+        print("📈 Creating performance evolution plots...")
+
+        if not round_stats:
+            return
+
+        rounds = [stat['round'] for stat in round_stats]
+        train_acc = [stat['train_accuracy'] * 100 for stat in round_stats]
+        test_acc = [stat['test_accuracy'] * 100 for stat in round_stats]
+        training_sizes = [stat['training_size'] for stat in round_stats]
+        improvements = [stat['improvement'] * 100 for stat in round_stats]
+
+        # Create subplots with optimized layout
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+        # Plot 1: Accuracy Evolution - OPTIMIZED LEGEND
+        line1, = ax1.plot(rounds, train_acc, 'o-', linewidth=2, markersize=6,
+                         label='Training Accuracy', color=self.colors[0])
+        line2, = ax1.plot(rounds, test_acc, 's-', linewidth=2, markersize=6,
+                         label='Test Accuracy', color=self.colors[1])
+
+        # Highlight best round without legend
+        best_round_idx = np.argmax(test_acc)
+        ax1.axvline(x=rounds[best_round_idx], color='red', linestyle='--', alpha=0.7)
+
+        ax1.set_xlabel('Adaptive Round')
+        ax1.set_ylabel('Accuracy (%)')
+        ax1.set_title('Accuracy Evolution Across Rounds', fontweight='bold', fontsize=14)
+
+        # Use manual legend positioning instead of loc="best"
+        ax1.legend([line1, line2], ['Training Accuracy', 'Test Accuracy'],
+                   loc='upper left', frameon=True, fancybox=True, shadow=True)
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Training Size Growth
+        ax2.plot(rounds, training_sizes, '^-', linewidth=2, markersize=6, color=self.colors[2])
+        ax2.set_xlabel('Adaptive Round')
+        ax2.set_ylabel('Training Set Size')
+        ax2.set_title('Training Set Growth', fontweight='bold', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+
+        # Add percentage growth annotation
+        if len(training_sizes) > 1:
+            growth_pct = ((training_sizes[-1] - training_sizes[0]) / training_sizes[0]) * 100
+            ax2.annotate(f'+{growth_pct:.1f}% growth',
+                        xy=(rounds[-1], training_sizes[-1]),
+                        xytext=(10, 10), textcoords='offset points',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                        fontsize=9)
+
+        # Plot 3: Improvement per Round
+        bars = ax3.bar(rounds, improvements,
+                       color=np.where(np.array(improvements) >= 0, 'green', 'red'),
+                       alpha=0.7, width=0.6)
+        ax3.set_xlabel('Adaptive Round')
+        ax3.set_ylabel('Accuracy Improvement (%)')
+        ax3.set_title('Accuracy Improvement per Round', fontweight='bold', fontsize=14)
+        ax3.grid(True, alpha=0.3)
+
+        # Add value labels on bars - optimized for performance
+        for bar, improvement in zip(bars, improvements):
+            height = bar.get_height()
+            if abs(height) > 0.1:  # Only label significant improvements
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{improvement:+.1f}%', ha='center', va='bottom' if height >= 0 else 'top',
+                        fontsize=8)
+
+        # Plot 4: Cumulative Performance
+        cumulative_improvement = np.cumsum(improvements)
+        ax4.plot(rounds, cumulative_improvement, 'o-', linewidth=2, markersize=6, color=self.colors[3])
+        ax4.set_xlabel('Adaptive Round')
+        ax4.set_ylabel('Cumulative Improvement (%)')
+        ax4.set_title('Cumulative Performance Improvement', fontweight='bold', fontsize=14)
+        ax4.grid(True, alpha=0.3)
+        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['performance'] / 'performance_evolution.png', dpi=200, bbox_inches='tight')
+        plt.savefig(self.subdirs['performance'] / 'performance_evolution.pdf', bbox_inches='tight')
+        plt.close()
+
+        # Create interactive version
+        self._create_interactive_performance_plot(rounds, train_acc, test_acc, training_sizes, improvements, cumulative_improvement)
+
+    def _create_interactive_performance_plot(self, rounds, train_acc, test_acc, training_sizes, improvements, cumulative_improvement):
+        """Create optimized interactive performance plot"""
+        fig_int = make_subplots(rows=2, cols=2,
+                               subplot_titles=('Accuracy Evolution', 'Training Set Growth',
+                                             'Improvement per Round', 'Cumulative Improvement'))
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=train_acc, name='Training Accuracy',
+                                   line=dict(color=self.colors[0])), row=1, col=1)
+        fig_int.add_trace(go.Scatter(x=rounds, y=test_acc, name='Test Accuracy',
+                                   line=dict(color=self.colors[1])), row=1, col=1)
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=training_sizes, name='Training Size',
+                                   line=dict(color=self.colors[2])), row=1, col=2)
+
+        fig_int.add_trace(go.Bar(x=rounds, y=improvements, name='Improvement',
+                               marker_color=np.where(np.array(improvements) >= 0, 'green', 'red')),
+                         row=2, col=1)
+
+        fig_int.add_trace(go.Scatter(x=rounds, y=cumulative_improvement, name='Cumulative Improvement',
+                                   line=dict(color=self.colors[3])), row=2, col=2)
+
+        fig_int.update_layout(height=800, title_text="Adaptive Learning Performance Evolution",
+                             showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        fig_int.write_html(self.subdirs['interactive'] / 'performance_evolution.html')
+
+    def plot_sample_selection_analysis(self, training_history, y_full):
+        """Analyze how samples are selected across rounds - OPTIMIZED"""
+        print("🔍 Creating sample selection analysis...")
+
+        if not training_history:
+            return
+
+        unique_classes = np.unique(y_full)
+        rounds = list(range(1, len(training_history) + 1))
+
+        # Calculate class distribution per round - optimized calculation
+        class_distributions = []
+        for round_indices in training_history:
+            round_labels = y_full[round_indices]
+            class_counts = [np.sum(round_labels == cls) for cls in unique_classes]
+            class_distributions.append(class_counts)
+
+        class_distributions = np.array(class_distributions)
+
+        # Create optimized plots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Stacked area plot for class distribution - optimized
+        if len(unique_classes) <= 10:  # Limit for reasonable visualization
+            ax1.stackplot(rounds, class_distributions.T,
+                         labels=[f'Class {cls}' for cls in unique_classes],
+                         colors=self.colors[:len(unique_classes)], alpha=0.8)
+            ax1.set_xlabel('Adaptive Round')
+            ax1.set_ylabel('Number of Samples')
+            ax1.set_title('Class Distribution Evolution', fontweight='bold', fontsize=14)
+            # Use fixed legend position
+            ax1.legend(loc='upper left', frameon=True, fancybox=True)
+        else:
+            # For many classes, use line plot instead
+            for i, cls in enumerate(unique_classes[:10]):  # Limit to first 10 classes
+                ax1.plot(rounds, class_distributions[:, i], 'o-', linewidth=1, markersize=3,
+                        label=f'Class {cls}', color=self.colors[i % len(self.colors)])
+            ax1.set_xlabel('Adaptive Round')
+            ax1.set_ylabel('Number of Samples')
+            ax1.set_title('Class Distribution Evolution (Top 10 Classes)', fontweight='bold', fontsize=14)
+            ax1.legend(loc='upper left', frameon=True, fancybox=True)
+
+        ax1.grid(True, alpha=0.3)
+
+        # Plot 2: Class Proportion Evolution - optimized
+        class_proportions = class_distributions / class_distributions.sum(axis=1, keepdims=True)
+
+        # Limit number of classes shown for clarity
+        classes_to_show = min(8, len(unique_classes))
+        for i, cls in enumerate(unique_classes[:classes_to_show]):
+            ax2.plot(rounds, class_proportions[:, i] * 100, 'o-', linewidth=1.5, markersize=4,
+                    label=f'Class {cls}', color=self.colors[i])
+
+        ax2.set_xlabel('Adaptive Round')
+        ax2.set_ylabel('Percentage (%)')
+        ax2.set_title('Class Proportion Evolution', fontweight='bold', fontsize=14)
+        ax2.legend(loc='upper right', frameon=True, fancybox=True)
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim(0, 100)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['samples'] / 'class_distribution_evolution.png', dpi=200, bbox_inches='tight')
+        plt.close()
+
+        # Plot sample selection efficiency separately
+        self._plot_sample_efficiency(rounds, training_history)
+
+    def _plot_sample_efficiency(self, rounds, training_history):
+        """Plot sample selection efficiency - OPTIMIZED"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        total_samples = [len(indices) for indices in training_history]
+        new_samples_per_round = [len(training_history[0])] + \
+                               [len(training_history[i]) - len(training_history[i-1])
+                                for i in range(1, len(training_history))]
+
+        width = 0.35
+        x = np.arange(len(rounds))
+
+        bars1 = ax.bar(x - width/2, total_samples, width, label='Cumulative Samples', alpha=0.7)
+        bars2 = ax.bar(x + width/2, new_samples_per_round, width, label='New Samples per Round', alpha=0.7)
+
+        ax.set_xlabel('Adaptive Round')
+        ax.set_ylabel('Number of Samples')
+        ax.set_title('Sample Selection Efficiency', fontweight='bold', fontsize=14)
+        ax.set_xticks(x)
+        ax.set_xticklabels(rounds)
+        ax.legend(loc='upper left', frameon=True, fancybox=True)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['samples'] / 'sample_selection_efficiency.png', dpi=200, bbox_inches='tight')
+        plt.close()
+
+    def plot_training_sample_distributions(self, X_full, y_full, training_history, feature_names):
+        """Plot feature distributions of selected training samples"""
+        print("📊 Creating training sample distribution analysis...")
+
+        if not training_history or len(training_history) < 3:
+            return
+
+        # Select key rounds to visualize
+        key_rounds = [0, len(training_history)//2, -1]  # Start, middle, end
+        round_names = ['Initial', 'Middle', 'Final']
+
+        fig, axes = plt.subplots(3, min(5, X_full.shape[1]), figsize=(20, 12))
+        if X_full.shape[1] == 1:
+            axes = axes.reshape(-1, 1)
+
+        for round_idx, (round_num, round_name) in enumerate(zip(key_rounds, round_names)):
+            training_indices = training_history[round_num]
+            X_train = X_full[training_indices]
+            y_train = y_full[training_indices]
+
+            # Plot distributions for first 5 features (or all if less than 5)
+            n_features = min(5, X_full.shape[1])
+            for feature_idx in range(n_features):
+                ax = axes[round_idx, feature_idx]
+
+                # Plot distribution for each class
+                unique_classes = np.unique(y_train)
+                for cls in unique_classes:
+                    class_mask = y_train == cls
+                    if np.any(class_mask):
+                        feature_values = X_train[class_mask, feature_idx]
+                        ax.hist(feature_values, bins=20, alpha=0.6,
+                               label=f'Class {cls}', density=True)
+
+                ax.set_xlabel(f'{feature_names[feature_idx]}')
+                if feature_idx == 0:
+                    ax.set_ylabel(f'{round_name}\nRound\nDensity')
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+
+        plt.suptitle('Feature Distribution Evolution in Training Set', fontweight='bold', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(self.subdirs['distributions'] / 'feature_distribution_evolution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_3d_networks(self, X_full, y_full, training_history, feature_names):
+        """Create optimized 3D network visualizations of training samples"""
+        print("🌐 Creating optimized 3D network visualizations...")
+
+        if not training_history:
+            return
+
+        # Reduce dimensionality for visualization - use PCA for better performance
+        if X_full.shape[1] > 3:
+            pca = PCA(n_components=3, random_state=42)
+            X_3d = pca.fit_transform(X_full)
+            explained_var = pca.explained_variance_ratio_.sum()
+        else:
+            X_3d = X_full
+            explained_var = 1.0
+
+        # Limit to key rounds for performance
+        total_rounds = len(training_history)
+        if total_rounds > 5:
+            # Show first, middle, and last rounds only
+            key_rounds = [0, total_rounds//2, -1]
+        else:
+            key_rounds = list(range(total_rounds))
+
+        for round_num in key_rounds:
+            training_indices = training_history[round_num]
+            self._create_optimized_3d_network(X_3d, y_full, training_indices,
+                                            round_num, explained_var, feature_names)
+
+    def _create_optimized_3d_network(self, X_3d, y_full, training_indices, round_num, explained_var, feature_names):
+        """Create optimized single 3D network visualization"""
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Limit data for better performance
+        max_points = 1000  # Maximum points to display
+        if len(X_3d) > max_points:
+            # Sample points for better performance
+            sample_indices = np.random.choice(len(X_3d), max_points, replace=False)
+            X_display = X_3d[sample_indices]
+            y_display = y_full[sample_indices]
+            training_mask_display = np.isin(sample_indices, training_indices)
+        else:
+            X_display = X_3d
+            y_display = y_full
+            training_mask_display = np.isin(range(len(X_3d)), training_indices)
+
+        unique_classes = np.unique(y_display)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Plot non-training samples (background) with reduced alpha and size
+        background_mask = ~training_mask_display
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_display == cls) & background_mask
+            if np.any(class_mask):
+                ax.scatter(X_display[class_mask, 0], X_display[class_mask, 1], X_display[class_mask, 2],
+                          c=[colors[i]], alpha=0.05, s=5, marker='.')  # Reduced alpha and size
+
+        # Plot training samples (foreground) - limit legend entries
+        legend_handles = []
+        legend_labels = []
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_display == cls) & training_mask_display
+            if np.any(class_mask):
+                scatter = ax.scatter(X_display[class_mask, 0], X_display[class_mask, 1], X_display[class_mask, 2],
+                                   c=[colors[i]], alpha=0.8, s=30, label=f'Class {cls}',
+                                   edgecolors='black', linewidth=0.5)
+                if len(legend_handles) < 8:  # Limit legend entries
+                    legend_handles.append(scatter)
+                    legend_labels.append(f'Class {cls}')
+
+        # Add network connections only for training samples (limited)
+        if len(training_indices) <= 200:  # Only add connections for reasonable dataset sizes
+            self._add_optimized_network_connections(ax, X_3d, y_full, training_indices, colors)
+
+        ax.set_xlabel(f'PC1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('PC2')
+        ax.set_zlabel('PC3')
+        ax.set_title(f'3D Training Network - Round {round_num + 1}\n'
+                    f'Training Samples: {len(training_indices)}', fontweight='bold', fontsize=12)
+
+        # Use limited legend
+        if legend_handles:
+            ax.legend(legend_handles, legend_labels, loc='upper left', bbox_to_anchor=(0, 1))
+
+        plt.tight_layout()
+        filename = f'3d_network_round_{round_num + 1}.png'
+        plt.savefig(self.subdirs['networks'] / filename, dpi=150, bbox_inches='tight')  # Reduced DPI
+        plt.close()
+
+    def _add_optimized_network_connections(self, ax, X_3d, y_full, training_indices, colors):
+        """Add optimized network connections between training samples"""
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            # Only create connections for reasonable class sizes
+            if len(class_points) < 2 or len(class_points) > 50:
+                continue
+
+            try:
+                # Create minimum spanning tree with distance threshold
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                # Apply distance threshold to reduce connections
+                max_distance = np.percentile(dist_matrix[dist_matrix > 0], 50)  # Median distance
+
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        if dist_matrix[j, k] <= max_distance:
+                            G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                if G.number_of_edges() > 0:
+                    mst = nx.minimum_spanning_tree(G)
+
+                    # Plot MST edges
+                    for edge in list(mst.edges())[:50]:  # Limit number of edges
+                        point1 = class_points[edge[0]]
+                        point2 = class_points[edge[1]]
+                        ax.plot([point1[0], point2[0]],
+                               [point1[1], point2[1]],
+                               [point1[2], point2[2]],
+                               color=colors[i], alpha=0.4, linewidth=0.8)  # Reduced alpha and linewidth
+
+            except Exception as e:
+                # Silently continue if MST fails
+                continue
+
+    def _create_single_3d_network(self, X_3d, y_full, training_indices, round_num, explained_var, feature_names):
+        """Create a single 3D network visualization"""
+        fig = plt.figure(figsize=(15, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Plot all samples (background)
+        unique_classes = np.unique(y_full)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Background points (non-training)
+        background_mask = ~np.isin(range(len(X_3d)), training_indices)
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_full == cls) & background_mask
+            if np.any(class_mask):
+                ax.scatter(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2],
+                          c=[colors[i]], alpha=0.1, s=10, label=f'_nolegend_')
+
+        # Training samples (foreground)
+        for i, cls in enumerate(unique_classes):
+            class_mask = (y_full == cls) & np.isin(range(len(X_3d)), training_indices)
+            if np.any(class_mask):
+                ax.scatter(X_3d[class_mask, 0], X_3d[class_mask, 1], X_3d[class_mask, 2],
+                          c=[colors[i]], alpha=0.8, s=50, label=f'Class {cls}',
+                          edgecolors='black', linewidth=0.5)
+
+        # Create network connections
+        self._add_network_connections(ax, X_3d, y_full, training_indices, colors)
+
+        ax.set_xlabel(f'PC1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('PC2')
+        ax.set_zlabel('PC3')
+        ax.set_title(f'3D Training Network - Round {round_num + 1}\n'
+                    f'Training Samples: {len(training_indices)}', fontweight='bold', fontsize=14)
+        ax.legend()
+
+        plt.tight_layout()
+        filename = f'3d_network_round_{round_num + 1}.png'
+        plt.savefig(self.subdirs['networks'] / filename, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def _add_network_connections(self, ax, X_3d, y_full, training_indices, colors):
+        """Add network connections between training samples"""
+        training_mask = np.isin(range(len(X_3d)), training_indices)
+        X_train = X_3d[training_mask]
+        y_train = y_full[training_mask]
+
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_train[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            try:
+                # Create minimum spanning tree
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                mst = nx.minimum_spanning_tree(G)
+
+                # Plot MST edges
+                for edge in mst.edges():
+                    point1 = class_points[edge[0]]
+                    point2 = class_points[edge[1]]
+                    ax.plot([point1[0], point2[0]],
+                           [point1[1], point2[1]],
+                           [point1[2], point2[2]],
+                           color=colors[i], alpha=0.6, linewidth=1.5)
+
+            except Exception as e:
+                print(f"⚠️ Could not create MST for class {cls}: {e}")
+
+    def plot_feature_importance_analysis(self, adaptive_model, X_full, y_full, feature_names):
+        """Analyze and plot feature importance - FIXED for DBNN compatibility"""
+        print("🔧 Creating feature importance analysis...")
+
+        try:
+            # For DBNN, use variance or other metrics since there's no feature_importances_
+            if hasattr(adaptive_model, 'feature_importances_'):
+                importances = adaptive_model.feature_importances_
+            else:
+                # Use variance as proxy for importance for DBNN
+                if torch.is_tensor(X_full):
+                    importances = torch.var(X_full, dim=0).cpu().numpy()
+                else:
+                    importances = np.var(X_full, axis=0)
+
+                # Alternative: Use weights from DBNN if available
+                if hasattr(adaptive_model, 'best_W') and adaptive_model.best_W is not None:
+                    try:
+                        # Try to extract feature importance from DBNN weights
+                        weight_importance = torch.mean(torch.abs(adaptive_model.best_W), dim=0).cpu().numpy()
+                        if len(weight_importance) == len(importances):
+                            # Combine variance and weight importance
+                            importances = 0.7 * importances + 0.3 * weight_importance
+                    except:
+                        pass
+
+            # Sort features by importance
+            sorted_idx = np.argsort(importances)[::-1]
+            sorted_importances = importances[sorted_idx]
+            sorted_names = [feature_names[i] for i in sorted_idx]
+
+            # Plot feature importance
+            fig, ax = plt.subplots(figsize=(12, 8))
+            y_pos = np.arange(len(sorted_names))
+
+            bars = ax.barh(y_pos, sorted_importances, color=self.colors[0], alpha=0.7)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(sorted_names)
+            ax.set_xlabel('Importance Score')
+            ax.set_title('Feature Importance Analysis', fontweight='bold', fontsize=14)
+            ax.grid(True, alpha=0.3, axis='x')
+
+            # Add value labels
+            for bar, importance in zip(bars, sorted_importances):
+                width = bar.get_width()
+                ax.text(width, bar.get_y() + bar.get_height()/2.,
+                       f'{importance:.4f}', ha='left', va='center')
+
+            plt.tight_layout()
+            plt.savefig(self.subdirs['distributions'] / 'feature_importance.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            print(f"⚠️ Feature importance analysis completed with simplified approach: {e}")
+
+    def plot_class_separation_analysis(self, X_full, y_full, training_history):
+        """Analyze class separation evolution"""
+        print("🎯 Creating class separation analysis...")
+
+        if not training_history:
+            return
+
+        # Calculate class separation metrics for each round
+        separation_scores = []
+
+        for training_indices in training_history:
+            X_train = X_full[training_indices]
+            y_train = y_full[training_indices]
+
+            # Simple separation score: ratio of between-class to within-class variance
+            unique_classes = np.unique(y_train)
+            if len(unique_classes) < 2:
+                separation_scores.append(0)
+                continue
+
+            overall_mean = np.mean(X_train, axis=0)
+            between_var = 0
+            within_var = 0
+
+            for cls in unique_classes:
+                class_mask = y_train == cls
+                class_mean = np.mean(X_train[class_mask], axis=0)
+                between_var += np.sum(class_mask) * np.sum((class_mean - overall_mean) ** 2)
+                within_var += np.sum((X_train[class_mask] - class_mean) ** 2)
+
+            if within_var > 0:
+                separation_score = between_var / within_var
+            else:
+                separation_score = 0
+
+            separation_scores.append(separation_score)
+
+        # Plot separation evolution
+        fig, ax = plt.subplots(figsize=(12, 6))
+        rounds = list(range(1, len(separation_scores) + 1))
+
+        ax.plot(rounds, separation_scores, 'o-', linewidth=2, markersize=8, color=self.colors[0])
+        ax.set_xlabel('Adaptive Round')
+        ax.set_ylabel('Separation Score')
+        ax.set_title('Class Separation Evolution in Training Set', fontweight='bold', fontsize=14)
+        ax.grid(True, alpha=0.3)
+
+        # Add trend line
+        if len(separation_scores) > 1:
+            z = np.polyfit(rounds, separation_scores, 1)
+            p = np.poly1d(z)
+            ax.plot(rounds, p(rounds), "--", color='red', alpha=0.7,
+                   label=f'Trend: {z[0]:.3f}x + {z[1]:.3f}')
+            ax.legend()
+
+        plt.tight_layout()
+        plt.savefig(self.subdirs['comparisons'] / 'class_separation_evolution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def plot_confidence_evolution(self, adaptive_model, X_full, y_full, training_history):
+        """Plot confidence evolution across rounds - FIXED for DBNN compatibility"""
+        print("🎲 Creating confidence evolution analysis...")
+
+        if not training_history:
+            return
+
+        confidence_evolution = []
+
+        for training_indices in training_history:
+            try:
+                # Use DBNN's prediction method instead of model.predict_proba
+                if hasattr(adaptive_model, 'predict'):
+                    # Get predictions using DBNN's predict method
+                    predictions, posteriors = adaptive_model.predict(X_full[training_indices])
+                    if posteriors is not None:
+                        max_probas = torch.max(posteriors, dim=1)[0] if torch.is_tensor(posteriors) else np.max(posteriors, axis=1)
+                        avg_confidence = float(torch.mean(max_probas)) if torch.is_tensor(max_probas) else float(np.mean(max_probas))
+                        confidence_evolution.append(avg_confidence)
+                    else:
+                        confidence_evolution.append(0.5)
+                else:
+                    confidence_evolution.append(0.5)
+            except:
+                confidence_evolution.append(0.5)  # Default value
+
+        # Plot confidence evolution
+        if confidence_evolution:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            rounds = list(range(1, len(confidence_evolution) + 1))
+
+            ax.plot(rounds, confidence_evolution, 'o-', linewidth=2, markersize=8, color=self.colors[1])
+            ax.set_xlabel('Adaptive Round')
+            ax.set_ylabel('Average Prediction Confidence')
+            ax.set_title('Prediction Confidence Evolution', fontweight='bold', fontsize=14)
+            ax.set_ylim(0, 1)
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            plt.savefig(self.subdirs['performance'] / 'confidence_evolution.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+    def create_interactive_dashboard(self, round_stats, training_history, X_full, y_full, feature_names):
+        """Create interactive dashboard with all visualizations - FIXED VERSION"""
+        print("📊 Creating interactive dashboard...")
+
+        # FIX: Validate round_stats before using it
+        if not round_stats:
+            print("⚠️  No round statistics available for dashboard")
+            return
+
+        # FIX: Validate training_history
+        if not training_history:
+            print("⚠️  No training history available for dashboard")
+            return
+
+        try:
+            # FIX: Safe extraction of values with defaults
+            rounds = [s['round'] for s in round_stats] if round_stats else []
+            train_acc = [s.get('train_accuracy', 0) * 100 for s in round_stats] if round_stats else []
+            test_acc = [s.get('test_accuracy', 0) * 100 for s in round_stats] if round_stats else []
+
+            # FIX: Safe max calculation
+            best_accuracy = max([s.get('test_accuracy', 0) for s in round_stats]) * 100 if round_stats else 0
+            final_training_size = len(training_history[-1]) if training_history else 0
+            total_rounds = len(round_stats) if round_stats else 0
+
+            # Create comprehensive dashboard HTML
+            dashboard_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Adaptive DBNN Dashboard - {self.dataset_name}</title>
+                <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                             color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+                    .plot-container {{ margin: 20px 0; border: 1px solid #ddd; border-radius: 5px; padding: 15px; }}
+                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 20px 0; }}
+                    .stat-card {{ background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }}
+                    .warning {{ background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; margin: 10px 0; }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h1>🎯 Adaptive DBNN Analysis Dashboard</h1>
+                    <h2>Dataset: {self.dataset_name}</h2>
+                    <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                </div>
+
+                <div class="stats">
+                    <div class="stat-card">
+                        <h3>Total Rounds</h3>
+                        <p style="font-size: 24px; font-weight: bold; color: #667eea;">{total_rounds}</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Final Training Size</h3>
+                        <p style="font-size: 24px; font-weight: bold; color: #28a745;">{final_training_size}</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Best Accuracy</h3>
+                        <p style="font-size: 24px; font-weight: bold; color: #dc3545;">{best_accuracy:.1f}%</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Features</h3>
+                        <p style="font-size: 24px; font-weight: bold; color: #ffc107;">{len(feature_names) if feature_names else 0}</p>
+                    </div>
+                </div>
+            """
+
+            # Only add plots if we have data
+            if rounds and train_acc and test_acc:
+                dashboard_html += f"""
+                <div class="plot-container">
+                    <h3>📈 Performance Evolution</h3>
+                    <div id="performance-plot"></div>
+                </div>
+
+                <div class="plot-container">
+                    <h3>🔍 Sample Selection Analysis</h3>
+                    <div id="sample-plot"></div>
+                </div>
+
+                <script>
+                    // Performance data
+                    const rounds = {rounds};
+                    const trainAcc = {train_acc};
+                    const testAcc = {test_acc};
+
+                    // Create performance plot
+                    Plotly.newPlot('performance-plot', [
+                        {{x: rounds, y: trainAcc, type: 'scatter', name: 'Training Accuracy', line: {{color: '#1f77b4'}}}},
+                        {{x: rounds, y: testAcc, type: 'scatter', name: 'Test Accuracy', line: {{color: '#ff7f0e'}}}}
+                    ], {{title: 'Accuracy Evolution Across Rounds'}});
+
+                    // Sample selection data
+                    const trainingSizes = {[len(indices) for indices in training_history]};
+
+                    Plotly.newPlot('sample-plot', [
+                        {{x: rounds, y: trainingSizes, type: 'scatter', name: 'Training Size', line: {{color: '#2ca02c'}}}}
+                    ], {{title: 'Training Set Growth'}});
+                </script>
+                """
+            else:
+                dashboard_html += """
+                <div class="warning">
+                    <h3>⚠️ Limited Data Available</h3>
+                    <p>Insufficient round statistics available for detailed visualization.
+                    This may occur with single-round training or when adaptive learning completes quickly.</p>
+                </div>
+                """
+
+            dashboard_html += """
+            </body>
+            </html>
+            """
+
+            with open(self.subdirs['interactive'] / 'dashboard.html', 'w') as f:
+                f.write(dashboard_html)
+
+            print("✅ Interactive dashboard created successfully")
+
+        except Exception as e:
+            print(f"⚠️  Error creating interactive dashboard: {str(e)}")
+            # Create a minimal dashboard with error information
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Adaptive DBNN Dashboard - {self.dataset_name}</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    .error {{ background: #f8d7da; color: #721c24; padding: 20px; border-radius: 5px; }}
+                </style>
+            </head>
+            <body>
+                <h1>Adaptive DBNN Dashboard - {self.dataset_name}</h1>
+                <div class="error">
+                    <h2>⚠️ Dashboard Generation Error</h2>
+                    <p>Error: {str(e)}</p>
+                    <p>This may occur due to insufficient training rounds or missing statistics.</p>
+                </div>
+            </body>
+            </html>
+            """
+            with open(self.subdirs['interactive'] / 'dashboard.html', 'w') as f:
+                f.write(error_html)
+
+    def plot_final_model_analysis(self, adaptive_model, X_full, y_full, feature_names):
+        """Create final model analysis plots"""
+        print("🏆 Creating final model analysis...")
+
+        try:
+            # Get predictions
+            y_pred = adaptive_model.model.predict(X_full)
+
+            # Confusion Matrix
+            fig, ax = plt.subplots(figsize=(10, 8))
+            cm = confusion_matrix(y_full, y_pred)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_title('Final Model Confusion Matrix', fontweight='bold', fontsize=14)
+            plt.tight_layout()
+            plt.savefig(self.subdirs['performance'] / 'final_confusion_matrix.png', dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Classification Report
+            report = classification_report(y_full, y_pred, output_dict=True)
+            report_df = pd.DataFrame(report).transpose()
+            report_df.to_csv(self.subdirs['performance'] / 'classification_report.csv')
+
+        except Exception as e:
+            print(f"⚠️ Final model analysis failed: {e}")
+
+class AdaptiveVisualizer3D:
+    """3D Visualization system for adaptive learning training samples"""
+
+    def __init__(self, output_dir='adaptive_3d_visualizations'):
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+    def create_3d_training_network(self, X_full, y_full, training_indices, feature_names=None,
+                                 round_num=None, method='pca'):
+        """Create 3D visualization of training samples forming class networks"""
+
+        print("🎨 Creating 3D training sample network visualization...")
+
+        # Reduce to 3D for visualization
+        if method == 'pca':
+            reducer = PCA(n_components=3, random_state=42)
+            X_3d = reducer.fit_transform(X_full)
+            explained_var = sum(reducer.explained_variance_ratio_)
+            print(f"📊 PCA explained variance: {explained_var:.3f}")
+        else:  # tsne
+            reducer = TSNE(n_components=3, random_state=42, perplexity=30)
+            X_3d = reducer.fit_transform(X_full)
+            explained_var = 1.0
+
+        # Separate training and non-training samples
+        train_mask = np.zeros(len(X_full), dtype=bool)
+        train_mask[training_indices] = True
+
+        X_train_3d = X_3d[train_mask]
+        y_train = y_full[train_mask]
+        X_other_3d = X_3d[~train_mask]
+        y_other = y_full[~train_mask]
+
+        # Create the plot
+        fig = plt.figure(figsize=(15, 10))
+
+        # 3D scatter plot
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Plot all samples (transparent)
+        unique_classes = np.unique(y_full)
+        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+        # Plot non-training samples (faint)
+        for i, cls in enumerate(unique_classes):
+            mask = y_other == cls
+            if np.any(mask):
+                ax.scatter(X_other_3d[mask, 0], X_other_3d[mask, 1], X_other_3d[mask, 2],
+                          c=[colors[i]], alpha=0.1, s=10, label=f'Class {cls} (other)')
+
+        # Plot training samples (bright)
+        for i, cls in enumerate(unique_classes):
+            mask = y_train == cls
+            if np.any(mask):
+                ax.scatter(X_train_3d[mask, 0], X_train_3d[mask, 1], X_train_3d[mask, 2],
+                          c=[colors[i]], alpha=0.8, s=50, label=f'Class {cls} (training)',
+                          edgecolors='black', linewidth=0.5)
+
+        # Create network connections within each class
+        self._add_class_networks(ax, X_train_3d, y_train, colors)
+
+        # Customize the plot
+        ax.set_xlabel(f'Component 1 ({explained_var*100:.1f}% variance)')
+        ax.set_ylabel('Component 2')
+        ax.set_zlabel('Component 3')
+
+        title = '3D Training Sample Network'
+        if round_num is not None:
+            title += f' - Round {round_num}'
+        ax.set_title(title, fontsize=14, fontweight='bold')
+
+        # Legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        # Save the plot
+        filename = f'training_network_round_{round_num}.png' if round_num else 'training_network_final.png'
+        plt.tight_layout()
+        plt.savefig(f'{self.output_dir}/{filename}', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"✅ 3D network visualization saved: {filename}")
+
+        # Also create interactive Plotly version
+        self._create_interactive_3d_plot(X_3d, y_full, train_mask, training_indices, round_num)
+
+    def _add_class_networks(self, ax, X_3d, y_train, colors):
+        """Add network connections between training samples of the same class"""
+        unique_classes = np.unique(y_train)
+
+        for i, cls in enumerate(unique_classes):
+            class_mask = y_train == cls
+            class_points = X_3d[class_mask]
+
+            if len(class_points) < 2:
+                continue
+
+            # Create a minimum spanning tree for the class
+            try:
+                # Calculate distance matrix
+                from scipy.spatial import distance_matrix
+                dist_matrix = distance_matrix(class_points, class_points)
+
+                # Create graph and minimum spanning tree
+                G = nx.Graph()
+                for j in range(len(class_points)):
+                    for k in range(j+1, len(class_points)):
+                        G.add_edge(j, k, weight=dist_matrix[j, k])
+
+                mst = nx.minimum_spanning_tree(G)
+
+                # Plot MST edges
+                for edge in mst.edges():
+                    point1 = class_points[edge[0]]
+                    point2 = class_points[edge[1]]
+                    ax.plot([point1[0], point2[0]],
+                           [point1[1], point2[1]],
+                           [point1[2], point2[2]],
+                           color=colors[i], alpha=0.6, linewidth=1.5)
+
+            except Exception as e:
+                print(f"⚠️ Could not create MST for class {cls}: {e}")
+
+    def _create_interactive_3d_plot(self, X_3d, y_full, train_mask, training_indices, round_num):
+        """Create interactive 3D plot using Plotly"""
+
+        # Create DataFrame for Plotly
+        import pandas as pd
+        df = pd.DataFrame({
+            'x': X_3d[:, 0],
+            'y': X_3d[:, 1],
+            'z': X_3d[:, 2],
+            'class': y_full,
+            'type': ['Training' if i in training_indices else 'Other' for i in range(len(X_3d))],
+            'index': range(len(X_3d))
+        })
+
+        # Create interactive scatter plot
+        fig = px.scatter_3d(df, x='x', y='y', z='z',
+                           color='class',
+                           symbol='type',
+                           hover_data=['index'],
+                           title=f'Interactive 3D Training Network - Round {round_num}' if round_num else 'Interactive 3D Training Network - Final',
+                           opacity=0.7)
+
+        # Update marker sizes
+        fig.update_traces(marker=dict(size=5 if df['type'] == 'Other' else 8),
+                         selector=dict(mode='markers'))
+
+        # Save interactive plot
+        filename = f'interactive_network_round_{round_num}.html' if round_num else 'interactive_network_final.html'
+        fig.write_html(f'{self.output_dir}/{filename}')
+
+        print(f"✅ Interactive 3D visualization saved: {filename}")
+
+    def create_adaptive_learning_animation(self, X_full, y_full, training_history):
+        """Create animation showing evolution of training samples"""
+        print("🎬 Creating adaptive learning animation...")
+
+        # Reduce to 3D once for consistency
+        reducer = PCA(n_components=3, random_state=42)
+        X_3d = reducer.fit_transform(X_full)
+
+        frames = []
+
+        for round_num, training_indices in enumerate(training_history):
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot all samples
+            unique_classes = np.unique(y_full)
+            colors = plt.cm.Set1(np.linspace(0, 1, len(unique_classes)))
+
+            # Plot non-training samples
+            other_mask = ~np.isin(range(len(X_full)), training_indices)
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                mask = class_mask & other_mask
+                if np.any(mask):
+                    ax.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
+                              c=[colors[i]], alpha=0.1, s=5)
+
+            # Plot training samples
+            for i, cls in enumerate(unique_classes):
+                class_mask = y_full == cls
+                mask = class_mask & np.isin(range(len(X_full)), training_indices)
+                if np.any(mask):
+                    ax.scatter(X_3d[mask, 0], X_3d[mask, 1], X_3d[mask, 2],
+                              c=[colors[i]], alpha=0.8, s=30, label=f'Class {cls}',
+                              edgecolors='black', linewidth=0.5)
+
+            ax.set_title(f'Adaptive Learning - Round {round_num + 1}\nTraining Samples: {len(training_indices)}',
+                        fontsize=12, fontweight='bold')
+            ax.set_xlabel('Component 1')
+            ax.set_ylabel('Component 2')
+            ax.set_zlabel('Component 3')
+
+            frames.append(fig)
+            plt.close()
+
+        # Create animation (you'll need to install imageio: pip install imageio)
+        try:
+            import imageio
+            images = []
+            for fig in frames:
+                fig.canvas.draw()
+                image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+                image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                images.append(image)
+
+            imageio.mimsave(f'{self.output_dir}/adaptive_learning_evolution.gif',
+                           images, fps=2, loop=0)
+            print("✅ Adaptive learning animation saved: adaptive_learning_evolution.gif")
+
+        except ImportError:
+            print("⚠️ imageio not installed, skipping animation creation")
 
 
 class DatasetProcessor:
@@ -249,6 +2214,10 @@ class Colors:
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
     RED = '\033[91m'
+    CYAN = '\033[96m'  # ADDED: Cyan color
+    MAGENTA = '\033[95m'  # ADDED: Magenta color
+    WHITE = '\033[97m'  # ADDED: White color
+    BLACK = '\033[90m'  # ADDED: Black color
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
@@ -286,6 +2255,56 @@ class Colors:
             return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_accuracy(accuracy):
+        """Color accuracy values based on threshold"""
+        if accuracy >= 0.9:
+            return f"{Colors.GREEN}{accuracy:.4f}{Colors.ENDC}"
+        elif accuracy >= 0.7:
+            return f"{Colors.YELLOW}{accuracy:.4f}{Colors.ENDC}"
+        else:
+            return f"{Colors.RED}{accuracy:.4f}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_feature(name):
+        """Highlight feature name in cyan"""
+        return f"{Colors.CYAN}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_class(name):
+        """Highlight class name in magenta"""
+        return f"{Colors.MAGENTA}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_round(round_num):
+        """Highlight round number in blue"""
+        return f"{Colors.BLUE}{round_num}{Colors.ENDC}"
+
+    @staticmethod
+    def print_success(message):
+        """Print success message in green"""
+        print(f"{Colors.GREEN}✅ {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_warning(message):
+        """Print warning message in yellow"""
+        print(f"{Colors.YELLOW}⚠️  {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_error(message):
+        """Print error message in red"""
+        print(f"{Colors.RED}❌ {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_info(message):
+        """Print info message in cyan"""
+        print(f"{Colors.CYAN}📊 {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_debug(message):
+        """Print debug message in magenta"""
+        print(f"{Colors.MAGENTA}🐛 {message}{Colors.ENDC}")
 
 class DatasetConfig:
     """Enhanced dataset configuration handling with support for column names and URLs"""
@@ -1241,7 +3260,9 @@ class GPUDBNN:
         self.test_size = training_params.get('test_fraction', TestFraction)
         self.n_bins_per_dim = training_params.get('n_bins_per_dim', 128)
         self.batch_size = training_params.get('batch_size', 128)
-
+        if self.batch_size is None:
+            self.batch_size = 128
+            print(f"{Colors.YELLOW}[WARNING] batch_size was None, using default: 128{Colors.ENDC}")
         # Handle random_state specially (your code uses -1 for no shuffle)
         config_random_seed = training_params.get('random_seed', TrainingRandomSeed)
         if random_state is None:
@@ -1688,6 +3709,9 @@ class DBNN(GPUDBNN):
         self.trials = trials
         self.patience = trials
         self.adaptive_patience = training_params.get('adaptive_patience', 25)
+
+        # Initialize the functionality
+        add_geometric_visualization_to_adbnn()
 
         # Print verification
         print(f"\033[K{Colors.GREEN}Using parameters from config file:{Colors.ENDC}")
@@ -2628,6 +4652,10 @@ class DBNN(GPUDBNN):
         train_indices = []
         test_indices = None
 
+        # FIX: Initialize training_history at the start of the method
+        training_history = []  # Store training indices for each round
+        round_stats = []  # Initialize round_stats to avoid reference errors
+
         try:
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
@@ -2849,9 +4877,17 @@ class DBNN(GPUDBNN):
             DEBUG.log(f" Initial training set size: {len(train_indices)}")
             DEBUG.log(f" Initial test set size: {len(test_indices)}")
             adaptive_patience_counter = 0
+
             # Continue with training loop...
             patience = self.adaptive_patience if self.in_adaptive_fit else self.patience
-            while adaptive_patience_counter <patience:
+
+            # Initialize visualization if enabled
+            if self.config.get('training_params', {}).get('enable_visualization', False):
+                if not hasattr(self, 'visualizer'):
+                    self.visualizer = ComprehensiveAdaptiveVisualizer(self.dataset_name)
+                # training_history is already initialized at the start of the method
+
+            while adaptive_patience_counter < patience:
                 for round_num in range(max_rounds):
                     print("\033[K" +f"Round {round_num + 1}/{max_rounds}")
                     print("\033[K" +f"Training set size: {len(train_indices)}")
@@ -2885,6 +4921,10 @@ class DBNN(GPUDBNN):
 
                     # Check if we're improving overall
                     improved = False
+
+                    # FIX: Always append to training_history (it's now properly initialized)
+                    training_history.append(self.train_indices.copy())
+
                     if 'best_train_accuracy' not in locals():
                         best_train_accuracy = self.best_combined_accuracy
                         improved = True
@@ -2950,10 +4990,6 @@ class DBNN(GPUDBNN):
                             break
 
                     #print(f"{Colors.YELLOW} Identified {len(new_train_indices)} [{new_train_indices}]samples from failed dataset {Colors.ENDC}")
-
-
-
-
                     # Update training and test sets with new samples
                     #train_indices.extend(new_train_indices)
                     #test_indices = list(set(test_indices) - set(new_train_indices))
@@ -2992,6 +5028,14 @@ class DBNN(GPUDBNN):
             print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Adaptive training ended at: {end_clock}{Colors.ENDC}")
             print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Total adaptive training time: {elapsed_time:.2f} seconds{Colors.ENDC}")
 
+            # Generate final visualizations
+            if hasattr(self, 'visualizer') and training_history:
+                print("🎨 Generating comprehensive visualizations...")
+                self.visualizer.create_comprehensive_visualizations(
+                    self, self.X_tensor.cpu().numpy(), self.y_tensor.cpu().numpy(),
+                    training_history, round_stats, self.feature_columns
+                )
+                dbnn.create_geometric_visualization(training_history, round_stats)
             self.in_adaptive_fit = False
             return {'train_indices': train_indices, 'test_indices': test_indices}
 
@@ -7401,6 +9445,34 @@ def validate_config(config: dict) -> dict:
 
     return validated_config
 
+def get_dataset_name_from_path(file_path):
+    """Extract dataset name from file path"""
+    if not file_path:
+        return None
+
+    # Handle different path formats
+    if '/' in file_path:
+        # Unix-style path
+        parts = file_path.split('/')
+        # Look for meaningful dataset name
+        for part in reversed(parts):
+            if part and not part.endswith(('.csv', '.ccv', '.data')):
+                return part
+        # Fallback: use filename without extension
+        filename = parts[-1]
+        return os.path.splitext(filename)[0]
+    elif '\\' in file_path:
+        # Windows-style path
+        parts = file_path.split('\\')
+        for part in reversed(parts):
+            if part and not part.endswith(('.csv', '.ccv', '.data')):
+                return part
+        filename = parts[-1]
+        return os.path.splitext(filename)[0]
+    else:
+        # Simple filename
+        return os.path.splitext(file_path)[0]
+
 def main():
     # Available datasets section will be populated dynamically
     dataset_info = "    Available datasets will be listed here when using --list_datasets"
@@ -7460,6 +9532,8 @@ def main():
     args = parser.parse_args()
 
     processor = DatasetProcessor()
+
+
 
     def print_banner():
         """Print beautiful banner"""
@@ -7572,6 +9646,14 @@ def main():
             # Load config
             config = load_or_create_config(conf_path)
 
+            # CRITICAL FIX: Force enable visualization in config if requested
+            if generate_visualization:
+                if 'training_params' not in config:
+                    config['training_params'] = {}
+                config['training_params']['enable_visualization'] = True
+                config['training_params']['save_plots'] = True
+                print(f"📊 {Colors.GREEN}Visualization ENABLED in configuration{Colors.ENDC}")
+
             # Determine mode if not provided
             if not mode:
                 mode = 'train_predict' if config.get('train', True) and config.get('predict', True) else \
@@ -7584,11 +9666,20 @@ def main():
             print(f"📊 {Colors.BOLD}Visualization: {Colors.GREEN}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
             print(f"{'='*80}")
 
-            # Create DBNN instance
+            # Create DBNN instance - PASS VISUALIZATION CONFIG
             if mode == 'train_predict':
                 model = DBNN(dataset_name=dataset_name, mode='train', model_type=model_type)
             else:
                 model = DBNN(dataset_name=dataset_name, mode=mode, model_type=model_type)
+
+            # FORCE VISUALIZATION INITIALIZATION if enabled
+            if generate_visualization:
+                print(f"🎨 {Colors.BLUE}Initializing visualization systems...{Colors.ENDC}")
+                # Ensure visualizers are created
+                if not hasattr(model, 'visualizer'):
+                    model.visualizer = ComprehensiveAdaptiveVisualizer(dataset_name)
+                if not hasattr(model, 'visualizer_3d'):
+                    model.visualizer_3d = AdvancedInteractiveVisualizer(dataset_name)
 
             if mode in ['train', 'train_predict']:
                 # Training phase
@@ -7613,15 +9704,47 @@ def main():
                     accuracy_color = Colors.GREEN if results['test_accuracy'] > 0.9 else Colors.YELLOW if results['test_accuracy'] > 0.7 else Colors.RED
                     print(f"🎯 {Colors.BOLD}Test Accuracy: {accuracy_color}{results['test_accuracy']:.2%}{Colors.ENDC}")
 
-                # Generate visualization if requested
-                if generate_visualization and hasattr(model, 'generate_training_visualization'):
-                    print(f"\n📊 {Colors.BOLD}Generating training visualization...{Colors.ENDC}")
+                # CRITICAL FIX: Generate visualization if requested
+                if generate_visualization:
+                    print(f"\n📊 {Colors.BOLD}Generating comprehensive visualizations...{Colors.ENDC}")
                     try:
-                        viz_file = model.generate_training_visualization()
-                        if viz_file:
-                            print(f"🖼️  {Colors.GREEN}Visualization saved: {Colors.CYAN}{viz_file}{Colors.ENDC}")
+                        # Check if we have the required data for visualization
+                        if hasattr(model, 'X_tensor') and hasattr(model, 'y_tensor'):
+                            # Convert tensors to numpy for visualization
+                            X_full_np = model.X_tensor.cpu().numpy()
+                            y_full_np = model.y_tensor.cpu().numpy()
+
+                            # Create training history for visualization
+                            training_history = [model.train_indices] if hasattr(model, 'train_indices') else []
+
+                            # Generate comprehensive visualizations
+                            if hasattr(model, 'visualizer'):
+                                print(f"🎨 {Colors.BLUE}Creating comprehensive visualizations...{Colors.ENDC}")
+                                model.visualizer.create_comprehensive_visualizations(
+                                    model, X_full_np, y_full_np, training_history,
+                                    round_stats=[], feature_names=getattr(model, 'feature_columns', [])
+                                )
+
+                            # Generate 3D interactive visualizations
+                            if hasattr(model, 'visualizer_3d'):
+                                print(f"🌐 {Colors.BLUE}Creating 3D interactive visualizations...{Colors.ENDC}")
+                                model.visualizer_3d.create_advanced_3d_dashboard(
+                                    X_full_np, y_full_np, training_history,
+                                    getattr(model, 'feature_columns', []), round_num=None
+                                )
+
+                            print(f"✅ {Colors.GREEN}Visualizations generated in: Visualizer/adaptiveDBNN/{dataset_name}/{Colors.ENDC}")
+
+                        # Also try the built-in visualization method if it exists
+                        if hasattr(model, 'generate_training_visualization'):
+                            viz_file = model.generate_training_visualization()
+                            if viz_file:
+                                print(f"🖼️  {Colors.GREEN}Training visualization saved: {Colors.CYAN}{viz_file}{Colors.ENDC}")
+
                     except Exception as e:
                         print(f"⚠️  {Colors.YELLOW}Visualization failed: {str(e)}{Colors.ENDC}")
+                        import traceback
+                        traceback.print_exc()
 
                 # Save model components
                 try:
@@ -7640,8 +9763,8 @@ def main():
                 output_dir = os.path.join('data', dataset_name, 'Predictions')
                 os.makedirs(output_dir, exist_ok=True)
 
-                print(f"📁 {Colors.BOLD}Input: {Colors.CYAN}{input_csv}{Colors.ENDC}")
-                print(f"📂 {Colors.BOLD}Output: {Colors.CYAN}{output_dir}{Colors.ENDC}")
+                print(f"📁 {Colors.BOLD}Input: {Colors.GREEN}{input_csv}{Colors.ENDC}")
+                print(f"📂 {Colors.BOLD}Output: {Colors.YELLOW}{output_dir}{Colors.ENDC}")
 
                 # For prediction mode, create a new predictor instance
                 if mode == 'predict':
@@ -7695,6 +9818,12 @@ def main():
 
             print(f"\n{'='*80}")
             print(f"✅ {Colors.BOLD}{Colors.GREEN}Processing completed for {dataset_name}!{Colors.ENDC}")
+
+            # Final reminder about visualization output location
+            if generate_visualization:
+                viz_path = f"Visualizer/adaptiveDBNN/{dataset_name}/"
+                print(f"📊 {Colors.BOLD}Visualizations saved to: {Colors.CYAN}{viz_path}{Colors.ENDC}")
+
             print(f"{'='*80}\n")
 
         except Exception as e:
