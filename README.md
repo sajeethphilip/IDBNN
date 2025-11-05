@@ -26,6 +26,9 @@ To train/predict using adbnn  (For Difference Boosting Neural Network
 
 ```
 Nov 2025 Updates:
+
+python adbnn.py --mode train_predict --visualize --file_path data/mnist/mnist.csv
+
 <img width="1018" height="848" alt="image" src="https://github.com/user-attachments/assets/3f8c76b2-86da-406c-9af2-2124a4333eca" />
 <img width="596" height="836" alt="image" src="https://github.com/user-attachments/assets/4ab7290c-fc65-4fc1-a188-eace0cf2b210" />
 
