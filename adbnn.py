@@ -7607,7 +7607,7 @@ def main():
 
                 # Print results
                 print(f"\n✅ {Colors.GREEN}Training completed!{Colors.ENDC}")
-                print(f"⏱️  {Colors.BOLD}Time taken: {Colors.CYAN}{training_time:.1f} seconds{Colors.ENDC}")
+                print(f"⏱️  {Colors.BOLD}Time taken: {Colors.BLUE}{training_time:.1f} seconds{Colors.ENDC}")
 
                 if results and 'test_accuracy' in results:
                     accuracy_color = Colors.GREEN if results['test_accuracy'] > 0.9 else Colors.YELLOW if results['test_accuracy'] > 0.7 else Colors.RED
