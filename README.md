@@ -1,3 +1,4 @@
+## Important Note: This module is mostly for image-based analysis, where you have more features and want to do some advanced feature engineering to get the best results. The DBNN code is the same, but the pre-processing slightly varies. For simple datasets like iris or any of the UCI repository datasets, we used the adaptive_dbnn module.
 # For the lazy guy
 ```
 git pull 
