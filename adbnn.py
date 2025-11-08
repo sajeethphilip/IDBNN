@@ -24,6 +24,7 @@
 # Updated failed candidate selection procedure as per DBNN original concepts May 5 2025 3:57 pm
 # Fixed the bug in feature selection : May 10:12:09 am
 # Fixed the bug in sample selection May 11 1:27 am
+# All fixed, working training and predcition perfectly Nov 8th 2025
 
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
