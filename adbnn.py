@@ -2996,6 +2996,7 @@ class DBNN(GPUDBNN):
 
                     if new_train_indices:
                         # Reset to the best round's initial conditions
+                        self.reset_to_initial_state()
                         if self.best_round_initial_conditions is not None:
                             print("\033[K" +f"Resetting to initial conditions of best round {self.best_round}")
                             self.current_W = self.best_round_initial_conditions['weights'].clone()
@@ -5568,7 +5569,7 @@ class DBNN(GPUDBNN):
                 self._save_model_components()
             else:
                 print("\033[K" + f"{Colors.RED}Current classwise accuracy declined from {best_metric:.2%} to {current_metric:.2%}{Colors.ENDC}")
-            self.reset_to_initial_state() # After saving the weights, reset to initial state for next round.
+            #self.reset_to_initial_state() # After saving the weights, reset to initial state for next round.
 
 
             # Extract predictions for training and test data using stored indices
