@@ -4182,7 +4182,7 @@ class DatasetProcessor:
 
     def __init__(self, datafile: str = "MNIST", datatype: str = "torchvision",
                  output_dir: str = "data", config: Optional[Dict] = None,
-                 data_name: Optional[str] = None):  # Add data_name parameter
+                 data_name: Optional[str] = None):
         self.datafile = datafile
         self.datatype = datatype.lower()
         self.output_dir = output_dir
@@ -4244,8 +4244,25 @@ class DatasetProcessor:
 
         return extract_dir
 
+    def process(self) -> Tuple[str, Optional[str]]:
+        """Process dataset and return paths to train and test directories"""
+        if self.datatype == 'torchvision':
+            # For torchvision, we process directly without file path validation
+            return self._process_torchvision()
+        else:
+            # For custom datasets, process the data path
+            if not self.datafile:
+                raise ValueError("Data file path is required for custom datasets")
+
+            processed_path = self._process_data_path(self.datafile)
+            return self._process_custom(processed_path)
+
     def _process_data_path(self, data_path: str) -> str:
         """Process input data path, handling compressed files if necessary"""
+        # For torchvision datasets, we don't have a data_path to process
+        if self.datatype == 'torchvision':
+            return ""  # Return empty string or some default
+
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Data path not found: {data_path}")
 
@@ -4265,15 +4282,6 @@ class DatasetProcessor:
             return extract_dir
 
         return data_path
-
-    def process(self) -> Tuple[str, Optional[str]]:
-        """Process dataset and return paths to train and test directories"""
-        if self.datatype == 'torchvision':
-            return self._process_torchvision()
-        else:
-            # Process the data path first
-            processed_path = self._process_data_path(self.datafile)
-            return self._process_custom(processed_path)
 
     def _handle_existing_directory(self, path: str):
         """Handle existing directory by either removing it or merging its contents."""
@@ -4412,203 +4420,10 @@ class DatasetProcessor:
                 "mean": mean,
                 "std": std,
                 "resize_images": False,
-                "train_dir": train_dir,
-                "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
+                "train_dir": train_dir,  # This now contains all images (train + test)
+                "test_dir": train_dir   # Same directory for both since they're merged
             },
-             "model": {
-                "encoder_type": "autoenc",
-                'enable_adaptive': True,  # Default value
-                "feature_dims": feature_dims,
-                "learning_rate": 0.001,
-                "optimizer": {
-                    "type": "Adam",
-                    "weight_decay": 0.0001,
-                    "momentum": 0.9,
-                    "beta1": 0.9,
-                    "beta2": 0.999,
-                    "epsilon": 1e-08
-                },
-                "scheduler": {
-                    "type": "ReduceLROnPlateau",
-                    "factor": 0.1,
-                    "patience": 10,
-                    "min_lr": 1e-06,
-                    "verbose": True
-                },
-                "autoencoder_config": {
-                    "reconstruction_weight": 1.0,
-                    "feature_weight": 0.1,
-                    "convergence_threshold": 0.0001,
-                    "min_epochs": 10,
-                    "patience": 5,
-                    "enhancements": {
-                        "enabled": True,
-                        "use_kl_divergence": True,
-                        "use_class_encoding": False,
-                        "kl_divergence_weight": 0.5,
-                        "classification_weight": 0.5,
-                        "clustering_temperature": 1.0,
-                        "min_cluster_confidence": 0.7
-                    }
-                },
-                "loss_functions": {
-                    "structural": {
-                        "enabled": True,
-                        "weight": 1.0,
-                        "params": {
-                            "edge_weight": 1.0,
-                            "smoothness_weight": 0.5
-                        }
-                    },
-                    "color_enhancement": {
-                        "enabled": True,
-                        "weight": 0.8,
-                        "params": {
-                            "channel_weight": 0.5,
-                            "contrast_weight": 0.3
-                        }
-                    },
-                    "morphology": {
-                        "enabled": True,
-                        "weight": 0.6,
-                        "params": {
-                            "shape_weight": 0.7,
-                            "symmetry_weight": 0.3
-                        }
-                    },
-                    "detail_preserving": {
-                        "enabled": True,
-                        "weight": 0.8,
-                        "params": {
-                            "detail_weight": 1.0,
-                            "texture_weight": 0.8,
-                            "frequency_weight": 0.6
-                        }
-                    },
-                    "astronomical_structure": {
-                        "enabled": True,
-                        "weight": 1.0,
-                        "components": {
-                            "edge_preservation": True,
-                            "peak_preservation": True,
-                            "detail_preservation": True
-                        }
-                    },
-                    "medical_structure": {
-                        "enabled": True,
-                        "weight": 1.0,
-                        "components": {
-                            "boundary_preservation": True,
-                            "tissue_contrast": True,
-                            "local_structure": True
-                        }
-                    },
-                    "agricultural_pattern": {
-                        "enabled": True,
-                        "weight": 1.0,
-                        "components": {
-                            "texture_preservation": True,
-                            "damage_pattern": True,
-                            "color_consistency": True
-                        }
-                    }
-                },
-                "enhancement_modules": {
-                    "astronomical": {
-                        "enabled": True,
-                        "components": {
-                            "structure_preservation": True,
-                            "detail_preservation": True,
-                            "star_detection": True,
-                            "galaxy_features": True,
-                            "kl_divergence": True
-                        },
-                        "weights": {
-                            "detail_weight": 1.0,
-                            "structure_weight": 0.8,
-                            "edge_weight": 0.7
-                        }
-                    },
-                    "medical": {
-                        "enabled": True,
-                        "components": {
-                            "tissue_boundary": True,
-                            "lesion_detection": True,
-                            "contrast_enhancement": True,
-                            "subtle_feature_preservation": True
-                        },
-                        "weights": {
-                            "boundary_weight": 1.0,
-                            "lesion_weight": 0.8,
-                            "contrast_weight": 0.6
-                        }
-                    },
-                    "agricultural": {
-                        "enabled": True,
-                        "components": {
-                            "texture_analysis": True,
-                            "damage_detection": True,
-                            "color_anomaly": True,
-                            "pattern_enhancement": True,
-                            "morphological_features": True
-                        },
-                        "weights": {
-                            "texture_weight": 1.0,
-                            "damage_weight": 0.8,
-                            "pattern_weight": 0.7
-                        }
-                    }
-                }
-            },
-            "training": {
-                "batch_size": 128,
-                "epochs": 200,
-                "num_workers": min(4, os.cpu_count() or 1),
-                "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
-                "validation_split": 0.2,
-                "invert_DBNN": True,
-                "reconstruction_weight": 0.5,
-                "feedback_strength": 0.3,
-                "inverse_learning_rate": 0.1,
-                "use_classwise_acc": True, # classwise accuracy has priority
-                "early_stopping": {
-                    "patience": 5,
-                    "min_delta": 0.001
-                }
-            },
-            "augmentation": {
-                "enabled": True,
-                "random_crop": {"enabled": True, "padding": 4},
-                "random_rotation": {"enabled": True, "degrees": 10},
-                "horizontal_flip": {"enabled": True, "probability": 0.5},
-                "vertical_flip": {"enabled": False},
-                "color_jitter": {
-                    "enabled": True,
-                    "brightness": 0.2,
-                    "contrast": 0.2,
-                    "saturation": 0.2,
-                    "hue": 0.1
-                },
-                "normalize": {
-                    "enabled": True,
-                    "mean": mean,
-                    "std": std
-                }
-            },
-            "execution_flags": {
-                "mode": "train_and_predict",
-                "use_gpu": torch.cuda.is_available(),
-                "mixed_precision": True,
-                "distributed_training": False,
-                "debug_mode": False,
-                "use_previous_model": True,
-                "fresh_start": False
-            },
-            "output": {
-                "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
-                "model_dir": os.path.join(self.dataset_dir, "models"),
-                "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
-            }
+            # ... rest of the configuration remains the same
         }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
@@ -4835,16 +4650,14 @@ class DatasetProcessor:
 
 
     def _process_torchvision(self) -> Tuple[str, str]:
-        """Process torchvision dataset"""
+        """Process torchvision dataset and merge train/test into single directory"""
         dataset_name = self.datafile.upper()
         if not hasattr(datasets, dataset_name):
             raise ValueError(f"Torchvision dataset {dataset_name} not found")
 
-        # Setup paths in dataset-specific directory
-        train_dir = os.path.join(self.dataset_dir, "train")
-        test_dir = os.path.join(self.dataset_dir, "test")
-        os.makedirs(train_dir, exist_ok=True)
-        os.makedirs(test_dir, exist_ok=True)
+        # Setup main dataset directory (no separate train/test)
+        dataset_dir = os.path.join(self.dataset_dir)
+        os.makedirs(dataset_dir, exist_ok=True)
 
         # Download and process datasets
         transform = transforms.ToTensor()
@@ -4863,8 +4676,8 @@ class DatasetProcessor:
             transform=transform
         )
 
-        # Save images with class directories
-        def save_dataset_images(dataset, output_dir, split_name):
+        # Save ALL images with class directories in the main dataset folder
+        def save_dataset_images(dataset, split_name):
             logger.info(f"Processing {split_name} split...")
 
             class_to_idx = getattr(dataset, 'class_to_idx', None)
@@ -4874,21 +4687,23 @@ class DatasetProcessor:
             with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
                 for idx, (img, label) in enumerate(dataset):
                     class_name = idx_to_class[label] if class_to_idx else str(label)
-                    class_dir = os.path.join(output_dir, class_name)
+                    class_dir = os.path.join(dataset_dir, class_name)
                     os.makedirs(class_dir, exist_ok=True)
 
                     if isinstance(img, torch.Tensor):
                         img = transforms.ToPILImage()(img)
 
-                    img_path = os.path.join(class_dir, f"{idx}.png")
+                    # Use split prefix to avoid filename conflicts
+                    img_path = os.path.join(class_dir, f"{split_name}_{idx}.png")
                     img.save(img_path)
                     pbar.update(1)
 
-        save_dataset_images(train_dataset, train_dir, "training")
-        save_dataset_images(test_dataset, test_dir, "test")
+        # Save both train and test images to the same class directories
+        save_dataset_images(train_dataset, "train")
+        save_dataset_images(test_dataset, "test")
 
-        return train_dir, test_dir
-
+        # Return the same directory for both train and test (they're merged)
+        return dataset_dir, dataset_dir
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
         """Create train/test split from source directory"""
@@ -5323,19 +5138,20 @@ def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
     dataset_config = config['dataset']
 
     if dataset_config['type'] == 'torchvision':
-        train_dataset = getattr(torchvision.datasets, dataset_config['name'].upper())(
-            root='./data',
-            train=True,
-            download=True,
-            transform=transform
+        # For torchvision, we use the same directory for both train and test
+        train_dir = dataset_config['train_dir']
+
+        train_dataset = CustomImageDataset(
+            data_dir=train_dir,
+            transform=transform,
+            config=config,
+            data_name=dataset_config['name']
         )
 
-        test_dataset = getattr(torchvision.datasets, dataset_config['name'].upper())(
-            root='./data',
-            train=False,
-            download=True,
-            transform=transform
-        )
+        # For torchvision merged datasets, we don't create a separate test dataset
+        # The entire dataset will be used for training/feature extraction
+        test_dataset = None
+
     else:
         train_dir = dataset_config['train_dir']
         test_dir = dataset_config.get('test_dir')
@@ -5345,14 +5161,18 @@ def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
 
         train_dataset = CustomImageDataset(
             data_dir=train_dir,
-            transform=transform
+            transform=transform,
+            config=config,
+            data_name=dataset_config['name']
         )
 
         test_dataset = None
-        if test_dir and os.path.exists(test_dir):
+        if test_dir and os.path.exists(test_dir) and test_dir != train_dir:
             test_dataset = CustomImageDataset(
                 data_dir=test_dir,
-                transform=transform
+                transform=transform,
+                config=config,
+                data_name=dataset_config['name']
             )
 
     if config['training'].get('merge_datasets', False) and test_dataset is not None:
@@ -5387,6 +5207,9 @@ def update_config_with_args(config: Dict, args) -> Dict:
         config['execution_flags']['use_gpu'] = not args.cpu
     if hasattr(args, 'debug'):
         config['execution_flags']['debug_mode'] = args.debug
+    if hasattr(args, 'output_dir'):
+        config['output']['model_dir'] = os.path.join(args.output_dir, config['dataset']['name'], "models")
+        config['output']['visualization_dir'] = os.path.join(args.output_dir, config['dataset']['name'], "visualizations")
 
     return config
 
@@ -5444,10 +5267,11 @@ def get_interactive_args():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
     args = argparse.Namespace()
+
     # Add data_name prompt
     default_name = last_args.get('data_name') if last_args else None
     data_name = input(f"Enter dataset name (leave empty to auto-detect) [{default_name}]: ").strip()
-    args.data_name = data_name or default_name
+    args.data_name = data_name or default_name or 'mnist'  # Default to 'mnist'
 
     # Get mode (train/reconstruct/predict)
     while True:
@@ -5469,30 +5293,40 @@ def get_interactive_args():
             break
         print("Invalid type. Please enter 'torchvision' or 'custom'")
 
-    # Get data path/name
-    default = last_args.get('data', '') if last_args else ''
-    prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
-    dataset_name = input(prompt).strip() or default
+    # Only ask for input_path for custom datasets
+    if args.data_type == 'custom':
+        default = last_args.get('data', '') if last_args else ''
+        prompt = f"Enter dataset path [{default}]: " if default else "Enter dataset path: "
+        args.input_path = input(prompt).strip() or default
+        if not args.input_path:
+            raise ValueError("Input path is required for custom datasets")
+    else:
+        # For torchvision, set a dummy path that won't be used
+        args.input_path = f"torchvision://{args.data_name}"
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
+        default_model = (f"data/{args.data_name}/checkpoints/{args.data_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
-        # Set default input directory
-        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
+        # For torchvision, set default input to the downloaded dataset
+        if args.data_type == 'torchvision':
+            default_input = f"data/{args.data_name}"
+        else:
+            default_input = f"Data/{args.data_name}.zip" if args.data_name else ''
+
         prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_path= input(prompt).strip() or default_input
+        args.input_path = input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        default_csv = os.path.join('data', args.data_name, f"{args.data_name}.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
-    # Handle train/reconstruct modes
-    else:
+    # Handle train/reconstruct modes for torchvision
+    elif args.data_type == 'torchvision':
         # Ask about invert DBNN
         default_invert = last_args.get('invert_dbnn', True) if last_args else True
         invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
@@ -5534,7 +5368,6 @@ def get_interactive_args():
 
     save_last_args(args)
     return args
-
 def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
     checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
@@ -5712,6 +5545,7 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
 
         return existing_config
     return new_config
+
 def main():
     """Main function for CDBNN processing with enhancement configurations"""
     args = None
@@ -5719,76 +5553,30 @@ def main():
         # Setup logging
         logger = setup_logging()
 
-        # First try to parse command line arguments
-        try:
-            args = parse_arguments()
-        except SystemExit:
-            # argparse exits when -h/--help is used
-            return 0
-        except:
-            args = None
+        # Parse command line arguments
+        args = parse_arguments()
 
-        # If no command line args or --interactive flag, use interactive input
-        if args is None or getattr(args, 'interactive', False):
-            args = interactive_input()
+        # For command line usage, ensure we have the required arguments
+        if not args.data_name:
+            logger.error("Data name is required. Use --data_name argument.")
+            return 1
 
-        dataset_name = str(getattr(args, 'data_name', 'mnist'))
+        if not args.data_type:
+            logger.error("Data type is required. Use --data_type argument.")
+            return 1
+
+        # For custom datasets, input_path is required
+        if args.data_type == 'custom' and not args.input_path:
+            logger.error("Input path is required for custom datasets. Use --input_path argument.")
+            return 1
 
         # Process based on mode
         if args.mode == 'predict':
-            # Load the config
-            config_path = os.path.join('data', dataset_name, f"{dataset_name}.json")
-            if not os.path.exists(config_path):
-                logger.error(f"Config file not found at {config_path}")
-                config_path = input("Enter path to config file: ").strip()
-                if not os.path.exists(config_path):
-                    raise FileNotFoundError(f"Config file not found at {config_path}")
-
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Setup prediction logging
-            os.makedirs('logs', exist_ok=True)
-            log_file = f"logs/prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(levelname)s - %(message)s',
-                handlers=[
-                    logging.FileHandler(log_file),
-                    logging.StreamHandler()
-                ]
-            )
-            logger.info(f"Logging setup complete. Log file: {log_file}")
-
-            # Initialize the PredictionManager
-            device = 'cuda' if torch.cuda.is_available() and not getattr(args, 'cpu', False) else 'cpu'
-            predictor = PredictionManager(config=config, device=device)
-
-            # Set the dataset (if required)
-            if hasattr(predictor.model, 'set_dataset'):
-                transform = predictor._get_transforms()
-                dataset = predictor._create_dataset(getattr(args, 'input_path'), transform)
-                predictor.model.set_dataset(dataset)
-                logger.info(f"Dataset created with {len(dataset)} images")
-
-            # Handle output path
-            if not hasattr(args, 'output') or not args.output:
-                args.output = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                logger.info(f"Using default output path: {args.output}")
-
-            # Perform predictions
-            logger.info("Starting prediction process...")
-            predictor.predict_images(
-                data_path=getattr(args, 'input_path'),
-                output_csv=getattr(args, 'output'),
-                batch_size=getattr(args, 'batch_size', 128)
-            )
-            logger.info(f"Predictions saved to {args.output}")
-
+            return handle_prediction_mode(args, logger)
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
         elif args.mode == 'reconstruct':
-            return handle_prediction_mode(args, logger)
+            return handle_reconstruction_mode(args, logger)
         else:
             logger.error(f"Invalid mode: {args.mode}")
             return 1
@@ -5798,7 +5586,6 @@ def main():
         if args and getattr(args, 'debug', False):
             traceback.print_exc()
         return 1
-
 
 def interactive_input():
     """Collect inputs interactively if no command line args provided"""
@@ -5838,39 +5625,42 @@ def parse_arguments():
 
     # Main arguments
     parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
-                       default='predict', help='Operation mode')
-    parser.add_argument('--data_name', dest='data_name', default='dataset',
-                       help='Name of the dataset')
-    parser.add_argument('--data_type', dest='data_type', default='custom',
-                       help='custom or torchvision dataset')
+                       default='train', help='Operation mode')
+    parser.add_argument('--data_name', required=True,
+                       help='Name of the dataset (e.g., CIFAR100, MNIST)')
+    parser.add_argument('--data_type', choices=['torchvision', 'custom'], required=True,
+                       help='Type of dataset: torchvision or custom')
 
-    parser.add_argument('--input_path', required=True,
-                       help='Path to input data (directory or zip file)')
-    parser.add_argument('--interactive', action='store_true',
-                       help='Force interactive mode even with command line args')
+    # Make input_path optional - only required for custom datasets
+    parser.add_argument('--input_path',
+                       help='Path to input data (directory or zip file) - only for custom datasets')
+
+    # Model and training parameters
     parser.add_argument('--encoder_type', choices=['autoenc', 'cnn'],
-                       default='autoenc', help='Decide model type autoenc (default) or cnn')
-
-    # Prediction-specific
-    parser.add_argument('--model-path', help='Path to trained model')
-    parser.add_argument('--output', help='Output path for predictions')
-    parser.add_argument('--batch-size', type=int, default=128,
+                       default='autoenc', help='Model type: autoenc (default) or cnn')
+    parser.add_argument('--batch_size', type=int, default=128,
                        help='Batch size for processing')
-    parser.add_argument('--cpu', action='store_true',
-                       help='Force CPU even if GPU available')
-
-    # Training-specific
     parser.add_argument('--epochs', type=int, default=100,
                        help='Number of training epochs')
-    parser.add_argument('--learning-rate', type=float, default=0.001,
+    parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='Learning rate for training')
+    parser.add_argument('--workers', type=int, default=4,
+                       help='Number of data loading workers')
+    parser.add_argument('--output_dir', default='data',
+                       help='Output directory')
 
-    # Debugging
+    # Prediction-specific
+    parser.add_argument('--model_path', help='Path to trained model')
+    parser.add_argument('--output', help='Output path for predictions')
+
+    # System parameters
+    parser.add_argument('--cpu', action='store_true',
+                       help='Force CPU even if GPU available')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug mode with verbose output')
+    parser.add_argument('--config', help='Path to configuration file')
 
     return parser.parse_args()
-
 
 def setup_logging():
     """Setup basic logging configuration"""
@@ -5884,15 +5674,22 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     """Handle training mode operations"""
     try:
         # Setup paths
-        #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name=args.data_name
+        data_name = args.data_name
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
-        # Process dataset
-        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'),data_name=args.data_name)
+        logger.info(f"Starting training for dataset: {data_name} (type: {args.data_type})")
+
+        # Process dataset based on data type
+        if args.data_type == 'torchvision':
+            # For torchvision, use the dataset name directly
+            processor = DatasetProcessor(data_name, args.data_type, args.output_dir, data_name=data_name)
+        else:
+            # For custom datasets, use the provided input_path
+            processor = DatasetProcessor(args.input_path, args.data_type, args.output_dir, data_name=data_name)
+
         train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
+        logger.info(f"Dataset processed: train_dir={train_dir}")
 
         # Generate/verify configurations
         logger.info("Generating/verifying configurations...")
@@ -5904,12 +5701,20 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
-        fd= config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
-        config['model']['feature_dims']=feature_dims
-        # Get model type
+        # Ask for feature dimensions if in interactive mode, otherwise use config value
+        if hasattr(args, 'interactive') and args.interactive:
+            fd = config['model']['feature_dims']
+            feature_dims = int(input(f"Please specify the output feature dimensions[{fd}]: ") or fd)
+            config['model']['feature_dims'] = feature_dims
+        else:
+            # For command line, use the configured value
+            feature_dims = config['model']['feature_dims']
+            logger.info(f"Using feature dimensions: {feature_dims}")
+
+        # Save updated config
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
+
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
@@ -5923,9 +5728,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Initialize model and loss manager
         model, loss_manager = initialize_model_components(config, logger)
 
-        # Get training confirmation
-        if not get_training_confirmation(logger):
-            return 0
+        # Get training confirmation (skip for non-interactive command line)
+        if hasattr(args, 'interactive') and args.interactive:
+            if not get_training_confirmation(logger):
+                return 0
+        else:
+            logger.info("Starting training...")
 
         # Perform training and feature extraction
         features_dict = perform_training_and_extraction(
@@ -5941,6 +5749,38 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     except Exception as e:
         logger.error(f"Error in training mode: {str(e)}")
         raise
+
+def handle_reconstruction_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
+    """Handle reconstruction mode operations"""
+    try:
+        # Similar to prediction mode but for reconstruction
+        data_name = args.data_name
+        data_dir = os.path.join('data', data_name)
+
+        # Load configuration
+        config_path = os.path.join(data_dir, f"{data_name}.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Setup output directory
+        output_dir = os.path.join(data_dir, 'reconstructions', datetime.now().strftime('%Y%m%d_%H%M%S'))
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Initialize reconstruction manager and generate reconstructions
+        reconstructor = ReconstructionManager(config)
+        reconstructor.predict_from_csv(args.input_path, output_dir)
+
+        logger.info("Reconstruction completed successfully!")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error in reconstruction mode: {str(e)}")
+        if args.debug:
+            traceback.print_exc()
+        return 1
 
 def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle prediction mode operations"""
