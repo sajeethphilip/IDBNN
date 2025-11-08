@@ -842,7 +842,7 @@ class BinWeightUpdater:
                 self.histogram_weights[class_id][pair_idx] = torch.full(
                     (n_bins_per_dim, n_bins_per_dim),
                     self.initial_weight,
-                    dtype=torch.float32,
+                    dtype=torch.float64,
                     device=self.device
                 ).contiguous()
 
@@ -853,7 +853,7 @@ class BinWeightUpdater:
             for pair_idx in range(len(feature_pairs)):
                 self.gaussian_weights[class_id][pair_idx] = torch.tensor(
                     self.initial_weight,
-                    dtype=torch.float32,
+                    dtype=torch.float64,
                     device=self.device
                 ).contiguous()
 
@@ -861,13 +861,13 @@ class BinWeightUpdater:
         self.weights = torch.full(
             (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
             self.initial_weight,
-            dtype=torch.float32,
+            dtype=torch.float64,
             device=self.device
         ).contiguous()
 
         # Pre-allocate update buffers
         self.update_indices = torch.zeros((3, 1000), dtype=torch.long)
-        self.update_values = torch.zeros(1000, dtype=torch.float32)
+        self.update_values = torch.zeros(1000, dtype=torch.float64)
         self.update_count = 0
 
         # Debug initialization
@@ -897,7 +897,7 @@ class BinWeightUpdater:
                               for bi in bin_indices], device=self.device)
         bin_js = torch.tensor([bj[1] if isinstance(bj, (list, tuple)) else bj
                               for bj in bin_indices], device=self.device)
-        adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
+        adjs = torch.tensor(adjustments, dtype=torch.float64, device=self.device)
 
         # Group updates by (class, pair)
         unique_pairs, inverse = torch.unique(
@@ -952,7 +952,7 @@ class BinWeightUpdater:
 
             self.batch_adjustments_buffer = torch.zeros(
                 batch_size,
-                dtype=torch.float32,
+                dtype=torch.float64,
                 device=self.batch_indices_buffer.device
             ).contiguous()
 
@@ -1025,7 +1025,7 @@ class BinWeightUpdater:
             pair_ids = torch.tensor(pair_indices, dtype=torch.long, device=self.device)
             b_i = torch.tensor(bin_is, dtype=torch.long, device=self.device)
             b_j = torch.tensor(bin_js, dtype=torch.long, device=self.device)
-            adjs = torch.tensor(adjustments, dtype=torch.float32, device=self.device)
+            adjs = torch.tensor(adjustments, dtype=torch.float64, device=self.device)
 
             # Group by pair_idx
             unique_pairs, counts = torch.unique(pair_ids, return_counts=True)
@@ -1322,8 +1322,7 @@ class GPUDBNN:
 
         training_params = self.config.get('training_params', {})
 
-        # DEBUG: Print what we found in config
-        print(f"\033[K{Colors.YELLOW}[DEBUG] Config training_params: {training_params}{Colors.ENDC}")
+
 
         # USE CONFIG VALUES DIRECTLY, ignore the passed parameters (they come from wrong source)
         self.learning_rate = training_params.get('learning_rate', LearningRate)
@@ -1352,15 +1351,6 @@ class GPUDBNN:
                 self.device = compute_device
         else:
             self.device = device
-
-        # Print verification of ACTUAL parameters being used
-        print(f"\033[K{Colors.GREEN}[GPUDBNN] ACTUAL PARAMETERS FROM CONFIG:{Colors.ENDC}")
-        print(f"\033[K  learning_rate: {self.learning_rate} (config: {training_params.get('learning_rate', 'default')})")
-        print(f"\033[K  max_epochs: {self.max_epochs} (config: {training_params.get('epochs', 'default')})")
-        print(f"\033[K  test_size: {self.test_size} (config: {training_params.get('test_fraction', 'default')})")
-        print(f"\033[K  n_bins_per_dim: {self.n_bins_per_dim} (config: {training_params.get('n_bins_per_dim', 'default')})")
-        print(f"\033[K  random_state: {self.random_state} (config: {training_params.get('random_seed', 'default')})")
-        print(f"\033[K  device: {self.device} (config: {training_params.get('compute_device', 'auto')})")
 
         # Initialize computation cache with correct device
         self.computation_cache = ComputationCache(self.device)
@@ -1457,7 +1447,6 @@ class GPUDBNN:
 
         # Load active_learning config parameters and merge with training_params
         active_learning_config = self.config.get('active_learning', {})
-        print(f"\033[K{Colors.YELLOW}[DEBUG] Active Learning Config: {active_learning_config}{Colors.ENDC}")
 
         # Store active learning parameters (use training_params as primary, fallback to active_learning)
         self.min_divergence = training_params.get('min_divergence',
@@ -1480,25 +1469,6 @@ class GPUDBNN:
         self.best_round_initial_conditions = None
         self.best_combined_accuracy = 0.00
         self.best_model_weights = None
-
-        # Print ALL adaptive parameters for verification
-        if self.adaptive_learning:
-            print(f"\033[K{Colors.BLUE}[ADAPTIVE] All Parameters:{Colors.ENDC}")
-            print(f"\033[K  From training_params:")
-            print(f"\033[K    adaptive_rounds: {self.adaptive_rounds}")
-            print(f"\033[K    initial_samples: {self.initial_samples}")
-            print(f"\033[K    max_samples_per_round: {self.max_samples_per_round}")
-            print(f"\033[K    minimum_training_accuracy: {self.minimum_training_accuracy}")
-            print(f"\033[K  From active_learning (merged):")
-            print(f"\033[K    min_divergence: {self.min_divergence}")
-            print(f"\033[K    max_class_addition_percent: {self.max_class_addition_percent}")
-            print(f"\033[K    cardinality_threshold_percentile: {self.cardinality_threshold_percentile}")
-            print(f"\033[K    similarity_threshold: {self.similarity_threshold}")
-            print(f"\033[K    strong_margin_threshold: {self.strong_margin_threshold}")
-            print(f"\033[K    marginal_margin_threshold: {self.marginal_margin_threshold}")
-            print(f"\033[K    tolerance: {self.tolerance}")
-
-        print("\033[K" +f"Using device: {self.device}")
 
         # Model components (re-initialize to ensure consistency)
         self.scaler = StandardScaler()
@@ -1523,22 +1493,6 @@ class GPUDBNN:
         self._load_best_weights()
         self._load_categorical_encoders()
 
-        # Final verification
-        print(f"\033[K{Colors.GREEN}[FINAL] Training with:{Colors.ENDC}")
-        print(f"\033[K  Learning Rate: {self.learning_rate}")
-        print(f"\033[K  Max Epochs: {self.max_epochs}")
-        print(f"\033[K  Test Size: {self.test_size}")
-        print(f"\033[K  Bins per Dim: {self.n_bins_per_dim}")
-        print(f"\033[K  Random State: {self.random_state}")
-        print(f"\033[K  Adaptive: {self.adaptive_learning}")
-        print(f"\033[K  Initial Samples: {self.initial_samples}")
-        print(f"\033[K  Adaptive Rounds: {self.adaptive_rounds}")
-        print(f"\033[K  Max Samples Per Round: {self.max_samples_per_round}")
-
-        # CONFIG VERIFICATION
-        print(f"\033[K{Colors.GREEN}[CONFIG VERIFICATION]{Colors.ENDC}")
-        print(f"\033[K  Training Params keys: {list(training_params.keys())}")
-        print(f"\033[K  Active Learning keys: {list(active_learning_config.keys())}")
 
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
@@ -1784,15 +1738,6 @@ class DBNN(GPUDBNN):
 
         # Initialize the functionality
         add_geometric_visualization_to_adbnn()
-
-        # Print verification
-        print(f"\033[K{Colors.GREEN}Using parameters from config file:{Colors.ENDC}")
-        print(f"\033[K  Learning rate: {self.learning_rate}")
-        print(f"\033[K  Epochs: {self.max_epochs}")
-        print(f"\033[K  Test fraction: {self.test_size}")
-        print(f"\033[K  Random seed: {self.random_state}")
-        print(f"\033[K  Bins per dim: {self.n_bins_per_dim}")
-        print(f"\033[K  Trials/Patience: {self.trials}")
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -2328,7 +2273,7 @@ class DBNN(GPUDBNN):
 
         # For smaller datasets, use the optimized vectorized approach
         n_pairs = len(feature_pairs)
-        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float32)
+        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float64)
 
         # Process all feature pairs in one batch if memory allows
         if n_pairs <= 100 and n_samples <= 500:  # Conservative limits
@@ -2369,7 +2314,7 @@ class DBNN(GPUDBNN):
         n_pairs = len(feature_pairs)
 
         # Initialize distances matrix
-        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float32)
+        distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float64)
 
         # Determine optimal chunk size based on available memory
         if n_samples > 5000:
@@ -2646,7 +2591,7 @@ class DBNN(GPUDBNN):
                 (n_classes, n_pairs),
                 0.1,  # Default uniform prior
                 device=self.device,
-                dtype=torch.float32
+                dtype=torch.float64
             )
             self.best_W = self.current_W.clone()
             self.best_error = float('inf')
@@ -2716,10 +2661,7 @@ class DBNN(GPUDBNN):
             # Get initial data
             X = self.data.drop(columns=[self.target_column])
             y = self.data[self.target_column]
-            print(self.target_column)
-            print("\033[K" +f" Initial data shape: X={X.shape}, y={len(y)}")
-            print("\033[K" +f"Number of classes in data = {np.unique(y)}")
-            print(self.data.head)
+            print(f'Target:  {self.target_column}')
             # Initialize label encoder if not already done
             if not hasattr(self.label_encoder, 'classes_'):
                 self.label_encoder.fit(y)
@@ -2811,7 +2753,7 @@ class DBNN(GPUDBNN):
                     (n_classes, n_pairs),
                     0.1,
                     device=self.device,
-                    dtype=torch.float32
+                    dtype=torch.float64
                 )
                 if self.best_W is None:
                     self.best_W = self.current_W.clone()
@@ -3235,9 +3177,9 @@ class DBNN(GPUDBNN):
         # Step 3: Convert to numpy array
         try:
             if isinstance(X_encoded, pd.DataFrame):
-                X_numpy = X_encoded.to_numpy(dtype=np.float32)
+                X_numpy = X_encoded.to_numpy(dtype=np.float64)
             else:
-                X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float32)
+                X_numpy = X_encoded.cpu().numpy() if torch.is_tensor(X_encoded) else np.array(X_encoded, dtype=np.float64)
             DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
         except Exception as e:
             DEBUG.log(f"Error converting to numpy: {str(e)}")
@@ -3255,7 +3197,7 @@ class DBNN(GPUDBNN):
             X_scaled = (X_numpy - means) / stds
 
         # Step 5: Convert to tensor
-        X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float64, device=self.device)
 
         # Step 6: Compute feature pairs and bin edges (training only)
         if is_training:
@@ -3963,7 +3905,7 @@ class DBNN(GPUDBNN):
 
             # Initialize counts for all classes
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
-                                    dtype=torch.float32, device=self.device)
+                                    dtype=torch.float64, device=self.device)
 
             # Vectorized processing for all classes
             for cls_idx, cls in enumerate(unique_classes):
@@ -4013,7 +3955,7 @@ class DBNN(GPUDBNN):
 
             # Initialize bin counts on CPU
             bin_shape = [len(unique_classes)] + group_bin_sizes
-            bin_counts = torch.zeros(bin_shape, dtype=torch.float32)
+            bin_counts = torch.zeros(bin_shape, dtype=torch.float64)
 
             for class_idx, class_label in enumerate(unique_classes):
                 class_mask = (labels_cpu == class_label)
@@ -4046,11 +3988,11 @@ class DBNN(GPUDBNN):
                             dim=0
                         ).long()
 
-                        counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.float32)
+                        counts = torch.zeros(np.prod(group_bin_sizes), dtype=torch.float64)
                         counts.scatter_add_(
                             0,
                             flat_indices,
-                            torch.ones_like(flat_indices, dtype=torch.float32)
+                            torch.ones_like(flat_indices, dtype=torch.float64)
                         )
                         bin_counts[class_idx] = counts.reshape(*group_bin_sizes)
 
@@ -4604,12 +4546,12 @@ class DBNN(GPUDBNN):
                 weights_array = np.array(weights_dict['weights'])
                 self.best_W = torch.tensor(
                     weights_array,
-                    dtype=torch.float32,
+                    dtype=torch.float64,
                     device=self.device
                 )
                 self.current_W = torch.tensor(
                     weights_array,
-                    dtype=torch.float32,
+                    dtype=torch.float64,
                     device=self.device
                 )
                 print(f"Weights file {weights_file} loaded succesfully")
@@ -5346,8 +5288,8 @@ class DBNN(GPUDBNN):
         )
 
         # Convert back to PyTorch tensors and move to the appropriate device
-        X_train = torch.tensor(X_train, dtype=torch.float32).to(self.device)
-        X_test = torch.tensor(X_test, dtype=torch.float32).to(self.device)
+        X_train = torch.tensor(X_train, dtype=torch.float64).to(self.device)
+        X_test = torch.tensor(X_test, dtype=torch.float64).to(self.device)
         y_train = torch.tensor(y_train, dtype=torch.long).to(self.device)
         y_test = torch.tensor(y_test, dtype=torch.long).to(self.device)
 
@@ -5405,7 +5347,7 @@ class DBNN(GPUDBNN):
         for class_id in self.likelihood_pdfs.keys():
             W[class_id] = {}
             for feature_pair in self.likelihood_pdfs[class_id].keys():
-                W[class_id][feature_pair] = torch.tensor(0.1, dtype=torch.float32)
+                W[class_id][feature_pair] = torch.tensor(0.1, dtype=torch.float64)
         return W
 
     def _calculate_class_wise_accuracy(self, y_true, y_pred):
@@ -5487,7 +5429,7 @@ class DBNN(GPUDBNN):
                 X_processed = self._preprocess_data(X, is_training=True)
 
                 # Convert to tensors and move to device
-                X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+                X_tensor = torch.tensor(X_processed, dtype=torch.float64).to(self.device)
                 y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
                 # Split data
@@ -5496,8 +5438,8 @@ class DBNN(GPUDBNN):
                     X_tensor, y_tensor)
 
                 # Convert split data back to tensors
-                X_train = torch.from_numpy(X_train).to(self.device, dtype=torch.float32)
-                X_test = torch.from_numpy(X_test).to(self.device, dtype=torch.float32)
+                X_train = torch.from_numpy(X_train).to(self.device, dtype=torch.float64)
+                X_test = torch.from_numpy(X_test).to(self.device, dtype=torch.float64)
                 y_train = torch.from_numpy(y_train).to(self.device, dtype=torch.long)
                 y_test = torch.from_numpy(y_test).to(self.device, dtype=torch.long)
 
@@ -5811,7 +5753,7 @@ class DBNN(GPUDBNN):
         if isinstance(X_processed, torch.Tensor):
             X_tensor = X_processed.clone().detach().to(self.device)
         else:
-            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+            X_tensor = torch.tensor(X_processed, dtype=torch.float64).to(self.device)
 
         # Compute probabilities in batches
         batch_size = 128
