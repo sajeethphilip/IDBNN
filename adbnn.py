@@ -1764,33 +1764,66 @@ class DBNN(GPUDBNN):
         self.global_std[self.global_std == 0] = 1.0
 
     def _preprocess_and_split_data(self):
-        """Preprocess data and split into training and testing sets."""
+        """Preprocess data and split into training and testing sets with prediction mode support."""
         # Load dataset
         self.target_column = self.config['target_column']
         self.data = self._load_dataset()
 
-        # Preprocess features and target
-        predict_mode = True if self.mode=='predict' else False
-        # Load and preprocess data
-        X = self.data.drop(columns=[self.target_column]) if not predict_mode else self.data.copy()
+        # Determine mode
+        predict_mode = (self.mode == 'predict')
 
-        # Convert target to strings for universal encoding
-        y = self.data[self.target_column].astype(str) if not predict_mode else pd.Series([-99999]*len(self.data))
+        # Handle features and labels based on mode
+        if predict_mode:
+            # Prediction mode logic
+            if self.target_column in self.data.columns:
+                # Target column exists - use it for potential evaluation
+                X = self.data.drop(columns=[self.target_column])
+                y_true = self.data[self.target_column].astype(str)
+                self.prediction_true_labels = y_true  # Store for evaluation
+                DEBUG.log(f"Target column found with {len(y_true.unique())} unique classes")
+            else:
+                # Pure prediction mode - no target column
+                X = self.data.copy()
+                self.prediction_true_labels = None
+                DEBUG.log("No target column found - running in pure prediction mode")
 
-        # Compute global statistics for normalization
-        self.compute_global_statistics(X)
+            # Create dummy y for processing (won't be used for actual encoding in prediction)
+            y = pd.Series(['dummy_pred'] * len(self.data))
 
-        # Encode labels if not already done - always convert to string first
-        if not hasattr(self.label_encoder, 'classes_'):
-            y_encoded = self.label_encoder.fit_transform(y.astype(str))
         else:
-            y_encoded = self.label_encoder.transform(y.astype(str))
+            # Training mode logic
+            if self.target_column not in self.data.columns:
+                raise ValueError(f"Target column '{self.target_column}' not found in dataset")
+
+            X = self.data.drop(columns=[self.target_column])
+            y = self.data[self.target_column].astype(str)
+            self.prediction_true_labels = None  # Not in prediction mode
+
+        # Encode labels - handle prediction mode carefully
+        if predict_mode:
+            # In prediction mode, we should have a pre-trained label encoder
+            if not hasattr(self.label_encoder, 'classes_'):
+                raise RuntimeError("Label encoder not fitted. Load a trained model first for prediction.")
+
+            # For prediction, we don't actually use y for encoding, but we need a tensor
+            # Create dummy encoded values (all zeros or based on first class)
+            y_encoded = np.zeros(len(y), dtype=int)
+            DEBUG.log("Using dummy encoding for prediction mode")
+
+        else:
+            # Training mode - fit or transform the encoder
+            if not hasattr(self.label_encoder, 'classes_'):
+                y_encoded = self.label_encoder.fit_transform(y.astype(str))
+                DEBUG.log(f"Fitted label encoder with classes: {self.label_encoder.classes_}")
+            else:
+                y_encoded = self.label_encoder.transform(y.astype(str))
+                DEBUG.log(f"Transformed labels using existing encoder")
 
         # Preprocess features
-        X_processed = self._preprocess_data(X, is_training=True)
+        X_processed = self._preprocess_data(X, is_training=not predict_mode)
 
-        # Convert to tensors on CPU first, then move to device
-        self.X_tensor =  X_processed.clone().detach().to(self.device)
+        # Convert to tensors
+        self.X_tensor = X_processed.clone().detach().to(self.device)
         self.y_tensor = torch.tensor(y_encoded, dtype=torch.long).to(self.device)
 
         # Split data (use all data as "test" in prediction mode)
@@ -1798,11 +1831,14 @@ class DBNN(GPUDBNN):
             self.X_train, self.X_test = None, self.X_tensor
             self.y_train, self.y_test = None, self.y_tensor
             self.train_indices, self.test_indices = [], list(range(len(self.data)))
+            DEBUG.log(f"Prediction mode: using all {len(self.data)} samples for prediction")
         else:
             self.X_train, self.X_test, self.y_train, self.y_test = self._get_train_test_split(
                 self.X_tensor, self.y_tensor)
+            DEBUG.log(f"Training mode: {len(self.X_train)} train, {len(self.X_test)} test samples")
 
-        self._is_preprocessed = True  # Mark preprocessing as complete
+        self._is_preprocessed = True
+        DEBUG.log("Data preprocessing completed successfully")
 
     def create_invertible_model(self, reconstruction_weight: float = 0.5, feedback_strength: float = 0.3):
         """Create an invertible DBNN model"""
@@ -1961,7 +1997,7 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"Loading dataset: {self.dataset_name}")
 
         try:
-            # Config validation (unchanged)
+            # Config validation
             if not self.config:
                 raise ValueError(f"No config for dataset: {self.dataset_name}")
 
@@ -1969,7 +2005,7 @@ class DBNN(GPUDBNN):
             if not file_path:
                 raise ValueError("No file path in config")
 
-            # Load data (unchanged file handling)
+            # Load data
             if file_path.startswith(('http://', 'https://')):
                 df = pd.read_csv(StringIO(requests.get(file_path).text),
                                sep=self.config.get('separator', ','),
@@ -1979,7 +2015,7 @@ class DBNN(GPUDBNN):
                                sep=self.config.get('separator', ','),
                                header=0 if self.config.get('has_header', True) else None,  low_memory=False)
 
-            predict_mode = True if self.mode=='predict' else False
+            predict_mode = (self.mode == 'predict')
 
             # Store original target data type for proper decoding
             if self.target_column in df.columns:
@@ -1989,47 +2025,41 @@ class DBNN(GPUDBNN):
                 self.original_target_dtype = np.dtype('object')
                 DEBUG.log("Target column not found, using default object dtype")
 
-            # Handle target column validation
+            # Handle target column validation for prediction mode
             if predict_mode and self.target_column in df.columns:
-                if not self._validate_target_column(df[self.target_column]):
-                    # Get the current column names
-                    column_names = df.columns.tolist()
-                    # Find the index of the target column
-                    try:
-                        index = column_names.index(self.target_column)
-                        # Update the name
-                        column_names[index] = 'dummy_target'
-                        # Assign the updated list back to columns
-                        df.columns = column_names
-                        # Update the target_column reference
-                        self.target_column = None
-                    except ValueError as e:
-                        print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
-                        # If target column isn't found, just proceed without renaming
+                DEBUG.log(f"Target column '{self.target_column}' found in prediction data - will use for evaluation if needed")
+                # Keep target column for potential evaluation, but don't use for encoding
 
             # Store original data (CPU only)
-            self.Original_data = df.copy()  # This is the line that was missing
+            self.Original_data = df.copy()
 
-            # Handle prediction mode (target column may not exist)
-            if predict_mode and self.target_column not in df.columns:
-                DEBUG.log(f"Prediction mode - target column '{self.target_column}' not found")
-                self.X_Orig = df.copy()  # Use all columns for prediction
+            # Handle data splitting based on mode
+            if predict_mode:
+                # Prediction mode - target column may or may not exist
+                if self.target_column in df.columns:
+                    self.X_Orig = df.drop(columns=[self.target_column]).copy()
+                    DEBUG.log(f"Using {len(df.columns) - 1} features for prediction (target column excluded)")
+                else:
+                    self.X_Orig = df.copy()
+                    DEBUG.log(f"Using all {len(df.columns)} columns for prediction (no target column found)")
             else:
-                # Training mode - ensure target column exists
+                # Training mode - target column must exist
                 if self.target_column not in df.columns:
                     raise ValueError(f"Target column '{self.target_column}' not found in dataset")
                 self.X_Orig = df.drop(columns=[self.target_column]).copy()
+                DEBUG.log(f"Using {len(df.columns) - 1} features for training")
 
             # Filter features if specified
             if 'column_names' in self.config:
                 df = _filter_features_from_config(df, self.config)
 
-            # Handle target column
+            # Handle target column configuration
             target_col = self.config['target_column']
             if isinstance(target_col, int):
                 target_col = df.columns[target_col]
                 self.config['target_column'] = target_col
 
+            # For prediction mode, don't require target column to be present
             if not predict_mode and target_col not in df.columns:
                 raise ValueError(f"Target column '{target_col}' not found")
 
@@ -2062,10 +2092,12 @@ class DBNN(GPUDBNN):
                 'target_column': target_col,
                 'original_index': df.index.values,
                 'shuffle_path': shuffle_path,
-                'original_target_dtype': str(self.original_target_dtype)
+                'original_target_dtype': str(self.original_target_dtype),
+                'prediction_mode': predict_mode,
+                'has_target_column': self.target_column in df.columns
             }
 
-            # Convert target column to string for universal encoding
+            # Convert target column to string for universal encoding ONLY if it exists
             if self.target_column in df.columns:
                 df[self.target_column] = df[self.target_column].astype(str)
                 DEBUG.log(f"Converted target column to string for universal encoding")
@@ -2413,7 +2445,7 @@ class DBNN(GPUDBNN):
         return cardinalities
 
     def _select_samples_from_failed_classes(self, test_predictions, y_test, test_indices, results):
-        """Memory-optimized sample selection with PER-CLASS sampling"""
+        """Memory-optimized sample selection with PER-CLASS sampling and safe label handling"""
         from tqdm import tqdm
 
         # Configuration parameters
@@ -2437,6 +2469,8 @@ class DBNN(GPUDBNN):
         test_pos_map = {idx: pos for pos, idx in enumerate(self.test_indices)}
 
         final_selected_indices = []
+
+        # Get unique classes from the true_class column (which contains original labels)
         unique_classes = test_results['true_class'].unique()
 
         # Class processing progress bar
@@ -2489,8 +2523,14 @@ class DBNN(GPUDBNN):
                 else:
                     posteriors, _ = self._compute_batch_posterior_std(batch_X)
 
-                # Get encoded class ID for this class label
-                encoded_class_id = self.label_encoder.transform([class_label])[0]
+                # SAFE LABEL HANDLING: Try to get encoded class ID, but handle errors gracefully
+                try:
+                    # Try to transform the class label
+                    encoded_class_id = self.label_encoder.transform([str(class_label)])[0]
+                except (ValueError, KeyError) as e:
+                    # If the class label is not in the encoder, skip this class
+                    print(f"{Colors.YELLOW}Warning: Class label '{class_label}' not found in label encoder. Skipping.{Colors.ENDC}")
+                    continue
 
                 # Calculate margins
                 max_probs, _ = torch.max(posteriors, dim=1)
@@ -4025,7 +4065,6 @@ class DBNN(GPUDBNN):
                 return base_size
         return base_size
 
-
     def _compute_gaussian_params(self, dataset: torch.Tensor, labels: torch.Tensor):
         """
         Compute Gaussian parameters (means and covariances) for all feature pairs once during initialization.
@@ -4232,7 +4271,7 @@ class DBNN(GPUDBNN):
         )
 
     def _update_priors_parallel(self, failed_cases: List[Tuple], batch_size: int = 128):
-        """Vectorized weight updates with memory optimization"""
+        """Vectorized weight updates with memory optimization and dtype fix"""
         n_failed = len(failed_cases)
         if n_failed == 0:
             self.consecutive_successes += 1
@@ -4298,13 +4337,15 @@ class DBNN(GPUDBNN):
                     cls_bin_j = mask_bin_j[cls_mask]
                     cls_adjustments = mask_adjustments[cls_mask]
 
+                    # FIX: Ensure proper dtype matching
+                    cls_adjustments = cls_adjustments.to(self.weight_updater.histogram_weights[class_id.item()][group_idx].dtype)
+
                     # Vectorized weight update
                     self.weight_updater.histogram_weights[class_id.item()][group_idx].index_put_(
                         indices=(cls_bin_i, cls_bin_j),
                         values=cls_adjustments,
                         accumulate=True
                     )
-
 
 #------------------------------------------Boost weights------------------------------------------
 
@@ -5923,7 +5964,7 @@ class DBNN(GPUDBNN):
             return False
 
     def _load_model_components(self):
-        """Enhanced model component loading with comprehensive validation"""
+        """Enhanced model component loading with comprehensive validation and proper label encoder restoration"""
         components_file = self._get_model_components_filename()
 
         if not os.path.exists(components_file):
@@ -5947,12 +5988,17 @@ class DBNN(GPUDBNN):
             # Store current visualization setting before loading config
             current_visualization = self.config.get('training_params', {}).get('enable_visualization', False)
 
-            # Load and validate label encoder
+            # Load and validate label encoder - FIXED: Properly restore the label encoder
             if 'label_encoder' not in components or not components['label_encoder'].get('fitted', False):
                 raise ValueError("Label encoder not properly saved or not fitted")
 
+            # CRITICAL FIX: Properly restore the label encoder with all attributes
             self.label_encoder = LabelEncoder()
-            self.label_encoder.classes_ = np.array(components['label_encoder']['classes_'])
+            if 'classes_' in components['label_encoder']:
+                self.label_encoder.classes_ = np.array(components['label_encoder']['classes_'])
+                print(f"\033[K[INFO] Restored label encoder with classes: {self.label_encoder.classes_}")
+            else:
+                raise ValueError("Label encoder classes not found in saved components")
 
             # Load original target dtype for proper decoding
             if 'original_target_dtype' in components:
@@ -6071,136 +6117,135 @@ class DBNN(GPUDBNN):
 
         return unique_values.issubset(encoder_classes)
 
-    def predict_from_file(self, input_csv: str, output_path: str = None,model_type=None,
+    def predict_from_file(self, input_csv: str, output_path: str = None, model_type=None,
                          image_dir: str = None, batch_size: int = 128) -> Dict:
         """
-        Make predictions from CSV file with comprehensive output handling, including
-        failure/success analysis and PDF mosaics.
-
-        Args:
-            input_csv: Path to input CSV file
-            output_path: Directory to save prediction results
-            image_dir: Optional directory containing images for mosaics
-            batch_size: Batch size for prediction
-
-        Returns:
-            Dictionary containing prediction results and metrics
+        Make predictions from CSV file with comprehensive output handling.
         """
         # Create output directory if needed
-        os.makedirs(output_path, exist_ok=True)
+        if output_path:
+            os.makedirs(output_path, exist_ok=True)
+
         try:
             # Load data
             df = pd.read_csv(input_csv)
-            if self.target_column in df.columns:
-                df[self.target_column] = df[self.target_column].apply(str)  # Force string
+
+            # Determine if target column exists
+            has_target_column = self.target_column in df.columns
+            predict_mode = (self.mode == 'predict')
+
+            if has_target_column:
+                # Convert target to string for consistency
+                df[self.target_column] = df[self.target_column].astype(str)
+                DEBUG.log(f"Target column '{self.target_column}' found with {len(df[self.target_column].unique())} unique values")
 
             print(f"\n{Colors.BLUE}Processing predictions for: {input_csv}{Colors.ENDC}")
-            predict_mode = True if self.mode=='predict' else False
-            self.model_type=model_type
-            # Handle target column validation
-            if predict_mode and self.target_column in df.columns:
-                if not self._validate_target_column(df[self.target_column]):
-                    print(f"\033[K" + f"{Colors.RED}The predict mode is {predict_mode} and target column is invalid. We will ignore it{Colors.ENDC}")
-                    # Get the current column names
-                    column_names = df.columns.tolist()
-                    # Find the index of the target column
-                    try:
-                        index = column_names.index(self.target_column)
-                        # Update the name
-                        column_names[index] = 'dummy_target'
-                        # Assign the updated list back to columns
-                        df.columns = column_names
-                        # Update the target_column reference
-                        self.target_column = None
-                    except ValueError as e:
-                        print(f"\033[K" + f"Warning: Target column '{self.target_column}' not found in dataset columns: {column_names}")
-                        # If target column isn't found, just proceed without renaming
+            self.model_type = model_type
 
             # Store original data
             self.X_orig = df.copy()
 
-            # Handle output directory
-            if output_path:
-                # Handle existing output path
-                if os.path.exists(output_path):
-                    print(f"{Colors.BLUE}Output directory exists: {output_path}{Colors.ENDC}")
-                    print(f"{Colors.BOLD}Choose an action:{Colors.ENDC}")
-                    print("1. Overwrite existing content")
-                    print("2. Create new version (append timestamp)")
-                    print("3. Specify different output directory")
-                    print("q. Quit")
+            # Handle output directory selection
+            if output_path and os.path.exists(output_path):
+                print(f"{Colors.BLUE}Output directory exists: {output_path}{Colors.ENDC}")
+                print(f"{Colors.BOLD}Choose an action:{Colors.ENDC}")
+                print("1. Overwrite existing content")
+                print("2. Create new version (append timestamp)")
+                print("3. Specify different output directory")
+                print("q. Quit")
 
-                    while True:
-                        choice = input(f"{Colors.YELLOW}Your choice (1-3/q): {Colors.ENDC}").strip().lower()
+                while True:
+                    choice = input(f"{Colors.YELLOW}Your choice (1-3/q): {Colors.ENDC}").strip().lower()
 
-                        if choice == '1':  # Overwrite
-                            print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
-                            # Clear existing predictions file if it exists
-                            predictions_path = os.path.join(output_path, 'predictions.csv')
-                            if os.path.exists(predictions_path):
-                                os.remove(predictions_path)
-                            # Clear analysis directories if they exist
-                            for analysis_type in ['mosaics', 'failed_analysis', 'correct_analysis']:
-                                analysis_dir = os.path.join(output_path, analysis_type)
-                                if os.path.exists(analysis_dir):
-                                    shutil.rmtree(analysis_dir)
-                            break
+                    if choice == '1':  # Overwrite
+                        print(f"{Colors.YELLOW}Existing files will be overwritten{Colors.ENDC}")
+                        # Clear existing predictions file if it exists
+                        predictions_path = os.path.join(output_path, 'predictions.csv')
+                        if os.path.exists(predictions_path):
+                            os.remove(predictions_path)
+                        # Clear analysis directories if they exist
+                        for analysis_type in ['mosaics', 'failed_analysis', 'correct_analysis']:
+                            analysis_dir = os.path.join(output_path, analysis_type)
+                            if os.path.exists(analysis_dir):
+                                shutil.rmtree(analysis_dir)
+                        break
 
-                        elif choice == '2':  # New version
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            output_path = f"{output_path}_{timestamp}"
+                    elif choice == '2':  # New version
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_path = f"{output_path}_{timestamp}"
+                        os.makedirs(output_path, exist_ok=True)
+                        print(f"{Colors.GREEN}Creating new version at: {output_path}{Colors.ENDC}")
+                        break
+
+                    elif choice == '3':  # Different directory
+                        new_dir = input(f"{Colors.YELLOW}Enter new directory path: {Colors.ENDC}").strip()
+                        if new_dir:
+                            output_path = new_dir
                             os.makedirs(output_path, exist_ok=True)
-                            print(f"{Colors.GREEN}Creating new version at: {output_path}{Colors.ENDC}")
+                            print(f"{Colors.GREEN}Using new directory: {output_path}{Colors.ENDC}")
                             break
-
-                        elif choice == '3':  # Different directory
-                            new_dir = input(f"{Colors.YELLOW}Enter new directory path: {Colors.ENDC}").strip()
-                            if new_dir:
-                                output_path = new_dir
-                                os.makedirs(output_path, exist_ok=True)
-                                print(f"{Colors.GREEN}Using new directory: {output_path}{Colors.ENDC}")
-                                break
-                            else:
-                                print(f"{Colors.RED}Invalid path. Please try again.{Colors.ENDC}")
-
-                        elif choice == 'q':  # Quit
-                            return None
-
                         else:
-                            print(f"{Colors.RED}Invalid option. Please choose 1-3 or q.{Colors.ENDC}")
-                else:
-                    os.makedirs(output_path, exist_ok=True)
+                            print(f"{Colors.RED}Invalid path. Please try again.{Colors.ENDC}")
 
-            # Handle true labels if target column exists
-            if hasattr(self, 'target_column') and self.target_column in df.columns:
+                    elif choice == 'q':  # Quit
+                        return None
+
+                    else:
+                        print(f"{Colors.RED}Invalid option. Please choose 1-3 or q.{Colors.ENDC}")
+            elif output_path:
+                os.makedirs(output_path, exist_ok=True)
+
+            # Handle true labels if target column exists - FIXED: Use the loaded label encoder properly
+            if has_target_column:
                 y_true_str = df[self.target_column]
                 try:
-                    if hasattr(self.label_encoder, 'classes_'):
+                    # CRITICAL FIX: Check if label encoder is properly loaded and has classes
+                    if hasattr(self.label_encoder, 'classes_') and len(self.label_encoder.classes_) > 0:
+                        print(f"\033[K[INFO] Using loaded label encoder with classes: {self.label_encoder.classes_}")
+                        # Transform the true labels using the loaded encoder
                         y_true = self.label_encoder.transform(y_true_str)
+                        DEBUG.log(f"Successfully encoded {len(y_true_str)} true labels using pre-trained encoder")
                     else:
-                        print(f"{Colors.YELLOW}Warning: Label encoder not fitted, using raw labels{Colors.ENDC}")
-                        y_true = y_true_str
+                        print(f"{Colors.YELLOW}Warning: Label encoder not properly loaded, attempting to fit{Colors.ENDC}")
+                        # Fallback: fit the encoder (shouldn't happen with properly saved models)
+                        self.label_encoder.fit(y_true_str.astype(str))
+                        y_true = self.label_encoder.transform(y_true_str)
+                        DEBUG.log(f"Fitted new label encoder with classes: {self.label_encoder.classes_}")
                 except ValueError as e:
-                    print(f"{Colors.RED}Error encoding true labels: {str(e)}{Colors.ENDC}")
-                    print(f"Encoder knows: {self.label_encoder.classes_}")
-                    print(f"Data contains: {np.unique(y_true_str)}")
-                    raise
+                    print(f"{Colors.YELLOW}Warning: Some true labels not in training set: {str(e)}{Colors.ENDC}")
+                    if hasattr(self.label_encoder, 'classes_'):
+                        print(f"Known classes: {self.label_encoder.classes_}")
+                    print(f"Data classes: {y_true_str.unique()}")
+                    # For prediction, we can continue without true labels for evaluation
+                    y_true_str = None
+                    y_true = None
             else:
                 y_true_str = None
                 y_true = None
+                DEBUG.log("No target column found - running in pure prediction mode")
 
             # Get features (drop target column if exists)
-            if self.target_column in df.columns:
+            if has_target_column:
                 X = df.drop(columns=[self.target_column])
+                DEBUG.log(f"Using {X.shape[1]} features for prediction (target column excluded)")
             else:
                 X = df.copy()
-                DEBUG.log("No target column found - running in pure prediction mode")
+                DEBUG.log(f"Using all {X.shape[1]} columns for prediction")
 
             # Generate predictions
             self._load_model_components()
             print(f"{Colors.BLUE}Generating predictions...{Colors.ENDC}")
             y_pred, posteriors = self.predict(X, batch_size=batch_size)
-            pred_classes = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+
+            # Decode predictions to original labels using the loaded encoder
+            try:
+                pred_classes = self.label_encoder.inverse_transform(y_pred.cpu().numpy())
+                DEBUG.log(f"Successfully decoded predictions using label encoder")
+            except Exception as e:
+                print(f"{Colors.YELLOW}Warning: Could not decode predictions with label encoder: {str(e)}{Colors.ENDC}")
+                # Fallback: use raw predictions
+                pred_classes = y_pred.cpu().numpy().astype(str)
+
             confidences = posteriors[np.arange(len(y_pred)), y_pred].cpu().numpy()
 
             # Generate detailed results
@@ -6213,6 +6258,7 @@ class DBNN(GPUDBNN):
             )
 
             # Save results if output path specified
+            metadata = {}
             if output_path:
                 # Standard paths
                 predictions_path = os.path.join(output_path, 'predictions.csv')
@@ -6220,9 +6266,8 @@ class DBNN(GPUDBNN):
 
                 # Ensure the predictions directory exists
                 os.makedirs(os.path.dirname(predictions_path), exist_ok=True)
-                os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
 
-                # Save predictions
+                # Save predictions with additional info
                 results['predicted_class'] = pred_classes
                 results['confidence'] = confidences
                 results.to_csv(predictions_path, index=False)
@@ -6235,50 +6280,57 @@ class DBNN(GPUDBNN):
                     'timestamp': pd.Timestamp.now().isoformat(),
                     'feature_columns': list(X.columns),
                     'target_column': self.target_column if hasattr(self, 'target_column') else None,
+                    'has_ground_truth': has_target_column,
                     'label_encoder_classes': (self.label_encoder.classes_.tolist()
                                             if hasattr(self.label_encoder, 'classes_')
-                                            else None)
+                                            else None),
+                    'samples_processed': len(results)
                 }
                 with open(os.path.join(output_path, 'metadata.json'), 'w') as f:
                     json.dump(metadata, f, indent=2)
 
-                # --- Enhanced Mosaic Generation ---
+                # Generate mosaics if image data available
                 if 'filepath' in results.columns:
-                    # Get mosaic layout parameters
-                    columns = input("Please specify the number of columns of images per page (default 10): ") or 10
-                    rows = input("Please specify the number of rows of images per page (default 10): ") or 10
-
                     try:
-                        columns = int(columns)
-                        rows = int(rows)
-                    except ValueError:
-                        print(f"{Colors.RED}Invalid input. Using default 10x10 grid{Colors.ENDC}")
-                        columns = 10
-                        rows = 10
+                        columns = input("Please specify the number of columns of images per page (default 4): ") or 4
+                        rows = input("Please specify the number of rows of images per page (default 4): ") or 4
 
-                    # Create main mosaics directory
-                    mosaic_dir = os.path.join(output_path, 'mosaics')
-                    os.makedirs(mosaic_dir, exist_ok=True)
+                        try:
+                            columns = int(columns)
+                            rows = int(rows)
+                        except ValueError:
+                            print(f"{Colors.RED}Invalid input. Using default 4x4 grid{Colors.ENDC}")
+                            columns = 4
+                            rows = 4
 
-                    # Generate class-wise mosaics
-                    for class_name, group in results.groupby('predicted_class'):
-                        valid_images = []
-                        for _, row in group.iterrows():
-                            img_path = row['filepath']
-                            if os.path.exists(img_path):
-                                valid_images.append(row)
+                        # Create main mosaics directory
+                        mosaic_dir = os.path.join(output_path, 'mosaics')
+                        os.makedirs(mosaic_dir, exist_ok=True)
 
-                        if valid_images:
-                            class_df = pd.DataFrame(valid_images)
-                            self.generate_class_pdf_mosaics(
-                                predictions_df=class_df,
-                                output_dir=mosaic_dir,
-                                columns=columns,
-                                rows=rows
-                            )
+                        # Generate class-wise mosaics
+                        for class_name, group in results.groupby('predicted_class'):
+                            valid_images = []
+                            for _, row in group.iterrows():
+                                img_path = row['filepath']
+                                if os.path.exists(img_path):
+                                    valid_images.append(row)
 
-                    # --- Failure/Success Analysis ---
-                    if y_true_str is not None and 'true_class' in results.columns:
+                            if valid_images:
+                                class_df = pd.DataFrame(valid_images)
+                                self.generate_class_pdf_mosaics(
+                                    predictions_df=class_df,
+                                    output_dir=mosaic_dir,
+                                    columns=columns,
+                                    rows=rows
+                                )
+                                print(f"{Colors.GREEN}Generated mosaic for class {class_name}{Colors.ENDC}")
+
+                    except Exception as e:
+                        print(f"{Colors.YELLOW}Mosaic generation skipped: {str(e)}{Colors.ENDC}")
+
+                # Failure/Success Analysis only if we have ground truth
+                if has_target_column and 'true_class' in results.columns:
+                    try:
                         # Create analysis directories
                         failed_dir = os.path.join(output_path, 'failed_analysis')
                         correct_dir = os.path.join(output_path, 'correct_analysis')
@@ -6293,90 +6345,85 @@ class DBNN(GPUDBNN):
                         failed_predictions.to_csv(os.path.join(failed_dir, 'failed_predictions.csv'), index=False)
                         correct_predictions.to_csv(os.path.join(correct_dir, 'correct_predictions.csv'), index=False)
 
-                        # Generate failure analysis mosaics
-                        if not failed_predictions.empty:
-                            print(f"{Colors.BLUE}Generating failure analysis mosaics...{Colors.ENDC}")
-                            for true_class, group in failed_predictions.groupby('true_class'):
-                                valid_images = []
-                                for _, row in group.iterrows():
-                                    img_path = row['filepath']
-                                    if os.path.exists(img_path):
-                                        valid_images.append(row)
+                        print(f"{Colors.GREEN}Analysis files saved:{Colors.ENDC}")
+                        print(f"  - Failed predictions: {len(failed_predictions)} samples")
+                        print(f"  - Correct predictions: {len(correct_predictions)} samples")
 
-                                if valid_images:
-                                    class_df = pd.DataFrame(valid_images)
-                                    self.generate_class_pdf_mosaics(
-                                        predictions_df=class_df,
-                                        output_dir=failed_dir,
-                                        columns=columns,
-                                        rows=rows
-                                    )
+                    except Exception as e:
+                        print(f"{Colors.YELLOW}Analysis generation skipped: {str(e)}{Colors.ENDC}")
 
-                        # Generate success analysis mosaics
-                        if not correct_predictions.empty:
-                            print(f"{Colors.BLUE}Generating success analysis mosaics...{Colors.ENDC}")
-                            for pred_class, group in correct_predictions.groupby('predicted_class'):
-                                valid_images = []
-                                for _, row in group.iterrows():
-                                    img_path = row['filepath']
-                                    if os.path.exists(img_path):
-                                        valid_images.append(row)
-
-                                if valid_images:
-                                    class_df = pd.DataFrame(valid_images)
-                                    self.generate_class_pdf_mosaics(
-                                        predictions_df=class_df,
-                                        output_dir=correct_dir,
-                                        columns=columns,
-                                        rows=rows
-                                    )
-
-            # Compute and return metrics if we have true labels
-            metrics = {}
+            # Compute metrics only if we have true labels and predictions - FIXED: Handle Series properly
+            metrics = None
             if y_true is not None and y_pred is not None:
                 print(f"\n{Colors.BLUE}Computing evaluation metrics...{Colors.ENDC}")
 
-                # Ensure we have numpy arrays for sklearn metrics
-                y_true_np = y_true if isinstance(y_true, (np.ndarray, list)) else y_true.cpu().numpy()
-                y_pred_np = y_pred if isinstance(y_pred, (np.ndarray, list)) else y_pred.cpu().numpy()
+                try:
+                    # Ensure we have numpy arrays for sklearn metrics - FIXED: Handle Series objects
+                    if hasattr(y_true, 'cpu'):
+                        y_true_np = y_true.cpu().numpy()
+                    elif hasattr(y_true, 'to_numpy'):
+                        y_true_np = y_true.to_numpy()
+                    else:
+                        y_true_np = np.array(y_true)
 
-                # Calculate metrics
-                metrics['accuracy'] = accuracy_score(y_true_np, y_pred_np)
-                metrics['classification_report'] = classification_report(
-                    y_true, y_pred,
-                    output_dict=True,
-                    target_names=[str(cls) for cls in self.label_encoder.classes_]
-                )
-                metrics['confusion_matrix'] = confusion_matrix(y_true_np, y_pred_np).tolist()
-                # For saving as string
-                metrics['classification_report_str'] =classification_report(
-                    y_true, y_pred,
-                    target_names=[str(cls) for cls in self.label_encoder.classes_]
-                )
-                # Print colored confusion matrix
-                if hasattr(self.label_encoder, 'classes_'):
-                    self.print_colored_confusion_matrix(
-                        y_true_np,
-                        y_pred_np,
-                        class_labels=self.label_encoder.classes_,
-                        header="Prediction Results"
+                    if hasattr(y_pred, 'cpu'):
+                        y_pred_np = y_pred.cpu().numpy()
+                    else:
+                        y_pred_np = np.array(y_pred)
+
+                    # Calculate metrics
+                    metrics = {}
+                    metrics['accuracy'] = accuracy_score(y_true_np, y_pred_np)
+
+                    # Get class names for reporting
+                    if hasattr(self.label_encoder, 'classes_'):
+                        target_names = [str(cls) for cls in self.label_encoder.classes_]
+                    else:
+                        target_names = None
+
+                    metrics['classification_report'] = classification_report(
+                        y_true_np, y_pred_np,
+                        output_dict=True,
+                        target_names=target_names
                     )
-                else:
-                    print(f"{Colors.YELLOW}Warning: No class labels available for confusion matrix{Colors.ENDC}")
+                    metrics['confusion_matrix'] = confusion_matrix(y_true_np, y_pred_np).tolist()
+                    metrics['classification_report_str'] = classification_report(
+                        y_true_np, y_pred_np,
+                        target_names=target_names
+                    )
 
-                # Save metrics if output path exists
-                if output_path:
-                    with open(metrics_path, 'w') as f:
-                        f.write(metrics['classification_report_str'])
-                    print(f"{Colors.GREEN}Metrics saved to {metrics_path}{Colors.ENDC}")
+                    # Print colored confusion matrix
+                    if hasattr(self.label_encoder, 'classes_'):
+                        self.print_colored_confusion_matrix(
+                            y_true_np,
+                            y_pred_np,
+                            class_labels=self.label_encoder.classes_,
+                            header="Prediction Results"
+                        )
+                    else:
+                        print(f"{Colors.YELLOW}Warning: No class labels available for confusion matrix{Colors.ENDC}")
+
+                    # Save metrics if output path exists
+                    if output_path:
+                        with open(metrics_path, 'w') as f:
+                            f.write(metrics['classification_report_str'])
+                        print(f"{Colors.GREEN}Metrics saved to {metrics_path}{Colors.ENDC}")
+
+                except Exception as e:
+                    print(f"{Colors.YELLOW}Warning: Could not compute metrics: {str(e)}{Colors.ENDC}")
+                    import traceback
+                    traceback.print_exc()
+                    metrics = None
+            else:
+                print(f"{Colors.YELLOW}No ground truth available for metrics calculation{Colors.ENDC}")
 
             return {
                 'predictions': results,
-                'metrics': metrics if metrics else None,
-                'metadata': metadata if output_path else None,
+                'metrics': metrics,  # Can be None
+                'metadata': metadata,
                 'analysis_files': {
-                    'failed_predictions': os.path.join(output_path, 'failed_analysis') if y_true_str is not None else None,
-                    'correct_predictions': os.path.join(output_path, 'correct_analysis') if y_true_str is not None else None
+                    'failed_predictions': os.path.join(output_path, 'failed_analysis') if has_target_column else None,
+                    'correct_predictions': os.path.join(output_path, 'correct_analysis') if has_target_column else None
                 } if output_path else None
             }
 
@@ -8032,7 +8079,7 @@ def main():
             # Load config
             config = load_or_create_config(conf_path)
 
-            # CRITICAL FIX: Force enable visualization in config if requested
+            # Force enable visualization in config if requested
             if generate_visualization:
                 if 'training_params' not in config:
                     config['training_params'] = {}
@@ -8052,7 +8099,7 @@ def main():
             print(f"📊 {Colors.BOLD}Visualization: {Colors.GREEN}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
             print(f"{'='*80}")
 
-            # Create DBNN instance - PASS VISUALIZATION CONFIG
+            # Create DBNN instance
             if mode == 'train_predict':
                 model = DBNN(dataset_name=dataset_name, mode='train', model_type=model_type)
             else:
@@ -8081,7 +8128,7 @@ def main():
                     accuracy_color = Colors.GREEN if results['test_accuracy'] > 0.9 else Colors.YELLOW if results['test_accuracy'] > 0.7 else Colors.RED
                     print(f"🎯 {Colors.BOLD}Test Accuracy: {accuracy_color}{results['test_accuracy']:.2%}{Colors.ENDC}")
 
-                # NEW UNIFIED VISUALIZATION SYSTEM
+                # Visualization
                 if generate_visualization:
                     print(f"\n📊 {Colors.BOLD}Generating unified visualizations...{Colors.ENDC}")
                     try:
@@ -8166,10 +8213,18 @@ def main():
 
                 if results:
                     print(f"✅ {Colors.GREEN}Predictions completed successfully!{Colors.ENDC}")
-                    if 'metrics' in results and 'accuracy' in results['metrics']:
+                    # FIXED: Safe metrics access
+                    if results.get('metrics') is not None and 'accuracy' in results['metrics']:
                         acc = results['metrics']['accuracy']
                         acc_color = Colors.GREEN if acc > 0.9 else Colors.YELLOW if acc > 0.7 else Colors.RED
                         print(f"🎯 {Colors.BOLD}Prediction Accuracy: {acc_color}{acc:.2%}{Colors.ENDC}")
+                    else:
+                        print(f"📊 {Colors.YELLOW}No ground truth available for accuracy calculation{Colors.ENDC}")
+
+                    # Print sample count
+                    if 'predictions' in results:
+                        sample_count = len(results['predictions'])
+                        print(f"📈 {Colors.BOLD}Samples processed: {Colors.CYAN}{sample_count}{Colors.ENDC}")
 
             if mode == 'invertDBNN':
                 # Invert DBNN mode
