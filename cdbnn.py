@@ -4190,23 +4190,29 @@ class DatasetProcessor:
 
         # Determine dataset name
         if data_name:
-            self.dataset_name = data_name.lower()
+            self.dataset_name = data_name.upper()  # Use uppercase for dataset name
         else:
             if self.datatype == 'torchvision':
-                self.dataset_name = self.datafile.lower()
+                self.dataset_name = self.datafile.upper()  # Use uppercase
             else:
                 # Handle both files and directories
                 path_obj = Path(self.datafile)
                 if path_obj.is_dir():
-                    self.dataset_name = path_obj.name.lower()
+                    self.dataset_name = path_obj.name.upper()  # Use uppercase
                 else:
-                    self.dataset_name = path_obj.stem.lower() or 'dataset'
+                    self.dataset_name = path_obj.stem.upper() or 'DATASET'  # Use uppercase
 
-        self.dataset_dir = os.path.join("data", self.dataset_name)
+        # For torchvision datasets, use Data/DATASET_NAME/ structure
+        if self.datatype == 'torchvision':
+            self.dataset_dir = os.path.join("Data", self.dataset_name)  # Data/CIFAR100/
+        else:
+            # For custom datasets, use the original structure
+            self.dataset_dir = os.path.join("data", self.dataset_name.lower())  # data/dataset_name/
+
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
+        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
 
     def _extract_archive(self, archive_path: str) -> str:
@@ -4402,34 +4408,271 @@ class DatasetProcessor:
 
     def _generate_main_config(self, train_dir: str) -> Dict:
         """Generate main configuration with all necessary parameters"""
-        input_size, in_channels = self._detect_image_properties(train_dir)
-        class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
-        num_classes = len(class_dirs)
+        try:
+            input_size, in_channels = self._detect_image_properties(train_dir)
+            class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+            num_classes = len(class_dirs)
 
-        mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
-        std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+            mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
+            std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
+            feature_dims = min(128, np.prod(input_size) // 4)
 
-        return {
-            "dataset": {
-                "name": self.dataset_name,
-                "type": self.datatype,
-                "in_channels": in_channels,
-                "num_classes": num_classes,
-                "input_size": list(input_size),
-                "mean": mean,
-                "std": std,
-                "resize_images": False,
-                "train_dir": train_dir,  # This now contains all images (train + test)
-                "test_dir": train_dir   # Same directory for both since they're merged
-            },
-            # ... rest of the configuration remains the same
-        }
+            # Use lowercase for dataset name in config, but keep path as is
+            dataset_name_lower = self.dataset_name.lower()
+
+            # Build the complete configuration structure
+            config = {
+                "dataset": {
+                    "name": dataset_name_lower,
+                    "type": self.datatype,
+                    "in_channels": in_channels,
+                    "num_classes": num_classes,
+                    "input_size": list(input_size),
+                    "mean": mean,
+                    "std": std,
+                    "resize_images": False,
+                    "train_dir": train_dir,
+                    "test_dir": train_dir
+                },
+                "model": {
+                    "encoder_type": "autoenc",
+                    "enable_adaptive": True,
+                    "feature_dims": feature_dims,
+                    "learning_rate": 0.001,
+                    "optimizer": {
+                        "type": "Adam",
+                        "weight_decay": 0.0001,
+                        "momentum": 0.9,
+                        "beta1": 0.9,
+                        "beta2": 0.999,
+                        "epsilon": 1e-08
+                    },
+                    "scheduler": {
+                        "type": "ReduceLROnPlateau",
+                        "factor": 0.1,
+                        "patience": 10,
+                        "min_lr": 1e-06,
+                        "verbose": True
+                    },
+                    "autoencoder_config": {
+                        "reconstruction_weight": 1.0,
+                        "feature_weight": 0.1,
+                        "convergence_threshold": 0.0001,
+                        "min_epochs": 10,
+                        "patience": 5,
+                        "enhancements": {
+                            "enabled": True,
+                            "use_kl_divergence": True,
+                            "use_class_encoding": False,
+                            "kl_divergence_weight": 0.5,
+                            "classification_weight": 0.5,
+                            "clustering_temperature": 1.0,
+                            "min_cluster_confidence": 0.7
+                        }
+                    },
+                    "loss_functions": {
+                        "structural": {
+                            "enabled": True,
+                            "weight": 1.0,
+                            "params": {
+                                "edge_weight": 1.0,
+                                "smoothness_weight": 0.5
+                            }
+                        },
+                        "color_enhancement": {
+                            "enabled": True,
+                            "weight": 0.8,
+                            "params": {
+                                "channel_weight": 0.5,
+                                "contrast_weight": 0.3
+                            }
+                        },
+                        "morphology": {
+                            "enabled": True,
+                            "weight": 0.6,
+                            "params": {
+                                "shape_weight": 0.7,
+                                "symmetry_weight": 0.3
+                            }
+                        },
+                        "detail_preserving": {
+                            "enabled": True,
+                            "weight": 0.8,
+                            "params": {
+                                "detail_weight": 1.0,
+                                "texture_weight": 0.8,
+                                "frequency_weight": 0.6
+                            }
+                        },
+                        "astronomical_structure": {
+                            "enabled": True,
+                            "weight": 1.0,
+                            "components": {
+                                "edge_preservation": True,
+                                "peak_preservation": True,
+                                "detail_preservation": True
+                            }
+                        },
+                        "medical_structure": {
+                            "enabled": True,
+                            "weight": 1.0,
+                            "components": {
+                                "boundary_preservation": True,
+                                "tissue_contrast": True,
+                                "local_structure": True
+                            }
+                        },
+                        "agricultural_pattern": {
+                            "enabled": True,
+                            "weight": 1.0,
+                            "components": {
+                                "texture_preservation": True,
+                                "damage_pattern": True,
+                                "color_consistency": True
+                            }
+                        }
+                    },
+                    "enhancement_modules": {
+                        "astronomical": {
+                            "enabled": True,
+                            "components": {
+                                "structure_preservation": True,
+                                "detail_preservation": True,
+                                "star_detection": True,
+                                "galaxy_features": True,
+                                "kl_divergence": True
+                            },
+                            "weights": {
+                                "detail_weight": 1.0,
+                                "structure_weight": 0.8,
+                                "edge_weight": 0.7
+                            }
+                        },
+                        "medical": {
+                            "enabled": True,
+                            "components": {
+                                "tissue_boundary": True,
+                                "lesion_detection": True,
+                                "contrast_enhancement": True,
+                                "subtle_feature_preservation": True
+                            },
+                            "weights": {
+                                "boundary_weight": 1.0,
+                                "lesion_weight": 0.8,
+                                "contrast_weight": 0.6
+                            }
+                        },
+                        "agricultural": {
+                            "enabled": True,
+                            "components": {
+                                "texture_analysis": True,
+                                "damage_detection": True,
+                                "color_anomaly": True,
+                                "pattern_enhancement": True,
+                                "morphological_features": True
+                            },
+                            "weights": {
+                                "texture_weight": 1.0,
+                                "damage_weight": 0.8,
+                                "pattern_weight": 0.7
+                            }
+                        }
+                    }
+                },
+                "training": {
+                    "batch_size": 128,
+                    "epochs": 200,
+                    "num_workers": min(4, os.cpu_count() or 1),
+                    "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
+                    "validation_split": 0.2,
+                    "invert_DBNN": True,
+                    "reconstruction_weight": 0.5,
+                    "feedback_strength": 0.3,
+                    "inverse_learning_rate": 0.1,
+                    "use_classwise_acc": True,
+                    "early_stopping": {
+                        "patience": 5,
+                        "min_delta": 0.001
+                    }
+                },
+                "augmentation": {
+                    "enabled": True,
+                    "random_crop": {"enabled": True, "padding": 4},
+                    "random_rotation": {"enabled": True, "degrees": 10},
+                    "horizontal_flip": {"enabled": True, "probability": 0.5},
+                    "vertical_flip": {"enabled": False},
+                    "color_jitter": {
+                        "enabled": True,
+                        "brightness": 0.2,
+                        "contrast": 0.2,
+                        "saturation": 0.2,
+                        "hue": 0.1
+                    },
+                    "normalize": {
+                        "enabled": True,
+                        "mean": mean,
+                        "std": std
+                    }
+                },
+                "execution_flags": {
+                    "mode": "train_and_predict",
+                    "use_gpu": torch.cuda.is_available(),
+                    "mixed_precision": True,
+                    "distributed_training": False,
+                    "debug_mode": False,
+                    "use_previous_model": True,
+                    "fresh_start": False
+                },
+                "output": {
+                    "features_file": os.path.join(self.dataset_dir, f"{dataset_name_lower}.csv"),
+                    "model_dir": os.path.join(self.dataset_dir, "models"),
+                    "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+                }
+            }
+
+            return config
+
+        except Exception as e:
+            logger.error(f"Error generating main config: {str(e)}")
+            # Return a minimal valid config as fallback
+            return {
+                "dataset": {
+                    "name": self.dataset_name.lower(),
+                    "type": self.datatype,
+                    "in_channels": 3,
+                    "num_classes": 10,
+                    "input_size": [32, 32],
+                    "mean": [0.5, 0.5, 0.5],
+                    "std": [0.5, 0.5, 0.5],
+                    "resize_images": False,
+                    "train_dir": train_dir,
+                    "test_dir": train_dir
+                },
+                "model": {
+                    "encoder_type": "autoenc",
+                    "enable_adaptive": True,
+                    "feature_dims": 128,
+                    "learning_rate": 0.001,
+                    "autoencoder_config": {
+                        "reconstruction_weight": 1.0,
+                        "feature_weight": 0.1,
+                        "enhancements": {
+                            "use_kl_divergence": True,
+                            "use_class_encoding": False
+                        }
+                    }
+                },
+                "training": {
+                    "batch_size": 128,
+                    "epochs": 100,
+                    "num_workers": 4
+                }
+            }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
         """Generate dataset-specific configuration"""
         return {
-            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
@@ -4449,7 +4692,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size":128,
+                "batch_size": 128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -4519,23 +4762,28 @@ class DatasetProcessor:
         os.makedirs(self.dataset_dir, exist_ok=True)
         logger.info(f"Starting configuration generation for dataset: {self.dataset_name}")
 
-        # 1. Generate and handle main configuration (json)
+        # 1. Generate main configuration
         logger.info("Generating main configuration...")
         config = self._generate_main_config(train_dir)
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path, 'r') as f:
-                    existing_config = json.load(f)
-                    logger.info(f"Found existing main config, merging...")
-                    config = self._merge_configs(existing_config, config)
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON in {self.config_path}, using default template")
 
+        # Ensure all required sections exist
+        required_sections = ['dataset', 'model', 'training', 'augmentation', 'execution_flags', 'output']
+        for section in required_sections:
+            if section not in config:
+                config[section] = {}
+
+        # Ensure model has all required sub-sections
+        model_required = ['autoencoder_config', 'loss_functions', 'enhancement_modules']
+        for sub_section in model_required:
+            if sub_section not in config['model']:
+                config['model'][sub_section] = {}
+
+        # Save main config
         with open(self.config_path, 'w') as f:
             json.dump(config, f, indent=4)
         logger.info(f"Main configuration saved: {self.config_path}")
 
-        # 2. Generate and handle dataset.conf using _generate_dataset_conf
+        # 2. Generate dataset.conf
         logger.info("Generating dataset configuration...")
         dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
         if os.path.exists(self.conf_path):
@@ -4551,7 +4799,7 @@ class DatasetProcessor:
             json.dump(dataset_conf, f, indent=4)
         logger.info(f"Dataset configuration saved: {self.conf_path}")
 
-        # 3. Generate and handle adaptive_dbnn.conf using _generate_dbnn_config
+        # 3. Generate adaptive_dbnn.conf
         logger.info("Generating DBNN configuration...")
         dbnn_config = self._generate_dbnn_config(config)
         if os.path.exists(self.dbnn_conf_path):
@@ -4650,13 +4898,13 @@ class DatasetProcessor:
 
 
     def _process_torchvision(self) -> Tuple[str, str]:
-        """Process torchvision dataset and merge train/test into single directory"""
-        dataset_name = self.datafile.upper()
+        """Process torchvision dataset and merge train/test into single directory with uppercase structure"""
+        dataset_name = self.datafile.upper()  # Ensure uppercase
         if not hasattr(datasets, dataset_name):
             raise ValueError(f"Torchvision dataset {dataset_name} not found")
 
-        # Setup main dataset directory (no separate train/test)
-        dataset_dir = os.path.join(self.dataset_dir)
+        # Setup main dataset directory with uppercase structure: Data/DATASET_NAME/
+        dataset_dir = os.path.join("Data", dataset_name)  # Use "Data" (uppercase) folder
         os.makedirs(dataset_dir, exist_ok=True)
 
         # Download and process datasets
@@ -4683,10 +4931,16 @@ class DatasetProcessor:
             class_to_idx = getattr(dataset, 'class_to_idx', None)
             if class_to_idx:
                 idx_to_class = {v: k for k, v in class_to_idx.items()}
+            else:
+                # For datasets without class_to_idx, create numeric class names
+                unique_labels = set()
+                for _, label in dataset:
+                    unique_labels.add(label)
+                idx_to_class = {label: str(label) for label in unique_labels}
 
             with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
                 for idx, (img, label) in enumerate(dataset):
-                    class_name = idx_to_class[label] if class_to_idx else str(label)
+                    class_name = idx_to_class[label]
                     class_dir = os.path.join(dataset_dir, class_name)
                     os.makedirs(class_dir, exist_ok=True)
 
@@ -4701,6 +4955,8 @@ class DatasetProcessor:
         # Save both train and test images to the same class directories
         save_dataset_images(train_dataset, "train")
         save_dataset_images(test_dataset, "test")
+
+        logger.info(f"Dataset saved to: {dataset_dir}")
 
         # Return the same directory for both train and test (they're merged)
         return dataset_dir, dataset_dir
@@ -5313,7 +5569,7 @@ def get_interactive_args():
 
         # For torchvision, set default input to the downloaded dataset
         if args.data_type == 'torchvision':
-            default_input = f"data/{args.data_name}"
+            default_input = f"Data/{args.data_name}"
         else:
             default_input = f"Data/{args.data_name}.zip" if args.data_name else ''
 
@@ -5673,12 +5929,18 @@ def setup_logging():
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
-        # Setup paths
-        data_name = args.data_name
-        data_dir = os.path.join('data', data_name)
-        config_path = os.path.join(data_dir, f"{data_name}.json")
+        # Setup paths - use uppercase for torchvision, lowercase for custom
+        data_name = args.data_name.upper() if args.data_type == 'torchvision' else args.data_name.lower()
+
+        if args.data_type == 'torchvision':
+            data_dir = os.path.join("Data", data_name)  # Data/CIFAR100/
+        else:
+            data_dir = os.path.join("data", data_name)  # data/dataset_name/
+
+        config_path = os.path.join(data_dir, f"{data_name.lower()}.json")  # Config file uses lowercase
 
         logger.info(f"Starting training for dataset: {data_name} (type: {args.data_type})")
+        logger.info(f"Dataset directory: {data_dir}")
 
         # Process dataset based on data type
         if args.data_type == 'torchvision':
@@ -5741,7 +6003,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         )
 
         # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name, logger)
+        save_training_results(features_dict, model, config, data_dir, data_name.lower(), logger)
 
         logger.info("Processing completed successfully!")
         return 0
