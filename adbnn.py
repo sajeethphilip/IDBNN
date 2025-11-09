@@ -146,7 +146,12 @@ import psutil
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
-
+try:
+        # Import tkinter for GUI
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
+except:
+        print("tkinter is not available")
 #from Invertible_DBNN import InvertibleDBNN
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
@@ -230,6 +235,208 @@ import os
 import json
 from datetime import datetime
 
+
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    CYAN = '\033[96m'  # ADDED: Cyan color
+    MAGENTA = '\033[95m'  # ADDED: Magenta color
+    WHITE = '\033[97m'  # ADDED: White color
+    BLACK = '\033[90m'  # ADDED: Black color
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+    @staticmethod
+    def color_value(current_value, previous_value=None, higher_is_better=True):
+        """Color a value based on whether it improved or declined"""
+        if previous_value is None:
+            return f"{current_value:.4f}"
+
+        if higher_is_better:
+            if current_value > previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value < previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+        else:  # lower is better
+            if current_value < previous_value:
+                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
+            elif current_value > previous_value:
+                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
+
+        return f"{current_value:.4f}"  # No color if equal
+
+    @staticmethod
+    def highlight_dataset(name):
+        """Highlight dataset name in red"""
+        return f"{Colors.RED}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_time(time_value):
+        """Color time values based on threshold"""
+        if time_value < 10:
+            return f"{Colors.GREEN}{time_value:.2f}{Colors.ENDC}"
+        elif time_value < 30:
+            return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
+        else:
+            return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_accuracy(accuracy):
+        """Color accuracy values based on threshold"""
+        if accuracy >= 0.9:
+            return f"{Colors.GREEN}{accuracy:.4f}{Colors.ENDC}"
+        elif accuracy >= 0.7:
+            return f"{Colors.YELLOW}{accuracy:.4f}{Colors.ENDC}"
+        else:
+            return f"{Colors.RED}{accuracy:.4f}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_feature(name):
+        """Highlight feature name in cyan"""
+        return f"{Colors.CYAN}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_class(name):
+        """Highlight class name in magenta"""
+        return f"{Colors.MAGENTA}{name}{Colors.ENDC}"
+
+    @staticmethod
+    def highlight_round(round_num):
+        """Highlight round number in blue"""
+        return f"{Colors.BLUE}{round_num}{Colors.ENDC}"
+
+    @staticmethod
+    def print_success(message):
+        """Print success message in green"""
+        print(f"{Colors.GREEN}✅ {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_warning(message):
+        """Print warning message in yellow"""
+        print(f"{Colors.YELLOW}⚠️  {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_error(message):
+        """Print error message in red"""
+        print(f"{Colors.RED}❌ {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_info(message):
+        """Print info message in cyan"""
+        print(f"{Colors.CYAN}📊 {message}{Colors.ENDC}")
+
+    @staticmethod
+    def print_debug(message):
+        """Print debug message in magenta"""
+        print(f"{Colors.MAGENTA}🐛 {message}{Colors.ENDC}")
+
+    @staticmethod
+    def get_color(color_name, format='named'):
+        """
+        Get color in proper format for different libraries
+        format: 'named', 'hex', 'rgb', 'normalized'
+        """
+        color_map = {
+            'red': {
+                'named': 'red',
+                'hex': '#e41a1c',
+                'rgb': (228, 26, 28),
+                'normalized': (228/255, 26/255, 28/255)
+            },
+            'green': {
+                'named': 'green',
+                'hex': '#4daf4a',
+                'rgb': (77, 175, 74),
+                'normalized': (77/255, 175/255, 74/255)
+            },
+            'blue': {
+                'named': 'blue',
+                'hex': '#377eb8',
+                'rgb': (55, 126, 184),
+                'normalized': (55/255, 126/255, 184/255)
+            },
+            'yellow': {
+                'named': 'yellow',
+                'hex': '#ffff33',
+                'rgb': (255, 255, 51),
+                'normalized': (1.0, 1.0, 0.2)
+            },
+            'orange': {
+                'named': 'orange',
+                'hex': '#ffa500',
+                'rgb': (255, 165, 0),
+                'normalized': (1.0, 0.65, 0.0)
+            }
+        }
+
+        if color_name in color_map:
+            return color_map[color_name][format]
+        else:
+            # Fallback to matplotlib named colors
+            return color_name
+
+# Global command line flags storage - SINGLE SOURCE OF TRUTH
+COMMAND_LINE_FLAGS = {
+    'visualize': False,
+    'model_type': 'Histogram',
+    'mode': 'train_predict',
+    'file_path': None,
+    'interactive': False,
+    'list_datasets': False,
+    'fresh_start': False,
+    'use_previous_model': True,
+    'enable_5DCTvisualization': False
+}
+
+def parse_command_line_flags():
+    """Parse and store ALL command line flags globally - called once at startup"""
+    import sys
+
+    # Set defaults
+    COMMAND_LINE_FLAGS.update({
+        'visualize': '--visualize' in sys.argv or any(arg in sys.argv for arg in ['-v', '--visualise']),
+        'interactive': '--interactive' in sys.argv,
+        'list_datasets': '--list_datasets' in sys.argv,
+        'fresh_start': '--fresh_start' in sys.argv,
+    })
+
+    # Parse arguments with values
+    for i, arg in enumerate(sys.argv):
+        if arg == '--model_type' and i + 1 < len(sys.argv):
+            COMMAND_LINE_FLAGS['model_type'] = sys.argv[i + 1]
+        elif arg == '--mode' and i + 1 < len(sys.argv):
+            COMMAND_LINE_FLAGS['mode'] = sys.argv[i + 1]
+        elif arg == '--file_path' and i + 1 < len(sys.argv):
+            COMMAND_LINE_FLAGS['file_path'] = sys.argv[i + 1]
+        elif arg == '--fresh_start':
+            COMMAND_LINE_FLAGS['fresh_start'] = True
+            COMMAND_LINE_FLAGS['use_previous_model'] = False
+        elif arg == '--use_previous_model':
+            COMMAND_LINE_FLAGS['use_previous_model'] = True
+            COMMAND_LINE_FLAGS['fresh_start'] = False
+
+    # AUTO-ENABLE 5DCT when visualize is enabled
+    if COMMAND_LINE_FLAGS['visualize']:
+        COMMAND_LINE_FLAGS['enable_5DCTvisualization'] = True
+        print(f"🌌 {Colors.GREEN}AUTO-ENABLED: 5DCT visualization (--visualize flag detected){Colors.ENDC}")
+
+    # Print summary of detected flags
+    if len(sys.argv) > 1:  # Only show if command line arguments were provided
+        print(f"🎯 {Colors.BOLD}GLOBAL COMMAND LINE FLAGS DETECTED:{Colors.ENDC}")
+        for flag, value in COMMAND_LINE_FLAGS.items():
+            if value and value not in [None, False, '']:
+                color = Colors.GREEN if value not in [False, None] else Colors.YELLOW
+                print(f"   {Colors.CYAN}--{flag:<25}: {color}{value}{Colors.ENDC}")
+        print()
+
+# Call this immediately after imports
+parse_command_line_flags()
+
 class DBNNVisualizer:
     """
     Enhanced visualization class for DBNN with interactive 3D capabilities,
@@ -252,6 +459,7 @@ class DBNNVisualizer:
         self.training_history = []  # List of training snapshots
         self.visualization_data = {}  # Additional visualization metadata
         self.tensor_snapshots = []  # Tensor-specific training data
+        self.enable_5DCT_visualization = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
 
         # Enhanced data storage for advanced visualizations
         self.feature_space_snapshots = []  # 3D feature space evolution
@@ -275,197 +483,40 @@ class DBNNVisualizer:
     # HELP SYSTEM METHODS
     # =========================================================================
 
+    def _get_viz_output_path(self, viz_type, filename):
+        """Use the DBNN instance's path method"""
+        if hasattr(self, 'dbnn_instance'):
+            return self.dbnn_instance._get_viz_output_path(viz_type, filename)
+        else:
+            # Fallback to local implementation
+            base_dir = "Visualizer"
+            type_dir = os.path.join(base_dir, viz_type)
+            os.makedirs(type_dir, exist_ok=True)
+            return os.path.join(type_dir, filename)
+
     def create_help_window(self, title, content, width=400, height=300):
-        """Create a standardized help window for visualization explanations"""
-        # Hide existing help windows first
-        self.hide_all_help_windows()
-
-        try:
-            # Create help window
-            help_win = tk.Toplevel()
-            help_win.title(f"{title} - Visualization Help")
-            help_win.geometry(f"{width}x{height}+100+100")
-            help_win.configure(bg='lightblue')
-            help_win.attributes('-topmost', True)
-
-            # Register this window
-            self.help_windows.add(help_win)
-
-            # Content frame
-            content_frame = ttk.Frame(help_win)
-            content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-            # Help text
-            help_text = tk.Text(content_frame, wrap=tk.WORD, bg='lightyellow',
-                              font=('Arial', 10), padx=10, pady=10)
-            help_text.insert(tk.END, content)
-            help_text.config(state=tk.DISABLED)  # Make read-only
-            help_text.pack(fill=tk.BOTH, expand=True)
-
-            # Close button
-            close_btn = tk.Button(content_frame, text="Close Help",
-                                 command=help_win.destroy,
-                                 bg='white', fg='blue', font=('Arial', 9))
-            close_btn.pack(pady=5)
-
-            # Auto-close after 15 seconds
-            help_win.after(15000, help_win.destroy)
-
-            # Bind destruction to remove from registry
-            help_win.bind('<Destroy>', lambda e: self.help_windows.discard(help_win))
-
-            return help_win
-
-        except ImportError:
-            print("Tkinter not available for help windows")
-            return None
+        """Create a non-GUI help message (tkinter removed)"""
+        print(f"🎓 {title} Help:")
+        print("=" * 50)
+        print(content)
+        print("=" * 50)
+        return None
 
     def hide_all_help_windows(self):
-        """Hide all registered help windows"""
-        for window in list(self.help_windows):
-            try:
-                if hasattr(window, 'winfo_exists') and window.winfo_exists():
-                    window.destroy()
-            except:
-                pass
-        self.help_windows.clear()
+        """No-op since we removed GUI"""
+        pass
 
     def get_visualization_help_content(self, viz_type):
-        """Get help content for different visualization types"""
+        """Get help content without GUI dependencies"""
         help_contents = {
-            'circular_tensor': """
-🎓 Circular Tensor Evolution
-
-Shows how tensor orientations evolve during training
-in a circular coordinate space.
-
-• Each point represents a data sample's feature tensor
-• Colors indicate different classes
-• Angles show tensor directions in complex space
-• Radii show feature magnitudes/importance
-
-Watch as classes organize into distinct angular sectors
-as training progresses and the model learns to separate them.
-
-Interactive Features:
-• Play/Pause animation
-• Zoom and rotate view
-• Toggle class visibility
-• Manual iteration control
-""",
-            'polar_tensor': """
-🎓 Polar Tensor Evolution
-
-Displays tensor space transformation using polar coordinates.
-
-• Radial distance = Feature magnitude
-• Angular position = Feature direction
-• Colors = Different object classes
-• Animation = Training progression
-
-Observe how initially random tensor orientations
-gradually organize into well-separated class clusters.
-
-Controls:
-• Full rotation and zoom capability
-• Speed adjustment
-• Class filtering
-• Progress tracking
-""",
-            '3d_feature_space': """
-🎓 3D Feature Space Visualization
-
-Interactive 3D plot showing feature relationships and
-class separation in three dimensions.
-
-• X, Y, Z axes = Selected features
-• Colors = Class assignments
-• Marker size = Confidence level
-• Animation = Training evolution
-
-Use this to understand how your model transforms
-the feature space to separate different classes.
-
-Features:
-• Camera rotation and zoom
-• Feature axis selection
-• Class highlighting
-• Point inspection
-""",
-            'confusion_matrix': """
-🎓 Animated Confusion Matrix
-
-Shows how classification performance evolves during training.
-
-• Rows = True classes
-• Columns = Predicted classes
-• Color intensity = Classification probability
-• Diagonal = Correct classifications
-
-Watch as the matrix becomes more diagonal over time,
-indicating improving classification accuracy.
-
-Interactive Elements:
-• Play/Pause animation
-• Iteration slider
-• Hover for details
-• Accuracy tracking
-""",
-            'performance_metrics': """
-🎓 Performance Metrics Dashboard
-
-Comprehensive view of training progress and model performance.
-
-• Accuracy progression over time
-• Weight distribution analysis
-• Feature correlation patterns
-• Training summary statistics
-
-Monitor model convergence and identify potential
-issues like overfitting or underfitting.
-
-Metrics Shown:
-• Training accuracy history
-• Best achieved accuracy
-• Weight statistics
-• Feature relationships
-""",
-            'complex_phase': """
-🎓 Complex Phase Diagram
-
-Shows feature relationships in complex space using
-phase plots for different feature pairs.
-
-• Real/imaginary components = Complex features
-• Subplots = Different feature combinations
-• Colors = Class memberships
-• Patterns = Class separation boundaries
-
-Useful for understanding how complex feature
-transformations help with class separation.
-
-Analysis:
-• Feature correlation patterns
-• Class cluster formation
-• Separation boundary evolution
-"""
+            'circular_tensor': "Circular Tensor Evolution - Shows tensor orientations in circular coordinate space",
+            'polar_tensor': "Polar Tensor Evolution - Displays tensor space transformation using polar coordinates",
+            '3d_feature_space': "3D Feature Space Visualization - Interactive 3D plot showing feature relationships",
+            'confusion_matrix': "Animated Confusion Matrix - Shows classification performance evolution",
+            'performance_metrics': "Performance Metrics Dashboard - Comprehensive training progress view",
+            'complex_phase': "Complex Phase Diagram - Shows feature relationships in complex space"
         }
-
-        return help_contents.get(viz_type, """
-🎓 Visualization Help
-
-This interactive visualization shows the evolution
-of your DBNN model during training.
-
-Use the controls to:
-• Play/Pause the animation
-• Zoom and rotate the view
-• Hover for detailed information
-• Adjust speed and settings
-
-The visualization helps you understand how your
-model learns to separate different classes over time.
-""")
+        return help_contents.get(viz_type, "Visualization Help - Interactive training evolution visualization")
 
     # =========================================================================
     # CORE TRAINING DATA CAPTURE METHODS
@@ -615,9 +666,100 @@ model learns to separate different classes over time.
 
         return snapshot
 
+    def capture_epoch_snapshot(self, features, targets, weights, predictions, accuracy, epoch_num):
+        """Capture epoch-level snapshot for training progression visualization"""
+        try:
+            # Handle PyTorch tensors - keep on GPU but use clone for safety
+            def safe_clone(data):
+                if data is None:
+                    return None
+                elif torch.is_tensor(data):
+                    return data.detach().clone()
+                elif hasattr(data, 'copy'):
+                    return data.copy()
+                else:
+                    return data
+
+            snapshot = {
+                'epoch': epoch_num,
+                'features': safe_clone(features),
+                'targets': safe_clone(targets),
+                'weights': safe_clone(weights),
+                'predictions': safe_clone(predictions),
+                'accuracy': accuracy,
+                'timestamp': time.time(),
+                'is_tensor': any(torch.is_tensor(x) for x in [features, targets, weights, predictions] if x is not None)
+            }
+
+            # Store in training history
+            self.training_history.append(snapshot)
+
+            # For feature space snapshots, convert to CPU numpy for visualization
+            if (features is not None and
+                hasattr(features, 'shape') and
+                (torch.is_tensor(features) and features.shape[1] >= 2) or
+                (hasattr(features, 'shape') and features.shape[1] >= 2)):
+
+                features_np = features.detach().cpu().numpy() if torch.is_tensor(features) else features
+                targets_np = targets.detach().cpu().numpy() if torch.is_tensor(targets) else targets
+                predictions_np = predictions.detach().cpu().numpy() if torch.is_tensor(predictions) else predictions
+
+                self.capture_feature_space_snapshot(
+                    features=features_np,
+                    targets=targets_np,
+                    predictions=predictions_np,
+                    iteration=epoch_num,
+                    feature_names=getattr(self, 'feature_names', []),
+                    class_names=getattr(self, 'class_names', [])
+                )
+
+            return snapshot
+
+        except Exception as e:
+            print(f"❌ Epoch snapshot capture failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
     # =========================================================================
     # ENHANCED INTERACTIVE 3D VISUALIZATION METHODS
     # =========================================================================
+
+
+
+    def validate_visualization_directories(self):
+        """Validate that all visualization directories exist and are consistent"""
+        try:
+            # Re-initialize directories to ensure consistency
+            self._initialize_visualization_directories()
+
+            expected_dirs = [
+                "Visualizer",
+                "Visualizer/Tensor",
+                "Visualizer/Spherical",
+                "Visualizer/Standard",
+                "Visualizer/Adaptive",
+                "Visualizer/DBNN"
+            ]
+
+            missing_dirs = []
+            for directory in expected_dirs:
+                if not os.path.exists(directory):
+                    missing_dirs.append(directory)
+                    os.makedirs(directory, exist_ok=True)
+                    print(f"🔧 Created missing directory: {directory}")
+
+            if missing_dirs:
+                print(f"✅ Fixed {len(missing_dirs)} missing directories")
+            else:
+                print("✅ All visualization directories are properly set up")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Error validating visualization directories: {e}")
+            return False
 
     def generate_circular_tensor_evolution(self, output_file="circular_tensor_evolution_enhanced.html"):
         """Generate enhanced circular coordinate visualization with full width, rotation, and class controls"""
@@ -636,6 +778,10 @@ model learns to separate different classes over time.
                 return None
 
             print("🔄 Generating enhanced circular tensor evolution visualization...")
+
+            # Use consistent output path
+            output_path = model._get_viz_output_path("tensor", output_file)
+            print(f"📁 Saving circular tensor evolution to: {output_path}")
 
             # Create figure with FULL WIDTH layout
             fig = make_subplots(
@@ -1041,11 +1187,10 @@ model learns to separate different classes over time.
 
             fig.frames = frames
 
-            import os
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Enhanced circular tensor evolution visualization saved: {output_file}")
-            return output_file
+            # Save with consistent path
+            fig.write_html(output_path)
+            print(f"✅ Enhanced circular tensor evolution visualization saved: {output_path}")
+            return output_path
 
         except Exception as e:
             print(f"Error creating enhanced circular tensor evolution: {e}")
@@ -1275,6 +1420,10 @@ model learns to separate different classes over time.
                 return None
 
             print("🔄 Generating scalable polar tensor evolution visualization...")
+
+            # Use consistent output path
+            output_path = self._get_viz_output_path("tensor", output_file)
+            print(f"📁 Saving polar tensor evolution to: {output_path}")
 
             fig = go.Figure()
 
@@ -1634,16 +1783,15 @@ model learns to separate different classes over time.
 
             fig.frames = frames
 
-            import os
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
+            # Save with consistent path
+            fig.write_html(output_path)
 
-            print(f"✅ Scalable polar visualization saved: {output_file}")
+            print(f"✅ Scalable polar visualization saved: {output_path}")
             print(f"   Classes: {n_classes}, Iterations: {n_iterations}")
             print(f"   Visualization strategy: {'centroid-based' if n_classes > 20 else 'full-sampling'}")
             print(f"   Performance optimizations: {max_samples_per_class} samples/class")
 
-            return output_file
+            return output_path
 
         except Exception as e:
             print(f"Error creating scalable polar tensor evolution: {e}")
@@ -2973,35 +3121,54 @@ model learns to separate different classes over time.
         return self.create_training_dashboard(output_file)
 
     def generate_all_standard_visualizations(self, output_dir="Visualisations/Standard"):
-        """Generate all standard visualizations - FIXED METHOD NAME"""
+        """Generate all standard visualizations INCLUDING 5DCT spherical visualizations"""
         try:
             import os
             os.makedirs(output_dir, exist_ok=True)
 
             outputs = {}
 
-            # Generate each visualization
+            # ADD THIS: Generate 5DCT spherical visualizations if enabled
+            if hasattr(self, 'enable_5DCT_visualization') and self.enable_5DCT_visualization:
+                print("🌌 Generating 5DCT spherical visualizations...")
+                spherical_dir = "Visualisations/Spherical"
+                spherical_results = self.generate_all_spherical_visualizations(spherical_dir)
+                if spherical_results:
+                    outputs.update(spherical_results)
+                    print(f"✅ Generated {len(spherical_results)} 5DCT spherical visualizations")
+                else:
+                    print("❌ No spherical visualizations were generated")
+            else:
+                print("ℹ️  5DCT visualization disabled, skipping spherical visualizations")
+
+            # Generate standard visualizations
             viz_methods = [
                 ('performance', self.generate_performance_metrics),
                 ('correlation', self.generate_correlation_matrix),
                 ('feature_explorer', self.generate_basic_3d_visualization),
                 ('animated', self.generate_animated_training),
-                ('standard_dashboard', self.visualizer.create_training_dashboard)
+                ('standard_dashboard', self.create_training_dashboard)  # Fixed: removed .visualizer
             ]
 
             for name, method in viz_methods:
                 output_file = os.path.join(output_dir, f"{name}.html")
-                result = method(output_file)
-                if result:
-                    outputs[name] = result
-                    print(f"✅ Generated {name}: {result}")
-                else:
-                    print(f"❌ Failed to generate {name}")
+                try:
+                    result = method(output_file)
+                    if result:
+                        outputs[name] = result
+                        print(f"✅ Generated {name}: {os.path.basename(result)}")
+                    else:
+                        print(f"❌ Failed to generate {name}")
+                except Exception as e:
+                    print(f"❌ Error generating {name}: {e}")
 
+            print(f"🎨 Completed: {len(outputs)} total visualizations generated")
             return outputs
 
         except Exception as e:
             print(f"Error generating standard visualizations: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _add_enhanced_3d_snapshot(self, fig, snapshot):
@@ -3863,15 +4030,7 @@ model learns to separate different classes over time.
     # =========================================================================
 
     def create_training_dashboard(self, output_file="training_dashboard.html"):
-        """
-        Create a comprehensive training dashboard with multiple visualization types.
-
-        Args:
-            output_file (str): Path for output HTML file
-
-        Returns:
-            str or None: Path to generated file if successful, None otherwise
-        """
+        """Create training dashboard with proper key handling - PRESERVES ALL DATA"""
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
@@ -3887,80 +4046,155 @@ model learns to separate different classes over time.
                 subplot_titles=('Accuracy Progression', 'Feature Space',
                               'Weight Distribution', 'Training Summary'),
                 specs=[[{"type": "xy"}, {"type": "scatter3d"}],
-                       [{"type": "xy"}, {"type": "xy"}]]  # CHANGED from "domain" to "xy"
+                       [{"type": "xy"}, {"type": "xy"}]]
             )
 
-            # 1. Accuracy Progression (top-left)
-            rounds = [s['round'] for s in self.training_history]
-            accuracies = [s['accuracy'] for s in self.training_history]
+            # 1. Accuracy Progression (top-left) - FIXED: Handle all possible keys
+            rounds = []
+            accuracies = []
+
+            for snapshot in self.training_history:
+                # Try all possible iteration keys in order of preference
+                iteration = (snapshot.get('round') or
+                            snapshot.get('epoch') or
+                            snapshot.get('iteration') or
+                            0)
+                accuracy = snapshot.get('accuracy', 0)
+
+                rounds.append(iteration)
+                accuracies.append(accuracy)
 
             fig.add_trace(go.Scatter(
                 x=rounds, y=accuracies, mode='lines+markers',
-                name='Accuracy', line=dict(color='blue', width=2)
+                name='Accuracy', line=dict(color='blue', width=2),
+                hovertemplate='Iteration: %{x}<br>Accuracy: %{y:.2f}%<extra></extra>'
             ), row=1, col=1)
 
-            # 2. Feature Space (top-right) - use latest snapshot
+            # 2. Feature Space (top-right) - use latest snapshot with proper validation
             latest_snapshot = self.training_history[-1]
-            if (latest_snapshot['features'] is not None and
-                latest_snapshot['features'].shape[1] >= 3):
+            features = latest_snapshot.get('features')
+            targets = latest_snapshot.get('targets')
 
-                features = latest_snapshot['features']
-                targets = latest_snapshot['targets']
+            if (features is not None and
+                hasattr(features, 'shape') and
+                len(features.shape) >= 2 and
+                features.shape[1] >= 3 and
+                targets is not None and
+                len(targets) > 0):
 
                 # Use first 3 features for 3D plot
                 x, y, z = features[:, 0], features[:, 1], features[:, 2]
 
                 # Create color mapping
                 unique_classes = np.unique(targets)
+                colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
                 for i, cls in enumerate(unique_classes):
                     class_mask = targets == cls
-                    fig.add_trace(go.Scatter3d(
-                        x=x[class_mask], y=y[class_mask], z=z[class_mask],
-                        mode='markers', name=f'Class {int(cls)}',
-                        marker=dict(size=4, opacity=0.7)
-                    ), row=1, col=2)
+                    if np.any(class_mask):
+                        fig.add_trace(go.Scatter3d(
+                            x=x[class_mask], y=y[class_mask], z=z[class_mask],
+                            mode='markers',
+                            name=f'Class {int(cls)}',
+                            marker=dict(
+                                size=4,
+                                opacity=0.7,
+                                color=colors[i % len(colors)]
+                            ),
+                            hovertemplate=f'Class {int(cls)}<br>X: %{{x:.3f}}<br>Y: %{{y:.3f}}<br>Z: %{{z:.3f}}<extra></extra>'
+                        ), row=1, col=2)
+            else:
+                # Add placeholder if no 3D data available
+                fig.add_trace(go.Scatter3d(
+                    x=[0], y=[0], z=[0], mode='text',
+                    text=['3D feature data not available'],
+                    textposition='middle center',
+                    showlegend=False
+                ), row=1, col=2)
 
-            # 3. Weight Distribution (bottom-left)
-            if self.weight_evolution:
+            # 3. Weight Distribution (bottom-left) - use weight_evolution if available
+            if hasattr(self, 'weight_evolution') and self.weight_evolution:
                 latest_weights = self.weight_evolution[-1]
-                # Create sample weight distribution
-                weights = np.random.normal(latest_weights['mean'],
-                                         latest_weights['std'], 1000)
-                fig.add_trace(go.Histogram(
-                    x=weights, nbinsx=30, name='Weights',
-                    marker_color='lightgreen', opacity=0.7
-                ), row=2, col=1)
+                # Create sample weight distribution based on statistics
+                weights = np.random.normal(
+                    latest_weights.get('mean', 0),
+                    latest_weights.get('std', 1),
+                    1000
+                )
+                # Filter extremes for better visualization
+                weights = weights[(weights > -10) & (weights < 10)]
 
-            # 4. Training Summary (bottom-right)
+                fig.add_trace(go.Histogram(
+                    x=weights, nbinsx=30,
+                    name='Weight Distribution',
+                    marker_color='lightgreen',
+                    opacity=0.7,
+                    hovertemplate='Weight: %{x:.3f}<br>Count: %{y}<extra></extra>'
+                ), row=2, col=1)
+            else:
+                # Fallback: try to get weights from latest snapshot
+                latest_weights = latest_snapshot.get('weights')
+                if latest_weights is not None:
+                    try:
+                        flat_weights = latest_weights.flatten()
+                        flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
+                        if len(flat_weights) > 0:
+                            fig.add_trace(go.Histogram(
+                                x=flat_weights, nbinsx=30,
+                                name='Weight Distribution',
+                                marker_color='lightgreen',
+                                opacity=0.7
+                            ), row=2, col=1)
+                    except:
+                        pass
+
+            # 4. Training Summary (bottom-right) - enhanced with more metrics
             best_accuracy = max(accuracies) if accuracies else 0
             final_accuracy = accuracies[-1] if accuracies else 0
+            initial_accuracy = accuracies[0] if accuracies else 0
+            improvement = final_accuracy - initial_accuracy
+
+            # Calculate additional metrics
+            total_iterations = len(self.training_history)
+            feature_count = features.shape[1] if features is not None else 0
+            sample_count = len(features) if features is not None else 0
 
             summary_text = f"""
-            Training Summary:
-            • Total Rounds: {len(self.training_history)}
-            • Best Accuracy: {best_accuracy:.2f}%
-            • Final Accuracy: {final_accuracy:.2f}%
-            • Features: {latest_snapshot['features'].shape[1]}
-            • Samples: {len(latest_snapshot['features'])}
+            <b>Training Summary:</b><br>
+            • Iterations: {total_iterations}<br>
+            • Best Accuracy: {best_accuracy:.2f}%<br>
+            • Final Accuracy: {final_accuracy:.2f}%<br>
+            • Improvement: {improvement:+.2f}%<br>
+            • Features: {feature_count}<br>
+            • Samples: {sample_count}<br>
+            • Model: {latest_snapshot.get('model_type', 'N/A')}
             """
 
             fig.add_annotation(
                 text=summary_text,
                 xref="paper", yref="paper",
                 x=0.02, y=0.02,
-                xanchor="right", yanchor="bottom",
+                xanchor="left", yanchor="bottom",
                 showarrow=False,
-                bgcolor="white",
-                bordercolor="black",
-                borderwidth=1,
+                bgcolor="lightblue",
+                bordercolor="blue",
+                borderwidth=2,
                 font=dict(size=10)
             )
 
+            # Update layout
             fig.update_layout(
                 height=800,
                 title_text="DBNN Training Dashboard",
-                showlegend=True
+                showlegend=True,
+                template="plotly_white"
             )
+
+            # Update axis labels
+            fig.update_xaxes(title_text="Iteration", row=1, col=1)
+            fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1)
+            fig.update_xaxes(title_text="Weight Value", row=2, col=1)
+            fig.update_yaxes(title_text="Frequency", row=2, col=1)
 
             # Ensure output directory exists
             os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -4795,11 +5029,7 @@ model learns to separate different classes over time.
         """Generate correlation matrix - FIXED NAME"""
         return self.generate_correlation_matrix(output_file)
 
-    def generate_all_standard(self, output_dir="Visualisations/Standard"):
-        """Generate all standard visualizations - FIXED NAME"""
-        return self.generate_all_standard_visualizations(output_dir)
-
-    def generate_tensor_space_visualizations(self, output_dir="Visualisations/Tensor"):
+    def generate_tensor_space_visualizations(self, output_dir="Visualizer/Tensor"):
         """Generate all tensor space visualizations in one call"""
         try:
             import os
@@ -5539,7 +5769,7 @@ Watch as classes organize into distinct spherical regions as training progresses
             print(f"Error calculating spherical separation: {e}")
             return 0.0
 
-    def generate_all_spherical_visualizations(self, output_dir="Visualisations/Spherical"):
+    def generate_all_spherical_visualizations(self, output_dir="Visualizer/Spherical"):
         """Generate all spherical coordinate visualizations"""
         try:
             import os
@@ -5639,150 +5869,6 @@ class DatasetProcessor:
         return datasets
 
 
-class Colors:
-    """ANSI color codes for terminal output"""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    CYAN = '\033[96m'  # ADDED: Cyan color
-    MAGENTA = '\033[95m'  # ADDED: Magenta color
-    WHITE = '\033[97m'  # ADDED: White color
-    BLACK = '\033[90m'  # ADDED: Black color
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-
-    @staticmethod
-    def color_value(current_value, previous_value=None, higher_is_better=True):
-        """Color a value based on whether it improved or declined"""
-        if previous_value is None:
-            return f"{current_value:.4f}"
-
-        if higher_is_better:
-            if current_value > previous_value:
-                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
-            elif current_value < previous_value:
-                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
-        else:  # lower is better
-            if current_value < previous_value:
-                return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
-            elif current_value > previous_value:
-                return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
-
-        return f"{current_value:.4f}"  # No color if equal
-
-    @staticmethod
-    def highlight_dataset(name):
-        """Highlight dataset name in red"""
-        return f"{Colors.RED}{name}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_time(time_value):
-        """Color time values based on threshold"""
-        if time_value < 10:
-            return f"{Colors.GREEN}{time_value:.2f}{Colors.ENDC}"
-        elif time_value < 30:
-            return f"{Colors.YELLOW}{time_value:.2f}{Colors.ENDC}"
-        else:
-            return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_accuracy(accuracy):
-        """Color accuracy values based on threshold"""
-        if accuracy >= 0.9:
-            return f"{Colors.GREEN}{accuracy:.4f}{Colors.ENDC}"
-        elif accuracy >= 0.7:
-            return f"{Colors.YELLOW}{accuracy:.4f}{Colors.ENDC}"
-        else:
-            return f"{Colors.RED}{accuracy:.4f}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_feature(name):
-        """Highlight feature name in cyan"""
-        return f"{Colors.CYAN}{name}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_class(name):
-        """Highlight class name in magenta"""
-        return f"{Colors.MAGENTA}{name}{Colors.ENDC}"
-
-    @staticmethod
-    def highlight_round(round_num):
-        """Highlight round number in blue"""
-        return f"{Colors.BLUE}{round_num}{Colors.ENDC}"
-
-    @staticmethod
-    def print_success(message):
-        """Print success message in green"""
-        print(f"{Colors.GREEN}✅ {message}{Colors.ENDC}")
-
-    @staticmethod
-    def print_warning(message):
-        """Print warning message in yellow"""
-        print(f"{Colors.YELLOW}⚠️  {message}{Colors.ENDC}")
-
-    @staticmethod
-    def print_error(message):
-        """Print error message in red"""
-        print(f"{Colors.RED}❌ {message}{Colors.ENDC}")
-
-    @staticmethod
-    def print_info(message):
-        """Print info message in cyan"""
-        print(f"{Colors.CYAN}📊 {message}{Colors.ENDC}")
-
-    @staticmethod
-    def print_debug(message):
-        """Print debug message in magenta"""
-        print(f"{Colors.MAGENTA}🐛 {message}{Colors.ENDC}")
-
-    @staticmethod
-    def get_color(color_name, format='named'):
-        """
-        Get color in proper format for different libraries
-        format: 'named', 'hex', 'rgb', 'normalized'
-        """
-        color_map = {
-            'red': {
-                'named': 'red',
-                'hex': '#e41a1c',
-                'rgb': (228, 26, 28),
-                'normalized': (228/255, 26/255, 28/255)
-            },
-            'green': {
-                'named': 'green',
-                'hex': '#4daf4a',
-                'rgb': (77, 175, 74),
-                'normalized': (77/255, 175/255, 74/255)
-            },
-            'blue': {
-                'named': 'blue',
-                'hex': '#377eb8',
-                'rgb': (55, 126, 184),
-                'normalized': (55/255, 126/255, 184/255)
-            },
-            'yellow': {
-                'named': 'yellow',
-                'hex': '#ffff33',
-                'rgb': (255, 255, 51),
-                'normalized': (1.0, 1.0, 0.2)
-            },
-            'orange': {
-                'named': 'orange',
-                'hex': '#ffa500',
-                'rgb': (255, 165, 0),
-                'normalized': (1.0, 0.65, 0.0)
-            }
-        }
-
-        if color_name in color_map:
-            return color_map[color_name][format]
-        else:
-            # Fallback to matplotlib named colors
-            return color_name
-
 class DatasetConfig:
     """Enhanced dataset configuration handling with support for column names and URLs"""
 
@@ -5833,7 +5919,7 @@ class DatasetConfig:
 
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
-        """Enhanced configuration loading with interactive setup and comment removal"""
+        """Enhanced configuration loading with interactive setup, comment removal, and GLOBAL command line flag support"""
         if not dataset_name or not isinstance(dataset_name, str):
             print("\033[K" + "Error: Invalid dataset name provided.")
             return None
@@ -5842,6 +5928,13 @@ class DatasetConfig:
         csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         try:
+            # Use GLOBAL command line flags
+            force_visualization = COMMAND_LINE_FLAGS['visualize']
+            force_model_type = COMMAND_LINE_FLAGS['model_type']
+            force_fresh_start = COMMAND_LINE_FLAGS['fresh_start']
+            force_use_previous_model = COMMAND_LINE_FLAGS['use_previous_model']
+            force_5dct = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
+
             # Handle missing config file
             if not os.path.exists(config_path):
                 # Check for corresponding CSV file
@@ -5887,14 +5980,22 @@ class DatasetConfig:
                             break
                         print("\033[K" + f"Invalid column! Choose from: {', '.join(columns)}")
 
-                    # Create base configuration
+                    # Create base configuration WITH GLOBAL COMMAND LINE DEFAULTS
                     config = DatasetConfig.create_default_config(dataset_name)
                     config.update({
                         "file_path": csv_path,
                         "column_names": columns,
                         "target_column": target,
                         "has_header": has_header,
-                        "modelType": config.get("modelType", "Histogram")
+                        "modelType": force_model_type,  # Use command line default
+                        "training_params": {
+                            "enable_visualization": force_visualization,  # Use command line default
+                            "modelType": force_model_type  # Use command line default
+                        },
+                        "execution_flags": {
+                            "fresh_start": force_fresh_start,  # Use command line default
+                            "use_previous_model": force_use_previous_model  # Use command line default
+                        }
                     })
 
                     # Let user edit the config
@@ -5957,14 +6058,80 @@ class DatasetConfig:
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
 
-            # Ensure enable_visualization parameter exists in training_params
+            # APPLY GLOBAL COMMAND LINE OVERRIDES
+            applied_overrides = []
+
+            # Ensure training_params exists
             if 'training_params' not in validated_config:
                 validated_config['training_params'] = {}
 
-            # Set default enable_visualization if missing
-            if 'enable_visualization' not in validated_config['training_params']:
-                validated_config['training_params']['enable_visualization'] = DatasetConfig.DEFAULT_CONFIG['training_params']['enable_visualization']
-                print(f"\033[K[INFO] Added missing 'enable_visualization' parameter with default value: {validated_config['training_params']['enable_visualization']}")
+            training_params = validated_config['training_params']
+
+            # Visualization override
+            if force_visualization:
+                if training_params.get('enable_visualization') != True:
+                    training_params['enable_visualization'] = True
+                    applied_overrides.append('enable_visualization=True')
+
+            # Model type override
+            if force_visualization:
+                if 'training_params' not in validated_config:
+                    validated_config['training_params'] = {}
+                if validated_config.get('training_params', {}).get('enable_visualization') != True:
+                    validated_config['training_params']['enable_visualization'] = True
+                    applied_overrides.append('enable_visualization')
+
+            # ADD 5DCT override
+            if force_5dct:
+                if 'training_params' not in validated_config:
+                    validated_config['training_params'] = {}
+                if validated_config.get('training_params', {}).get('enable_5DCTvisualization') != True:
+                    validated_config['training_params']['enable_5DCTvisualization'] = True
+                    applied_overrides.append('enable_5DCTvisualization')
+
+            # Ensure execution_flags exists
+            if 'execution_flags' not in validated_config:
+                validated_config['execution_flags'] = {}
+
+            execution_flags = validated_config['execution_flags']
+
+            # Fresh start override
+            if force_fresh_start:
+                if execution_flags.get('fresh_start') != True:
+                    execution_flags['fresh_start'] = True
+                    execution_flags['use_previous_model'] = False
+                    applied_overrides.append('fresh_start=True')
+
+            # Use previous model override
+            if force_use_previous_model:
+                if execution_flags.get('use_previous_model') != True:
+                    execution_flags['use_previous_model'] = True
+                    execution_flags['fresh_start'] = False
+                    applied_overrides.append('use_previous_model=True')
+
+            # Show override summary (only once per dataset)
+            if applied_overrides and not hasattr(DatasetConfig.load_config, f'_overrides_shown_{dataset_name}'):
+                print(f"🎯 {Colors.GREEN}DATASET CONFIG OVERRIDES for {dataset_name} ({len(applied_overrides)}):{Colors.ENDC}")
+                for override in applied_overrides:
+                    print(f"   {Colors.CYAN}→ {override}{Colors.ENDC}")
+                setattr(DatasetConfig.load_config, f'_overrides_shown_{dataset_name}', True)
+
+            # Set defaults for missing parameters (respecting command line flags)
+            if 'enable_visualization' not in training_params:
+                training_params['enable_visualization'] = force_visualization
+                if not hasattr(DatasetConfig.load_config, f'_default_shown_{dataset_name}'):
+                    print(f"🔧 {Colors.YELLOW}Added missing 'enable_visualization' parameter with value: {force_visualization}{Colors.ENDC}")
+
+            if 'enable_5DCTvisualization' not in training_params:  # 5DCT
+                    training_params['enable_5DCTvisualization'] = force_5dct
+            if 'modelType' not in training_params:
+                training_params['modelType'] = force_model_type
+
+            if 'fresh_start' not in execution_flags:
+                execution_flags['fresh_start'] = force_fresh_start
+
+            if 'use_previous_model' not in execution_flags:
+                execution_flags['use_previous_model'] = force_use_previous_model
 
             # Path handling
             if validated_config.get('file_path'):
@@ -6029,6 +6196,7 @@ class DatasetConfig:
                         print(f"\033[K{Colors.GREEN}Updated target column to '{new_target}' in configuration.{Colors.ENDC}")
                         break
                     print(f"\033[K{Colors.RED}Invalid column! Choose from: {', '.join(validated_config['column_names'])}{Colors.ENDC}")
+
             if isinstance(target_col, (int, float)):
                 # Convert numeric indices to column name
                 validated_config['target_column'] = str(validated_config['column_names'][target_col])
@@ -6037,6 +6205,11 @@ class DatasetConfig:
             else:
                 raise ValueError(f"Invalid target column type: {type(target_col)}")
 
+            # Final confirmation of visualization state
+            final_viz = validated_config.get('training_params', {}).get('enable_visualization', False)
+            if force_visualization and final_viz and not hasattr(DatasetConfig.load_config, f'_final_shown_{dataset_name}'):
+                print(f"✅ {Colors.GREEN}DATASET CONFIG FINAL: Visualization ENABLED for {dataset_name}{Colors.ENDC}")
+                setattr(DatasetConfig.load_config, f'_final_shown_{dataset_name}', True)
 
             return validated_config
 
@@ -7144,6 +7317,15 @@ class DBNN(GPUDBNN):
         self.patience = trials
         self.adaptive_patience = training_params.get('adaptive_patience', 25)
 
+        # Pass self reference to visualizer
+        self.visualizer = DBNNVisualizer()
+        self.visualizer.dbnn_instance = self  # Pass reference
+
+        # USE GLOBAL FLAGS AS DEFAULTS
+        if enable_visualization is False:
+            enable_visualization = COMMAND_LINE_FLAGS['visualize']
+        if enable_5DCTvisualization is False:
+            enable_5DCTvisualization = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
 
         # Initialize the functionality
         add_geometric_visualization_to_adbnn()
@@ -7176,10 +7358,18 @@ class DBNN(GPUDBNN):
             self.adaptive_snapshots = []
 
     def _initialize_visualization_directories(self):
-        """Initialize visualization directory structure for DBNN"""
+        """Initialize visualization directory structure for DBNN with consistent paths"""
+        print(f"🔍 DEBUG: _initialize_visualization_directories called")
+        print(f"🔍 DEBUG: self.enable_visualization = {getattr(self, 'enable_visualization', 'NOT SET')}")
+
         if not self.enable_visualization:
+            print("❌ DEBUG: Visualization disabled, skipping directory creation")
             return
-        self.viz_output_dir = "Visualisations"
+
+        print("✅ DEBUG: Visualization enabled, creating directories...")
+
+        # Use consistent directory name (British spelling as shown in logs)
+        self.viz_output_dir = "Visualizer"
         self.tensor_viz_dir = os.path.join(self.viz_output_dir, "Tensor")
         self.spherical_viz_dir = os.path.join(self.viz_output_dir, "Spherical")
         self.standard_viz_dir = os.path.join(self.viz_output_dir, "Standard")
@@ -7187,10 +7377,48 @@ class DBNN(GPUDBNN):
         self.dbnn_viz_dir = os.path.join(self.viz_output_dir, "DBNN")
 
         # Create directories
-        for dir_path in [self.viz_output_dir, self.tensor_viz_dir,
-                        self.spherical_viz_dir, self.standard_viz_dir,
-                        self.adaptive_viz_dir, self.dbnn_viz_dir]:
-            os.makedirs(dir_path, exist_ok=True)
+        directories = [
+            self.viz_output_dir, self.tensor_viz_dir, self.spherical_viz_dir,
+            self.standard_viz_dir, self.adaptive_viz_dir, self.dbnn_viz_dir
+        ]
+
+        for directory in directories:
+            os.makedirs(directory, exist_ok=True)
+            print(f"📁 Created/Verified: {directory}")
+
+        print("✅ DEBUG: All visualization directories created successfully")
+
+        # Store directory mapping for consistent path generation
+        self.viz_directories = {
+            'tensor': self.tensor_viz_dir,
+            'spherical': self.spherical_viz_dir,
+            'standard': self.standard_viz_dir,
+            'adaptive': self.adaptive_viz_dir,
+            'dbnn': self.dbnn_viz_dir,
+            'base': self.viz_output_dir
+        }
+
+    def _get_viz_output_path(self, subdir, filename):
+        """Get consistent output path for visualizations"""
+        try:
+            if subdir in self.viz_directories:
+                base_dir = self.viz_directories[subdir]
+            else:
+                base_dir = self.viz_directories['base']
+
+            output_path = os.path.join(base_dir, filename)
+            print(f"Output Path for the file is set to: {output_path}")
+
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            return output_path
+
+        except Exception as e:
+            print(f"❌ Error getting visualization path: {e}")
+            # Fallback to current directory
+            return filename
+
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -8127,6 +8355,41 @@ class DBNN(GPUDBNN):
 
         return ", ".join(dist)
 
+    def return_call_4afp(self,start_time,train_indices, test_indices,training_history,round_stats):
+            # Record the end time
+            start_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+            end_time = time.time()
+            end_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
+            elapsed_time = end_time - start_time
+
+            # Print the timing information
+            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Adaptive training started at: {start_clock}{Colors.ENDC}")
+            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Adaptive training ended at: {end_clock}{Colors.ENDC}")
+            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Total adaptive training time: {elapsed_time:.2f} seconds{Colors.ENDC}")
+
+            # GENERATE UNIFIED VISUALIZATIONS AFTER TRAINING - ALL SYSTEMS
+            if self.enable_visualization:
+                print(f"==============Visualisation Enabled=================")
+                self._generate_unified_visualizations()
+                self.visualizer.generate_all_standard_visualizations()
+
+            else:
+                print(f"------------------------------------------------Enable visualisation is {self.enable_visualization}")
+            # Generate final visualizations (legacy compatibility)
+            if hasattr(self, 'visualizer') and training_history:
+                print("🎨 Generating comprehensive visualizations...")
+                # Legacy visualization call for backward compatibility
+                if hasattr(self, 'create_comprehensive_visualizations'):
+                    self.create_comprehensive_visualizations(
+                        self, self.X_tensor.cpu().numpy(), self.y_tensor.cpu().numpy(),
+                        training_history, round_stats, self.feature_columns
+                    )
+                if hasattr(self, 'create_geometric_visualization'):
+                    self.create_geometric_visualization(training_history, round_stats)
+
+            self.in_adaptive_fit = False
+            return {'train_indices': train_indices, 'test_indices': test_indices}
+
     def adaptive_fit_predict(self, max_rounds: int = 10,
                             improvement_threshold: float = 0.0001,
                             load_epoch: int = None,
@@ -8420,6 +8683,7 @@ class DBNN(GPUDBNN):
                         if not new_train_indices:
                             print("\033[K" +"Achieved 100% accuracy on all data. Training complete.                                           ")
                             self.in_adaptive_fit = False
+                            self.return_call_4afp(start_time,train_indices, test_indices,training_history,round_stats)
                             return {'train_indices': [], 'test_indices': []}
 
                     else:
@@ -8461,35 +8725,8 @@ class DBNN(GPUDBNN):
                             self.feature_pairs = self.best_round_initial_conditions['feature_pairs']
                             self.bin_edges = self.best_round_initial_conditions['bin_edges']
                             self.gaussian_params = self.best_round_initial_conditions['gaussian_params']
+            self.return_call_4afp(start_time,train_indices, test_indices,training_history,round_stats)
 
-            # Record the end time
-            end_time = time.time()
-            end_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
-            elapsed_time = end_time - start_time
-
-            # Print the timing information
-            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Adaptive training started at: {start_clock}{Colors.ENDC}")
-            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Adaptive training ended at: {end_clock}{Colors.ENDC}")
-            print("\033[K" +f"{Colors.BOLD}{Colors.BLUE}Total adaptive training time: {elapsed_time:.2f} seconds{Colors.ENDC}")
-
-            # GENERATE UNIFIED VISUALIZATIONS AFTER TRAINING - ALL SYSTEMS
-            if self.enable_visualization:
-                self._generate_unified_visualizations()
-
-            # Generate final visualizations (legacy compatibility)
-            if hasattr(self, 'visualizer') and training_history:
-                print("🎨 Generating comprehensive visualizations...")
-                # Legacy visualization call for backward compatibility
-                if hasattr(self, 'create_comprehensive_visualizations'):
-                    self.create_comprehensive_visualizations(
-                        self, self.X_tensor.cpu().numpy(), self.y_tensor.cpu().numpy(),
-                        training_history, round_stats, self.feature_columns
-                    )
-                if hasattr(self, 'create_geometric_visualization'):
-                    self.create_geometric_visualization(training_history, round_stats)
-
-            self.in_adaptive_fit = False
-            return {'train_indices': train_indices, 'test_indices': test_indices}
 
         except Exception as e:
             DEBUG.log(f" Error in adaptive_fit_predict: {str(e)}")
@@ -8610,13 +8847,13 @@ class DBNN(GPUDBNN):
             )
 
             # CAPTURE FOR 5DCT VISUALIZER
-            if hasattr(self, 'visualizer5DCT') and hasattr(self.visualizer5DCT, 'capture_training_snapshot'):
+            if self.enable_5DCTvisualization:
                 self.visualizer5DCT.capture_training_snapshot(
                     features=X_combined,
                     targets=y_combined,
-                    predictions=predictions_combined,
-                    accuracy=(train_accuracy + test_accuracy) / 2,
-                    iteration=round_num
+                    train_accuracy=train_accuracy,
+                    test_accuracy= test_accuracy,
+                    epoch=round_num
                 )
 
             # Store adaptive round metadata
@@ -8640,6 +8877,8 @@ class DBNN(GPUDBNN):
     def _generate_unified_visualizations(self):
         """Generate comprehensive visualizations for ALL systems"""
         if not self.enable_visualization:
+
+
             return
 
         print(f"{Colors.CYAN}[DBNN-VISUAL] 🎨 Generating UNIFIED visualizations for ALL systems...{Colors.ENDC}")
@@ -10758,7 +10997,7 @@ class DBNN(GPUDBNN):
 
                     # Capture snapshot every 5 epochs to avoid too much data
                     if epoch % 5 == 0 or epoch == self.max_epochs - 1:
-                        self.visualizer.capture_epoch_snapshot(epoch, overall_accuracy)
+                        self.visualizer.capture_epoch_snapshot(epoch_num=epoch, accuracy=overall_accuracy,weights=train_weights,predictions=all_pred,features=X_all,targets=y_all)
                 except Exception as e:
                     print(f"\033[KVisualization capture skipped: {str(e)}")
 
@@ -12462,7 +12701,7 @@ class DBNN(GPUDBNN):
 class DBNN_5DCT_Visualizer:
     """Interactive 3D visualization for 5D Complex Tensor orthogonization"""
 
-    def __init__(self, dbnn_model, output_dir="5dct_visualizations"):
+    def __init__(self, dbnn_model, output_dir="Visualizer"):
         self.dbnn = dbnn_model
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -12503,7 +12742,7 @@ class DBNN_5DCT_Visualizer:
         """Disable visualization"""
         self.is_enabled = False
 
-    def capture_training_snapshot(self, epoch, train_accuracy, test_accuracy, features=None, labels=None):
+    def capture_training_snapshot(self, epoch, train_accuracy, test_accuracy, features=None, targets=None):
         """Capture training snapshot at specific epoch"""
         if not self.is_enabled:
             return
@@ -12520,11 +12759,11 @@ class DBNN_5DCT_Visualizer:
             # Store features and labels if provided
             if features is not None:
                 snapshot['features'] = features.cpu().numpy() if hasattr(features, 'cpu') else features
-            if labels is not None:
-                snapshot['labels'] = labels.cpu().numpy() if hasattr(labels, 'cpu') else labels
+            if targets is not None:
+                snapshot['labels'] = targets.cpu().numpy() if hasattr(targets, 'cpu') else targets
 
             # Compute projections if we have data
-            if features is not None and labels is not None:
+            if features is not None and targets is not None:
                 self._compute_lightweight_projections(snapshot)
 
             self.epoch_snapshots.append(snapshot)
@@ -12882,7 +13121,7 @@ def add_visualization_integration():
             # Extract visualization parameters before calling original init
             enable_visualization = kwargs.pop('enable_visualization', False)
             visualization_frequency = kwargs.pop('visualization_frequency', 1)
-            enable_5DCTvisualization = kwargs.pop('enable_5DCTvisualization', False)
+            enable_5DCTvisualization = kwargs.pop('enable_visualization', False)
 
             # Call original initialization first (this will set up the 5DCT visualizer)
             original_init(self, *args, **kwargs)
@@ -12906,7 +13145,7 @@ def add_visualization_integration():
                 print(f"{Colors.CYAN}[DBNN-VISUAL] Snapshot frequency: every {visualization_frequency} round(s){Colors.ENDC}")
 
                 # Also enable 5DCT visualization if requested
-                if enable_5DCTvisualization and hasattr(self, 'visualizer5DCT'):
+                if enable_5DCTvisualization :
                     self.enable_5DCTvisualization = True
                     print(f"{Colors.CYAN}[DBNN-VISUAL] 5DCT visualization also enabled{Colors.ENDC}")
             else:
@@ -12915,29 +13154,39 @@ def add_visualization_integration():
                 self.adaptive_round_data = []
                 self.adaptive_snapshots = []
 
-                # Disable 5DCT visualization unless explicitly enabled
-                if hasattr(self, 'enable_5DCTvisualization'):
-                    self.enable_5DCTvisualization = enable_5DCTvisualization
 
         return wrapper
 
     def enable_visualization(self):
         """Enable visualization - must be called explicitly"""
-        if hasattr(self, 'visualizer'):
-            self.enable_5DCTvisualization = True
-            self.visualizer5DCT.enable()
-            print("🎨 5DCT Visualization enabled")
+        print("🔧 enable_visualization() called - checking state...")
 
-    def disable_visualization(self):
-        """Disable visualization"""
-        if hasattr(self, 'visualizer'):
-            self.enable_5DCTvisualization = False
-            self.visualizer5DCT.disable()
+        # CRITICAL FIX: Check for visualizer5DCT, not visualizer
+        if self.visualizer5DCT:
+            self.enable_5DCTvisualization = True
+            self.enable_visualization = True
+            print("✅ 5DCT Visualization enabled - visualizer5DCT found and ready")
+
+            # Debug: Show current state
+            snapshots = len(getattr(self.visualizer5DCT, 'feature_space_snapshots', []))
+            print(f"📁 Current 5DCT snapshots: {snapshots}")
+
+        elif hasattr(self, 'visualizer') and self.visualizer is not None:
+            # Fallback: at least we have the main visualizer
+            self.enable_visualization = True
+            print("⚠️  Main visualization enabled, but 5DCT visualizer not available")
+
+        else:
+            print("❌ No visualizers available! Need to initialize first.")
+            # Auto-initialize if flags are set
+            if COMMAND_LINE_FLAGS.get('enable_5DCTvisualization', False):
+                self._initialize_5dct_visualizer()
+                print("🔄 Auto-initialized 5DCT visualizer")
 
     def capture_training_snapshot(self, epoch, train_accuracy, test_accuracy, features=None, labels=None):
         """Capture training snapshot"""
-        if (hasattr(self, 'enable_visualization') and self.enable_5DCTvisualization and
-            hasattr(self, 'visualizer')):
+        if self.enable_5DCTvisualization:
+            print("=========================Capturing 5DCT Snaps==================")
             self.visualizer5DCT.capture_training_snapshot(epoch, train_accuracy, test_accuracy, features, labels)
 
     def create_visualization(self):
@@ -12961,8 +13210,7 @@ def add_visualization_integration():
     # Apply enhancements to DBNN class
     DBNN.__init__ = enhanced_init(DBNN.__init__)
     DBNN.enable_5DCTvisualization = enable_visualization
-    DBNN.disable_5DCTvisualization = disable_visualization
-    DBNN.capture_training_snapshot = capture_training_snapshot
+    DBNN.capture_training_snapshot =enable_visualization
     DBNN.create_visualization = create_visualization
 
 # Apply integration (this should be at the VERY END of the file)
@@ -14184,13 +14432,17 @@ def load_or_create_config(config_path: str) -> dict:
     """
     Load the configuration file if it exists, or create a default one if it doesn't.
     Update global variables based on the configuration file.
-
-    Args:
-        config_path: Path to the configuration file.
-
-    Returns:
-        Dictionary containing the configuration.
+    RESPECTS ALL GLOBAL COMMAND LINE FLAGS.
     """
+    # Use GLOBAL command line flags
+    command_line_visualize = COMMAND_LINE_FLAGS['visualize']
+    command_line_model_type = COMMAND_LINE_FLAGS['model_type']
+    command_line_fresh_start = COMMAND_LINE_FLAGS['fresh_start']
+    command_line_use_previous_model = COMMAND_LINE_FLAGS['use_previous_model']
+    command_line_5dct = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
+    command_line_mode = COMMAND_LINE_FLAGS['mode']
+    command_line_interactive = COMMAND_LINE_FLAGS['interactive']
+
     default_config = {
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "trials": 100,
@@ -14208,9 +14460,9 @@ def load_or_create_config(config_path: str) -> dict:
         "nokbd": False,
         "display": None,
         "training_params": {
-            "batch_size": None,  # Batch size will be dynamically calculated if not provided
-            "patience": 100,  # Default epochs to wait
-            "adaptive_patience": 25,  # Patience during adaptive training
+            "batch_size": None,
+            "patience": 100,
+            "adaptive_patience": 25,
             "n_bins_per_dim": 128,
             "minimum_training_accuracy": 0.95,
             "invert_DBNN": True,
@@ -14223,78 +14475,289 @@ def load_or_create_config(config_path: str) -> dict:
             "vectorization_warning_acknowledged": False,
             "compute_device": "auto",
             "use_interactive_kbd": False,
-            "modelType": "Histogram",
+            "modelType": command_line_model_type,
             "class_preference": True,
-             "enable_visualization": False
+            "enable_visualization": command_line_visualize,
+            "enable_5DCTvisualization": command_line_5dct,
+            "enable_adaptive_learning": True,
+            "adaptive_rounds": 100,
+            "initial_samples": 50,
+            "max_samples_per_round": 500
         },
         "active_learning": {
             "tolerance": 1.0,
-            "update_condition": "bin_overlap",  # or "probability_threshold"
-             "similarity_threshold": 0.25,  # Bins with >25% probability in predicted class are considered similar
+            "similarity_threshold": 0.25,
             "cardinality_threshold_percentile": 95,
-            "strong_margin_threshold": 0.01,           # Consider only a margin of 1% of the max for divergence computation and sample selection.
-            "marginal_margin_threshold": 0.01,
-            "min_divergence": 0.1
+            "update_condition": "bin_overlap",
+            "min_divergence": 0.1,
+            "max_class_addition_percent": 99
         },
         "anomaly_detection": {
-            "initial_weight": 1e-6,        # Near-zero initial weight
-            "threshold": 0.01,             # Posterior threshold for flagging anomalies
-            "missing_value": -99999,       # Special value indicating missing features
-            "missing_weight_multiplier": 0.1  # Additional penalty for missing values
+            "initial_weight": 1e-6,
+            "weight_update_rate": 0.1,
+            "max_weight": 10.0,
+            "min_weight": 1e-8
+        },
+        "likelihood_config": {
+            "feature_group_size": 2,
+            "max_combinations": 90000000,
+            "bin_sizes": [128],
+            "n_bins_per_dim": 128
         },
         "execution_flags": {
-            "train": True,
-            "train_only": False,
-            "predict": True,
-            "fresh_start": False,
-            "use_previous_model": True,
-            "gen_samples": False
+            "fresh_start": command_line_fresh_start,
+            "use_previous_model": command_line_use_previous_model,
+            "mode": command_line_mode,
+            "interactive": command_line_interactive
         }
     }
 
     if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        #print(f"Loaded configuration from {config_path}")
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_text = f.read()
+
+            # Remove comments from JSON
+            def remove_comments(json_str):
+                lines = []
+                in_multiline_comment = False
+                for line in json_str.split('\n'):
+                    if '_comment' in line:
+                        continue
+                    if '/*' in line and '*/' in line:
+                        line = line[:line.find('/*')] + line[line.find('*/') + 2:]
+                    elif '/*' in line:
+                        in_multiline_comment = True
+                        line = line[:line.find('/*')]
+                    elif '*/' in line:
+                        in_multiline_comment = False
+                        line = line[line.find('*/') + 2:]
+                    elif in_multiline_comment:
+                        continue
+                    if '//' in line and not ('http://' in line or 'https://' in line):
+                        line = line.split('//')[0]
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith('_comment'):
+                        lines.append(stripped)
+                return '\n'.join(lines)
+
+            clean_config = remove_comments(config_text)
+            config = json.loads(clean_config)
+
+        except Exception as e:
+            print(f"❌ {Colors.RED}Error loading config file {config_path}: {e}{Colors.ENDC}")
+            print(f"🔧 {Colors.YELLOW}Creating new config with defaults...{Colors.ENDC}")
+            config = default_config
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+
+        # APPLY GLOBAL COMMAND LINE OVERRIDES
+        applied_overrides = []
+
+        # Ensure training_params exists
+        if 'training_params' not in config:
+            config['training_params'] = {}
+
+        training_params = config['training_params']
+
+        # Visualization override
+        if command_line_visualize:
+            if training_params.get('enable_visualization') != True:
+                training_params['enable_visualization'] = True
+                applied_overrides.append('enable_visualization=True')
+
+        # 5DCT Visualization override
+        if command_line_5dct:
+            if training_params.get('enable_5DCTvisualization') != True:
+                training_params['enable_5DCTvisualization'] = True
+                applied_overrides.append('enable_5DCTvisualization=True')
+
+        # Model type override
+        if command_line_model_type != 'Histogram':
+            if training_params.get('modelType') != command_line_model_type:
+                training_params['modelType'] = command_line_model_type
+                applied_overrides.append(f'modelType={command_line_model_type}')
+
+        # Ensure execution_flags exists
+        if 'execution_flags' not in config:
+            config['execution_flags'] = {}
+
+        execution_flags = config['execution_flags']
+
+        # Fresh start override
+        if command_line_fresh_start:
+            if execution_flags.get('fresh_start') != True:
+                execution_flags['fresh_start'] = True
+                execution_flags['use_previous_model'] = False
+                applied_overrides.append('fresh_start=True')
+
+        # Use previous model override
+        if command_line_use_previous_model:
+            if execution_flags.get('use_previous_model') != True:
+                execution_flags['use_previous_model'] = True
+                execution_flags['fresh_start'] = False
+                applied_overrides.append('use_previous_model=True')
+
+        # Mode override
+        if command_line_mode != 'train_predict':
+            if execution_flags.get('mode') != command_line_mode:
+                execution_flags['mode'] = command_line_mode
+                applied_overrides.append(f'mode={command_line_mode}')
+
+        # Interactive override
+        if command_line_interactive:
+            if execution_flags.get('interactive') != True:
+                execution_flags['interactive'] = True
+                applied_overrides.append('interactive=True')
+
+        # Show override summary (only once)
+        if applied_overrides and not hasattr(load_or_create_config, '_overrides_shown'):
+            print(f"🎯 {Colors.GREEN}CONFIG OVERRIDES APPLIED ({len(applied_overrides)}):{Colors.ENDC}")
+            for override in applied_overrides:
+                print(f"   {Colors.CYAN}→ {override}{Colors.ENDC}")
+            load_or_create_config._overrides_shown = True
+
+        # Set defaults for missing parameters (respecting command line flags)
+        if 'enable_visualization' not in training_params:
+            training_params['enable_visualization'] = command_line_visualize
+            if not hasattr(load_or_create_config, '_default_shown'):
+                print(f"🔧 {Colors.YELLOW}Added missing 'enable_visualization' parameter with value: {command_line_visualize}{Colors.ENDC}")
+
+        if 'enable_5DCTvisualization' not in training_params:
+            training_params['enable_5DCTvisualization'] = command_line_5dct
+
+        if 'modelType' not in training_params:
+            training_params['modelType'] = command_line_model_type
+
+        if 'fresh_start' not in execution_flags:
+            execution_flags['fresh_start'] = command_line_fresh_start
+
+        if 'use_previous_model' not in execution_flags:
+            execution_flags['use_previous_model'] = command_line_use_previous_model
+
+        if 'mode' not in execution_flags:
+            execution_flags['mode'] = command_line_mode
+
+        if 'interactive' not in execution_flags:
+            execution_flags['interactive'] = command_line_interactive
+
+        # Ensure other required sections exist
+        if 'active_learning' not in config:
+            config['active_learning'] = default_config['active_learning']
+
+        if 'anomaly_detection' not in config:
+            config['anomaly_detection'] = default_config['anomaly_detection']
+
+        if 'likelihood_config' not in config:
+            config['likelihood_config'] = default_config['likelihood_config']
+
     else:
         config = default_config
-        with open(config_path, 'w') as f:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(config_path) if os.path.dirname(config_path) else '.', exist_ok=True)
+        with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4)
-        print(f"Created default configuration file at {config_path}")
-        print(config)
-        input("Press Enter Key")
+        print(f"📝 {Colors.GREEN}Created default configuration file at {config_path}{Colors.ENDC}")
+
+        # Show which command line flags were used in default creation
+        used_flags = []
+        if command_line_visualize:
+            used_flags.append('visualize')
+        if command_line_5dct:
+            used_flags.append('5DCT')
+        if command_line_model_type != 'Histogram':
+            used_flags.append(f'model_type={command_line_model_type}')
+        if command_line_fresh_start:
+            used_flags.append('fresh_start')
+        if command_line_use_previous_model:
+            used_flags.append('use_previous_model')
+        if command_line_mode != 'train_predict':
+            used_flags.append(f'mode={command_line_mode}')
+        if command_line_interactive:
+            used_flags.append('interactive')
+
+        if used_flags:
+            print(f"🔧 {Colors.CYAN}Default config created with: {', '.join(used_flags)}{Colors.ENDC}")
+
+    # Update global variables
+    global predict_mode, Train_device, bin_sizes, n_bins_per_dim, Trials, cardinality_threshold
+    global cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction
+    global Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+
+    try:
+        Train_device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+        Trials = config.get("trials", 100)
+        cardinality_threshold = config.get("cardinality_threshold", 0.9)
+        cardinality_tolerance = config.get("cardinality_tolerance", 8)
+        bin_sizes = config.get("bin_sizes", 128)
+        n_bins_per_dim = config.get("n_bins_per_dim", 128)
+        LearningRate = config.get("learning_rate", 0.1)
+        TrainingRandomSeed = config.get("random_seed", 42)
+        Epochs = config.get("epochs", 1000)
+        TestFraction = config.get("test_fraction", 0.2)
+        Train = config.get("train", True)
+        Train_only = config.get("train_only", False)
+        Predict = config.get("predict", True)
+        Gen_Samples = config.get("gen_samples", False)
+        EnableAdaptive = config.get("enable_adaptive", True)
+        nokbd = config.get("nokbd", False)
+        display = config.get("display", None)
+
+        # Set predict_mode based on execution flags
+        execution_flags = config.get('execution_flags', {})
+        predict_mode = execution_flags.get('mode', 'train_predict') == 'predict'
+
+        # Dynamically calculate batch size if not provided
+        if "training_params" in config:
+            training_params = config["training_params"]
+            if "batch_size" not in training_params or training_params["batch_size"] is None:
+                sample_tensor_size = 4 * 1024 * 1024  # 4MB sample tensor
+                training_params["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
+                print(f"🔧 {Colors.CYAN}Auto-calculated batch_size: {training_params['batch_size']}{Colors.ENDC}")
+
+        # Final validation
+        required_sections = ['training_params', 'active_learning', 'anomaly_detection', 'likelihood_config', 'execution_flags']
+        for section in required_sections:
+            if section not in config:
+                config[section] = default_config.get(section, {})
+                print(f"🔧 {Colors.YELLOW}Added missing section: {section}{Colors.ENDC}")
+
+        return config
+
+    except Exception as e:
+        print(f"❌ {Colors.RED}Error updating global variables from config: {e}{Colors.ENDC}")
+        return default_config
 
 
-    # Update global variables based on the configuration file
-    global predict_mode, Train_device, bin_sizes,n_bins_per_dim,Trials, cardinality_threshold, cardinality_tolerance, LearningRate, TrainingRandomSeed, Epochs, TestFraction, Train, Train_only, Predict, Gen_Samples, EnableAdaptive, nokbd, display
+def _calculate_optimal_batch_size(sample_tensor_size: int) -> int:
+    """
+    Calculate optimal batch size based on available GPU memory or system RAM.
 
-    # Update Train_device based on the compute_device setting in the configuration file
-    Train_device = config.get("compute_device", "cuda" if torch.cuda.is_available() else "cpu")
-    Trials = config.get("trials", 100)
-    cardinality_threshold = config.get("cardinality_threshold", 0.9)
-    cardinality_tolerance = config.get("cardinality_tolerance", 8)
-    bin_sizes = config.get("bin_sizes", 128)
-    n_bins_per_dim = config.get("n_bins_per_dim", 128)
-    LearningRate = config.get("learning_rate", 0.1)
-    TrainingRandomSeed = config.get("random_seed", 42)
-    Epochs = config.get("epochs", 1000)
-    TestFraction = config.get("test_fraction", 0.2)
-    Train = config.get("train", True)
-    Train_only = config.get("train_only", False)
-    Predict = config.get("predict", True)
-    Gen_Samples = config.get("gen_samples", False)
-    EnableAdaptive = config.get("enable_adaptive", True)
-    nokbd = config.get("nokbd", False)
-    display = config.get("display", None)
+    Args:
+        sample_tensor_size: Size of a single sample tensor in bytes
 
-    # Dynamically calculate batch size if not provided in the training_params section
-    if "training_params" in config:
-        if "batch_size" not in config["training_params"] or config["training_params"]["batch_size"] is None:
-            # Calculate optimal batch size dynamically
-            sample_tensor_size = 4 * 1024 * 1024  # Example: 4MB per sample (adjust based on your dataset)
-            config["training_params"]["batch_size"] = _calculate_optimal_batch_size(sample_tensor_size)
+    Returns:
+        Optimal batch size
+    """
+    try:
+        if torch.cuda.is_available():
+            # GPU-based calculation
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory
+            available_memory = gpu_memory * 0.7  # Use 70% of available memory
+            batch_size = max(1, int(available_memory / sample_tensor_size))
+            batch_size = min(batch_size, 1024)  # Cap at 1024
+        else:
+            # CPU-based calculation
+            import psutil
+            available_memory = psutil.virtual_memory().available * 0.5  # Use 50% of available RAM
+            batch_size = max(1, int(available_memory / sample_tensor_size))
+            batch_size = min(batch_size, 512)  # Cap at 512 for CPU
 
-    return config
+        return batch_size
+
+    except Exception as e:
+        print(f"⚠️ {Colors.YELLOW}Error calculating optimal batch size, using default: {e}{Colors.ENDC}")
+        return 128  # Safe default
 
 def find_dataset_pairs(data_dir: str = 'data') -> List[Tuple[str, str, str]]:
     """
@@ -14524,6 +14987,8 @@ def main():
                         default='Histogram', help='🧠 Model architecture type')
     parser.add_argument('--visualize', action='store_true', help="📊 Generate unified training visualization")
     parser.add_argument('--list_datasets', action='store_true', help="📋 List available datasets")
+    parser.add_argument('--fresh_start', action='store_true', help="🔄 Start training from scratch (ignore previous models)")
+    parser.add_argument('--use_previous_model', action='store_true', help="💾 Use previously trained model if available")
     args = parser.parse_args()
 
     processor = DatasetProcessor()
@@ -14632,21 +15097,48 @@ def main():
         else:
             print(f"❌ {Colors.RED}Invalid selection.{Colors.ENDC}")
 
-    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None, model_type="Histogram", generate_visualization=False):
-        """Process a single dataset with given mode"""
+    def process_single_dataset(dataset_name, conf_path, csv_path, mode=None, model_type=None, generate_visualization=None):
+        """Process a single dataset with given mode - uses GLOBAL command line flags as defaults"""
         try:
-            # Load config
+            # USE GLOBAL COMMAND LINE FLAGS AS DEFAULTS
+            if mode is None:
+                mode = COMMAND_LINE_FLAGS['mode']
+            if model_type is None:
+                model_type = COMMAND_LINE_FLAGS['model_type']
+            if generate_visualization is None:
+                generate_visualization = COMMAND_LINE_FLAGS['visualize']
+
+            enable_5dct = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
+            # Load config WITH GLOBAL COMMAND LINE OVERRIDE SUPPORT
+            # (config loading now automatically respects global flags via load_or_create_config)
             config = load_or_create_config(conf_path)
 
-            # Force enable visualization in config if requested
-            if generate_visualization:
-                if 'training_params' not in config:
-                    config['training_params'] = {}
-                config['training_params']['enable_visualization'] = True
-                config['training_params']['save_plots'] = True
-                print(f"📊 {Colors.GREEN}Visualization ENABLED in configuration{Colors.ENDC}")
+            # REMOVED: Redundant config modification - now handled in load_or_create_config
+            # The config loading function now automatically applies command line overrides
 
-            # Determine mode if not provided
+            # Show command line flag summary
+            if not hasattr(process_single_dataset, '_flags_shown'):
+                print(f"🎯 {Colors.BOLD}PROCESSING WITH GLOBAL FLAGS:{Colors.ENDC}")
+                active_flags = []
+                if COMMAND_LINE_FLAGS['visualize']:
+                    active_flags.append('--visualize')
+                if COMMAND_LINE_FLAGS['enable_5DCTvisualization']:
+                    active_flags.append('--5DCT')
+                if COMMAND_LINE_FLAGS['model_type'] != 'Histogram':
+                    active_flags.append(f'--model_type={COMMAND_LINE_FLAGS["model_type"]}')
+                if COMMAND_LINE_FLAGS['fresh_start']:
+                    active_flags.append('--fresh_start')
+                if COMMAND_LINE_FLAGS['use_previous_model']:
+                    active_flags.append('--use_previous_model')
+
+                if active_flags:
+                    for flag in active_flags:
+                        print(f"   {Colors.CYAN}📌 {flag}{Colors.ENDC}")
+                else:
+                    print(f"   {Colors.YELLOW}📌 Using default settings{Colors.ENDC}")
+                process_single_dataset._flags_shown = True
+
+            # Determine mode if not provided (should already be set from global flags)
             if not mode:
                 mode = 'train_predict' if config.get('train', True) and config.get('predict', True) else \
                        'train' if config.get('train', True) else 'predict'
@@ -14656,18 +15148,50 @@ def main():
             print(f"📋 {Colors.BOLD}Mode: {Colors.YELLOW}{mode}{Colors.ENDC}")
             print(f"🧠 {Colors.BOLD}Model: {Colors.YELLOW}{model_type}{Colors.ENDC}")
             print(f"📊 {Colors.BOLD}Visualization: {Colors.GREEN}{'Enabled' if generate_visualization else 'Disabled'}{Colors.ENDC}")
+            print(f"🔧 {Colors.BOLD}Config enable_visualization: {Colors.CYAN}{config.get('training_params', {}).get('enable_visualization', 'NOT SET')}{Colors.ENDC}")
             print(f"{'='*80}")
 
-            # Create DBNN instance
-            if mode == 'train_predict':
-                model = DBNN(dataset_name=dataset_name, mode='train', model_type=model_type)
-            else:
-                model = DBNN(dataset_name=dataset_name, mode=mode, model_type=model_type)
+            # Create DBNN instance - USE GLOBAL FLAGS
+            print(f"🔧 {Colors.BLUE}Creating DBNN instance with parameters:{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• enable_visualization={generate_visualization}{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• model_type={model_type}{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• mode={mode}{Colors.ENDC}")
+
+            model = DBNN(
+                dataset_name=dataset_name,
+                mode=mode if mode != 'train_predict' else 'train',  # Handle train_predict mode
+                model_type=model_type,
+                enable_visualization=generate_visualization,
+                enable_5DCTvisualization=enable_5dct
+            )
 
             if mode in ['train', 'train_predict']:
                 # Training phase
                 start_time = datetime.now()
                 print(f"\n⏳ {Colors.BOLD}Starting training phase...{Colors.ENDC}")
+
+                # Enhanced debug: Check if visualization is properly enabled
+                print(f"🔍 {Colors.CYAN}DBNN INSTANCE VERIFICATION:{Colors.ENDC}")
+                if hasattr(model, 'enable_visualization'):
+                    status_color = Colors.GREEN if model.enable_visualization else Colors.RED
+                    print(f"   {Colors.CYAN}• enable_visualization: {status_color}{model.enable_visualization}{Colors.ENDC}")
+                else:
+                    print(f"   {Colors.RED}• enable_visualization: NOT FOUND{Colors.ENDC}")
+
+                if hasattr(model, 'visualizer'):
+                    status_color = Colors.GREEN if model.visualizer is not None else Colors.RED
+                    print(f"   {Colors.CYAN}• visualizer: {status_color}{model.visualizer is not None}{Colors.ENDC}")
+                else:
+                    print(f"   {Colors.RED}• visualizer: NOT FOUND{Colors.ENDC}")
+
+                # Check execution flags from config
+                execution_flags = config.get('execution_flags', {})
+                fresh_start = execution_flags.get('fresh_start', COMMAND_LINE_FLAGS['fresh_start'])
+                use_previous_model = execution_flags.get('use_previous_model', COMMAND_LINE_FLAGS['use_previous_model'])
+
+                print(f"🔍 {Colors.CYAN}EXECUTION FLAGS:{Colors.ENDC}")
+                print(f"   {Colors.CYAN}• fresh_start: {Colors.YELLOW}{fresh_start}{Colors.ENDC}")
+                print(f"   {Colors.CYAN}• use_previous_model: {Colors.YELLOW}{use_previous_model}{Colors.ENDC}")
 
                 if config.get('training_params', {}).get('enable_adaptive', True):
                     print(f"🔄 {Colors.YELLOW}Using adaptive training{Colors.ENDC}")
@@ -14687,7 +15211,7 @@ def main():
                     accuracy_color = Colors.GREEN if results['test_accuracy'] > 0.9 else Colors.YELLOW if results['test_accuracy'] > 0.7 else Colors.RED
                     print(f"🎯 {Colors.BOLD}Test Accuracy: {accuracy_color}{results['test_accuracy']:.2%}{Colors.ENDC}")
 
-                # Visualization
+                # Visualization - NOW RESPECTS GLOBAL FLAG CONSISTENTLY
                 if generate_visualization:
                     print(f"\n📊 {Colors.BOLD}Generating unified visualizations...{Colors.ENDC}")
                     try:
@@ -14698,23 +15222,28 @@ def main():
                         # Try to extract training history from adaptive learning
                         if hasattr(model, 'training_history'):
                             training_history = model.training_history
+                            print(f"📈 {Colors.CYAN}Found training history: {len(training_history)} snapshots{Colors.ENDC}")
                         elif hasattr(model, 'train_indices'):
                             training_history = [model.train_indices]
+                            print(f"📈 {Colors.CYAN}Using train indices as history{Colors.ENDC}")
 
                         # Try to extract round statistics
                         if hasattr(model, 'round_stats'):
                             round_stats = model.round_stats
+                            print(f"📊 {Colors.CYAN}Found round stats: {len(round_stats)} rounds{Colors.ENDC}")
 
                         # Get feature names
                         feature_names = getattr(model, 'feature_columns', None)
                         if feature_names is None and hasattr(model, 'data'):
                             feature_names = [col for col in model.data.columns if col != model.target_column]
+                            print(f"🔤 {Colors.CYAN}Using {len(feature_names)} feature names{Colors.ENDC}")
 
                         # Use the new unified visualization system
                         print(f"🎨 {Colors.BLUE}Creating comprehensive unified visualizations...{Colors.ENDC}")
 
                         # Method 1: Use the unified visualization method if available
                         if hasattr(model, 'create_unified_visualization'):
+                            print(f"🛠️  {Colors.CYAN}Using model.create_unified_visualization(){Colors.ENDC}")
                             model.create_unified_visualization(
                                 training_history=training_history,
                                 round_stats=round_stats,
@@ -14724,10 +15253,12 @@ def main():
 
                         # Method 2: Use the geometric visualization method (backward compatibility)
                         elif hasattr(model, 'create_geometric_visualization'):
+                            print(f"🛠️  {Colors.CYAN}Using model.create_geometric_visualization(){Colors.ENDC}")
                             model.create_geometric_visualization(training_history, round_stats)
 
                         # Method 3: Direct UnifiedDBNNVisualizer instantiation
                         else:
+                            print(f"🛠️  {Colors.CYAN}Using UnifiedDBNNVisualizer directly{Colors.ENDC}")
                             visualizer = UnifiedDBNNVisualizer(model)
                             visualizer.create_comprehensive_visualizations(
                                 training_history=training_history,
@@ -14756,16 +15287,22 @@ def main():
                 print(f"\n🔮 {Colors.BOLD}Starting prediction phase...{Colors.ENDC}")
 
                 # Use either the provided CSV or default dataset CSV
-                input_csv = args.file_path if args.file_path and mode == 'predict' else csv_path
+                input_csv = COMMAND_LINE_FLAGS['file_path'] if COMMAND_LINE_FLAGS['file_path'] and mode == 'predict' else csv_path
                 output_dir = os.path.join('data', dataset_name, 'Predictions')
                 os.makedirs(output_dir, exist_ok=True)
 
                 print(f"📁 {Colors.BOLD}Input: {Colors.GREEN}{input_csv}{Colors.ENDC}")
                 print(f"📂 {Colors.BOLD}Output: {Colors.YELLOW}{output_dir}{Colors.ENDC}")
 
-                # For prediction mode, create a new predictor instance
+                # For prediction mode, create a new predictor instance WITH GLOBAL FLAGS
                 if mode == 'predict':
-                    predictor = DBNN(dataset_name=dataset_name, mode='predict', model_type=model_type)
+                    print(f"🔧 {Colors.BLUE}Creating predictor instance with global flags{Colors.ENDC}")
+                    predictor = DBNN(
+                        dataset_name=dataset_name,
+                        mode='predict',
+                        model_type=model_type,
+                        enable_visualization=generate_visualization
+                    )
                     model = predictor
 
                 results = model.predict_from_file(input_csv, output_dir, model_type=model_type)
@@ -14824,6 +15361,12 @@ def main():
             print(f"\n{'='*80}")
             print(f"✅ {Colors.BOLD}{Colors.GREEN}Processing completed for {dataset_name}!{Colors.ENDC}")
 
+            # Final summary including global flag status
+            print(f"📋 {Colors.BOLD}PROCESSING SUMMARY:{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• Dataset: {Colors.GREEN}{dataset_name}{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• Mode: {Colors.YELLOW}{mode}{Colors.ENDC}")
+            print(f"   {Colors.CYAN}• Model: {Colors.YELLOW}{model_type}{Colors.ENDC}")
+
             # Final reminder about visualization output location
             if generate_visualization:
                 viz_path = f"Visualizer/adaptiveDBNN/{dataset_name}/"
@@ -14833,6 +15376,20 @@ def main():
                 print(f"   - Adaptive learning analysis")
                 print(f"   - 3D interactive visualizations")
                 print(f"   - Interactive dashboard")
+            else:
+                print(f"🔇 {Colors.YELLOW}Visualization was disabled{Colors.ENDC}")
+
+            # Show which global flags were used
+            used_global_flags = []
+            if COMMAND_LINE_FLAGS['visualize'] and generate_visualization:
+                used_global_flags.append('--visualize')
+            if COMMAND_LINE_FLAGS['model_type'] != 'Histogram' and model_type == COMMAND_LINE_FLAGS['model_type']:
+                used_global_flags.append(f'--model_type={COMMAND_LINE_FLAGS["model_type"]}')
+            if COMMAND_LINE_FLAGS['fresh_start']:
+                used_global_flags.append('--fresh_start')
+
+            if used_global_flags:
+                print(f"🎯 {Colors.BOLD}Global flags applied: {Colors.CYAN}{', '.join(used_global_flags)}{Colors.ENDC}")
 
             print(f"{'='*80}\n")
 
@@ -14926,7 +15483,7 @@ def main():
 
         print(f"✅ {Colors.GREEN}Configuration updated.{Colors.ENDC}")
 
-        # Process the dataset
+        # Process the dataset - PASS THE VISUALIZATION FLAG
         process_single_dataset(dataset_name, conf_path, csv_path, mode, model_type, generate_viz)
 
     # Main execution flow
@@ -14984,7 +15541,29 @@ def main():
         parser.print_help()
         print(f"\n💡 {Colors.YELLOW}Tip: Use --interactive for guided mode or --list_datasets to see available datasets.{Colors.ENDC}")
 
+def find_visualizations():
+    """Find where visualizations are actually being saved"""
+    possible_paths = [
+        "Visualizer/",
+        "Visualizer/",
+        "Visualizer/adaptiveDBNN/",
+        "Visualizer/adaptiveDBNN/mnist/",
+        "./"
+    ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            print(f"📁 Found path: {path}")
+            # List all files recursively
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith('.html') or file.endswith('.png'):
+                        print(f"   📄 {os.path.join(root, file)}")
+
+
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
     print("\033[K" +"=" * 40)
     main()
+    # Call this after training
+    #find_visualizations()
