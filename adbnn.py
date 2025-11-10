@@ -25,6 +25,7 @@
 # Fixed the bug in feature selection : May 10:12:09 am
 # Fixed the bug in sample selection May 11 1:27 am
 # All fixed, working training and predcition perfectly Nov 9th 2025
+# Fully updated visualisations Nov 10 2025 version
 
 #----------------------------------------------------------------------------------------------------------------------------
 #---- author: Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
@@ -5554,6 +5555,37 @@ Watch as classes organize into distinct spherical regions as training progresses
         except Exception as e:
             print(f"Error generating spherical visualizations: {e}")
             return {}
+
+    def capture_epoch_snapshot(self, epoch, accuracy, features=None, targets=None, weights=None, predictions=None):
+        """
+        Compatibility method for epoch-based training loops.
+        Bridges the gap between epoch-based calls and round-based storage.
+
+        Args:
+            epoch (int): Training epoch number
+            accuracy (float): Current accuracy
+            features (numpy.ndarray, optional): Feature matrix
+            targets (numpy.ndarray, optional): True targets
+            weights (numpy.ndarray, optional): Model weights
+            predictions (numpy.ndarray, optional): Model predictions
+        """
+        # Use the existing capture_training_snapshot method but with epoch as round
+        snapshot = self.capture_training_snapshot(features, targets, weights, predictions, accuracy, epoch)
+
+        # Also store as epoch-specific data if needed
+        if not hasattr(self, 'epoch_history'):
+            self.epoch_history = []
+
+        self.epoch_history.append({
+            'epoch': epoch,
+            'accuracy': accuracy,
+            'timestamp': time.time(),
+            'features': features.copy() if features is not None else None,
+            'targets': targets.copy() if targets is not None else None
+        })
+
+        return snapshot
+
 # Generate the 3D spherical visualization
 #visualizer = DBNNVisualizer()
 #visualizer.generate_3d_spherical_tensor_evolution()
@@ -5961,12 +5993,16 @@ class DatasetConfig:
             validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
             validated_config.update(config)
 
+            # Track if we need to save the config back
+            config_updated = False
+
             # APPLY GLOBAL COMMAND LINE OVERRIDES
             applied_overrides = []
 
             # Ensure training_params exists
             if 'training_params' not in validated_config:
                 validated_config['training_params'] = {}
+                config_updated = True
 
             training_params = validated_config['training_params']
 
@@ -5975,26 +6011,25 @@ class DatasetConfig:
                 if training_params.get('enable_visualization') != True:
                     training_params['enable_visualization'] = True
                     applied_overrides.append('enable_visualization=True')
+                    config_updated = True
 
             # Model type override
-            if force_visualization:
-                if 'training_params' not in validated_config:
-                    validated_config['training_params'] = {}
-                if validated_config.get('training_params', {}).get('enable_visualization') != True:
-                    validated_config['training_params']['enable_visualization'] = True
-                    applied_overrides.append('enable_visualization')
+            if force_model_type and training_params.get('modelType') != force_model_type:
+                training_params['modelType'] = force_model_type
+                applied_overrides.append(f'modelType={force_model_type}')
+                config_updated = True
 
             # ADD 5DCT override
             if force_5dct:
-                if 'training_params' not in validated_config:
-                    validated_config['training_params'] = {}
-                if validated_config.get('training_params', {}).get('enable_5DCTvisualization') != True:
-                    validated_config['training_params']['enable_5DCTvisualization'] = True
-                    applied_overrides.append('enable_5DCTvisualization')
+                if training_params.get('enable_5DCTvisualization') != True:
+                    training_params['enable_5DCTvisualization'] = True
+                    applied_overrides.append('enable_5DCTvisualization=True')
+                    config_updated = True
 
             # Ensure execution_flags exists
             if 'execution_flags' not in validated_config:
                 validated_config['execution_flags'] = {}
+                config_updated = True
 
             execution_flags = validated_config['execution_flags']
 
@@ -6004,6 +6039,7 @@ class DatasetConfig:
                     execution_flags['fresh_start'] = True
                     execution_flags['use_previous_model'] = False
                     applied_overrides.append('fresh_start=True')
+                    config_updated = True
 
             # Use previous model override
             if force_use_previous_model:
@@ -6011,6 +6047,7 @@ class DatasetConfig:
                     execution_flags['use_previous_model'] = True
                     execution_flags['fresh_start'] = False
                     applied_overrides.append('use_previous_model=True')
+                    config_updated = True
 
             # Show override summary (only once per dataset)
             if applied_overrides and not hasattr(DatasetConfig.load_config, f'_overrides_shown_{dataset_name}'):
@@ -6019,22 +6056,102 @@ class DatasetConfig:
                     print(f"   {Colors.CYAN}→ {override}{Colors.ENDC}")
                 setattr(DatasetConfig.load_config, f'_overrides_shown_{dataset_name}', True)
 
-            # Set defaults for missing parameters (respecting command line flags)
+            # Set defaults for missing parameters and track updates
+            missing_params = []
+
             if 'enable_visualization' not in training_params:
                 training_params['enable_visualization'] = force_visualization
-                if not hasattr(DatasetConfig.load_config, f'_default_shown_{dataset_name}'):
-                    print(f"🔧 {Colors.YELLOW}Added missing 'enable_visualization' parameter with value: {force_visualization}{Colors.ENDC}")
+                missing_params.append(f'enable_visualization={force_visualization}')
+                config_updated = True
 
-            if 'enable_5DCTvisualization' not in training_params:  # 5DCT
-                    training_params['enable_5DCTvisualization'] = force_5dct
+            if 'enable_5DCTvisualization' not in training_params:
+                training_params['enable_5DCTvisualization'] = force_5dct
+                missing_params.append(f'enable_5DCTvisualization={force_5dct}')
+                config_updated = True
+
             if 'modelType' not in training_params:
                 training_params['modelType'] = force_model_type
+                missing_params.append(f'modelType={force_model_type}')
+                config_updated = True
 
             if 'fresh_start' not in execution_flags:
                 execution_flags['fresh_start'] = force_fresh_start
+                missing_params.append(f'fresh_start={force_fresh_start}')
+                config_updated = True
 
             if 'use_previous_model' not in execution_flags:
                 execution_flags['use_previous_model'] = force_use_previous_model
+                missing_params.append(f'use_previous_model={force_use_previous_model}')
+                config_updated = True
+
+            # Add comprehensive training parameters with defaults
+            training_defaults = {
+                'learning_rate': LearningRate,
+                'epochs': Epochs,
+                'test_fraction': TestFraction,
+                'n_bins_per_dim': 128,
+                'batch_size': 128,
+                'random_seed': TrainingRandomSeed,
+                'compute_device': 'auto',
+                'enable_adaptive': True,
+                'adaptive_rounds': 100,
+                'initial_samples': 50,
+                'max_samples_per_round': 500,
+                'minimum_training_accuracy': 0.95,
+                'cardinality_tolerance': cardinality_tolerance,
+                'min_divergence': 0.1,
+                'max_class_addition_percent': 99,
+                'cardinality_threshold_percentile': 95,
+                'similarity_threshold': 0.25,
+                'strong_margin_threshold': 0.01,
+                'marginal_margin_threshold': 0.01,
+                'tolerance': 1.0
+            }
+
+            for param, default_value in training_defaults.items():
+                if param not in training_params:
+                    training_params[param] = default_value
+                    missing_params.append(f'{param}={default_value}')
+                    config_updated = True
+
+            # Ensure active_learning section exists with defaults
+            if 'active_learning' not in validated_config:
+                validated_config['active_learning'] = {}
+                config_updated = True
+
+            active_learning = validated_config['active_learning']
+            active_defaults = {
+                'min_divergence': 0.1,
+                'max_class_addition_percent': 99,
+                'cardinality_threshold_percentile': 95,
+                'similarity_threshold': 0.25,
+                'strong_margin_threshold': 0.01,
+                'marginal_margin_threshold': 0.01,
+                'tolerance': 1.0,
+                'update_condition': 'bin_overlap'
+            }
+
+            for param, default_value in active_defaults.items():
+                if param not in active_learning:
+                    active_learning[param] = default_value
+                    missing_params.append(f'active_learning.{param}={default_value}')
+                    config_updated = True
+
+            # Show missing parameters that were added
+            if missing_params and not hasattr(DatasetConfig.load_config, f'_defaults_shown_{dataset_name}'):
+                print(f"🔧 {Colors.YELLOW}Added missing parameters to {dataset_name} config:{Colors.ENDC}")
+                for param in missing_params:
+                    print(f"   {Colors.CYAN}→ {param}{Colors.ENDC}")
+                setattr(DatasetConfig.load_config, f'_defaults_shown_{dataset_name}', True)
+
+            # Save the updated config back to file if any parameters were added
+            if config_updated and os.path.exists(config_path):
+                try:
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(validated_config, f, indent=2)
+                    print(f"💾 {Colors.GREEN}Updated configuration file permanently: {config_path}{Colors.ENDC}")
+                except Exception as e:
+                    print(f"❌ {Colors.RED}Failed to save updated config: {str(e)}{Colors.ENDC}")
 
             # Path handling
             if validated_config.get('file_path'):
@@ -6120,6 +6237,7 @@ class DatasetConfig:
             print("\033[K" + f"Error loading configuration for {dataset_name}: {str(e)}")
             traceback.print_exc()
             return None
+
     @staticmethod
     def download_dataset(url: str, local_path: str) -> bool:
         """Download dataset from URL to local path with proper error handling"""
@@ -8304,7 +8422,7 @@ class DBNN(GPUDBNN):
             self.enable_visualization = COMMAND_LINE_FLAGS['visualize']
         if self.enable_5DCTvisualization is False:
             self.enable_5DCTvisualization = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
-        if self.enable_visualization or self.enable_5DCT:
+        if self.enable_visualization or self.enable_5DCTvisualization:
             try:
                 self.visualizer = DBNNVisualizer()
                 print(f"{Colors.GREEN}[DBNN-VISUAL] 🎨 Visualization system initialized{Colors.ENDC}")
@@ -10907,7 +11025,14 @@ class DBNN(GPUDBNN):
 
                     # Capture snapshot every 5 epochs to avoid too much data
                     if epoch % 5 == 0 or epoch == self.max_epochs - 1:
-                        self.visualizer.capture_epoch_snapshot(epoch, overall_accuracy)
+                       visualizer.capture_epoch_snapshot(
+                            epoch=epoch,
+                            accuracy=accuracy,
+                            features=current_features,
+                            targets=current_targets,
+                            weights=current_weights,
+                            predictions=current_predictions
+                        )
                 except Exception as e:
                     print(f"\033[KVisualization capture skipped: {str(e)}")
 
@@ -14212,10 +14337,77 @@ class UnifiedDBNNVisualizer:
             f.write(dashboard_html)
 
     # Utility methods for integration with existing code
-    def capture_epoch_snapshot(self, epoch, accuracy):
-        """Capture snapshot for geometric analysis (compatibility method)"""
-        # This maintains compatibility with existing training code
-        pass
+    def capture_epoch_snapshot(self, features, targets, weights, predictions, accuracy, epoch_num):
+        """
+        Capture comprehensive training snapshot for each epoch.
+
+        Args:
+            features (numpy.ndarray): Feature matrix (samples x features)
+            targets (numpy.ndarray): True target values
+            weights (numpy.ndarray): Current network weights
+            predictions (numpy.ndarray): Model predictions
+            accuracy (float): Current accuracy percentage
+            epoch_num (int): Training epoch number
+
+        Returns:
+            dict: Snapshot containing all training data
+        """
+        snapshot = {
+            'epoch': epoch_num,
+            'features': features.copy() if features is not None else None,
+            'targets': targets.copy() if targets is not None else None,
+            'weights': weights.copy() if weights is not None else None,
+            'predictions': predictions.copy() if predictions is not None else None,
+            'accuracy': accuracy,
+            'timestamp': time.time()
+        }
+
+        # Store in training history
+        self.training_history.append(snapshot)
+
+        # Store accuracy progression
+        self.accuracy_progression.append({
+            'epoch': epoch_num,
+            'accuracy': accuracy,
+            'timestamp': time.time()
+        })
+
+        # Store weight statistics
+        if weights is not None:
+            flat_weights = weights.flatten()
+            flat_weights = flat_weights[(flat_weights != 0) & (np.abs(flat_weights) < 100)]
+
+            self.weight_evolution.append({
+                'epoch': epoch_num,
+                'mean': np.mean(flat_weights) if len(flat_weights) > 0 else 0,
+                'std': np.std(flat_weights) if len(flat_weights) > 0 else 0,
+                'min': np.min(flat_weights) if len(flat_weights) > 0 else 0,
+                'max': np.max(flat_weights) if len(flat_weights) > 0 else 0
+            })
+
+        # Capture enhanced visualization data
+        if hasattr(self, 'feature_space_snapshots') and features is not None:
+            try:
+                feature_names = getattr(self, 'feature_names',
+                                      [f'Feature_{i+1}' for i in range(features.shape[1])])
+                class_names = getattr(self, 'class_names',
+                                    [f'Class_{int(c)}' for c in np.unique(targets)])
+
+                enhanced_snapshot = {
+                    'iteration': epoch_num,
+                    'features': features.copy(),
+                    'targets': targets.copy(),
+                    'predictions': predictions.copy(),
+                    'feature_names': feature_names,
+                    'class_names': class_names,
+                    'timestamp': time.time(),
+                    'accuracy': accuracy
+                }
+                self.feature_space_snapshots.append(enhanced_snapshot)
+            except Exception as e:
+                print(f"Enhanced visualization capture warning: {e}")
+
+        return snapshot
 
     def create_geometric_visualization(self, training_history, round_stats):
         """Compatibility method for existing code"""
@@ -15134,6 +15326,6 @@ def main():
         print(f"\n💡 {Colors.YELLOW}Tip: Use --interactive for guided mode or --list_datasets to see available datasets.{Colors.ENDC}")
 
 if __name__ == "__main__":
-    print("\033[K" +"DBNN Dataset Processor")
+    print("\033[K" +"DBNN Dataset Processor Nov 10 2025")
     print("\033[K" +"=" * 40)
     main()
