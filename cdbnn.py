@@ -642,8 +642,148 @@ class PredictionManager:
         logger.info(f"Predictions saved to {output_csv}")
         return model
 
+class SlidingWindowDataset(Dataset):
+    """Dataset that processes large images using sliding windows"""
 
+    def __init__(self, image_paths, window_size=256, stride=128, transform=None,
+                 overlap=0.5, min_window_coverage=0.8, pad_mode='reflect'):
+        """
+        Args:
+            image_paths: List of paths to large images
+            window_size: Size of each processing window (square)
+            stride: Step size between windows
+            overlap: Overlap ratio between windows (0-1)
+            min_window_coverage: Minimum fraction of window that must contain image data
+            pad_mode: Padding mode for edge windows ('reflect', 'constant', 'edge')
+        """
+        self.image_paths = image_paths
+        self.window_size = window_size
+        self.stride = stride if stride else int(window_size * (1 - overlap))
+        self.transform = transform
+        self.min_window_coverage = min_window_coverage
+        self.pad_mode = pad_mode
 
+        # Precompute all window coordinates
+        self.windows = []  # (image_idx, y_start, x_start, y_end, x_end)
+        self.image_shapes = []
+
+        logger.info(f"Initializing sliding window dataset with {len(image_paths)} images")
+        self._precompute_windows()
+
+    def _precompute_windows(self):
+        """Precompute all window coordinates for efficient access"""
+        for img_idx, img_path in enumerate(tqdm(self.image_paths, desc="Precomputing windows")):
+            try:
+                with Image.open(img_path) as img:
+                    img_array = np.array(img)
+                    h, w = img_array.shape[:2]
+                    self.image_shapes.append((h, w))
+
+                    # Calculate window positions
+                    windows = self._get_window_coordinates(h, w)
+                    for y1, x1, y2, x2 in windows:
+                        self.windows.append((img_idx, y1, x1, y2, x2))
+
+            except Exception as e:
+                logger.error(f"Error processing {img_path}: {str(e)}")
+                continue
+
+        logger.info(f"Generated {len(self.windows)} windows from {len(self.image_paths)} images")
+
+    def _get_window_coordinates(self, height, width):
+        """Generate sliding window coordinates"""
+        windows = []
+
+        # Calculate number of windows in each dimension
+        y_steps = max(1, (height - self.window_size) // self.stride + 1)
+        x_steps = max(1, (width - self.window_size) // self.stride + 1)
+
+        # Add main windows
+        for i in range(y_steps):
+            for j in range(x_steps):
+                y1 = i * self.stride
+                x1 = j * self.stride
+                y2 = min(y1 + self.window_size, height)
+                x2 = min(x1 + self.window_size, width)
+
+                # Check if window has sufficient coverage
+                coverage = ((y2 - y1) * (x2 - x1)) / (self.window_size * self.window_size)
+                if coverage >= self.min_window_coverage:
+                    windows.append((y1, x1, y2, y2))
+
+        # Add edge windows to ensure full coverage
+        # Right edge
+        if width % self.stride != 0:
+            for i in range(y_steps):
+                x1 = width - self.window_size
+                x2 = width
+                y1 = i * self.stride
+                y2 = min(y1 + self.window_size, height)
+                coverage = ((y2 - y1) * (x2 - x1)) / (self.window_size * self.window_size)
+                if coverage >= self.min_window_coverage:
+                    windows.append((y1, x1, y2, x2))
+
+        # Bottom edge
+        if height % self.stride != 0:
+            for j in range(x_steps):
+                y1 = height - self.window_size
+                y2 = height
+                x1 = j * self.stride
+                x2 = min(x1 + self.window_size, width)
+                coverage = ((y2 - y1) * (x2 - x1)) / (self.window_size * self.window_size)
+                if coverage >= self.min_window_coverage:
+                    windows.append((y1, x1, y2, x2))
+
+        # Bottom-right corner
+        if height % self.stride != 0 and width % self.stride != 0:
+            y1 = height - self.window_size
+            y2 = height
+            x1 = width - self.window_size
+            x2 = width
+            coverage = ((y2 - y1) * (x2 - x1)) / (self.window_size * self.window_size)
+            if coverage >= self.min_window_coverage:
+                windows.append((y1, x1, y2, x2))
+
+        return windows
+
+    def __len__(self):
+        return len(self.windows)
+
+    def __getitem__(self, idx):
+        img_idx, y1, x1, y2, x2 = self.windows[idx]
+        img_path = self.image_paths[img_idx]
+
+        try:
+            with Image.open(img_path) as img:
+                # Extract window
+                window = img.crop((x1, y1, x2, y2))
+
+                # Convert to tensor
+                if self.transform:
+                    window_tensor = self.transform(window)
+                else:
+                    window_tensor = transforms.ToTensor()(window)
+
+                # Return window tensor and metadata for reconstruction
+                return {
+                    'window': window_tensor,
+                    'image_idx': img_idx,
+                    'coords': (y1, x1, y2, x2),
+                    'original_shape': self.image_shapes[img_idx],
+                    'window_size': self.window_size
+                }
+
+        except Exception as e:
+            logger.error(f"Error loading window {idx} from {img_path}: {str(e)}")
+            # Return a dummy window
+            dummy_window = torch.zeros(3, self.window_size, self.window_size)
+            return {
+                'window': dummy_window,
+                'image_idx': img_idx,
+                'coords': (y1, x1, y2, x2),
+                'original_shape': self.image_shapes[img_idx],
+                'window_size': self.window_size
+            }
 
 class BaseEnhancementConfig:
     """Base class for enhancement configuration management"""
@@ -706,6 +846,95 @@ class BaseEnhancementConfig:
     def get_config(self) -> Dict:
         """Get the current configuration"""
         return self.config
+
+class WindowReconstructor:
+    """Reconstructs full images from processed windows"""
+
+    def __init__(self, original_shape, window_size, stride, blend_mode='linear'):
+        """
+        Args:
+            original_shape: (height, width) of original image
+            window_size: Size of processing windows
+            stride: Step size between windows
+            blend_mode: How to blend overlapping regions ('linear', 'average', 'max')
+        """
+        self.original_shape = original_shape
+        self.window_size = window_size
+        self.stride = stride
+        self.blend_mode = blend_mode
+
+        # Initialize reconstruction buffers
+        self.output_tensor = torch.zeros(original_shape)
+        self.weight_tensor = torch.zeros(original_shape)
+
+        # Precompute blending weights
+        self.blend_weights = self._compute_blend_weights()
+
+    def _compute_blend_weights(self):
+        """Compute blending weights for smooth reconstruction"""
+        if self.blend_mode == 'linear':
+            # Create linear falloff weights
+            weights = torch.ones(self.window_size, self.window_size)
+            center = self.window_size // 2
+
+            # Create distance-based weights (higher in center)
+            for i in range(self.window_size):
+                for j in range(self.window_size):
+                    dist_x = abs(j - center) / center
+                    dist_y = abs(i - center) / center
+                    dist = np.sqrt(dist_x**2 + dist_y**2)
+                    weights[i, j] = max(0, 1 - dist)
+
+        elif self.blend_mode == 'average':
+            weights = torch.ones(self.window_size, self.window_size)
+        else:  # 'max'
+            weights = torch.ones(self.window_size, self.window_size)
+
+        return weights
+
+    def add_window(self, window_tensor, coords):
+        """Add a processed window to the reconstruction"""
+        y1, x1, y2, x2 = coords
+        window_h, window_w = y2 - y1, x2 - x1
+
+        # Ensure window matches expected size
+        if window_tensor.shape[-2:] != (window_h, window_w):
+            window_tensor = F.interpolate(
+                window_tensor.unsqueeze(0),
+                size=(window_h, window_w),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)
+
+        # Extract relevant portion of blend weights
+        weight_patch = self.blend_weights[:window_h, :window_w]
+
+        # Add to output with blending
+        if self.blend_mode == 'max':
+            self.output_tensor[:, y1:y2, x1:x2] = torch.max(
+                self.output_tensor[:, y1:y2, x1:x2],
+                window_tensor
+            )
+            self.weight_tensor[:, y1:y2, x1:x2] = 1.0
+        else:
+            self.output_tensor[:, y1:y2, x1:x2] += window_tensor * weight_patch
+            self.weight_tensor[:, y1:y2, x1:x2] += weight_patch
+
+    def get_reconstruction(self):
+        """Get final reconstructed image"""
+        if self.blend_mode in ['linear', 'average']:
+            # Normalize by weights to handle overlapping regions
+            mask = self.weight_tensor > 0
+            output = torch.zeros_like(self.output_tensor)
+            output[mask] = self.output_tensor[mask] / self.weight_tensor[mask]
+            return output
+        else:  # max
+            return self.output_tensor
+
+    def reset(self):
+        """Reset for new reconstruction"""
+        self.output_tensor = torch.zeros(self.original_shape)
+        self.weight_tensor = torch.zeros(self.original_shape)
 
 
 class GeneralEnhancementConfig(BaseEnhancementConfig):
@@ -921,7 +1150,7 @@ class BaseAutoencoder(nn.Module):
     """Base autoencoder class with all foundational methods"""
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
-        """Initialize base autoencoder with shape management and all core components.
+        """Initialize base autoencoder with dynamic shape management and all core components.
 
         Args:
             input_shape: Tuple of (channels, height, width)
@@ -936,8 +1165,7 @@ class BaseAutoencoder(nn.Module):
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        input_shape=self.input_shape
-        self.in_channels =config['dataset']['in_channels']
+        self.in_channels = config['dataset']['in_channels']
         self.feature_dims = feature_dims
         self.config = config
         self.train_dataset = None
@@ -947,25 +1175,17 @@ class BaseAutoencoder(nn.Module):
                                  and torch.cuda.is_available() else 'cpu')
 
         # Shape tracking initialization
-        self.shape_registry = {'input': input_shape}
-        self.spatial_dims = []
-        current_size = input_shape[1]
+        self.shape_registry = {'input': self.input_shape}
 
-        # Calculate layer dimensions
+        # Calculate layer dimensions and spatial progression DYNAMICALLY
         self.layer_sizes = self._calculate_layer_sizes()
 
-        # Track progressive spatial dimensions
-        for _ in self.layer_sizes:
-            self.spatial_dims.append(current_size)
-            current_size = current_size // 2
-
-        # Final dimensions
-        self.final_spatial_dim = current_size
-        self.flattened_size = self.layer_sizes[-1] * (self.final_spatial_dim ** 2)
+        # Calculate spatial progression through the network
+        self._calculate_spatial_progression()
 
         # Register key dimensions in shape registry
         self.shape_registry.update({
-            'final_spatial': (self.final_spatial_dim, self.final_spatial_dim),
+            'final_spatial': (self.final_spatial_dim_h, self.final_spatial_dim_w),
             'flattened': (self.flattened_size,),
             'latent': (self.feature_dims,)
         })
@@ -1015,17 +1235,132 @@ class BaseAutoencoder(nn.Module):
 
         # Register shapes for encoder/decoder paths
         for idx, size in enumerate(self.layer_sizes):
-            spatial_dim = self.spatial_dims[idx]
-            self.shape_registry[f'encoder_{idx}'] = (size, spatial_dim, spatial_dim)
-            self.shape_registry[f'decoder_{idx}'] = (size, spatial_dim, spatial_dim)
+            spatial_h, spatial_w = self.spatial_dims[idx]
+            self.shape_registry[f'encoder_{idx}'] = (size, spatial_h, spatial_w)
+            self.shape_registry[f'decoder_{idx}'] = (size, spatial_h, spatial_w)
 
         # Initialize training metrics
         self.best_loss = float('inf')
         self.best_accuracy = 0.0
         self.current_epoch = 0
         self.history = defaultdict(list)
+
         # Initialize clustering parameters
         self._initialize_clustering(config)
+
+        # Log architecture details
+        self._log_architecture_details()
+
+    def _calculate_spatial_progression(self):
+        """Calculate spatial dimensions with exact reversal for decoder"""
+        current_h = self.input_shape[1]
+        current_w = self.input_shape[2]
+
+        self.spatial_dims = []
+        encoder_dims = []
+
+        # Calculate encoder output dimensions
+        for i in range(len(self.layer_sizes)):
+            self.spatial_dims.append((current_h, current_w))
+            encoder_dims.append((current_h, current_w))
+
+            # Encoder: conv2d with kernel=3, stride=2, padding=1
+            # output_size = (input_size + 2*padding - kernel_size) // stride + 1
+            current_h = (current_h + 2*1 - 3) // 2 + 1
+            current_w = (current_w + 2*1 - 3) // 2 + 1
+
+            if current_h < 4 or current_w < 4:
+                logger.warning(f"Stopping at layer {i}, dimensions too small: {current_h}x{current_w}")
+                self.layer_sizes = self.layer_sizes[:i]
+                self.spatial_dims = self.spatial_dims[:i]
+                encoder_dims = encoder_dims[:i]
+                break
+
+        self.final_spatial_dim_h = current_h
+        self.final_spatial_dim_w = current_w
+        self.flattened_size = self.layer_sizes[-1] * current_h * current_w
+
+        # Calculate expected decoder output
+        decoder_h, decoder_w = current_h, current_w
+        for i in range(len(self.layer_sizes)-1, -1, -1):
+            # Decoder: convtranspose2d with kernel=3, stride=2, padding=1, output_padding=1
+            # output_size = (input_size - 1)*stride - 2*padding + kernel_size + output_padding
+            decoder_h = (decoder_h - 1)*2 - 2*1 + 3 + 1
+            decoder_w = (decoder_w - 1)*2 - 2*1 + 3 + 1
+
+        logger.info(f"Input dimensions: {self.input_shape[1:]}")
+        logger.info(f"Encoder output: {current_h}x{current_w}")
+        logger.info(f"Expected decoder output: {decoder_h}x{decoder_w}")
+        logger.info(f"Target input size: {self.input_shape[1:]}")
+
+        # Store the expected decoder output for reference
+        self.expected_decoder_output = (decoder_h, decoder_w)
+
+    def decode(self, x: torch.Tensor) -> torch.Tensor:
+        """Basic decoding process with guaranteed input size matching"""
+        x = self.unembedder(x)
+        x = x.view(x.size(0), self.layer_sizes[-1],
+                  self.final_spatial_dim_h, self.final_spatial_dim_w)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Always resize to match original input dimensions
+        target_h, target_w = self.input_shape[1], self.input_shape[2]
+        if x.shape[2] != target_h or x.shape[3] != target_w:
+            x = F.interpolate(x, size=(target_h, target_w), mode='bilinear', align_corners=False)
+            logger.debug(f"Resized decoder output from {x.shape[2:]} to {(target_h, target_w)}")
+
+        return x
+
+    def _calculate_layer_sizes(self) -> List[int]:
+        """Calculate progressive channel sizes based on input dimensions"""
+        base_channels = 32
+        sizes = []
+        current_size = base_channels
+
+        # Determine maximum layers based on smallest dimension
+        min_dim = min(self.input_shape[1], self.input_shape[2])
+        max_layers = max(3, int(np.log2(min_dim)) - 2)  # At least 3 layers
+
+        logger.info(f"Input dimensions: {self.input_shape[1]}x{self.input_shape[2]} (channels: {self.in_channels})")
+        logger.info(f"Calculating {max_layers} layers for min dimension {min_dim}")
+
+        for i in range(max_layers):
+            sizes.append(current_size)
+            # Stop doubling channels at 512 to prevent excessive memory usage
+            if current_size < 512:
+                current_size *= 2
+            else:
+                current_size = 512  # Cap at 512
+
+            # Early stop if dimensions become too small
+            if min_dim // (2 ** (i + 1)) < 4:
+                logger.info(f"Stopping at layer {i}, dimensions becoming too small")
+                break
+
+        logger.info(f"Final layer sizes: {sizes}")
+        return sizes
+
+    def _log_architecture_details(self):
+        """Log detailed architecture information"""
+        logger.info("=" * 60)
+        logger.info("AUTOENCODER ARCHITECTURE DETAILS")
+        logger.info("=" * 60)
+        logger.info(f"Input shape: {self.input_shape}")
+        logger.info(f"Layer sizes: {self.layer_sizes}")
+        logger.info(f"Spatial dimensions progression: {self.spatial_dims}")
+        logger.info(f"Final spatial dimensions: {self.final_spatial_dim_h}x{self.final_spatial_dim_w}")
+        logger.info(f"Flattened size: {self.flattened_size}")
+        logger.info(f"Feature dimensions: {self.feature_dims}")
+        logger.info(f"Encoder layers: {len(self.encoder_layers)}")
+        logger.info(f"Decoder layers: {len(self.decoder_layers)}")
+
+        # Calculate approximate parameter count
+        total_params = sum(p.numel() for p in self.parameters())
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info("=" * 60)
+
 
 #--------------------------Distance Correlations ----------
     def get_high_confidence_samples(self, dataloader, threshold=0.9):
@@ -1124,7 +1459,6 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
 
-
     def _prepare_features_dataframe(self, features: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
         """
@@ -1141,10 +1475,21 @@ class BaseAutoencoder(nn.Module):
 
         # Convert features to numpy
         embeddings = features['embeddings'].cpu().numpy()
-        labels = features.get('labels', torch.zeros(len(embeddings))).cpu().numpy()
+        base_length = len(embeddings)  # This is our reference length
 
         # Apply feature selection if enabled
-        if dc_config and dc_config.get('use_distance_correlation', True):
+        if dc_config and dc_config.get('use_distance_correlation', True) and 'labels' in features:
+            labels = features['labels'].cpu().numpy()
+
+            # Ensure labels length matches embeddings
+            if len(labels) != base_length:
+                logger.warning(f"Labels length ({len(labels)}) doesn't match embeddings length ({base_length}). Truncating to match.")
+                min_length = min(len(labels), base_length)
+                labels = labels[:min_length]
+                embeddings = embeddings[:min_length]
+                base_length = min_length
+
+            # Select features based on distance correlation
             selector = DistanceCorrelationFeatureSelector(
                 upper_threshold=dc_config['distance_correlation_upper'],
                 lower_threshold=dc_config['distance_correlation_lower']
@@ -1154,24 +1499,41 @@ class BaseAutoencoder(nn.Module):
             # Store selected features with metadata
             for new_idx, orig_idx in enumerate(selected_indices):
                 data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = orig_idx
-                data[f'feature_{new_idx}_correlation'] = corr_values[orig_idx]
+                data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
+                data[f'feature_{new_idx}_correlation'] = [corr_values[orig_idx]] * base_length
         else:
             # Store all features without selection
             for i in range(embeddings.shape[1]):
                 data[f'feature_{i}'] = embeddings[:, i]
 
-        # Add labels and metadata
+        # Add labels and metadata with length validation
         if 'class_names' in features:
-            data['target'] = features['class_names']
-        else:
+            class_names = features['class_names']
+            if len(class_names) != base_length:
+                logger.warning(f"Class names length ({len(class_names)}) doesn't match embeddings length ({base_length}). Truncating.")
+                class_names = class_names[:base_length]
+            data['target'] = class_names
+        elif 'labels' in features:
+            labels = features['labels'].cpu().numpy()
+            if len(labels) != base_length:
+                logger.warning(f"Labels length ({len(labels)}) doesn't match embeddings length ({base_length}). Truncating.")
+                labels = labels[:base_length]
             data['target'] = labels
+        else:
+            # Create default labels if none provided
+            data['target'] = [0] * base_length
 
-        if 'filenames' in features:
-            data['filename'] = features['filenames']
+        # Include additional metadata if available
+        optional_fields = ['indices', 'filenames']
+        for field in optional_fields:
+            if field in features and len(features[field]) == base_length:
+                data[field] = features[field]
+            elif field in features:
+                logger.warning(f"{field} length doesn't match embeddings. Skipping.")
+                # Optionally truncate to match:
+                # data[field] = features[field][:base_length]
 
         return pd.DataFrame(data)
-
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -1541,25 +1903,9 @@ class BaseAutoencoder(nn.Module):
                 device=self.device
             )
 
-    def _calculate_layer_sizes(self) -> List[int]:
-        """Calculate progressive channel sizes for encoder/decoder"""
-        base_channels = 32
-        sizes = []
-        current_size = base_channels
-
-        min_dim = min(self.input_shape[1:])
-        max_layers = int(np.log2(min_dim)) - 2
-
-        for _ in range(max_layers):
-            sizes.append(current_size)
-            if current_size < 1024:
-                current_size *= 2
-
-        logging.info(f"Layer sizes: {sizes}")
-        return sizes
 
     def _create_encoder_layers(self) -> nn.ModuleList:
-        """Create encoder layers"""
+        """Create encoder layers that adapt to input shape"""
         layers = nn.ModuleList()
         in_channels = self.in_channels
 
@@ -1573,29 +1919,19 @@ class BaseAutoencoder(nn.Module):
 
         return layers
 
-    def _create_embedder(self) -> nn.Sequential:
-        """Create embedder layers"""
-        return nn.Sequential(
-            nn.Linear(self.flattened_size, self.feature_dims),
-            nn.BatchNorm1d(self.feature_dims),
-            nn.LeakyReLU(0.2)
-        )
-
-    def _create_unembedder(self) -> nn.Sequential:
-        """Create unembedder layers"""
-        return nn.Sequential(
-            nn.Linear(self.feature_dims, self.flattened_size),
-            nn.BatchNorm1d(self.flattened_size),
-            nn.LeakyReLU(0.2)
-        )
-
     def _create_decoder_layers(self) -> nn.ModuleList:
-        """Create decoder layers"""
+        """Create decoder layers that exactly reconstruct original shape"""
         layers = nn.ModuleList()
         in_channels = self.layer_sizes[-1]
 
+        # Build decoder in reverse order
         for i in range(len(self.layer_sizes)-1, -1, -1):
             out_channels = self.in_channels if i == 0 else self.layer_sizes[i-1]
+
+            # For the last layer, ensure output channels match input
+            if i == 0:
+                out_channels = self.in_channels
+
             layers.append(nn.Sequential(
                 nn.ConvTranspose2d(
                     in_channels, out_channels,
@@ -1608,6 +1944,22 @@ class BaseAutoencoder(nn.Module):
 
         return layers
 
+    def _create_embedder(self) -> nn.Sequential:
+        """Create embedder with dynamic input size"""
+        return nn.Sequential(
+            nn.Linear(self.flattened_size, self.feature_dims),
+            nn.BatchNorm1d(self.feature_dims),
+            nn.LeakyReLU(0.2)
+        )
+
+    def _create_unembedder(self) -> nn.Sequential:
+        """Create unembedder with dynamic output size"""
+        return nn.Sequential(
+            nn.Linear(self.feature_dims, self.flattened_size),
+            nn.BatchNorm1d(self.flattened_size),
+            nn.LeakyReLU(0.2)
+        )
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Basic encoding process"""
         for layer in self.encoder_layers:
@@ -1616,10 +1968,10 @@ class BaseAutoencoder(nn.Module):
         return self.embedder(x)
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """Basic decoding process"""
+        """Basic decoding process with dynamic shape handling"""
         x = self.unembedder(x)
         x = x.view(x.size(0), self.layer_sizes[-1],
-                  self.final_spatial_dim, self.final_spatial_dim)
+                  self.final_spatial_dim_h, self.final_spatial_dim_w)
 
         for layer in self.decoder_layers:
             x = layer(x)
@@ -1719,21 +2071,14 @@ class BaseAutoencoder(nn.Module):
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
         """
-        Extract features from a DataLoader with improved label handling.
-
-        Args:
-            loader (DataLoader): DataLoader for the dataset.
-            dataset_type (str): Type of dataset ("train" or "test"). Defaults to "train".
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary containing extracted features and metadata.
+        Extract features from a DataLoader with improved label handling and length consistency.
         """
         self.eval()
         all_embeddings = []
         all_labels = []
-        all_indices = []  # Store file indices
-        all_filenames = []  # Store filenames
-        all_class_names = []  # Store actual class names
+        all_indices = []
+        all_filenames = []
+        all_class_names = []
 
         try:
             with torch.no_grad():
@@ -1743,27 +2088,40 @@ class BaseAutoencoder(nn.Module):
 
                     # Get metadata if available, otherwise use placeholders
                     if hasattr(loader.dataset, 'get_additional_info'):
-                        # Custom dataset with metadata
-                        indices = [loader.dataset.get_additional_info(idx)[0] for idx in range(len(inputs))]
-                        filenames = [loader.dataset.get_additional_info(idx)[1] for idx in range(len(inputs))]
+                        indices = []
+                        filenames = []
+                        class_names = []
 
-                        # Improved class name handling
-                        if hasattr(loader.dataset, 'reverse_encoder'):
-                            class_names = [loader.dataset.reverse_encoder[label.item()] for label in labels]
-                        elif hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
-                        else:
-                            class_names = [f"class_{label.item()}" for label in labels]
+                        batch_size = len(inputs)
+                        for i in range(batch_size):
+                            global_idx = batch_idx * loader.batch_size + i
+                            if global_idx < len(loader.dataset):
+                                idx_info = loader.dataset.get_additional_info(global_idx)
+                                indices.append(idx_info[0])
+                                filenames.append(idx_info[1])
+
+                                # Improved class name handling
+                                if hasattr(loader.dataset, 'reverse_encoder'):
+                                    class_names.append(loader.dataset.reverse_encoder[labels[i].item()])
+                                elif hasattr(loader.dataset, 'classes'):
+                                    class_names.append(loader.dataset.classes[labels[i].item()])
+                                else:
+                                    class_names.append(f"class_{labels[i].item()}")
+                            else:
+                                # Handle edge case for last incomplete batch
+                                indices.append(f"batch_{batch_idx}_{i}")
+                                filenames.append(f"batch_{batch_idx}_{i}")
+                                class_names.append(f"class_{labels[i].item()}")
                     else:
-                        # Dataset without metadata (e.g., torchvision)
-                        indices = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
-                        filenames = [f"unavailable_{batch_idx}_{i}" for i in range(len(inputs))]
+                        # Dataset without metadata
+                        batch_size = len(inputs)
+                        indices = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]
+                        filenames = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]
 
-                        # Better fallback for class names
                         if hasattr(loader.dataset, 'classes'):
-                            class_names = [loader.dataset.classes[label.item()] for label in labels]
+                            class_names = [loader.dataset.classes[labels[i].item()] for i in range(batch_size)]
                         else:
-                            class_names = [str(label.item()) for label in labels]
+                            class_names = [str(labels[i].item()) for i in range(batch_size)]
 
                     # Extract embeddings
                     embeddings = self.encode(inputs)
@@ -1781,12 +2139,24 @@ class BaseAutoencoder(nn.Module):
                 embeddings = torch.cat(all_embeddings)
                 labels = torch.cat(all_labels)
 
+                # Verify all arrays have the same length
+                total_samples = len(embeddings)
+                if len(all_indices) != total_samples:
+                    logger.warning(f"Indices length ({len(all_indices)}) doesn't match embeddings ({total_samples}). Truncating.")
+                    all_indices = all_indices[:total_samples]
+                if len(all_filenames) != total_samples:
+                    logger.warning(f"Filenames length ({len(all_filenames)}) doesn't match embeddings ({total_samples}). Truncating.")
+                    all_filenames = all_filenames[:total_samples]
+                if len(all_class_names) != total_samples:
+                    logger.warning(f"Class names length ({len(all_class_names)}) doesn't match embeddings ({total_samples}). Truncating.")
+                    all_class_names = all_class_names[:total_samples]
+
                 feature_dict = {
                     'embeddings': embeddings,
                     'labels': labels,
                     'indices': all_indices,
                     'filenames': all_filenames,
-                    'class_names': all_class_names  # Now contains proper class names in all cases
+                    'class_names': all_class_names
                 }
 
                 return feature_dict
@@ -1794,6 +2164,7 @@ class BaseAutoencoder(nn.Module):
         except Exception as e:
             logger.error(f"Error during feature extraction: {str(e)}")
             raise
+
     def get_enhancement_features(self, embeddings: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Hook method for enhanced models to add specialized features.
@@ -2192,6 +2563,156 @@ class AgriculturalPatternAutoencoder(BaseAutoencoder):
             output['loss'] = loss
 
         return output
+
+class SlidingWindowAutoencoder(BaseAutoencoder):
+    """Autoencoder that processes large images using sliding windows"""
+
+    def __init__(self, input_shape, feature_dims, config, window_size=256, stride=128):
+        # Initialize with window size instead of full image size
+        self.window_size = window_size
+        self.stride = stride or window_size // 2
+
+        # Store original full image shape for reconstruction
+        self.full_image_shape = input_shape
+
+        # Initialize base autoencoder with window size
+        window_shape = (input_shape[0], window_size, window_size)
+        super().__init__(window_shape, feature_dims, config)
+
+        # Feature aggregator for combining window features
+        self.feature_aggregator = nn.Sequential(
+            nn.Linear(feature_dims * 4, feature_dims * 2),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(feature_dims * 2, feature_dims)
+        )
+
+        logger.info(f"Initialized sliding window autoencoder for images up to {input_shape[1]}x{input_shape[2]}")
+        logger.info(f"Processing windows: {window_size}x{window_size} with stride {stride}")
+
+    def process_full_image(self, image_tensor, reconstructor):
+        """Process full image using sliding window approach"""
+        batch_size, channels, height, width = image_tensor.shape
+
+        # Process each image in batch separately
+        batch_reconstructions = []
+        batch_embeddings = []
+
+        for batch_idx in range(batch_size):
+            single_image = image_tensor[batch_idx:batch_idx+1]
+            reconstruction, embedding = self._process_single_image(single_image, reconstructor)
+            batch_reconstructions.append(reconstruction)
+            batch_embeddings.append(embedding)
+
+        return torch.cat(batch_reconstructions, dim=0), torch.stack(batch_embeddings, dim=0)
+
+    def _process_single_image(self, image_tensor, reconstructor):
+        """Process a single large image using sliding windows"""
+        _, channels, height, width = image_tensor.shape
+        reconstructor.reset()
+
+        window_embeddings = []
+
+        # Generate window coordinates
+        windows = self._generate_windows(height, width)
+
+        # Process each window
+        for y1, x1, y2, x2 in windows:
+            # Extract window
+            window = image_tensor[:, :, y1:y2, x1:x2]
+
+            # Pad if necessary (for edge windows)
+            if window.shape[-2] != self.window_size or window.shape[-1] != self.window_size:
+                window = F.pad(window, (0, self.window_size - window.shape[-1],
+                                       0, self.window_size - window.shape[-2]),
+                              mode='reflect')
+
+            # Process window through autoencoder
+            with torch.no_grad():
+                window_embedding = self.encode(window)
+                window_reconstruction = self.decode(window_embedding)
+
+            # Store embedding for aggregation
+            window_embeddings.append(window_embedding)
+
+            # Remove padding before reconstruction
+            if window_reconstruction.shape[-2] != (y2 - y1) or window_reconstruction.shape[-1] != (x2 - x1):
+                window_reconstruction = window_reconstruction[:, :, :(y2 - y1), :(x2 - x1)]
+
+            # Add to reconstructor
+            reconstructor.add_window(window_reconstruction.squeeze(0), (y1, x1, y2, x2))
+
+        # Aggregate window embeddings
+        if window_embeddings:
+            aggregated_embedding = self._aggregate_embeddings(window_embeddings)
+        else:
+            aggregated_embedding = torch.zeros(self.feature_dims, device=image_tensor.device)
+
+        # Get final reconstruction
+        full_reconstruction = reconstructor.get_reconstruction().unsqueeze(0)
+
+        return full_reconstruction, aggregated_embedding
+
+    def _generate_windows(self, height, width):
+        """Generate sliding window coordinates for a single image"""
+        windows = []
+
+        y_steps = max(1, (height - self.window_size) // self.stride + 1)
+        x_steps = max(1, (width - self.window_size) // self.stride + 1)
+
+        for i in range(y_steps):
+            for j in range(x_steps):
+                y1 = i * self.stride
+                x1 = j * self.stride
+                y2 = min(y1 + self.window_size, height)
+                x2 = min(x1 + self.window_size, width)
+                windows.append((y1, x1, y2, x2))
+
+        # Add edge cases
+        if width % self.stride != 0:
+            for i in range(y_steps):
+                x1 = width - self.window_size
+                x2 = width
+                y1 = i * self.stride
+                y2 = min(y1 + self.window_size, height)
+                windows.append((y1, x1, y2, x2))
+
+        if height % self.stride != 0:
+            for j in range(x_steps):
+                y1 = height - self.window_size
+                y2 = height
+                x1 = j * self.stride
+                x2 = min(x1 + self.window_size, width)
+                windows.append((y1, x1, y2, x2))
+
+        if height % self.stride != 0 and width % self.stride != 0:
+            y1 = height - self.window_size
+            y2 = height
+            x1 = width - self.window_size
+            x2 = width
+            windows.append((y1, x1, y2, x2))
+
+        return windows
+
+    def _aggregate_embeddings(self, window_embeddings):
+        """Aggregate embeddings from multiple windows"""
+        if len(window_embeddings) == 1:
+            return window_embeddings[0]
+
+        # Stack all window embeddings
+        all_embeddings = torch.stack(window_embeddings, dim=0)
+
+        # Use multiple aggregation strategies
+        max_pooled = torch.max(all_embeddings, dim=0)[0]
+        avg_pooled = torch.mean(all_embeddings, dim=0)
+        std_pooled = torch.std(all_embeddings, dim=0)
+
+        # Combine different aggregation methods
+        combined = torch.cat([max_pooled, avg_pooled, std_pooled], dim=0)
+        aggregated = self.feature_aggregator(combined)
+
+        return aggregated
+
 
 class AstronomicalStructureLoss(nn.Module):
     """Loss function specialized for astronomical imaging features"""
@@ -2763,6 +3284,83 @@ class ModelFactory:
         return model
 
 
+def train_sliding_window_model(model, large_image_paths, config):
+    """Train model using sliding window approach for large images"""
+
+    # Setup sliding window dataset
+    window_size = config['training'].get('window_size', 256)
+    stride = config['training'].get('stride', 128)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=config['dataset']['mean'],
+                           std=config['dataset']['std'])
+    ])
+
+    dataset = SlidingWindowDataset(
+        image_paths=large_image_paths,
+        window_size=window_size,
+        stride=stride,
+        transform=transform,
+        overlap=0.5  # 50% overlap for better reconstruction
+    )
+
+    # Create data loader with small batch size (we're processing windows)
+    loader = DataLoader(
+        dataset,
+        batch_size=config['training'].get('window_batch_size', 8),
+        shuffle=True,
+        num_workers=config['training']['num_workers'],
+        pin_memory=True
+    )
+
+    # Train using standard approach but on windows
+    optimizer = optim.Adam(model.parameters(), lr=config['model']['learning_rate'])
+    loss_manager = EnhancedLossManager(config)
+
+    # Standard training loop on windows
+    history = _train_phase(model, loader, optimizer, loss_manager,
+                          config['training']['epochs'], 1, config)
+
+    return history
+
+def process_very_large_image(model, image_path, output_path, config):
+    """Process a single very large image using sliding windows"""
+
+    # Load the large image
+    with Image.open(image_path) as img:
+        original_array = np.array(img)
+        original_shape = original_array.shape
+
+    # Convert to tensor
+    transform = transforms.ToTensor()
+    image_tensor = transform(img).unsqueeze(0)  # Add batch dimension
+
+    # Setup reconstructor
+    window_size = config['training'].get('window_size', 256)
+    stride = config['training'].get('stride', 128)
+
+    reconstructor = WindowReconstructor(
+        original_shape=image_tensor.shape[1:],  # (C, H, W)
+        window_size=window_size,
+        stride=stride,
+        blend_mode='linear'
+    )
+
+    # Process the image
+    with torch.no_grad():
+        reconstruction, embedding = model.process_full_image(image_tensor, reconstructor)
+
+    # Save reconstruction
+    reconstruction_pil = transforms.ToPILImage()(reconstruction.squeeze(0))
+    reconstruction_pil.save(output_path)
+
+    logger.info(f"Processed {image_path} ({original_shape[1]}x{original_shape[0]})")
+    logger.info(f"Saved reconstruction to {output_path}")
+
+    return embedding
+
+
 # Update the training loop to handle the new feature dictionary format
 def train_model(model: nn.Module, train_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
@@ -2921,7 +3519,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic with class-balanced loss calculation"""
+    """Training logic with class-balanced loss calculation and robust size handling"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
@@ -2946,13 +3544,27 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 # Forward pass
                 if phase == 1:
                     # Phase 1: Reconstruction loss only
-                    reconstruction = model.decode(model.encode(data))
+                    embedding = model.encode(data)
+                    reconstruction = model.decode(embedding)
+
+                    # Ensure reconstruction matches input size before loss calculation
+                    if reconstruction.shape != data.shape:
+                        reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
+                                                     mode='bilinear', align_corners=False)
+                        logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
+
                     loss = F.mse_loss(reconstruction, data)
                 else:
                     # Phase 2: Enhanced losses
                     output = model(data)
                     reconstruction = output['reconstruction']
                     embedding = output['embedding']
+
+                    # Ensure reconstruction matches input size before loss calculation
+                    if reconstruction.shape != data.shape:
+                        reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
+                                                     mode='bilinear', align_corners=False)
+                        logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2]}")
 
                     # Base reconstruction loss
                     recon_loss = F.mse_loss(reconstruction, data)
@@ -3014,6 +3626,10 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 # Backpropagation
                 loss.backward()
+
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 optimizer.step()
 
                 # Update metrics
@@ -3033,7 +3649,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 # Cleanup
                 del data, loss
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # Epoch statistics
             avg_loss = running_loss / num_batches
@@ -3043,6 +3660,10 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 avg_acc = running_acc / num_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
 
+            # Log epoch progress
+           # logger.info(f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}" +
+           #            (f" - Accuracy: {avg_acc:.2%}" if phase == 2 and model.use_class_encoding else ""))
+
             # Checkpointing
             if (best_loss - avg_loss) > min_thr:
                 best_loss = avg_loss
@@ -3050,19 +3671,37 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 checkpoint_manager.save_model_state(
                     model, optimizer, phase, epoch, avg_loss, True
                 )
+               #logger.info(f"New best model saved with loss: {best_loss:.4f}")
             else:
                 patience_counter += 1
+                logger.info(f"No improvement - Patience counter: {patience_counter}")
 
+            # Early stopping
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
-                logger.info(f"Early stopping at epoch {epoch+1}")
+                logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
 
+            # Learning rate scheduling (if configured)
+            if 'scheduler' in config['model'] and config['model']['scheduler'].get('enabled', False):
+                # Adjust learning rate based on loss improvement
+                if hasattr(optimizer, 'param_groups'):
+                    current_lr = optimizer.param_groups[0]['lr']
+                    min_lr = config['model']['scheduler'].get('min_lr', 1e-6)
+                    if avg_loss > best_loss * 1.1 and current_lr > min_lr:  # Loss increased by 10%
+                        new_lr = max(current_lr * 0.5, min_lr)
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] = new_lr
+                        logger.info(f"Reduced learning rate from {current_lr:.2e} to {new_lr:.2e}")
+
     except Exception as e:
-        logger.error(f"Training failed: {str(e)}")
+        logger.error(f"Training failed at epoch {epoch+1}: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
-    return history
+    # Log training completion
+    logger.info(f"Phase {phase} training completed. Best loss: {best_loss:.4f}")
 
+    return history
 
 
 class ReconstructionManager:
@@ -3803,20 +4442,40 @@ class DynamicAutoencoder(nn.Module):
             in_channels = out_channels
 
     def _calculate_layer_sizes(self) -> List[int]:
-        """Calculate progressive channel sizes for encoder/decoder"""
+        """Calculate progressive channel sizes based on input dimensions"""
         base_channels = 32
         sizes = []
         current_size = base_channels
 
-        min_dim = min(self.input_shape[1:])
-        max_layers = int(np.log2(min_dim)) - 2
+        # Determine maximum layers based on smallest dimension
+        min_dim = min(self.input_shape[1], self.input_shape[2])
 
-        for _ in range(max_layers):
+        # More conservative layer calculation
+        max_layers = max(2, int(np.log2(min_dim)) - 2)  # At least 2 layers
+
+        logger.info(f"Input dimensions: {self.input_shape[1]}x{self.input_shape[2]} (channels: {self.in_channels})")
+        logger.info(f"Calculating {max_layers} layers for min dimension {min_dim}")
+
+        for i in range(max_layers):
             sizes.append(current_size)
-            if current_size < 128:
-                current_size *= 2
 
-        logger.info(f"Layer sizes: {sizes}")
+            # Stop if dimensions become too small in next layer
+            next_dim = min_dim // (2 ** (i + 1))
+            if next_dim < 4:
+                logger.info(f"Stopping at layer {i}, next dimension would be {next_dim}")
+                break
+
+            # Stop doubling channels at 512 to prevent excessive memory usage
+            if current_size < 512:
+                current_size *= 2
+            else:
+                current_size = 512  # Cap at 512
+
+        # Ensure we have at least 2 layers
+        if len(sizes) < 2:
+            sizes = [32, 64]  # Minimum architecture
+
+        logger.info(f"Final layer sizes: {sizes}")
         return sizes
 
     def encode(self, x: torch.Tensor, class_labels: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -4188,32 +4847,47 @@ class DatasetProcessor:
         self.output_dir = output_dir
         self.config = config if config is not None else {}
 
-        # Determine dataset name
+        # Determine dataset name - prioritize data_name if provided
         if data_name:
-            self.dataset_name = data_name.upper()  # Use uppercase for dataset name
+            self.dataset_name = data_name.lower()
         else:
             if self.datatype == 'torchvision':
-                self.dataset_name = self.datafile.upper()  # Use uppercase
+                self.dataset_name = self.datafile.lower()
             else:
-                # Handle both files and directories
+                # Handle both files and directories for custom datasets
                 path_obj = Path(self.datafile)
                 if path_obj.is_dir():
-                    self.dataset_name = path_obj.name.upper()  # Use uppercase
+                    self.dataset_name = path_obj.name.lower()
                 else:
-                    self.dataset_name = path_obj.stem.upper() or 'DATASET'  # Use uppercase
+                    self.dataset_name = path_obj.stem.lower() or 'dataset'
 
-        # For torchvision datasets, use Data/DATASET_NAME/ structure
+            # For torchvision, set up standard directory structure
+            if self.datatype == 'torchvision':
+                # For torchvision, use the dataset name directly (e.g., "MNIST")
+                self.dataset_name = self.datafile.upper()  # Use uppercase for torchvision lookup
+            else:
+                # Handle both files and directories for custom datasets
+                path_obj = Path(self.datafile)
+                if path_obj.is_dir():
+                    self.dataset_name = path_obj.name.lower()
+                else:
+                    self.dataset_name = path_obj.stem.lower() or 'dataset'
+
+        # For torchvision, set up standard directory structure
         if self.datatype == 'torchvision':
-            self.dataset_dir = os.path.join("Data", self.dataset_name)  # Data/CIFAR100/
+            # Directory name should be lowercase, but dataset lookup is uppercase
+            self.dataset_dir = os.path.join("data", self.dataset_name.lower())
         else:
-            # For custom datasets, use the original structure
-            self.dataset_dir = os.path.join("data", self.dataset_name.lower())  # data/dataset_name/
+            # For custom datasets, use the provided path structure
+            self.dataset_dir = os.path.join("data", self.dataset_name)
+
 
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.conf")
+        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
         self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
+
 
     def _extract_archive(self, archive_path: str) -> str:
         """Extract compressed archive to temporary directory"""
@@ -4250,25 +4924,8 @@ class DatasetProcessor:
 
         return extract_dir
 
-    def process(self) -> Tuple[str, Optional[str]]:
-        """Process dataset and return paths to train and test directories"""
-        if self.datatype == 'torchvision':
-            # For torchvision, we process directly without file path validation
-            return self._process_torchvision()
-        else:
-            # For custom datasets, process the data path
-            if not self.datafile:
-                raise ValueError("Data file path is required for custom datasets")
-
-            processed_path = self._process_data_path(self.datafile)
-            return self._process_custom(processed_path)
-
     def _process_data_path(self, data_path: str) -> str:
         """Process input data path, handling compressed files if necessary"""
-        # For torchvision datasets, we don't have a data_path to process
-        if self.datatype == 'torchvision':
-            return ""  # Return empty string or some default
-
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Data path not found: {data_path}")
 
@@ -4288,6 +4945,18 @@ class DatasetProcessor:
             return extract_dir
 
         return data_path
+
+    def process(self) -> Tuple[str, Optional[str]]:
+        """Process dataset and return paths to train and test directories"""
+        if self.datatype == 'torchvision':
+            return self._process_torchvision()
+        else:
+            # Only process data path for custom datasets
+            if self.datafile and os.path.exists(self.datafile):
+                processed_path = self._process_data_path(self.datafile)
+                return self._process_custom(processed_path)
+            else:
+                raise FileNotFoundError(f"Custom dataset path not found: {self.datafile}")
 
     def _handle_existing_directory(self, path: str):
         """Handle existing directory by either removing it or merging its contents."""
@@ -4325,7 +4994,7 @@ class DatasetProcessor:
                 # Copy train data
                 shutil.copytree(os.path.join(data_path, "train"), train_dir, dirs_exist_ok=True)
 
-                return train_dir, test           # return train folder populated with both train and test data and the test folder for consistency.
+                return train_dir, test_dir           # FIXED: Changed 'test' to 'test_dir'
 
             else:
                 # Normal processing with separate train and test folders
@@ -4370,19 +5039,28 @@ class DatasetProcessor:
             shutil.rmtree(temp_dir)
 #------------------------
     def get_transforms(self, config: Dict, is_train: bool = True) -> transforms.Compose:
-        """Get transforms based on configuration"""
+        """Get transforms that preserve the detected image dimensions"""
         transform_list = []
 
-        # Handle resolution and channel conversion first
+        # Use detected dimensions, don't force resize
         target_size = tuple(config['dataset']['input_size'])
         target_channels = config['dataset']['in_channels']
 
-        # Resolution adjustment
-        transform_list.append(transforms.Resize(target_size))
+        logger.info(f"Using transforms for size: {target_size}, channels: {target_channels}")
 
-        # Channel conversion
+        # Only resize if images are very large (optional)
+        max_size = 512
+        if target_size[0] > max_size or target_size[1] > max_size:
+            logger.info(f"Resizing large images from {target_size} to max {max_size}")
+            transform_list.append(transforms.Resize(max_size))
+        else:
+            logger.info(f"Using original image size: {target_size}")
+
+        # Channel conversion if needed
         if target_channels == 1:
             transform_list.append(transforms.Grayscale(num_output_channels=1))
+        elif target_channels == 3:
+            transform_list.append(transforms.Lambda(lambda x: x.convert('RGB') if x.mode != 'RGB' else x))
 
         # Training augmentations
         if is_train and config.get('augmentation', {}).get('enabled', True):
@@ -4391,10 +5069,6 @@ class DatasetProcessor:
                 transform_list.append(transforms.RandomCrop(target_size, padding=4))
             if aug_config.get('horizontal_flip', {}).get('enabled', False):
                 transform_list.append(transforms.RandomHorizontalFlip())
-            if aug_config.get('color_jitter', {}).get('enabled', False):
-                transform_list.append(transforms.ColorJitter(
-                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1
-                ))
 
         # Final transforms
         transform_list.extend([
@@ -4405,274 +5079,233 @@ class DatasetProcessor:
 
         return transforms.Compose(transform_list)
 
-
     def _generate_main_config(self, train_dir: str) -> Dict:
         """Generate main configuration with all necessary parameters"""
-        try:
-            input_size, in_channels = self._detect_image_properties(train_dir)
-            class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
-            num_classes = len(class_dirs)
+        input_size, in_channels = self._detect_image_properties(train_dir)
+        class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+        num_classes = len(class_dirs)
 
-            mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
-            std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-            feature_dims = min(128, np.prod(input_size) // 4)
+        mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
+        std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
+        feature_dims = min(128, np.prod(input_size) // 4)
 
-            # Use lowercase for dataset name in config, but keep path as is
-            dataset_name_lower = self.dataset_name.lower()
-
-            # Build the complete configuration structure
-            config = {
-                "dataset": {
-                    "name": dataset_name_lower,
-                    "type": self.datatype,
-                    "in_channels": in_channels,
-                    "num_classes": num_classes,
-                    "input_size": list(input_size),
-                    "mean": mean,
-                    "std": std,
-                    "resize_images": False,
-                    "train_dir": train_dir,
-                    "test_dir": train_dir
+        return {
+            "dataset": {
+                "name": self.dataset_name,
+                "type": self.datatype,
+                "in_channels": in_channels,
+                "num_classes": num_classes,
+                "input_size": list(input_size),
+                "mean": mean,
+                "std": std,
+                "resize_images": False,
+                "train_dir": train_dir,
+                "test_dir": os.path.join(os.path.dirname(train_dir), 'test')
+            },
+             "model": {
+                "encoder_type": "autoenc",
+                'enable_adaptive': True,  # Default value
+                "feature_dims": feature_dims,
+                "learning_rate": 0.001,
+                "optimizer": {
+                    "type": "Adam",
+                    "weight_decay": 0.0001,
+                    "momentum": 0.9,
+                    "beta1": 0.9,
+                    "beta2": 0.999,
+                    "epsilon": 1e-08
                 },
-                "model": {
-                    "encoder_type": "autoenc",
-                    "enable_adaptive": True,
-                    "feature_dims": feature_dims,
-                    "learning_rate": 0.001,
-                    "optimizer": {
-                        "type": "Adam",
-                        "weight_decay": 0.0001,
-                        "momentum": 0.9,
-                        "beta1": 0.9,
-                        "beta2": 0.999,
-                        "epsilon": 1e-08
-                    },
-                    "scheduler": {
-                        "type": "ReduceLROnPlateau",
-                        "factor": 0.1,
-                        "patience": 10,
-                        "min_lr": 1e-06,
-                        "verbose": True
-                    },
-                    "autoencoder_config": {
-                        "reconstruction_weight": 1.0,
-                        "feature_weight": 0.1,
-                        "convergence_threshold": 0.0001,
-                        "min_epochs": 10,
-                        "patience": 5,
-                        "enhancements": {
-                            "enabled": True,
-                            "use_kl_divergence": True,
-                            "use_class_encoding": False,
-                            "kl_divergence_weight": 0.5,
-                            "classification_weight": 0.5,
-                            "clustering_temperature": 1.0,
-                            "min_cluster_confidence": 0.7
+                "scheduler": {
+                    "type": "ReduceLROnPlateau",
+                    "factor": 0.1,
+                    "patience": 10,
+                    "min_lr": 1e-06,
+                    "verbose": True
+                },
+                "autoencoder_config": {
+                    "reconstruction_weight": 1.0,
+                    "feature_weight": 0.1,
+                    "convergence_threshold": 0.0001,
+                    "min_epochs": 10,
+                    "patience": 5,
+                    "enhancements": {
+                        "enabled": True,
+                        "use_kl_divergence": True,
+                        "use_class_encoding": False,
+                        "kl_divergence_weight": 0.5,
+                        "classification_weight": 0.5,
+                        "clustering_temperature": 1.0,
+                        "min_cluster_confidence": 0.7
+                    }
+                },
+                "loss_functions": {
+                    "structural": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "params": {
+                            "edge_weight": 1.0,
+                            "smoothness_weight": 0.5
                         }
                     },
-                    "loss_functions": {
-                        "structural": {
-                            "enabled": True,
-                            "weight": 1.0,
-                            "params": {
-                                "edge_weight": 1.0,
-                                "smoothness_weight": 0.5
-                            }
-                        },
-                        "color_enhancement": {
-                            "enabled": True,
-                            "weight": 0.8,
-                            "params": {
-                                "channel_weight": 0.5,
-                                "contrast_weight": 0.3
-                            }
-                        },
-                        "morphology": {
-                            "enabled": True,
-                            "weight": 0.6,
-                            "params": {
-                                "shape_weight": 0.7,
-                                "symmetry_weight": 0.3
-                            }
-                        },
-                        "detail_preserving": {
-                            "enabled": True,
-                            "weight": 0.8,
-                            "params": {
-                                "detail_weight": 1.0,
-                                "texture_weight": 0.8,
-                                "frequency_weight": 0.6
-                            }
-                        },
-                        "astronomical_structure": {
-                            "enabled": True,
-                            "weight": 1.0,
-                            "components": {
-                                "edge_preservation": True,
-                                "peak_preservation": True,
-                                "detail_preservation": True
-                            }
-                        },
-                        "medical_structure": {
-                            "enabled": True,
-                            "weight": 1.0,
-                            "components": {
-                                "boundary_preservation": True,
-                                "tissue_contrast": True,
-                                "local_structure": True
-                            }
-                        },
-                        "agricultural_pattern": {
-                            "enabled": True,
-                            "weight": 1.0,
-                            "components": {
-                                "texture_preservation": True,
-                                "damage_pattern": True,
-                                "color_consistency": True
-                            }
+                    "color_enhancement": {
+                        "enabled": True,
+                        "weight": 0.8,
+                        "params": {
+                            "channel_weight": 0.5,
+                            "contrast_weight": 0.3
                         }
                     },
-                    "enhancement_modules": {
-                        "astronomical": {
-                            "enabled": True,
-                            "components": {
-                                "structure_preservation": True,
-                                "detail_preservation": True,
-                                "star_detection": True,
-                                "galaxy_features": True,
-                                "kl_divergence": True
-                            },
-                            "weights": {
-                                "detail_weight": 1.0,
-                                "structure_weight": 0.8,
-                                "edge_weight": 0.7
-                            }
-                        },
-                        "medical": {
-                            "enabled": True,
-                            "components": {
-                                "tissue_boundary": True,
-                                "lesion_detection": True,
-                                "contrast_enhancement": True,
-                                "subtle_feature_preservation": True
-                            },
-                            "weights": {
-                                "boundary_weight": 1.0,
-                                "lesion_weight": 0.8,
-                                "contrast_weight": 0.6
-                            }
-                        },
-                        "agricultural": {
-                            "enabled": True,
-                            "components": {
-                                "texture_analysis": True,
-                                "damage_detection": True,
-                                "color_anomaly": True,
-                                "pattern_enhancement": True,
-                                "morphological_features": True
-                            },
-                            "weights": {
-                                "texture_weight": 1.0,
-                                "damage_weight": 0.8,
-                                "pattern_weight": 0.7
-                            }
+                    "morphology": {
+                        "enabled": True,
+                        "weight": 0.6,
+                        "params": {
+                            "shape_weight": 0.7,
+                            "symmetry_weight": 0.3
+                        }
+                    },
+                    "detail_preserving": {
+                        "enabled": True,
+                        "weight": 0.8,
+                        "params": {
+                            "detail_weight": 1.0,
+                            "texture_weight": 0.8,
+                            "frequency_weight": 0.6
+                        }
+                    },
+                    "astronomical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "edge_preservation": True,
+                            "peak_preservation": True,
+                            "detail_preservation": True
+                        }
+                    },
+                    "medical_structure": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "boundary_preservation": True,
+                            "tissue_contrast": True,
+                            "local_structure": True
+                        }
+                    },
+                    "agricultural_pattern": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "components": {
+                            "texture_preservation": True,
+                            "damage_pattern": True,
+                            "color_consistency": True
                         }
                     }
                 },
-                "training": {
-                    "batch_size": 128,
-                    "epochs": 200,
-                    "num_workers": min(4, os.cpu_count() or 1),
-                    "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
-                    "validation_split": 0.2,
-                    "invert_DBNN": True,
-                    "reconstruction_weight": 0.5,
-                    "feedback_strength": 0.3,
-                    "inverse_learning_rate": 0.1,
-                    "use_classwise_acc": True,
-                    "early_stopping": {
-                        "patience": 5,
-                        "min_delta": 0.001
+                "enhancement_modules": {
+                    "astronomical": {
+                        "enabled": True,
+                        "components": {
+                            "structure_preservation": True,
+                            "detail_preservation": True,
+                            "star_detection": True,
+                            "galaxy_features": True,
+                            "kl_divergence": True
+                        },
+                        "weights": {
+                            "detail_weight": 1.0,
+                            "structure_weight": 0.8,
+                            "edge_weight": 0.7
+                        }
+                    },
+                    "medical": {
+                        "enabled": True,
+                        "components": {
+                            "tissue_boundary": True,
+                            "lesion_detection": True,
+                            "contrast_enhancement": True,
+                            "subtle_feature_preservation": True
+                        },
+                        "weights": {
+                            "boundary_weight": 1.0,
+                            "lesion_weight": 0.8,
+                            "contrast_weight": 0.6
+                        }
+                    },
+                    "agricultural": {
+                        "enabled": True,
+                        "components": {
+                            "texture_analysis": True,
+                            "damage_detection": True,
+                            "color_anomaly": True,
+                            "pattern_enhancement": True,
+                            "morphological_features": True
+                        },
+                        "weights": {
+                            "texture_weight": 1.0,
+                            "damage_weight": 0.8,
+                            "pattern_weight": 0.7
+                        }
                     }
-                },
-                "augmentation": {
+                }
+            },
+            "training": {
+                "window_size": 256,  # For sliding window processing
+                "stride": 128,       # 50% overlap
+                "window_batch_size": 8,  # Smaller batches for windows
+                "use_sliding_window": True,  # Enable for large images
+                "batch_size": 128,
+                "epochs": 200,
+                "num_workers": min(4, os.cpu_count() or 1),
+                "checkpoint_dir": os.path.join(self.dataset_dir, "checkpoints"),
+                "validation_split": 0.2,
+                "invert_DBNN": True,
+                "reconstruction_weight": 0.5,
+                "feedback_strength": 0.3,
+                "inverse_learning_rate": 0.1,
+                "use_classwise_acc": True, # classwise accuracy has priority
+                "early_stopping": {
+                    "patience": 5,
+                    "min_delta": 0.001
+                }
+            },
+            "augmentation": {
+                "enabled": True,
+                "random_crop": {"enabled": True, "padding": 4},
+                "random_rotation": {"enabled": True, "degrees": 10},
+                "horizontal_flip": {"enabled": True, "probability": 0.5},
+                "vertical_flip": {"enabled": False},
+                "color_jitter": {
                     "enabled": True,
-                    "random_crop": {"enabled": True, "padding": 4},
-                    "random_rotation": {"enabled": True, "degrees": 10},
-                    "horizontal_flip": {"enabled": True, "probability": 0.5},
-                    "vertical_flip": {"enabled": False},
-                    "color_jitter": {
-                        "enabled": True,
-                        "brightness": 0.2,
-                        "contrast": 0.2,
-                        "saturation": 0.2,
-                        "hue": 0.1
-                    },
-                    "normalize": {
-                        "enabled": True,
-                        "mean": mean,
-                        "std": std
-                    }
+                    "brightness": 0.2,
+                    "contrast": 0.2,
+                    "saturation": 0.2,
+                    "hue": 0.1
                 },
-                "execution_flags": {
-                    "mode": "train_and_predict",
-                    "use_gpu": torch.cuda.is_available(),
-                    "mixed_precision": True,
-                    "distributed_training": False,
-                    "debug_mode": False,
-                    "use_previous_model": True,
-                    "fresh_start": False
-                },
-                "output": {
-                    "features_file": os.path.join(self.dataset_dir, f"{dataset_name_lower}.csv"),
-                    "model_dir": os.path.join(self.dataset_dir, "models"),
-                    "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
+                "normalize": {
+                    "enabled": True,
+                    "mean": mean,
+                    "std": std
                 }
+            },
+            "execution_flags": {
+                "mode": "train_and_predict",
+                "use_gpu": torch.cuda.is_available(),
+                "mixed_precision": True,
+                "distributed_training": False,
+                "debug_mode": False,
+                "use_previous_model": True,
+                "fresh_start": False
+            },
+            "output": {
+                "features_file": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+                "model_dir": os.path.join(self.dataset_dir, "models"),
+                "visualization_dir": os.path.join(self.dataset_dir, "visualizations")
             }
-
-            return config
-
-        except Exception as e:
-            logger.error(f"Error generating main config: {str(e)}")
-            # Return a minimal valid config as fallback
-            return {
-                "dataset": {
-                    "name": self.dataset_name.lower(),
-                    "type": self.datatype,
-                    "in_channels": 3,
-                    "num_classes": 10,
-                    "input_size": [32, 32],
-                    "mean": [0.5, 0.5, 0.5],
-                    "std": [0.5, 0.5, 0.5],
-                    "resize_images": False,
-                    "train_dir": train_dir,
-                    "test_dir": train_dir
-                },
-                "model": {
-                    "encoder_type": "autoenc",
-                    "enable_adaptive": True,
-                    "feature_dims": 128,
-                    "learning_rate": 0.001,
-                    "autoencoder_config": {
-                        "reconstruction_weight": 1.0,
-                        "feature_weight": 0.1,
-                        "enhancements": {
-                            "use_kl_divergence": True,
-                            "use_class_encoding": False
-                        }
-                    }
-                },
-                "training": {
-                    "batch_size": 128,
-                    "epochs": 100,
-                    "num_workers": 4
-                }
-            }
+        }
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
         """Generate dataset-specific configuration"""
         return {
-            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name.lower()}.csv"),
+            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
@@ -4692,7 +5325,7 @@ class DatasetProcessor:
                 "trials": 100,
                 "epochs": 1000,
                 "learning_rate": 0.001,
-                "batch_size": 128,
+                "batch_size":128,
                 "test_fraction": 0.2,
                 "random_seed": 42,
                 "minimum_training_accuracy": 0.95,
@@ -4762,28 +5395,23 @@ class DatasetProcessor:
         os.makedirs(self.dataset_dir, exist_ok=True)
         logger.info(f"Starting configuration generation for dataset: {self.dataset_name}")
 
-        # 1. Generate main configuration
+        # 1. Generate and handle main configuration (json)
         logger.info("Generating main configuration...")
         config = self._generate_main_config(train_dir)
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    existing_config = json.load(f)
+                    logger.info(f"Found existing main config, merging...")
+                    config = self._merge_configs(existing_config, config)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in {self.config_path}, using default template")
 
-        # Ensure all required sections exist
-        required_sections = ['dataset', 'model', 'training', 'augmentation', 'execution_flags', 'output']
-        for section in required_sections:
-            if section not in config:
-                config[section] = {}
-
-        # Ensure model has all required sub-sections
-        model_required = ['autoencoder_config', 'loss_functions', 'enhancement_modules']
-        for sub_section in model_required:
-            if sub_section not in config['model']:
-                config['model'][sub_section] = {}
-
-        # Save main config
         with open(self.config_path, 'w') as f:
             json.dump(config, f, indent=4)
         logger.info(f"Main configuration saved: {self.config_path}")
 
-        # 2. Generate dataset.conf
+        # 2. Generate and handle dataset.conf using _generate_dataset_conf
         logger.info("Generating dataset configuration...")
         dataset_conf = self._generate_dataset_conf(config['model']['feature_dims'])
         if os.path.exists(self.conf_path):
@@ -4799,7 +5427,7 @@ class DatasetProcessor:
             json.dump(dataset_conf, f, indent=4)
         logger.info(f"Dataset configuration saved: {self.conf_path}")
 
-        # 3. Generate adaptive_dbnn.conf
+        # 3. Generate and handle adaptive_dbnn.conf using _generate_dbnn_config
         logger.info("Generating DBNN configuration...")
         dbnn_config = self._generate_dbnn_config(config)
         if os.path.exists(self.dbnn_conf_path):
@@ -4846,120 +5474,138 @@ class DatasetProcessor:
 
         return config
 
+    def _save_torchvision_images(self, dataset, output_dir, split_name):
+        """Save torchvision dataset images to directory structure"""
+        logger.info(f"Processing {split_name} split...")
+
+        class_to_idx = getattr(dataset, 'class_to_idx', None)
+        if class_to_idx:
+            idx_to_class = {v: k for k, v in class_to_idx.items()}
+        elif hasattr(dataset, 'classes'):
+            # Create class mapping from dataset classes
+            idx_to_class = {i: str(cls) for i, cls in enumerate(dataset.classes)}
+        else:
+            # Fallback: use labels as class names
+            idx_to_class = {i: str(i) for i in range(10)}
+
+        with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
+            for idx, (img, label) in enumerate(dataset):
+                class_name = idx_to_class[label] if label in idx_to_class else str(label)
+                class_dir = os.path.join(output_dir, class_name)
+                os.makedirs(class_dir, exist_ok=True)
+
+                if isinstance(img, torch.Tensor):
+                    img = transforms.ToPILImage()(img)
+
+                img_path = os.path.join(class_dir, f"{idx}.png")
+                img.save(img_path)
+                pbar.update(1)
+
+        logger.info(f"Saved {len(dataset)} images to {output_dir}")
 
     def _detect_image_properties(self, folder_path: str) -> Tuple[Tuple[int, int], int]:
-        """Detect actual image properties but use config values if specified"""
-        # Load existing config if available
-        config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                if 'dataset' in config:
-                    dataset_config = config['dataset']
-                    if all(key in dataset_config for key in ['input_size', 'in_channels']):
-                        logger.info("Using image properties from config file")
-                        return (tuple(dataset_config['input_size']),
-                                dataset_config['in_channels'])
-
-        # Fall back to detection from files
+        """Dynamically detect image properties from actual images"""
+        img_formats = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
         size_counts = defaultdict(int)
         channel_counts = defaultdict(int)
-        samples_checked = 0
+        aspect_ratios = []
 
+        logger.info(f"Scanning images in {folder_path} to detect properties...")
+
+        images_checked = 0
         for root, _, files in os.walk(folder_path):
             for file in files:
-                if file.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS):
+                if any(file.lower().endswith(ext) for ext in img_formats):
                     try:
                         with Image.open(os.path.join(root, file)) as img:
+                            # Convert to tensor to get proper dimensions
                             tensor = transforms.ToTensor()(img)
-                            height, width = tensor.shape[1], tensor.shape[2]
-                            channels = tensor.shape[0]
+                            channels, height, width = tensor.shape
 
+                            # Record dimensions
                             size_counts[(width, height)] += 1
                             channel_counts[channels] += 1
-                            samples_checked += 1
+                            aspect_ratios.append(width / height)
 
-                            if samples_checked >= 50:
+                            images_checked += 1
+                            if images_checked >= 20:  # Sample 20 images
                                 break
                     except Exception as e:
                         logger.warning(f"Could not process image {file}: {str(e)}")
                         continue
-
-            if samples_checked >= 50:
+            if images_checked >= 20:
                 break
 
         if not size_counts:
             raise ValueError(f"No valid images found in {folder_path}")
 
-        input_size = max(size_counts.items(), key=lambda x: x[1])[0]
-        in_channels = max(channel_counts.items(), key=lambda x: x[1])[0]
+        # Find most common dimensions
+        most_common_size = max(size_counts.items(), key=lambda x: x[1])[0]
+        most_common_channels = max(channel_counts.items(), key=lambda x: x[1])[0]
 
-        return input_size, in_channels
+        # Calculate average aspect ratio
+        avg_aspect_ratio = sum(aspect_ratios) / len(aspect_ratios)
 
+        logger.info(f"Detected properties: size={most_common_size}, channels={most_common_channels}")
+        logger.info(f"Average aspect ratio: {avg_aspect_ratio:.2f}")
+        logger.info(f"Size distribution: {dict(size_counts)}")
+        logger.info(f"Channel distribution: {dict(channel_counts)}")
+
+        return most_common_size, most_common_channels
 
     def _process_torchvision(self) -> Tuple[str, str]:
-        """Process torchvision dataset and merge train/test into single directory with uppercase structure"""
-        dataset_name = self.datafile.upper()  # Ensure uppercase
-        if not hasattr(datasets, dataset_name):
-            raise ValueError(f"Torchvision dataset {dataset_name} not found")
+        """Process torchvision dataset - download and organize in standard location"""
+        # Use the dataset name that was passed to the constructor (should be uppercase)
+        dataset_name = self.datafile.upper()  # e.g., "CIFAR10"
 
-        # Setup main dataset directory with uppercase structure: Data/DATASET_NAME/
-        dataset_dir = os.path.join("Data", dataset_name)  # Use "Data" (uppercase) folder
-        os.makedirs(dataset_dir, exist_ok=True)
+        logger.info(f"Processing torchvision dataset: {dataset_name}")
+        logger.info(f"Output directory: {self.dataset_dir}")
 
-        # Download and process datasets
-        transform = transforms.ToTensor()
+        # Validate that the dataset exists in torchvision
+        available_datasets = [name for name in dir(datasets)
+                            if not name.startswith('_') and hasattr(getattr(datasets, name), '__call__')]
 
-        train_dataset = getattr(datasets, dataset_name)(
-            root=self.output_dir,
-            train=True,
-            download=True,
-            transform=transform
-        )
+        if dataset_name not in available_datasets:
+            raise ValueError(f"Torchvision dataset {dataset_name} not found. "
+                           f"Available datasets: {', '.join(sorted(available_datasets))}")
 
-        test_dataset = getattr(datasets, dataset_name)(
-            root=self.output_dir,
-            train=False,
-            download=True,
-            transform=transform
-        )
+        # Setup standard directory structure in data/<dataset_name_lower>/
+        train_dir = os.path.join(self.dataset_dir, "train")
+        test_dir = os.path.join(self.dataset_dir, "test")
 
-        # Save ALL images with class directories in the main dataset folder
-        def save_dataset_images(dataset, split_name):
-            logger.info(f"Processing {split_name} split...")
+        # Only recreate directories if they don't exist to avoid re-downloading
+        if not os.path.exists(train_dir) or not os.path.exists(test_dir):
+            os.makedirs(train_dir, exist_ok=True)
+            os.makedirs(test_dir, exist_ok=True)
 
-            class_to_idx = getattr(dataset, 'class_to_idx', None)
-            if class_to_idx:
-                idx_to_class = {v: k for k, v in class_to_idx.items()}
-            else:
-                # For datasets without class_to_idx, create numeric class names
-                unique_labels = set()
-                for _, label in dataset:
-                    unique_labels.add(label)
-                idx_to_class = {label: str(label) for label in unique_labels}
+            # Download and process datasets
+            transform = transforms.ToTensor()
 
-            with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
-                for idx, (img, label) in enumerate(dataset):
-                    class_name = idx_to_class[label]
-                    class_dir = os.path.join(dataset_dir, class_name)
-                    os.makedirs(class_dir, exist_ok=True)
+            logger.info(f"Downloading {dataset_name} training dataset...")
+            train_dataset = getattr(datasets, dataset_name)(
+                root='./data',  # Torchvision's default download location
+                train=True,
+                download=True,
+                transform=transform
+            )
 
-                    if isinstance(img, torch.Tensor):
-                        img = transforms.ToPILImage()(img)
+            logger.info(f"Downloading {dataset_name} test dataset...")
+            test_dataset = getattr(datasets, dataset_name)(
+                root='./data',
+                train=False,
+                download=True,
+                transform=transform
+            )
 
-                    # Use split prefix to avoid filename conflicts
-                    img_path = os.path.join(class_dir, f"{split_name}_{idx}.png")
-                    img.save(img_path)
-                    pbar.update(1)
+            # Save images with class directories in our standard structure
+            self._save_torchvision_images(train_dataset, train_dir, "training")
+            self._save_torchvision_images(test_dataset, test_dir, "test")
 
-        # Save both train and test images to the same class directories
-        save_dataset_images(train_dataset, "train")
-        save_dataset_images(test_dataset, "test")
+            logger.info(f"Successfully processed {dataset_name} dataset")
+        else:
+            logger.info(f"Using existing {dataset_name} dataset in {self.dataset_dir}")
 
-        logger.info(f"Dataset saved to: {dataset_dir}")
-
-        # Return the same directory for both train and test (they're merged)
-        return dataset_dir, dataset_dir
+        return train_dir, test_dir
 
     def _create_train_test_split(self, source_dir: str, test_size: float) -> Tuple[str, str]:
         """Create train/test split from source directory"""
@@ -5366,7 +6012,6 @@ class EnhancedConfigManager(ConfigManager):
             'loss_weight': loss_config['weight']
         }
 
-
 def setup_logging(log_dir: str = 'logs') -> logging.Logger:
     """Setup logging configuration"""
     os.makedirs(log_dir, exist_ok=True)
@@ -5386,28 +6031,24 @@ def setup_logging(log_dir: str = 'logs') -> logging.Logger:
     logger.info(f"Logging setup complete. Log file: {log_file}")
     return logger
 
-
-
-
 def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
     """Get dataset based on configuration"""
     dataset_config = config['dataset']
 
     if dataset_config['type'] == 'torchvision':
-        # For torchvision, we use the same directory for both train and test
-        train_dir = dataset_config['train_dir']
-
-        train_dataset = CustomImageDataset(
-            data_dir=train_dir,
-            transform=transform,
-            config=config,
-            data_name=dataset_config['name']
+        train_dataset = getattr(torchvision.datasets, dataset_config['name'].upper())(
+            root='./data',
+            train=True,
+            download=True,
+            transform=transform
         )
 
-        # For torchvision merged datasets, we don't create a separate test dataset
-        # The entire dataset will be used for training/feature extraction
-        test_dataset = None
-
+        test_dataset = getattr(torchvision.datasets, dataset_config['name'].upper())(
+            root='./data',
+            train=False,
+            download=True,
+            transform=transform
+        )
     else:
         train_dir = dataset_config['train_dir']
         test_dir = dataset_config.get('test_dir')
@@ -5417,18 +6058,14 @@ def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
 
         train_dataset = CustomImageDataset(
             data_dir=train_dir,
-            transform=transform,
-            config=config,
-            data_name=dataset_config['name']
+            transform=transform
         )
 
         test_dataset = None
-        if test_dir and os.path.exists(test_dir) and test_dir != train_dir:
+        if test_dir and os.path.exists(test_dir):
             test_dataset = CustomImageDataset(
                 data_dir=test_dir,
-                transform=transform,
-                config=config,
-                data_name=dataset_config['name']
+                transform=transform
             )
 
     if config['training'].get('merge_datasets', False) and test_dataset is not None:
@@ -5463,9 +6100,6 @@ def update_config_with_args(config: Dict, args) -> Dict:
         config['execution_flags']['use_gpu'] = not args.cpu
     if hasattr(args, 'debug'):
         config['execution_flags']['debug_mode'] = args.debug
-    if hasattr(args, 'output_dir'):
-        config['output']['model_dir'] = os.path.join(args.output_dir, config['dataset']['name'], "models")
-        config['output']['visualization_dir'] = os.path.join(args.output_dir, config['dataset']['name'], "visualizations")
 
     return config
 
@@ -5504,7 +6138,6 @@ def print_usage():
 import argparse
 
 
-
 def save_last_args(args):
     """Save arguments to JSON file"""
     args_dict = vars(args)
@@ -5523,11 +6156,10 @@ def get_interactive_args():
     """Get arguments interactively with invert DBNN support."""
     last_args = load_last_args()
     args = argparse.Namespace()
-
     # Add data_name prompt
     default_name = last_args.get('data_name') if last_args else None
     data_name = input(f"Enter dataset name (leave empty to auto-detect) [{default_name}]: ").strip()
-    args.data_name = data_name or default_name or 'mnist'  # Default to 'mnist'
+    args.data_name = data_name or default_name
 
     # Get mode (train/reconstruct/predict)
     while True:
@@ -5549,40 +6181,30 @@ def get_interactive_args():
             break
         print("Invalid type. Please enter 'torchvision' or 'custom'")
 
-    # Only ask for input_path for custom datasets
-    if args.data_type == 'custom':
-        default = last_args.get('data', '') if last_args else ''
-        prompt = f"Enter dataset path [{default}]: " if default else "Enter dataset path: "
-        args.input_path = input(prompt).strip() or default
-        if not args.input_path:
-            raise ValueError("Input path is required for custom datasets")
-    else:
-        # For torchvision, set a dummy path that won't be used
-        args.input_path = f"torchvision://{args.data_name}"
+    # Get data path/name
+    default = last_args.get('data', '') if last_args else ''
+    prompt = f"Enter dataset name [{default}]: " if default else "Enter dataset name: "
+    dataset_name = input(prompt).strip() or default
 
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path
-        default_model = (f"data/{args.data_name}/checkpoints/{args.data_name}_unified.pth")
+        default_model = (f"data/{dataset_name}/checkpoints/{dataset_name}_unified.pth")
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
-        # For torchvision, set default input to the downloaded dataset
-        if args.data_type == 'torchvision':
-            default_input = f"Data/{args.data_name}"
-        else:
-            default_input = f"Data/{args.data_name}.zip" if args.data_name else ''
-
+        # Set default input directory
+        default_input = f"Data/{dataset_name}.zip" if dataset_name else ''
         prompt = f"Enter directory containing new images [{default_input}]: "
-        args.input_path = input(prompt).strip() or default_input
+        args.input_path= input(prompt).strip() or default_input
 
         # Set default output CSV path
-        default_csv = os.path.join('data', args.data_name, f"{args.data_name}.csv")
+        default_csv = os.path.join('data', dataset_name, f"{dataset_name}.csv")
         prompt = f"Enter output CSV path [{default_csv}]: "
         args.output_csv = input(prompt).strip() or default_csv
 
-    # Handle train/reconstruct modes for torchvision
-    elif args.data_type == 'torchvision':
+    # Handle train/reconstruct modes
+    else:
         # Ask about invert DBNN
         default_invert = last_args.get('invert_dbnn', True) if last_args else True
         invert_response = input(f"Enable inverse DBNN mode? (y/n) [{['n', 'y'][default_invert]}]: ").strip().lower()
@@ -5624,6 +6246,7 @@ def get_interactive_args():
 
     save_last_args(args)
     return args
+
 def check_existing_model(dataset_dir, dataset_name):
     """Check existing model type from checkpoint"""
     checkpoint_path = os.path.join(dataset_dir, 'checkpoints', f"{dataset_name}_best.pth")
@@ -5803,36 +6426,57 @@ def update_existing_config(config_path: str, new_config: Dict) -> Dict:
     return new_config
 
 def main():
-    """Main function for CDBNN processing with enhancement configurations"""
+    """Main function for CDBNN processing with torchvision support"""
     args = None
     try:
         # Setup logging
         logger = setup_logging()
 
-        # Parse command line arguments
+        # Parse arguments
         args = parse_arguments()
 
-        # For command line usage, ensure we have the required arguments
-        if not args.data_name:
-            logger.error("Data name is required. Use --data_name argument.")
-            return 1
+        # Handle download mode
+        if args.mode == 'download' or (hasattr(args, 'download') and args.download):
+            downloaded_path = interactive_torchvision_download()
+            if downloaded_path:
+                if isinstance(downloaded_path, list):
+                    # Multiple datasets downloaded
+                    print("\nDownloaded datasets:")
+                    for dataset_name, path in downloaded_path:
+                        print(f"  - {dataset_name}: {path}")
+                else:
+                    # Single dataset downloaded
+                    print(f"\nDataset ready at: {downloaded_path}")
+                    print(f"You can now train using: python cdbnn.py --input_path {downloaded_path} --data_type custom --mode train")
+            return 0
 
-        if not args.data_type:
-            logger.error("Data type is required. Use --data_type argument.")
-            return 1
+        # Handle automatic torchvision dataset setup
+        if (args.data_type == 'torchvision' and args.data_name and
+            not args.input_path and args.mode == 'train'):
 
-        # For custom datasets, input_path is required
-        if args.data_type == 'custom' and not args.input_path:
-            logger.error("Input path is required for custom datasets. Use --input_path argument.")
-            return 1
+            logger.info(f"Automatically setting up torchvision dataset: {args.data_name}")
+            try:
+                # Download and setup the dataset
+                downloaded_path = download_and_setup_torchvision_dataset(args.data_name)
+
+                # Update arguments to use the downloaded dataset as custom
+                args.input_path = downloaded_path
+                args.data_type = 'custom'
+                logger.info(f"Using downloaded dataset as custom dataset from: {downloaded_path}")
+
+            except Exception as e:
+                logger.error(f"Failed to download torchvision dataset {args.data_name}: {str(e)}")
+                logger.info("Falling back to standard torchvision processing...")
+                # Continue with standard torchvision processing
 
         # Process based on mode
         if args.mode == 'predict':
-            return handle_prediction_mode(args, logger)
+            # [Keep existing prediction code...]
+            pass
         elif args.mode == 'train':
             return handle_training_mode(args, logger)
         elif args.mode == 'reconstruct':
-            return handle_reconstruction_mode(args, logger)
+            return handle_prediction_mode(args, logger)
         else:
             logger.error(f"Invalid mode: {args.mode}")
             return 1
@@ -5843,18 +6487,152 @@ def main():
             traceback.print_exc()
         return 1
 
+def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
+    """Handle training mode operations with torchvision support"""
+    try:
+        # Validate arguments
+        if not args.data_name:
+            raise ValueError("data_name argument is required")
+        if not args.data_type:
+            raise ValueError("data_type argument is required")
+
+        # Setup paths - use lowercase for directory names
+        data_name = str(args.data_name).lower()
+        data_dir = os.path.join('data', data_name)
+        config_path = os.path.join(data_dir, f"{data_name}.json")
+
+        logger.info(f"Processing dataset: {args.data_name} (type: {args.data_type})")
+
+        # Process dataset - handle torchvision vs custom differently
+        if args.data_type == 'torchvision':
+            # For torchvision, use the dataset name in uppercase for torchvision lookup
+            # but lowercase for directory structure
+            torchvision_dataset_name = str(args.data_name).upper()
+            logger.info(f"Using torchvision dataset: {torchvision_dataset_name}")
+
+            processor = DatasetProcessor(
+                datafile=torchvision_dataset_name,  # Uppercase for torchvision dataset name (e.g., "CIFAR10")
+                datatype=args.data_type,
+                output_dir=getattr(args, 'output', 'data'),
+                data_name=data_name  # Lowercase for directory structure (e.g., "cifar10")
+            )
+        else:
+            # For custom datasets, use the provided input path
+            if not hasattr(args, 'input_path') or not args.input_path:
+                raise ValueError("input_path argument is required for custom datasets")
+
+            processor = DatasetProcessor(
+                datafile=args.input_path,
+                datatype=args.data_type,
+                output_dir=getattr(args, 'output', 'data'),
+                data_name=data_name
+            )
+
+        train_dir, test_dir = processor.process()
+        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
+
+        # Generate/verify configurations
+        logger.info("Generating/verifying configurations...")
+        config = processor.generate_default_config(train_dir)
+
+        # Configure enhancements
+        config = configure_image_processing(config, logger)
+
+        # Update configuration with command line arguments
+        config = update_config_with_args(config, args)
+
+        # Get feature dimensions from user
+        fd = config['model']['feature_dims']
+        feature_dims_input = input(f"Please specify the output feature dimensions[{fd}]: ").strip()
+        if feature_dims_input:
+            try:
+                feature_dims = int(feature_dims_input)
+                if feature_dims <= 0:
+                    logger.warning(f"Invalid feature dimensions {feature_dims}, using default {fd}")
+                    feature_dims = fd
+            except ValueError:
+                logger.warning(f"Invalid feature dimensions input, using default {fd}")
+                feature_dims = fd
+        else:
+            feature_dims = fd
+
+        config['model']['feature_dims'] = feature_dims
+        logger.info(f"Using feature dimensions: {feature_dims}")
+
+        # Save updated config
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.info(f"Configuration saved to: {config_path}")
+
+        # Setup data loading
+        transform = processor.get_transforms(config)
+        train_dataset, test_dataset = get_dataset(config, transform)
+
+        if train_dataset is None:
+            raise ValueError("No training dataset available")
+
+        logger.info(f"Training dataset size: {len(train_dataset)}")
+        if test_dataset:
+            logger.info(f"Test dataset size: {len(test_dataset)}")
+
+        # Create data loaders
+        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
+        logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
+
+        # Initialize model and loss manager
+        model, loss_manager = initialize_model_components(config, logger)
+
+        # Log model information
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Model initialized with {total_params:,} parameters")
+        logger.info(f"Using device: {next(model.parameters()).device}")
+
+        # Get training confirmation
+        if not get_training_confirmation(logger):
+            logger.info("Training cancelled by user")
+            return 0
+
+        # Perform training and feature extraction
+        logger.info("Starting training process...")
+        features_dict = perform_training_and_extraction(
+            model, train_loader, test_loader, config, loss_manager, logger
+        )
+
+        # Save results
+        save_training_results(features_dict, model, config, data_dir, data_name, logger)
+
+        logger.info("Processing completed successfully!")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Error in training mode: {str(e)}")
+        if hasattr(args, 'debug') and args.debug:
+            logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+
 def interactive_input():
-    """Collect inputs interactively if no command line args provided"""
+    """Collect inputs interactively with torchvision support"""
     print("\nInteractive Mode - Please enter the following information:")
 
     mode = input("Enter mode (train/reconstruct/predict) [predict]: ").strip().lower() or 'predict'
     data_name = input("Enter dataset name [mnist]: ").strip() or 'mnist'
-    input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [Data/{data_name}.zip]: ").strip() or f"Data/{data_name}.zip"
+
+    # Get dataset type first
+    data_type = input("Enter dataset type (torchvision/custom) [torchvision]: ").strip().lower() or 'torchvision'
+
+    # CORRECTED: Only create path for custom datasets, use dataset name for torchvision
+    if data_type == 'custom':
+        input_path = input(f"Enter path to {'training data' if mode == 'train' else 'input images'} [Data/{data_name}.zip]: ").strip() or f"Data/{data_name}.zip"
+    else:
+        # For torchvision, use just the dataset name (e.g., "CIFAR10"), not a path
+        input_path = data_name.upper()  # e.g., "CIFAR10" not "Data/cifar10/"
+        print(f"Using torchvision dataset: {input_path}")
 
     args = SimpleNamespace(
         mode=mode,
         data_name=data_name,
-        input_path=input_path,
+        data_type=data_type,
+        input_path=input_path,  # This will be the dataset name for torchvision
         interactive=True
     )
 
@@ -5870,51 +6648,74 @@ def interactive_input():
         args.batch_size = int(input("Enter batch size [128]: ").strip() or 128)
         args.learning_rate = float(input("Enter learning rate [0.001]: ").strip() or 0.001)
 
+        # Additional training parameters
+        if data_type == 'torchvision':
+            print(f"Note: {data_name.upper()} will be automatically downloaded from torchvision")
+
+        # Ask about enhancements
+        enable_enhancements = input("Enable enhancement features? (y/n) [y]: ").strip().lower()
+        if enable_enhancements == '' or enable_enhancements == 'y':
+            print("Enhancement features will be configured during setup")
+
+    # Common parameters
+    args.encoder_type = input("Enter encoder type (autoenc/cnn) [autoenc]: ").strip().lower() or 'autoenc'
     args.debug = input("Enable debug mode? (y/n) [n]: ").strip().lower() == 'y'
+
+    # Set default values for other parameters
+    args.workers = 4
+    args.config = None
+
+    print(f"\nConfiguration Summary:")
+    print(f"  Mode: {args.mode}")
+    print(f"  Dataset: {args.data_name}")
+    print(f"  Type: {args.data_type}")
+    if data_type == 'torchvision':
+        print(f"  Torchvision Dataset: {input_path}")
+    else:
+        print(f"  Input Path: {args.input_path}")
+    print(f"  Encoder: {args.encoder_type}")
+
+    if mode == 'train':
+        print(f"  Epochs: {args.epochs}")
+        print(f"  Batch Size: {args.batch_size}")
+        print(f"  Learning Rate: {args.learning_rate}")
+
+    confirm = input("\nProceed with these settings? (y/n) [y]: ").strip().lower()
+    if confirm == 'n':
+        print("Configuration cancelled.")
+        return None
 
     return args
 
-
 def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='CDBNN Training and Prediction')
+    """Parse command line arguments with torchvision support"""
+    parser = argparse.ArgumentParser(description='CDBNN Image Processor')
 
-    # Main arguments
-    parser.add_argument('--mode', choices=['train', 'reconstruct', 'predict'],
-                       default='train', help='Operation mode')
-    parser.add_argument('--data_name', required=True,
-                       help='Name of the dataset (e.g., CIFAR100, MNIST)')
-    parser.add_argument('--data_type', choices=['torchvision', 'custom'], required=True,
-                       help='Type of dataset: torchvision or custom')
+    # Required arguments
+    parser.add_argument('--data_name', type=str, required=True,
+                       help='Dataset name (e.g., CIFAR10, MNIST)')
+    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], required=True,
+                       help='Type of dataset')
+    parser.add_argument('--mode', type=str, choices=['train', 'reconstruct', 'predict'], default='train',
+                       help='Operation mode')
 
-    # Make input_path optional - only required for custom datasets
-    parser.add_argument('--input_path',
-                       help='Path to input data (directory or zip file) - only for custom datasets')
-
-    # Model and training parameters
-    parser.add_argument('--encoder_type', choices=['autoenc', 'cnn'],
-                       default='autoenc', help='Model type: autoenc (default) or cnn')
+    # Optional arguments
+    parser.add_argument('--input_path', type=str,
+                       help='Path to input data (only for custom datasets)')
+    parser.add_argument('--output', type=str, default='data',
+                       help='Output directory')
     parser.add_argument('--batch_size', type=int, default=128,
-                       help='Batch size for processing')
-    parser.add_argument('--epochs', type=int, default=100,
+                       help='Batch size for training')
+    parser.add_argument('--epochs', type=int, default=200,
                        help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=0.001,
-                       help='Learning rate for training')
+                       help='Learning rate')
     parser.add_argument('--workers', type=int, default=4,
                        help='Number of data loading workers')
-    parser.add_argument('--output_dir', default='data',
-                       help='Output directory')
-
-    # Prediction-specific
-    parser.add_argument('--model_path', help='Path to trained model')
-    parser.add_argument('--output', help='Output path for predictions')
-
-    # System parameters
-    parser.add_argument('--cpu', action='store_true',
-                       help='Force CPU even if GPU available')
+    parser.add_argument('--encoder_type', type=str, choices=['cnn', 'autoenc'], default='autoenc',
+                       help='Type of encoder to use')
     parser.add_argument('--debug', action='store_true',
-                       help='Enable debug mode with verbose output')
-    parser.add_argument('--config', help='Path to configuration file')
+                       help='Enable debug mode')
 
     return parser.parse_args()
 
@@ -5929,29 +6730,16 @@ def setup_logging():
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle training mode operations"""
     try:
-        # Setup paths - use uppercase for torchvision, lowercase for custom
-        data_name = args.data_name.upper() if args.data_type == 'torchvision' else args.data_name.lower()
+        # Setup paths
+        #data_name = os.path.splitext(os.path.basename(args.data))[0]
+        data_name=args.data_name
+        data_dir = os.path.join('data', data_name)
+        config_path = os.path.join(data_dir, f"{data_name}.json")
 
-        if args.data_type == 'torchvision':
-            data_dir = os.path.join("Data", data_name)  # Data/CIFAR100/
-        else:
-            data_dir = os.path.join("data", data_name)  # data/dataset_name/
-
-        config_path = os.path.join(data_dir, f"{data_name.lower()}.json")  # Config file uses lowercase
-
-        logger.info(f"Starting training for dataset: {data_name} (type: {args.data_type})")
-        logger.info(f"Dataset directory: {data_dir}")
-
-        # Process dataset based on data type
-        if args.data_type == 'torchvision':
-            # For torchvision, use the dataset name directly
-            processor = DatasetProcessor(data_name, args.data_type, args.output_dir, data_name=data_name)
-        else:
-            # For custom datasets, use the provided input_path
-            processor = DatasetProcessor(args.input_path, args.data_type, args.output_dir, data_name=data_name)
-
+        # Process dataset
+        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'),data_name=args.data_name)
         train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}")
+        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
         # Generate/verify configurations
         logger.info("Generating/verifying configurations...")
@@ -5963,20 +6751,12 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
-        # Ask for feature dimensions if in interactive mode, otherwise use config value
-        if hasattr(args, 'interactive') and args.interactive:
-            fd = config['model']['feature_dims']
-            feature_dims = int(input(f"Please specify the output feature dimensions[{fd}]: ") or fd)
-            config['model']['feature_dims'] = feature_dims
-        else:
-            # For command line, use the configured value
-            feature_dims = config['model']['feature_dims']
-            logger.info(f"Using feature dimensions: {feature_dims}")
-
-        # Save updated config
+        fd= config['model']['feature_dims']
+        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
+        config['model']['feature_dims']=feature_dims
+        # Get model type
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
-
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
@@ -5990,12 +6770,9 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Initialize model and loss manager
         model, loss_manager = initialize_model_components(config, logger)
 
-        # Get training confirmation (skip for non-interactive command line)
-        if hasattr(args, 'interactive') and args.interactive:
-            if not get_training_confirmation(logger):
-                return 0
-        else:
-            logger.info("Starting training...")
+        # Get training confirmation
+        if not get_training_confirmation(logger):
+            return 0
 
         # Perform training and feature extraction
         features_dict = perform_training_and_extraction(
@@ -6003,7 +6780,7 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         )
 
         # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name.lower(), logger)
+        save_training_results(features_dict, model, config, data_dir, data_name, logger)
 
         logger.info("Processing completed successfully!")
         return 0
@@ -6011,38 +6788,6 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
     except Exception as e:
         logger.error(f"Error in training mode: {str(e)}")
         raise
-
-def handle_reconstruction_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
-    """Handle reconstruction mode operations"""
-    try:
-        # Similar to prediction mode but for reconstruction
-        data_name = args.data_name
-        data_dir = os.path.join('data', data_name)
-
-        # Load configuration
-        config_path = os.path.join(data_dir, f"{data_name}.json")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        # Setup output directory
-        output_dir = os.path.join(data_dir, 'reconstructions', datetime.now().strftime('%Y%m%d_%H%M%S'))
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Initialize reconstruction manager and generate reconstructions
-        reconstructor = ReconstructionManager(config)
-        reconstructor.predict_from_csv(args.input_path, output_dir)
-
-        logger.info("Reconstruction completed successfully!")
-        return 0
-
-    except Exception as e:
-        logger.error(f"Error in reconstruction mode: {str(e)}")
-        if args.debug:
-            traceback.print_exc()
-        return 1
 
 def handle_prediction_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
     """Handle prediction mode operations"""
