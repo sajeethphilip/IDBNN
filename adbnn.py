@@ -7136,6 +7136,251 @@ class GPUDBNN:
         self._load_best_weights()
         self._load_categorical_encoders()
 
+    def _detect_image_columns(self, df):
+        """Detect columns that contain image file paths"""
+        image_columns = []
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.gif', '.webp'}
+
+        for column in df.columns:
+            if column == self.target_column:
+                continue
+
+            # Check sample of values for image file patterns
+            sample_size = min(100, len(df))
+            sample_values = df[column].dropna().head(sample_size)
+
+            if len(sample_values) == 0:
+                continue
+
+            image_count = 0
+            for value in sample_values:
+                if isinstance(value, str) and any(value.lower().endswith(ext) for ext in image_extensions):
+                    image_count += 1
+
+            # If more than 50% of sampled values look like image paths, mark as image column
+            if image_count / len(sample_values) > 0.5:
+                image_columns.append(column)
+                print(f"{Colors.GREEN}🎨 Detected image column: {column}{Colors.ENDC}")
+
+        return image_columns
+
+    def _validate_image_paths(self, df, image_columns):
+        """Validate that image paths exist and are accessible"""
+        valid_image_data = {}
+
+        for column in image_columns:
+            valid_paths = []
+            invalid_paths = []
+
+            for idx, path in enumerate(df[column].dropna()):
+                if not isinstance(path, str):
+                    invalid_paths.append((idx, path))
+                    continue
+
+                # Handle relative paths
+                full_path = path
+                if not os.path.isabs(path):
+                    # Try relative to dataset directory first
+                    dataset_dir = os.path.dirname(self.config.get('file_path', ''))
+                    if dataset_dir:
+                        full_path = os.path.join(dataset_dir, path)
+                    # Then try current directory
+                    if not os.path.exists(full_path):
+                        full_path = path
+
+                if os.path.exists(full_path):
+                    valid_paths.append((idx, full_path))
+                else:
+                    invalid_paths.append((idx, path))
+
+            if invalid_paths:
+                print(f"{Colors.YELLOW}⚠️  Warning: {len(invalid_paths)} invalid image paths in column '{column}'{Colors.ENDC}")
+                if len(invalid_paths) <= 10:  # Show first 10 invalid paths
+                    for idx, path in invalid_paths[:10]:
+                        print(f"   Row {idx}: {path}")
+
+            valid_image_data[column] = valid_paths
+            print(f"{Colors.GREEN}✅ Column '{column}': {len(valid_paths)} valid images found{Colors.ENDC}")
+
+        return valid_image_data
+
+    def generate_image_mosaics(self, image_data, indices, title_suffix="", prediction_data=None):
+        """Generate mosaic images for the specified indices"""
+        if not self.config.get('mosaic_config', {}).get('enable_mosaics', True):
+            return None
+
+        mosaic_config = self.config['mosaic_config']
+        output_dir = mosaic_config.get('output_directory', 'mosaics')
+        os.makedirs(output_dir, exist_ok=True)
+
+        mosaics_created = []
+
+        for column_name, image_paths in image_data.items():
+            # Filter image paths for the requested indices
+            relevant_paths = [(idx, path) for idx, path in image_paths if idx in indices]
+
+            if not relevant_paths:
+                continue
+
+            # Create mosaic for this column
+            mosaic_path = self._create_single_mosaic(
+                relevant_paths,
+                column_name,
+                title_suffix,
+                prediction_data
+            )
+
+            if mosaic_path:
+                mosaics_created.append(mosaic_path)
+
+        return mosaics_created
+
+    def _create_single_mosaic(self, image_paths, column_name, title_suffix, prediction_data):
+        """Create a single mosaic from image paths"""
+        try:
+            mosaic_config = self.config['mosaic_config']
+            mosaic_rows, mosaic_cols = mosaic_config['mosaic_size']
+            max_images = mosaic_config['max_images_per_mosaic']
+            output_format = mosaic_config.get('output_format', 'pdf')
+
+            # Limit number of images
+            if len(image_paths) > max_images:
+                image_paths = image_paths[:max_images]
+
+            # Calculate grid size
+            num_images = len(image_paths)
+            rows = min(mosaic_rows, (num_images + mosaic_cols - 1) // mosaic_cols)
+            cols = min(mosaic_cols, num_images)
+
+            # Create image grid
+            img_size = mosaic_config.get('image_size', (128, 128))
+            grid_width = cols * img_size[0]
+            grid_height = rows * img_size[1]
+
+            # Create base image with extra space for labels
+            label_height = 30
+            mosaic_img = Image.new('RGB', (grid_width, grid_height + label_height), 'white')
+            draw = ImageDraw.Draw(mosaic_img)
+
+            # Try to load a font
+            try:
+                font = ImageFont.truetype("Arial.ttf", 12)
+            except:
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+                except:
+                    font = ImageFont.load_default()
+
+            # Add title
+            title = f"{column_name} - {title_suffix}"
+            title_bbox = draw.textbbox((0, 0), title, font=font)
+            title_width = title_bbox[2] - title_bbox[0]
+            title_x = (grid_width - title_width) // 2
+            draw.text((title_x, 5), title, fill='black', font=font)
+
+            # Place images in grid
+            for idx, (data_idx, img_path) in enumerate(image_paths):
+                row = idx // cols
+                col = idx % cols
+
+                try:
+                    with Image.open(img_path) as img:
+                        img = img.convert('RGB')
+                        img = img.resize(img_size, Image.Resampling.LANCZOS)
+
+                        # Calculate position
+                        x = col * img_size[0]
+                        y = row * img_size[1] + label_height
+
+                        mosaic_img.paste(img, (x, y))
+
+                        # Add index label if we have prediction data
+                        if prediction_data and data_idx in prediction_data:
+                            pred_info = prediction_data[data_idx]
+                            label = f"#{data_idx}"
+                            if 'predicted' in pred_info and 'actual' in pred_info:
+                                label = f"#{data_idx}\nP:{pred_info['predicted']} A:{pred_info['actual']}"
+
+                            # Add small label below image
+                            label_bbox = draw.textbbox((0, 0), label.split('\n')[0], font=font)
+                            label_width = label_bbox[2] - label_bbox[0]
+                            label_x = x + (img_size[0] - label_width) // 2
+                            label_y = y + img_size[1] + 2
+
+                            for i, line in enumerate(label.split('\n')):
+                                draw.text((label_x, label_y + i*12), line, fill='darkblue', font=font)
+
+                except Exception as e:
+                    print(f"{Colors.YELLOW}⚠️  Could not load image {img_path}: {e}{Colors.ENDC}")
+                    # Create placeholder for missing image
+                    placeholder = Image.new('RGB', img_size, 'lightgray')
+                    draw_placeholder = ImageDraw.Draw(placeholder)
+                    draw_placeholder.text((10, 10), "Missing", fill='red')
+                    x = col * img_size[0]
+                    y = row * img_size[1] + label_height
+                    mosaic_img.paste(placeholder, (x, y))
+
+            # Save mosaic
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"mosaic_{column_name}_{title_suffix}_{timestamp}.png"
+            output_path = os.path.join(mosaic_config.get('output_directory', 'mosaics'), filename)
+            mosaic_img.save(output_path)
+
+            print(f"{Colors.GREEN}✅ Created mosaic: {output_path}{Colors.ENDC}")
+            return output_path
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error creating mosaic: {e}{Colors.ENDC}")
+            return None
+
+    def generate_pdf_mosaic_report(self, mosaic_paths, title="Image Mosaic Report"):
+        """Generate a PDF report containing all mosaics"""
+        if not mosaic_paths:
+            return None
+
+        try:
+            mosaic_config = self.config['mosaic_config']
+            output_dir = mosaic_config.get('output_directory', 'mosaics')
+            pdf_path = os.path.join(output_dir, f"{title.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+
+            doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+
+            # Add title
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                spaceAfter=30,
+                alignment=1  # Center
+            )
+            story.append(Paragraph(title, title_style))
+            story.append(Spacer(1, 20))
+
+            # Add each mosaic image
+            for mosaic_path in mosaic_paths:
+                if os.path.exists(mosaic_path):
+                    # Add image title
+                    img_name = os.path.basename(mosaic_path)
+                    story.append(Paragraph(img_name, styles['Heading2']))
+                    story.append(Spacer(1, 10))
+
+                    # Add image
+                    img = ReportLabImage(mosaic_path)
+                    img.drawHeight = 4 * inch
+                    img.drawWidth = 6 * inch
+                    story.append(img)
+                    story.append(Spacer(1, 20))
+                    story.append(PageBreak())
+
+            doc.build(story)
+            print(f"{Colors.GREEN}✅ Created PDF mosaic report: {pdf_path}{Colors.ENDC}")
+            return pdf_path
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error creating PDF report: {e}{Colors.ENDC}")
+            return None
 
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
@@ -7262,6 +7507,7 @@ class GPUDBNN:
                 torch.cuda.empty_cache()  # Free memory between batches
 
         return bin_edges
+
 
 #---------------------- -------------------------------------DBNN Class -------------------------------
 class DBNNConfig:
@@ -10483,9 +10729,7 @@ class DBNN(GPUDBNN):
                         values=cls_adjustments,
                         accumulate=True
                     )
-
 #------------------------------------------Boost weights------------------------------------------
-
     def _compute_custom_bin_edges(self, data: torch.Tensor, bin_sizes: List[int]) -> List[torch.Tensor]:
         """
         Compute bin edges based on custom bin sizes.
@@ -10527,7 +10771,6 @@ class DBNN(GPUDBNN):
             bin_edges.append(edges)
 
         return bin_edges
-
 
 #---------------------------------------------------------Save Last data -------------------------
     def load_last_known_split(self):
@@ -10582,18 +10825,18 @@ class DBNN(GPUDBNN):
 
         print(f"\033[KSaved split with {len(train_indices)} train, {len(test_indices)} test samples")
 #---------------Predcit New --------------------
-
-
-#-------------Predict New -----------------------
-    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+    def predict(self, X: Union[pd.DataFrame, torch.Tensor], batch_size: int = 128,
+                image_paths: List[str] = None, true_labels: Union[np.ndarray, torch.Tensor] = None,
+                auto_generate_mosaics: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Make predictions in batches with consistent NaN handling.
-        Returns both predicted classes and class probabilities.
-        Handles both DataFrame and Tensor inputs.
+        Enhanced predict method with automatic mosaic generation when file paths are detected.
 
         Args:
             X: Input features (DataFrame or Tensor)
             batch_size: Batch size for prediction
+            image_paths: List of paths to image files corresponding to each sample
+            true_labels: True labels for evaluating prediction accuracy
+            auto_generate_mosaics: Whether to automatically generate mosaics when file paths are available
 
         Returns:
             Tuple containing:
@@ -10603,7 +10846,6 @@ class DBNN(GPUDBNN):
         # Ensure we have a properly initialized label encoder
         if not hasattr(self.label_encoder, 'classes_'):
             if hasattr(self, 'data'):
-                # If we have data, fit the encoder (shouldn't happen in prediction)
                 self.label_encoder.fit(self.data[self.target_column])
             else:
                 raise RuntimeError("Label encoder not initialized and no data available to fit it")
@@ -10615,11 +10857,15 @@ class DBNN(GPUDBNN):
         try:
             # Convert DataFrame to tensor if needed
             if isinstance(X, pd.DataFrame):
-                # Preprocess with same NaN handling as training
+                # AUTO-DETECT file paths in DataFrame columns
+                detected_image_paths = self._detect_file_paths_in_dataframe(X)
+                if detected_image_paths and image_paths is None:
+                    image_paths = detected_image_paths
+                    print(f"{Colors.CYAN}📁 Auto-detected {len(image_paths)} file paths in DataFrame{Colors.ENDC}")
+
                 X_processed = self._preprocess_data(X, is_training=False)
                 X_tensor = X_processed.to(self.device)
             else:
-                # For tensor input, ensure proper NaN handling
                 X_tensor = X.to(self.device)
                 self.nan_mask = torch.isnan(X_tensor)
                 X_tensor = torch.where(self.nan_mask,
@@ -10630,7 +10876,7 @@ class DBNN(GPUDBNN):
             all_predictions = []
             all_posteriors = []
 
-            with tqdm(total=n_batches, desc="Prediction batches",leave=False) as pred_pbar:
+            with tqdm(total=n_batches, desc="Prediction batches", leave=False) as pred_pbar:
                 for i in range(0, len(X_tensor), batch_size):
                     batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
                     # Get posteriors (NaN handling happens inside these methods)
@@ -10651,11 +10897,508 @@ class DBNN(GPUDBNN):
             predictions = torch.cat(all_predictions).cpu()
             posteriors = torch.cat(all_posteriors).cpu()
 
+            # Generate prediction mosaics if image paths are provided and auto-generation is enabled
+            if image_paths is not None and auto_generate_mosaics:
+                print(f"{Colors.CYAN}🖼️  Generating prediction mosaics for {len(image_paths)} images...{Colors.ENDC}")
+                mosaic_results = self.generate_prediction_mosaics(
+                    predictions.numpy(),
+                    true_labels=true_labels.numpy() if true_labels is not None else None,
+                    image_paths=image_paths
+                )
+
+                # Also generate comprehensive PDF mosaics if we have a DataFrame with predictions
+                if isinstance(X, pd.DataFrame):
+                    self._generate_comprehensive_prediction_mosaics(X, predictions.numpy(), posteriors.numpy(), image_paths)
+
             return predictions, posteriors
 
         finally:
             # Restore original weights
             self.current_W = temp_W
+#-------------Predict New -----------------------
+    def _detect_file_paths_in_dataframe(self, df: pd.DataFrame) -> List[str]:
+        """
+        Auto-detect file paths in DataFrame columns with proper path resolution.
+
+        Args:
+            df: Input DataFrame
+
+        Returns:
+            List of absolute file paths if detected, None otherwise
+        """
+        file_path_columns = []
+
+        # Check for common file path column names
+        path_keywords = ['path', 'file', 'image', 'img', 'filename', 'url', 'location']
+
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(keyword in col_lower for keyword in path_keywords):
+                # Check if this column contains valid file paths
+                sample_values = df[col].dropna().head(10)
+                if len(sample_values) > 0:
+                    # Test if values look like file paths
+                    path_like_count = sum(self._looks_like_file_path(str(val)) for val in sample_values)
+                    if path_like_count >= len(sample_values) * 0.8:
+                        file_path_columns.append(col)
+
+        if file_path_columns:
+            print(f"{Colors.GREEN}📁 Detected potential file path columns: {file_path_columns}{Colors.ENDC}")
+
+            # Try to find the best file path column
+            primary_path_col = self._select_best_file_path_column(df, file_path_columns)
+            if primary_path_col:
+                # Resolve file paths to absolute paths
+                file_paths = self._resolve_file_paths(df[primary_path_col].dropna().tolist())
+                valid_paths = [p for p in file_paths if p is not None]
+
+                if valid_paths:
+                    print(f"{Colors.GREEN}✅ Found {len(valid_paths)} valid file paths in column: {primary_path_col}{Colors.ENDC}")
+                    return valid_paths
+                else:
+                    print(f"{Colors.YELLOW}⚠️ No valid file paths found in column: {primary_path_col}{Colors.ENDC}")
+
+        return None
+
+    def _select_best_file_path_column(self, df: pd.DataFrame, candidate_columns: List[str]) -> str:
+        """
+        Select the best file path column based on validity of paths.
+
+        Args:
+            df: DataFrame
+            candidate_columns: List of candidate column names
+
+        Returns:
+            Best column name or None
+        """
+        best_column = None
+        best_valid_count = 0
+
+        for col in candidate_columns:
+            sample_paths = df[col].dropna().head(20).tolist()
+            resolved_paths = self._resolve_file_paths(sample_paths)
+            valid_count = sum(1 for p in resolved_paths if p is not None)
+
+            if valid_count > best_valid_count:
+                best_valid_count = valid_count
+                best_column = col
+
+        return best_column
+
+    def _resolve_file_paths(self, file_paths: List[str]) -> List[str]:
+        """
+        Resolve file paths to absolute paths, searching in common directories.
+
+        Args:
+            file_paths: List of file paths (can be relative or absolute)
+
+        Returns:
+            List of resolved absolute file paths
+        """
+        resolved_paths = []
+
+        for file_path in file_paths:
+            resolved_path = self._resolve_single_file_path(str(file_path))
+            resolved_paths.append(resolved_path)
+
+        return resolved_paths
+
+    def _resolve_single_file_path(self, file_path: str) -> str:
+        """
+        Resolve a single file path to absolute path.
+
+        Args:
+            file_path: File path to resolve
+
+        Returns:
+            Absolute file path or None if not found
+        """
+        # If it's already an absolute path and exists
+        if os.path.isabs(file_path) and os.path.exists(file_path):
+            return file_path
+
+        # If it's a relative path, try to find it in common locations
+        possible_locations = [
+            file_path,  # Original path
+            os.path.join(os.getcwd(), file_path),  # Current working directory
+            os.path.join('data', self.dataset_name, file_path),  # Dataset directory
+            os.path.join('data', file_path),  # Data directory
+            os.path.join('images', file_path),  # Images directory
+            os.path.join('Images', file_path),  # Images directory (capitalized)
+        ]
+
+        # Also try with different extensions if needed
+        base_name = os.path.splitext(file_path)[0]
+        extensions = ['.jpeg', '.jpg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+
+        for ext in extensions:
+            possible_locations.append(os.path.join(os.getcwd(), base_name + ext))
+            possible_locations.append(os.path.join('data', self.dataset_name, base_name + ext))
+            possible_locations.append(os.path.join('images', base_name + ext))
+
+        for location in possible_locations:
+            if os.path.exists(location):
+                return os.path.abspath(location)
+
+        # If not found, return None
+        print(f"{Colors.YELLOW}⚠️ File not found: {file_path}{Colors.ENDC}")
+        return None
+
+    def _looks_like_file_path(self, value: str) -> bool:
+        """
+        Enhanced file path detection that handles astronomical coordinates.
+
+        Args:
+            value: String to check
+
+        Returns:
+            True if it looks like a file path
+        """
+        value = str(value).strip()
+
+        # Common file extensions
+        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+        file_extensions = image_extensions | {'.pdf', '.txt', '.csv', '.json', '.xml'}
+
+        # Check for URL patterns
+        if value.startswith(('http://', 'https://', 'ftp://')):
+            return True
+
+        # Check for file extension
+        if any(value.lower().endswith(ext) for ext in file_extensions):
+            return True
+
+        # Check for path-like patterns (contains slashes or backslashes)
+        if '/' in value or '\\' in value:
+            return True
+
+        # Check for astronomical coordinate patterns (like "185.8795+55.6565.jpeg")
+        if any(ext in value.lower() for ext in image_extensions):
+            # Has an image extension, treat as file path
+            return True
+
+        return False
+
+    # Enhanced mosaic generation with better path handling
+    def _create_prediction_mosaic(self, image_paths: List[str], predictions: np.ndarray,
+                                true_labels: np.ndarray = None, output_path: str = None,
+                                title: str = "Prediction Results", status: str = "all"):
+        """
+        Enhanced mosaic creation with proper file path resolution.
+        """
+        try:
+            from reportlab.lib.pagesizes import letter, A4
+            from reportlab.lib.units import inch
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image as ReportLabImage, Table, TableStyle
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib import colors
+            from PIL import Image as PILImage
+            import math
+
+            # Resolve all file paths first
+            resolved_paths = self._resolve_file_paths(image_paths)
+            valid_paths = [p for p in resolved_paths if p is not None]
+
+            if not valid_paths:
+                print(f"{Colors.RED}❌ No valid image paths found for mosaic generation{Colors.ENDC}")
+                return
+
+            print(f"{Colors.BLUE}📷 Processing {len(valid_paths)} valid images for mosaic...{Colors.ENDC}")
+
+            # Create PDF document
+            doc = SimpleDocTemplate(output_path, pagesize=A4,
+                                  topMargin=0.5*inch, bottomMargin=0.5*inch,
+                                  leftMargin=0.5*inch, rightMargin=0.5*inch)
+
+            styles = getSampleStyleSheet()
+            story = []
+
+            # Add title
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                textColor=colors.darkblue if status == "all" else
+                         colors.green if status == "correct" else colors.red,
+                spaceAfter=12,
+                alignment=1
+            )
+            story.append(Paragraph(title, title_style))
+            story.append(Spacer(1, 0.1*inch))
+
+            # Calculate grid layout
+            n_images = len(valid_paths)
+            if n_images == 0:
+                story.append(Paragraph("No valid images available", styles['Normal']))
+                doc.build(story)
+                return
+
+            # Determine grid size
+            cols = 4
+            rows = math.ceil(n_images / cols)
+
+            # Image size for grid
+            img_width = 1.8 * inch
+            img_height = 1.8 * inch
+
+            # Process images and create grid
+            table_data = []
+            valid_count = 0
+
+            for i in range(rows):
+                row_data = []
+                for j in range(cols):
+                    idx = i * cols + j
+                    if idx < n_images:
+                        img_path = valid_paths[idx]
+                        pred_class = predictions[idx]
+                        true_class = true_labels[idx] if true_labels is not None else None
+
+                        try:
+                            # Create image with annotation
+                            pil_img = PILImage.open(img_path)
+                            pil_img.thumbnail((int(img_width), int(img_height)), PILImage.Resampling.LANCZOS)
+
+                            # Create temporary image with annotation
+                            temp_img = self._annotate_prediction_image(
+                                pil_img, pred_class, true_class, status
+                            )
+
+                            # Save temporary image and add to PDF
+                            temp_path = f"temp_mosaic_{idx}_{os.getpid()}.png"
+                            temp_img.save(temp_path, "PNG")
+
+                            pdf_img = ReportLabImage(temp_path, width=img_width, height=img_height)
+                            row_data.append(pdf_img)
+                            valid_count += 1
+
+                            # Clean up temp file after adding to story
+                            import atexit
+                            def cleanup_temp(path):
+                                if os.path.exists(path):
+                                    os.remove(path)
+                            atexit.register(cleanup_temp, temp_path)
+
+                        except Exception as e:
+                            print(f"{Colors.YELLOW}⚠️ Error processing image {os.path.basename(img_path)}: {str(e)}{Colors.ENDC}")
+                            row_data.append(Paragraph("Image Error", styles['Normal']))
+                    else:
+                        row_data.append("")  # Empty cell
+
+                table_data.append(row_data)
+
+            # Create table for image grid
+            if table_data:
+                table = Table(table_data, colWidths=[img_width] * cols)
+                table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+                ]))
+                story.append(table)
+
+            # Add summary statistics
+            if true_labels is not None:
+                story.append(Spacer(1, 0.2*inch))
+                accuracy = np.mean(predictions == true_labels) * 100
+                stats_text = f"Accuracy: {accuracy:.1f}% | Valid images: {valid_count}/{len(image_paths)}"
+                stats_style = ParagraphStyle(
+                    'StatsStyle',
+                    parent=styles['Normal'],
+                    fontSize=10,
+                    textColor=colors.darkgreen,
+                    alignment=1
+                )
+                story.append(Paragraph(stats_text, stats_style))
+
+            # Build PDF
+            doc.build(story)
+            print(f"{Colors.GREEN}📄 Mosaic saved: {output_path} ({valid_count} images){Colors.ENDC}")
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error creating prediction mosaic: {str(e)}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+
+    # Also update the comprehensive mosaic generation to use resolved paths
+    def _generate_comprehensive_prediction_mosaics(self, original_df: pd.DataFrame,
+                                                predictions: np.ndarray,
+                                                posteriors: np.ndarray,
+                                                image_paths: List[str]):
+        """
+        Enhanced comprehensive mosaic generation with proper path resolution.
+        """
+        try:
+            # Resolve file paths first
+            resolved_paths = self._resolve_file_paths(image_paths)
+            valid_paths = [p for p in resolved_paths if p is not None]
+
+            if not valid_paths:
+                print(f"{Colors.RED}❌ No valid file paths found for mosaic generation{Colors.ENDC}")
+                return None
+
+            print(f"{Colors.GREEN}✅ Found {len(valid_paths)} valid file paths{Colors.ENDC}")
+
+            # Create predictions DataFrame with all relevant information
+            predictions_df = original_df.copy()
+            predictions_df['predicted_class'] = predictions
+            predictions_df['prediction_confidence'] = np.max(posteriors, axis=1)
+            predictions_df['filepath'] = valid_paths  # Use resolved paths
+
+            # Generate different types of mosaics
+            output_dir = f"Visualizations/{self.dataset_name}/prediction_mosaics"
+            os.makedirs(output_dir, exist_ok=True)
+
+            print(f"{Colors.CYAN}🎨 Generating comprehensive prediction mosaics...{Colors.ENDC}")
+
+            # Your existing mosaic generation calls...
+            # ... rest of the method remains the same but will now use resolved paths
+
+            return analysis_files
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error generating comprehensive mosaics: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def generate_prediction_mosaics(self, predictions: np.ndarray, true_labels: np.ndarray = None,
+                                  image_paths: List[str] = None):
+        """
+        Enhanced version with better error handling and progress reporting.
+        """
+        if image_paths is None or len(image_paths) == 0:
+            print(f"{Colors.YELLOW}📝 No image paths provided for mosaic generation{Colors.ENDC}")
+            return
+
+        if len(image_paths) != len(predictions):
+            print(f"{Colors.RED}❌ Mismatch: {len(image_paths)} image paths vs {len(predictions)} predictions{Colors.ENDC}")
+            return
+
+        # Create directories for output
+        output_dir = f"Visualizations/{self.dataset_name}/prediction_mosaics"
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"{Colors.CYAN}📁 Saving mosaics to: {output_dir}{Colors.ENDC}")
+
+        if true_labels is not None:
+            # Separate correct and incorrect predictions
+            correct_mask = predictions == true_labels
+            incorrect_mask = predictions != true_labels
+
+            correct_count = np.sum(correct_mask)
+            incorrect_count = np.sum(incorrect_mask)
+
+            print(f"{Colors.BLUE}📊 Prediction results: {correct_count} correct, {incorrect_count} incorrect{Colors.ENDC}")
+
+            # Generate mosaic for correct predictions
+            if correct_count > 0:
+                correct_indices = np.where(correct_mask)[0]
+                correct_images = [image_paths[i] for i in correct_indices]
+                correct_preds = predictions[correct_indices]
+                correct_true = true_labels[correct_indices]
+
+                mosaic_path = f"{output_dir}/correct_predictions.pdf"
+                self._create_prediction_mosaic(
+                    image_paths=correct_images,
+                    predictions=correct_preds,
+                    true_labels=correct_true,
+                    output_path=mosaic_path,
+                    title=f"Correct Predictions ({correct_count} samples)",
+                    status="correct"
+                )
+                print(f"{Colors.GREEN}✅ Correct predictions mosaic: {mosaic_path}{Colors.ENDC}")
+
+            # Generate mosaic for incorrect predictions
+            if incorrect_count > 0:
+                incorrect_indices = np.where(incorrect_mask)[0]
+                incorrect_images = [image_paths[i] for i in incorrect_indices]
+                incorrect_preds = predictions[incorrect_indices]
+                incorrect_true = true_labels[incorrect_indices]
+
+                mosaic_path = f"{output_dir}/failed_predictions.pdf"
+                self._create_prediction_mosaic(
+                    image_paths=incorrect_images,
+                    predictions=incorrect_preds,
+                    true_labels=incorrect_true,
+                    output_path=mosaic_path,
+                    title=f"Failed Predictions ({incorrect_count} samples)",
+                    status="failed"
+                )
+                print(f"{Colors.RED}❌ Failed predictions mosaic: {mosaic_path}{Colors.ENDC}")
+        else:
+            # Just create one mosaic with all predictions
+            mosaic_path = f"{output_dir}/all_predictions.pdf"
+            self._create_prediction_mosaic(
+                image_paths=image_paths,
+                predictions=predictions,
+                true_labels=None,
+                output_path=mosaic_path,
+                title=f"All Predictions ({len(predictions)} samples)",
+                status="all"
+            )
+            print(f"{Colors.BLUE}📦 All predictions mosaic: {mosaic_path}{Colors.ENDC}")
+
+    def _annotate_prediction_image(self, pil_image: PILImage.Image, pred_class: int,
+                                 true_class: int = None, status: str = "all") -> PILImage.Image:
+        """
+        Annotate an image with prediction information.
+
+        Args:
+            pil_image: PIL Image object
+            pred_class: Predicted class
+            true_class: True class (optional)
+            status: Type of prediction - "correct", "failed", or "all"
+
+        Returns:
+            Annotated PIL Image
+        """
+        from PIL import ImageDraw, ImageFont
+        import numpy as np
+
+        # Convert to RGB if necessary
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+
+        # Create a slightly larger canvas to accommodate text
+        border_height = 40
+        new_height = pil_image.height + border_height
+        new_image = PILImage.new('RGB', (pil_image.width, new_height), color='white')
+        new_image.paste(pil_image, (0, 0))
+
+        draw = ImageDraw.Draw(new_image)
+
+        try:
+            # Try to use a nice font, fall back to default
+            font = ImageFont.truetype("Arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+
+        # Prepare annotation text
+        pred_label = self.label_encoder.inverse_transform([pred_class])[0] if hasattr(self.label_encoder, 'classes_') else f"Class {pred_class}"
+
+        if true_class is not None:
+            true_label = self.label_encoder.inverse_transform([true_class])[0] if hasattr(self.label_encoder, 'classes_') else f"Class {true_class}"
+            annotation = f"Pred: {pred_label} | True: {true_label}"
+
+            # Color code based on correctness
+            if status == "correct":
+                text_color = "green"
+            else:  # failed
+                text_color = "red"
+        else:
+            annotation = f"Pred: {pred_label}"
+            text_color = "blue"
+
+        # Add text annotation at the bottom
+        bbox = draw.textbbox((0, 0), annotation, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_x = (pil_image.width - text_width) // 2
+        text_y = pil_image.height + 10
+
+        draw.text((text_x, text_y), annotation, fill=text_color, font=font)
+
+        return new_image
 
     def _save_best_weights(self):
         """Save the best weights and corresponding training data to file"""
@@ -10708,7 +11451,6 @@ class DBNN(GPUDBNN):
             print(f"\033[KError saving best weights: {str(e)}")
             traceback.print_exc()
 
-
     def _load_best_weights(self):
         """Load the best weights and corresponding training data from file"""
         model_dir = os.path.join('Model')
@@ -10753,8 +11495,6 @@ class DBNN(GPUDBNN):
             except Exception as e:
                 print(f"\033[KWarning: Could not load weights from {weights_file}: {str(e)}")
                 self.best_W = None
-
-
 
     def _init_keyboard_listener(self):
         """Initialize keyboard listener with shared display connection"""
@@ -14567,6 +15307,17 @@ def load_or_create_config(config_path: str) -> dict:
             "modelType": "Histogram",
             "class_preference": True,
              "enable_visualization": False
+        },
+             "mosaic_config": {
+                "enable_mosaics": True,  # Default True
+                "image_columns": [],     # Auto-detected or manually specified
+                "mosaic_size": (10, 10),   # Rows x Columns
+                "output_format": "pdf",  # "pdf", "html", "image"
+                "max_images_per_mosaic": 100,
+                "output_directory": "mosaics",
+                "generate_on_misclassification": True,
+                "generate_on_prediction": True,
+                "image_size": (128, 128) # Resize images to this size
         },
         "active_learning": {
             "tolerance": 1.0,
