@@ -253,7 +253,7 @@ class PredictionManager:
 #--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict using frozen feature selection with full path support"""
-        # Get image files with full paths
+        # Get image files with full paths and class labels from subfolders
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             logger.warning(f"No image files found in {data_path}")
@@ -269,7 +269,8 @@ class PredictionManager:
 
         all_predictions = {
             'filename': [],
-            'file_path': [],  # NEW: Store full paths
+            'file_path': [],
+            'target': class_labels,  # Add class labels from subfolders
             'features_phase1': [],
             'class_predictions': [],
             'class_probabilities': [],
@@ -283,20 +284,19 @@ class PredictionManager:
             for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Predicting")):
                 # Handle different dataset return types
                 if isinstance(batch_data, (list, tuple)):
-                    batch_tensor = batch_data[0]  # Assume first element is the tensor
+                    batch_tensor = batch_data[0]
                 elif isinstance(batch_data, dict):
                     batch_tensor = batch_data.get('window', batch_data.get('image'))
                 else:
                     batch_tensor = batch_data
 
-                # Ensure tensor is on correct device
                 batch_tensor = batch_tensor.to(self.device)
 
                 # Forward pass
                 output = self.model(batch_tensor)
                 embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
 
-                # Use frozen features if available
+                # CRITICAL: Always use frozen features for consistency
                 if hasattr(self.model, '_is_feature_selection_frozen') and self.model._is_feature_selection_frozen:
                     features = self.model.get_frozen_features(embedding).detach().cpu().numpy()
                     logger.debug("Using frozen feature selection for prediction")
@@ -304,7 +304,7 @@ class PredictionManager:
                     features = embedding.detach().cpu().numpy()
                     logger.warning("No frozen feature selection available, using all features")
 
-                # Store predictions with full paths
+                # Store predictions
                 batch_size_actual = features.shape[0]
                 start_idx = batch_idx * batch_size
 
@@ -315,13 +315,13 @@ class PredictionManager:
                     actual_idx = start_idx + i
                     if actual_idx < len(image_files):
                         batch_filenames.append(os.path.basename(image_files[actual_idx]))
-                        batch_full_paths.append(image_files[actual_idx])  # Full path
+                        batch_full_paths.append(image_files[actual_idx])
                     else:
                         batch_filenames.append(f"batch_{batch_idx}_{i}")
                         batch_full_paths.append(f"batch_{batch_idx}_{i}")
 
                 all_predictions['filename'].extend(batch_filenames)
-                all_predictions['file_path'].extend(batch_full_paths)  # NEW
+                all_predictions['file_path'].extend(batch_full_paths)
                 all_predictions['features_phase1'].extend(features)
 
                 # Store additional outputs if available
@@ -340,6 +340,14 @@ class PredictionManager:
         # Save predictions
         if output_csv:
             self._save_predictions(all_predictions, output_csv)
+
+            # Verify consistency if training files exist
+            dataset_name = self.config['dataset']['name'].lower()
+            train_csv = f"data/{dataset_name}/{dataset_name}_train.csv"
+            test_csv = f"data/{dataset_name}/{dataset_name}_test.csv"
+
+            if os.path.exists(train_csv) and os.path.exists(test_csv):
+                self.verify_feature_consistency(train_csv, test_csv, output_csv)
 
         logger.info(f"Prediction completed for {len(image_files)} images")
         return all_predictions
@@ -422,12 +430,13 @@ class PredictionManager:
         class_labels = []
         original_filenames = []
         dataset_name = self.config['dataset']['name']
+
         if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
             # Handle compressed archive
             extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
             os.makedirs(extract_dir, exist_ok=True)
             self._extract_archive(input_path, extract_dir)
-            return self._get_image_files_with_labels(extract_dir)  # Recursively process extracted files
+            return self._get_image_files_with_labels(extract_dir)
 
         elif os.path.isdir(input_path):
             # Directory of images - recursively search for image files
@@ -436,9 +445,22 @@ class PredictionManager:
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
                         image_files.append(os.path.join(root, file))
                         original_filenames.append(file)
-                        # Extract class label from subfolder name if available
-                        class_label = os.path.basename(root)
-                        class_labels.append(class_label if class_label != os.path.basename(input_path) else "unknown")
+
+                        # FIX: Extract class label from the immediate subfolder name
+                        # Get the relative path from input_path to the file's directory
+                        rel_path = os.path.relpath(root, input_path)
+
+                        # If the file is in a subfolder, use that as class label
+                        if rel_path != '.':
+                            # Use the immediate subfolder name as class label
+                            path_parts = rel_path.split(os.sep)
+                            class_label = path_parts[0]  # First subfolder name
+                        else:
+                            # File is directly in input_path, use "unknown"
+                            class_label = "unknown"
+
+                        class_labels.append(class_label)
+
         elif os.path.isfile(input_path) and input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
             # Single image file
             image_files.append(input_path)
@@ -1437,19 +1459,25 @@ class BaseAutoencoder(nn.Module):
         embeddings = feature_dict['embeddings'].cpu().numpy()
         base_length = len(embeddings)
 
-        # Check if we have frozen feature selection
+        # CRITICAL FIX: Always use the same feature selection method and parameters
         has_frozen_selection = (hasattr(self, '_is_feature_selection_frozen') and
                               self._is_feature_selection_frozen and
                               self._selected_feature_indices is not None)
 
         if has_frozen_selection:
-            # Use frozen feature selection
+            # Use frozen feature selection - this ensures consistency
             selected_indices = self._selected_feature_indices
             importance_scores = self._feature_importance_scores
             logger.info(f"Using frozen feature selection: {len(selected_indices)} features")
 
+            # Store the selected features with consistent indexing
+            for new_idx, orig_idx in enumerate(selected_indices):
+                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
+                data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
+                data[f'feature_{new_idx}_importance'] = [importance_scores[orig_idx]] * base_length
+
         else:
-            # Perform new feature selection (training phase)
+            # During training, perform feature selection and freeze it
             use_feature_selection = (dc_config and
                                    dc_config.get('use_feature_selection', True) and
                                    'labels' in feature_dict)
@@ -1458,7 +1486,7 @@ class BaseAutoencoder(nn.Module):
                 try:
                     labels = feature_dict['labels'].cpu().numpy()
 
-                    # Get selector type from config
+                    # Get selector type from config - use the same method consistently
                     selector_type = dc_config.get('feature_selection', {}).get('method', 'balanced')
 
                     # Create appropriate selector
@@ -1470,17 +1498,10 @@ class BaseAutoencoder(nn.Module):
 
                     logger.info(f"Using {selector_type} feature selection: {selector.get_name()}")
 
-                    # Additional parameters for complex selection
-                    kwargs = {}
-                    if selector_type == 'complex':
-                        kwargs['dataloader'] = getattr(self, 'last_dataloader', None)
-
                     # Perform feature selection
-                    selected_indices, importance_scores = selector.select_features(
-                        embeddings, labels, **kwargs
-                    )
+                    selected_indices, importance_scores = selector.select_features(embeddings, labels)
 
-                    # Freeze the feature selection for future use
+                    # CRITICAL: Freeze the feature selection for future consistency
                     self.freeze_feature_selection(selected_indices, importance_scores, {
                         'method': selector_type,
                         'timestamp': datetime.now().isoformat(),
@@ -1489,24 +1510,25 @@ class BaseAutoencoder(nn.Module):
 
                     logger.info(f"Feature selection completed and frozen: {len(selected_indices)} features")
 
+                    # Store selected features
+                    for new_idx, orig_idx in enumerate(selected_indices):
+                        data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
+                        data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
+                        data[f'feature_{new_idx}_importance'] = [importance_scores[orig_idx]] * base_length
+
                 except Exception as e:
                     logger.error(f"Feature selection failed: {str(e)}")
                     logger.info("Falling back to all features")
-                    use_feature_selection = False
-                    selected_indices = list(range(embeddings.shape[1]))
-                    importance_scores = np.ones(embeddings.shape[1])
+                    # Fallback: use all features with consistent indexing
+                    for i in range(embeddings.shape[1]):
+                        data[f'feature_{i}'] = embeddings[:, i]
             else:
-                # Use all features
-                selected_indices = list(range(embeddings.shape[1]))
-                importance_scores = np.ones(embeddings.shape[1])
+                # Use all features with consistent indexing
+                for i in range(embeddings.shape[1]):
+                    data[f'feature_{i}'] = embeddings[:, i]
 
-        # Store selected features
-        for new_idx, orig_idx in enumerate(selected_indices):
-            data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-            data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
-            data[f'feature_{new_idx}_importance'] = [importance_scores[orig_idx]] * base_length
-
-        # Add full file paths (NEW: prioritize full_paths over filenames)
+        # Rest of the method remains the same...
+        # Add full file paths
         if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
             data['file_path'] = feature_dict['full_paths']
             logger.info(f"Included {len(feature_dict['full_paths'])} full file paths in CSV")
@@ -1632,6 +1654,36 @@ class BaseAutoencoder(nn.Module):
             logger.error(f"Error generating configuration: {str(e)}")
             raise
 
+    def verify_feature_consistency(self, train_csv: str, test_csv: str, pred_csv: str) -> bool:
+        """
+        Verify that features are consistent across train, test, and prediction CSV files.
+        """
+        try:
+            train_df = pd.read_csv(train_csv)
+            test_df = pd.read_csv(test_csv)
+            pred_df = pd.read_csv(pred_csv)
+
+            # Get feature columns
+            train_features = [col for col in train_df.columns if col.startswith('feature_')]
+            test_features = [col for col in test_df.columns if col.startswith('feature_')]
+            pred_features = [col for col in pred_df.columns if col.startswith('feature_')]
+
+            # Check if feature sets match
+            if set(train_features) != set(test_features) or set(train_features) != set(pred_features):
+                logger.error("Feature columns don't match across CSV files")
+                return False
+
+            # Check feature dimensions
+            if len(train_features) != len(test_features) or len(train_features) != len(pred_features):
+                logger.error("Feature dimensions don't match across CSV files")
+                return False
+
+            logger.info(f"Feature consistency verified: {len(train_features)} features match across all files")
+            return True
+
+        except Exception as e:
+            logger.error(f"Feature consistency check failed: {str(e)}")
+            return False
 
     def _save_feature_metadata(self, output_dir: str, feature_columns: List[str], dc_config: Dict = None):
         """Save comprehensive metadata about the saved features and feature selection process.
