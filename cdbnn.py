@@ -1178,27 +1178,36 @@ class BaseAutoencoder(nn.Module):
     def freeze_feature_selection(self, selected_indices: List[int],
                                importance_scores: np.ndarray,
                                metadata: Dict = None):
-        """Freeze feature selection so same features are always used"""
-        self._selected_feature_indices = selected_indices
-        self._feature_importance_scores = importance_scores
+        """Freeze feature selection so same features are always used - using tensors for binary storage"""
+        # Convert to tensors for efficient binary serialization
+        if isinstance(selected_indices, (list, np.ndarray)):
+            self._selected_feature_indices = torch.tensor(selected_indices, dtype=torch.long, device=self.device)
+        else:
+            self._selected_feature_indices = selected_indices
+
+        if isinstance(importance_scores, np.ndarray):
+            self._feature_importance_scores = torch.tensor(importance_scores, dtype=torch.float32, device=self.device)
+        else:
+            self._feature_importance_scores = importance_scores
+
         self._feature_selection_metadata = metadata or {}
         self._is_feature_selection_frozen = True
 
         logger.info(f"Feature selection frozen: {len(selected_indices)} features selected")
 
     def get_frozen_features(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Extract only the frozen selected features from embeddings"""
+        """Extract only the frozen selected features from embeddings using tensor indexing"""
         if self._selected_feature_indices is None:
             logger.warning("No frozen feature selection available, returning all features")
             return embeddings
 
-        # Convert to numpy if needed and ensure device compatibility
+        # Use tensor indexing (much faster and compatible with binary serialization)
         if isinstance(embeddings, torch.Tensor):
             selected_features = embeddings[:, self._selected_feature_indices]
         else:
-            # Handle numpy arrays
-            selected_features = embeddings[:, self._selected_feature_indices]
-            selected_features = torch.from_numpy(selected_features).to(self.device)
+            # Handle numpy arrays by converting to tensor first
+            selected_features = torch.from_numpy(embeddings)[:, self._selected_feature_indices.cpu()]
+            selected_features = selected_features.to(self.device)
 
         return selected_features
 
@@ -1454,9 +1463,9 @@ class BaseAutoencoder(nn.Module):
 
     def _prepare_features_dataframe(self, feature_dict: Dict[str, torch.Tensor],
                                   dc_config: Optional[Dict]) -> pd.DataFrame:
-        """Prepare DataFrame with frozen feature selection support and full file paths"""
+        """Prepare DataFrame with frozen feature selection support and full file paths - CSV output only"""
         data = {}
-        embeddings = feature_dict['embeddings'].cpu().numpy()
+        embeddings = feature_dict['embeddings'].cpu().numpy()  # Convert to numpy only for CSV
         base_length = len(embeddings)
 
         # CRITICAL FIX: Always use the same feature selection method and parameters
@@ -1465,16 +1474,16 @@ class BaseAutoencoder(nn.Module):
                               self._selected_feature_indices is not None)
 
         if has_frozen_selection:
-            # Use frozen feature selection - this ensures consistency
-            selected_indices = self._selected_feature_indices
-            importance_scores = self._feature_importance_scores
+            # Use frozen feature selection - convert tensors to numpy for CSV
+            selected_indices = self._selected_feature_indices.cpu().numpy()
+            importance_scores = self._feature_importance_scores.cpu().numpy()
             logger.info(f"Using frozen feature selection: {len(selected_indices)} features")
 
-            # Store the selected features with consistent indexing
+            # Store the selected features with consistent indexing (numpy for CSV)
             for new_idx, orig_idx in enumerate(selected_indices):
                 data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
-                data[f'feature_{new_idx}_importance'] = [importance_scores[orig_idx]] * base_length
+                data[f'original_feature_idx_{new_idx}'] = [int(orig_idx)] * base_length  # Ensure int for CSV
+                data[f'feature_{new_idx}_importance'] = [float(importance_scores[orig_idx])] * base_length  # Ensure float for CSV
 
         else:
             # During training, perform feature selection and freeze it
@@ -1486,7 +1495,7 @@ class BaseAutoencoder(nn.Module):
                 try:
                     labels = feature_dict['labels'].cpu().numpy()
 
-                    # Get selector type from config - use the same method consistently
+                    # Get selector type from config
                     selector_type = dc_config.get('feature_selection', {}).get('method', 'balanced')
 
                     # Create appropriate selector
@@ -1501,7 +1510,7 @@ class BaseAutoencoder(nn.Module):
                     # Perform feature selection
                     selected_indices, importance_scores = selector.select_features(embeddings, labels)
 
-                    # CRITICAL: Freeze the feature selection for future consistency
+                    # CRITICAL: Freeze the feature selection using tensors for binary storage
                     self.freeze_feature_selection(selected_indices, importance_scores, {
                         'method': selector_type,
                         'timestamp': datetime.now().isoformat(),
@@ -1510,11 +1519,11 @@ class BaseAutoencoder(nn.Module):
 
                     logger.info(f"Feature selection completed and frozen: {len(selected_indices)} features")
 
-                    # Store selected features
+                    # Store selected features for CSV
                     for new_idx, orig_idx in enumerate(selected_indices):
                         data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                        data[f'original_feature_idx_{new_idx}'] = [orig_idx] * base_length
-                        data[f'feature_{new_idx}_importance'] = [importance_scores[orig_idx]] * base_length
+                        data[f'original_feature_idx_{new_idx}'] = [int(orig_idx)] * base_length
+                        data[f'feature_{new_idx}_importance'] = [float(importance_scores[orig_idx])] * base_length
 
                 except Exception as e:
                     logger.error(f"Feature selection failed: {str(e)}")
@@ -1527,7 +1536,7 @@ class BaseAutoencoder(nn.Module):
                 for i in range(embeddings.shape[1]):
                     data[f'feature_{i}'] = embeddings[:, i]
 
-        # Rest of the method remains the same...
+        # Rest of CSV-specific processing remains the same...
         # Add full file paths
         if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
             data['file_path'] = feature_dict['full_paths']
@@ -1686,15 +1695,19 @@ class BaseAutoencoder(nn.Module):
             return False
 
     def _save_feature_metadata(self, output_dir: str, feature_columns: List[str], dc_config: Dict = None):
-        """Save comprehensive metadata about the saved features and feature selection process.
+        """Save comprehensive metadata about the saved features and feature selection process using binary format ONLY"""
 
-        Args:
-            output_dir (str): Directory where features are being saved
-            feature_columns (List[str]): List of feature column names that were saved
-            dc_config (Dict): Distance correlation configuration (optional)
-        """
-        # Prepare base metadata
-        metadata = {
+        # Delete any existing JSON metadata files to prevent serialization errors
+        json_metadata_path = os.path.join(output_dir, 'feature_extraction_metadata.json')
+        if os.path.exists(json_metadata_path):
+            try:
+                os.remove(json_metadata_path)
+                logger.info(f"Removed legacy JSON metadata file: {json_metadata_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove legacy JSON file {json_metadata_path}: {e}")
+
+        # Prepare ALL metadata in binary format - no JSON for any data
+        binary_data = {
             'timestamp': datetime.now().isoformat(),
             'feature_info': {
                 'total_features': len(feature_columns),
@@ -1720,13 +1733,19 @@ class BaseAutoencoder(nn.Module):
             }
         }
 
-        # Save the metadata
-        metadata_path = os.path.join(output_dir, 'feature_extraction_metadata.json')
+        # Add feature selection tensors if available
+        if hasattr(self, '_selected_feature_indices') and self._selected_feature_indices is not None:
+            binary_data.update({
+                'selected_feature_indices': self._selected_feature_indices.cpu(),
+                'feature_importance_scores': self._feature_importance_scores.cpu() if self._feature_importance_scores is not None else None,
+                'feature_selection_metadata': self._feature_selection_metadata
+            })
 
+        # Save ALL data in binary format
+        binary_path = os.path.join(output_dir, 'feature_metadata.pt')
         try:
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=4)
-            logger.info(f"Saved comprehensive feature metadata to {metadata_path}")
+            torch.save(binary_data, binary_path)
+            logger.info(f"Saved comprehensive feature metadata to {binary_path} (binary format)")
         except Exception as e:
             logger.error(f"Error saving feature metadata: {str(e)}")
             raise
@@ -3216,35 +3235,55 @@ class UnifiedCheckpoint:
 
     def save_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                          phase: int, epoch: int, loss: float, is_best: bool = False):
-        """Save model state including feature selection configuration"""
+        """Save model state including feature selection configuration - binary format ONLY"""
         state_key = self.get_state_key(phase, model)
 
-        # Capture feature selection state
+        # Clean feature selection metadata to remove any tensor objects
+        feature_selection_metadata = getattr(model, '_feature_selection_metadata', {})
+        clean_metadata = {}
+
+        for key, value in feature_selection_metadata.items():
+            if isinstance(value, (torch.Tensor, np.ndarray)):
+                # Skip tensors and arrays - they're stored separately in binary
+                continue
+            elif isinstance(value, dict):
+                # Recursively clean nested dictionaries
+                clean_nested = {}
+                for k, v in value.items():
+                    if not isinstance(v, (torch.Tensor, np.ndarray)):
+                        clean_nested[k] = v
+                if clean_nested:  # Only add if not empty
+                    clean_metadata[key] = clean_nested
+            else:
+                clean_metadata[key] = value
+
+        # Capture feature selection state - ensure all tensor data is properly handled
         feature_selection_state = {
             'method': self.config.get('feature_selection', {}).get('method', 'balanced'),
             'parameters': self.config.get('feature_selection', {}).get('parameters', {}),
+            # Store tensor references directly - torch.save will handle binary serialization
             'selected_feature_indices': getattr(model, '_selected_feature_indices', None),
             'feature_importance_scores': getattr(model, '_feature_importance_scores', None),
-            'feature_selection_metadata': getattr(model, '_feature_selection_metadata', {})
+            'feature_selection_metadata': clean_metadata  # Only non-tensor data
         }
 
-        # Prepare complete state dictionary
+        # Prepare complete state dictionary - all tensors are binary compatible
         state_dict = {
             'state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'epoch': epoch,
             'phase': phase,
-            'loss': loss,
+            'loss': float(loss) if hasattr(loss, 'item') else float(loss),  # Ensure scalar
             'timestamp': datetime.now().isoformat(),
             'config': {
-                'kl_divergence': model.use_kl_divergence,
-                'class_encoding': model.use_class_encoding,
-                'image_type': self.config['dataset'].get('image_type', 'general'),
+                'kl_divergence': bool(model.use_kl_divergence),  # Ensure bool
+                'class_encoding': bool(model.use_class_encoding),  # Ensure bool
+                'image_type': str(self.config['dataset'].get('image_type', 'general')),  # Ensure string
                 'clustering_params': {
-                    'num_clusters': model.cluster_centers.size(0) if hasattr(model, 'cluster_centers') else 0,
-                    'temperature': model.clustering_temperature.item() if hasattr(model, 'clustering_temperature') and isinstance(model.clustering_temperature, torch.Tensor) else 1.0
+                    'num_clusters': int(model.cluster_centers.size(0)) if hasattr(model, 'cluster_centers') else 0,  # Ensure int
+                    'temperature': float(model.clustering_temperature.item()) if hasattr(model, 'clustering_temperature') and isinstance(model.clustering_temperature, torch.Tensor) else 1.0  # Ensure float
                 },
-                'feature_selection': feature_selection_state  # Save feature selection config
+                'feature_selection': feature_selection_state  # All tensors are binary compatible
             }
         }
 
@@ -3260,8 +3299,9 @@ class UnifiedCheckpoint:
         if is_best:
             self.current_state['model_states'][state_key]['best'] = state_dict
 
-        # Save checkpoint
+        # Save checkpoint - torch.save handles all binary serialization
         torch.save(self.current_state, self.checkpoint_path)
+        #logger.info(f"Saved model state for {state_key} (binary format)")
 
     def load_model_state(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                         phase: int, load_best: bool = False) -> Optional[Dict]:
@@ -3353,6 +3393,23 @@ class UnifiedCheckpoint:
                 print(f"  Best    - Epoch: {state['best']['epoch']}, "
                       f"Loss: {state['best']['loss']:.4f}")
             print(f"  History - {len(state['history'])} entries")
+
+    def cleanup_legacy_json_files(self, output_dir: str):
+        """Remove any legacy JSON files that might cause serialization issues"""
+        legacy_files = [
+            'feature_extraction_metadata.json',
+            'feature_selection_metadata.json',
+            'training_metadata.json'
+        ]
+
+        for filename in legacy_files:
+            filepath = os.path.join(output_dir, filename)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Removed legacy JSON file: {filepath}")
+                except Exception as e:
+                    logger.warning(f"Could not remove legacy JSON file {filepath}: {e}")
 
 
 class ModelFactory:
@@ -8312,6 +8369,7 @@ def save_training_results(
 ) -> None:
     """Save training results and features"""
     # Save features
+    model.cleanup_legacy_json_files(output_dir)
     output_path = os.path.join(data_dir, f"{data_name}.csv")
     model.save_features(features_dict,features_dict, output_path)
 
