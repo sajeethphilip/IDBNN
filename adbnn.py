@@ -261,7 +261,7 @@ class DBNNVisualizer:
     real-time orthogonality analysis.
     """
 
-    def __init__(self):
+    def __init__(self, dataset_name=None):
         """
         Initialize DBNNVisualizer with empty data structures for storing
         training history and visualization data.
@@ -271,6 +271,17 @@ class DBNNVisualizer:
         self.visualization_data = {}  # Additional visualization metadata
         self.tensor_snapshots = []  # Tensor-specific training data
         self.enable_5DCT_visualization = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
+
+        # Dataset-specific directory structure
+        self.dataset_name = dataset_name
+        self.base_viz_dir = "Visualizer"
+        if dataset_name:
+            self.dataset_viz_dir = os.path.join(self.base_viz_dir, dataset_name)
+        else:
+            self.dataset_viz_dir = self.base_viz_dir
+
+        # Initialize all subdirectories
+        self._initialize_dataset_directories()
 
         # Enhanced data storage for advanced visualizations
         self.feature_space_snapshots = []  # 3D feature space evolution
@@ -293,6 +304,17 @@ class DBNNVisualizer:
 
         # Help system initialization
         self.help_windows = set()
+
+    def _initialize_dataset_directories(self):
+        """Create dataset-specific directory structure"""
+        subdirs = [
+            "Tensor", "Spherical", "Standard", "Adaptive", "DBNN",
+            "Circular", "Polar", "Orthogonality", "Performance", "Confusion"
+        ]
+
+        for subdir in subdirs:
+            dir_path = os.path.join(self.dataset_viz_dir, subdir)
+            os.makedirs(dir_path, exist_ok=True)
 
     # =========================================================================
     # ORTHOGONALITY ANALYSIS METHODS - COMPREHENSIVE INTEGRATION
@@ -561,19 +583,27 @@ class DBNNVisualizer:
     # ENHANCED VISUALIZATION METHODS WITH PRE-TRAINING SUPPORT
     # =========================================================================
 
-    def generate_3d_spherical_tensor_evolution(self, output_file="3d_spherical_tensor_evolution.html"):
+    def generate_3d_spherical_tensor_evolution(self, output_file=None):
         """Generate 3D spherical visualization with robust pre-training handling."""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
             import numpy as np
 
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Spherical", "3d_spherical_tensor_evolution.html")
+                else:
+                    output_file = "3d_spherical_tensor_evolution.html"
+
             # Check if we have any data at all
             if not self.feature_space_snapshots:
-                print("🔄 No training snapshots available - generating demo visualization")
-                return self._generate_demo_3d_spherical_visualization(output_file)
+                print("❌ No training snapshots available for 3D spherical visualization")
+                return None
 
             print("🔄 Generating 3D spherical polar tensor evolution visualization...")
+
 
             # Create figure
             fig = go.Figure()
@@ -776,92 +806,8 @@ class DBNNVisualizer:
         except Exception as e:
             print(f"❌ Error creating 3D spherical visualization: {e}")
             # Generate a simple demo as fallback
-            return self._generate_demo_3d_spherical_visualization(output_file)
-
-    def _generate_demo_3d_spherical_visualization(self, output_file):
-        """Generate a demo visualization when no training data is available."""
-        try:
-            import plotly.graph_objects as go
-            import plotly.express as px
-
-            fig = go.Figure()
-
-            # Create demo data
-            n_classes = 4
-            n_samples_per_class = 20
-            colors = px.colors.qualitative.Set1
-
-            for class_idx in range(n_classes):
-                # Create spherical coordinates for demo
-                theta = 2 * np.pi * class_idx / n_classes
-                phi = np.pi * (class_idx + 1) / (n_classes + 1)
-
-                # Generate points around this direction
-                thetas = theta + np.random.normal(0, 0.3, n_samples_per_class)
-                phis = phi + np.random.normal(0, 0.2, n_samples_per_class)
-                radii = 0.5 + 0.5 * np.random.random(n_samples_per_class)
-
-                # Convert to Cartesian
-                x = radii * np.sin(phis) * np.cos(thetas)
-                y = radii * np.sin(phis) * np.sin(thetas)
-                z = radii * np.cos(phis)
-
-                fig.add_trace(go.Scatter3d(
-                    x=x, y=y, z=z,
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=colors[class_idx % len(colors)],
-                        opacity=0.7
-                    ),
-                    name=f'Class {class_idx}',
-                    hovertemplate=f'Class {class_idx}<br>Demo Data<extra></extra>'
-                ))
-
-            fig.update_layout(
-                title="Demo: 3D Spherical Tensor Visualization (No Training Data)",
-                scene=dict(
-                    xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
-                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                ),
-                width=1000,
-                height=700
-            )
-
-            fig.add_annotation(
-                text="🔶 <b>Demo Visualization</b><br>"
-                     "This is a demo showing how the visualization will look.<br>"
-                     "Run training to see actual tensor evolution with orthogonality.",
-                xref="paper", yref="paper",
-                x=0.02, y=0.02,
-                showarrow=False,
-                bgcolor="lightblue",
-                bordercolor="blue",
-                borderwidth=2
-            )
-
-            import os
-            os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            fig.write_html(output_file)
-            print(f"✅ Demo 3D spherical visualization saved: {output_file}")
-            return output_file
-
-        except Exception as e:
-            print(f"❌ Failed to create demo visualization: {e}")
             return None
 
-    def _add_demo_content(self, fig):
-        """Add demo content to empty figure."""
-        import plotly.graph_objects as go
-
-        # Add a simple message
-        fig.add_trace(go.Scatter3d(
-            x=[0], y=[0], z=[0],
-            mode='text',
-            text=['No training data available yet.<br>Run training to see visualization.'],
-            textposition='middle center',
-            showlegend=False
-        ))
 
     def check_visualization_readiness(self):
         """
@@ -1361,8 +1307,15 @@ class DBNNVisualizer:
     # MODIFIED VISUALIZATION METHODS WITH ORTHOGONALITY INTEGRATION
     # =========================================================================
 
-    def generate_polar_tensor_evolution(self, output_file="polar_tensor_evolution.html"):
+    def generate_polar_tensor_evolution(self, output_file=None):
         """Generate polar coordinate visualization that scales to 100+ classes with orthogonality"""
+        # Set dataset-specific output file
+        if output_file is None:
+            if self.dataset_name:
+                output_file = os.path.join(self.dataset_viz_dir, "Polar", "polar_tensor_evolution.html")
+            else:
+                output_file = "polar_tensor_evolution.html"
+
         # Create help window for this visualization type
         help_content = self.get_visualization_help_content('polar_tensor')
         help_window = self.create_help_window("Polar Tensor Evolution", help_content)
@@ -1988,8 +1941,15 @@ This interactive visualization shows the evolution of your DBNN model during tra
     # UPDATED VISUALIZATION METHODS WITH PROPER HISTORY INTEGRATION
     # =========================================================================
 
-    def generate_circular_tensor_evolution(self, output_file="circular_tensor_evolution_enhanced.html"):
+    def generate_circular_tensor_evolution(self, output_file=None):
         """Generate enhanced circular coordinate visualization with proper orthogonality history"""
+        # Set dataset-specific output file
+        if output_file is None:
+            if self.dataset_name:
+                output_file = os.path.join(self.dataset_viz_dir, "Circular", "circular_tensor_evolution_enhanced.html")
+            else:
+                output_file = "circular_tensor_evolution_enhanced.html"
+
         # Create help window for this visualization type
         help_content = self.get_visualization_help_content('circular_tensor')
         help_window = self.create_help_window("Circular Tensor Evolution", help_content)
@@ -2331,11 +2291,18 @@ This interactive visualization shows the evolution of your DBNN model during tra
             }]
         )
 
-    def monitor_orthogonality_evolution(self, output_file="orthogonality_evolution.html"):
+    def monitor_orthogonality_evolution(self, output_file=None):
         """Generate visualization showing ACTUAL orthogonality evolution over training using historical data."""
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Orthogonality", "orthogonality_evolution.html")
+                else:
+                    output_file = "orthogonality_evolution.html"
 
             if not self.orthogonality_history:
                 print("❌ No orthogonality history available for evolution tracking")
@@ -2486,12 +2453,19 @@ This interactive visualization shows the evolution of your DBNN model during tra
     # EXISTING VISUALIZATION METHODS TO BE ADDED
     # =========================================================================
 
-    def generate_actual_tensor_visualization(self, output_file="actual_tensor_space.html"):
+    def generate_actual_tensor_visualization(self, output_file=None):
         """Generate visualization using actual tensor data from DBNN core"""
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Tensor", "actual_tensor_space.html")
+                else:
+                    output_file = "actual_tensor_space.html"
 
             print("🔄 Generating actual tensor space representation...")
 
@@ -2642,13 +2616,20 @@ This interactive visualization shows the evolution of your DBNN model during tra
             traceback.print_exc()
             return None
 
-    def generate_animated_confusion_matrix(self, output_file="confusion_animation.html", frame_delay=500):
+    def generate_animated_confusion_matrix(self, output_file=None, frame_delay=500):
         """Generate animated confusion matrix showing evolution over training iterations"""
         try:
             import plotly.graph_objects as go
             import numpy as np
             from sklearn.metrics import confusion_matrix
             import os
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Confusion", "confusion_animation.html")
+                else:
+                    output_file = "confusion_animation.html"
 
             if not self.feature_space_snapshots:
                 print("❌ No feature space snapshots available for confusion matrix animation")
@@ -2817,13 +2798,20 @@ This interactive visualization shows the evolution of your DBNN model during tra
             traceback.print_exc()
             return None
 
-    def generate_complex_tensor_evolution(self, output_file="complex_tensor_evolution.html"):
+    def generate_complex_tensor_evolution(self, output_file=None):
         """Generate visualization showing actual tensor orientations in complex space"""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
             from plotly.subplots import make_subplots
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Tensor", "complex_tensor_evolution.html")
+                else:
+                    output_file = "complex_tensor_evolution.html"
 
             if not self.feature_space_snapshots:
                 print("No feature space snapshots available for tensor visualization")
@@ -3008,12 +2996,19 @@ This interactive visualization shows the evolution of your DBNN model during tra
             traceback.print_exc()
             return None
 
-    def generate_fullscreen_circular_visualization(self, output_file="fullscreen_circular_visualization.html"):
+    def generate_fullscreen_circular_visualization(self, output_file=None):
         """Generate a fullscreen circular visualization with maximum space for animation"""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Circular", "fullscreen_circular_visualization.html")
+                else:
+                    output_file = "fullscreen_circular_visualization.html"
 
             if not self.feature_space_snapshots:
                 print("No feature space snapshots available for fullscreen visualization")
@@ -3149,13 +3144,20 @@ This interactive visualization shows the evolution of your DBNN model during tra
             traceback.print_exc()
             return None
 
-    def generate_enhanced_3d_spherical_visualization(self, output_file="enhanced_3d_spherical.html"):
+    def generate_enhanced_3d_spherical_visualization(self, output_file=None):
         """Generate enhanced 3D spherical visualization with multiple views and analytics"""
         try:
             from plotly.subplots import make_subplots
             import plotly.graph_objects as go
             import plotly.express as px
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Spherical", "enhanced_3d_spherical.html")
+                else:
+                    output_file = "enhanced_3d_spherical.html"
 
             if not self.feature_space_snapshots:
                 return None
@@ -3380,10 +3382,15 @@ This interactive visualization shows the evolution of your DBNN model during tra
             print(f"Error calculating spherical separation: {e}")
             return 0.0
 
-    def generate_all_spherical_visualizations(self, output_dir="Visualizer/Spherical"):
+    def generate_all_spherical_visualizations(self, output_dir=None):
         """Generate all spherical coordinate visualizations"""
         try:
             import os
+            if output_dir is None:
+                if self.dataset_name:
+                    output_dir = os.path.join(self.dataset_viz_dir, "Spherical")
+                else:
+                    output_dir = "Visualizer/Spherical"
             os.makedirs(output_dir, exist_ok=True)
 
             outputs = {}
@@ -3407,13 +3414,20 @@ This interactive visualization shows the evolution of your DBNN model during tra
             print(f"Error generating spherical visualizations: {e}")
             return {}
 
-    def generate_complex_phase_diagram(self, output_file="complex_phase_diagram.html"):
+    def generate_complex_phase_diagram(self, output_file=None):
         """Generate phase diagram showing feature vectors in complex space"""
         try:
             import plotly.graph_objects as go
             import plotly.express as px
             from plotly.subplots import make_subplots
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Tensor", "complex_phase_diagram.html")
+                else:
+                    output_file = "complex_phase_diagram.html"
 
             if not self.feature_space_snapshots:
                 return None
@@ -3515,12 +3529,19 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
         return complex_features
 
-    def generate_performance_metrics(self, output_file="performance_metrics.html"):
+    def generate_performance_metrics(self, output_file=None):
         """Generate performance metrics visualization"""
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
             import numpy as np
+
+            # Set dataset-specific output file
+            if output_file is None:
+                if self.dataset_name:
+                    output_file = os.path.join(self.dataset_viz_dir, "Performance", "performance_metrics.html")
+                else:
+                    output_file = "performance_metrics.html"
 
             if not self.accuracy_progression:
                 print("❌ No accuracy progression data available for performance metrics")
@@ -3595,10 +3616,15 @@ This interactive visualization shows the evolution of your DBNN model during tra
             traceback.print_exc()
             return None
 
-    def generate_all_standard_visualizations(self, output_dir="Visualizer/Standard"):
+    def generate_all_standard_visualizations(self, output_dir=None):
         """Generate all standard visualizations"""
         try:
             import os
+            if output_dir is None:
+                if self.dataset_name:
+                    output_dir = os.path.join(self.dataset_viz_dir, "Standard")
+                else:
+                    output_dir = "Visualizer/Standard"
             os.makedirs(output_dir, exist_ok=True)
 
             outputs = {}
@@ -3655,10 +3681,15 @@ This interactive visualization shows the evolution of your DBNN model during tra
         return self.training_history
 
 
-    def generate_all_visualizations_with_orthogonality(self, output_dir="Visualizations/WithOrthogonality"):
+    def generate_all_visualizations_with_orthogonality(self, output_dir=None):
         """Generate all visualizations with integrated orthogonality analysis"""
         try:
             import os
+            if output_dir is None:
+                if self.dataset_name:
+                    output_dir = os.path.join(self.dataset_viz_dir, "Orthogonality")
+                else:
+                    output_dir = "Visualizations/WithOrthogonality"
             os.makedirs(output_dir, exist_ok=True)
 
             outputs = {}
@@ -5126,10 +5157,6 @@ class GPUDBNN:
         # Load configuration and data
         self.target_column = self.config['target_column']
 
-        # Initialize model components
-        self.scaler = StandardScaler()
-        self.label_encoder = LabelEncoder()
-
         # Handle label encoder initialization based on mode
         if mode == 'predict':
             # Strict validation for prediction mode
@@ -5153,13 +5180,25 @@ class GPUDBNN:
             # Fresh training requested
             self._initialize_fresh_training()
 
-        self.likelihood_params = None
-        self.feature_pairs = None
+
         self.bin_edges = None  # Add bin_edges attribute
         self.gaussian_params = None  # Add gaussian_params attribute for Gaussian model
-        self.best_W = None
-        self.best_error = float('inf')
-        self.current_W = None
+
+        # Model components - ONLY initialize if not loading from existing model
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            self.scaler = StandardScaler()
+        if not hasattr(self, 'label_encoder') or self.label_encoder is None:
+            self.label_encoder = LabelEncoder()
+        if not hasattr(self, 'likelihood_params'):
+            self.likelihood_params = None
+        if not hasattr(self, 'feature_pairs'):
+            self.feature_pairs = None
+        if not hasattr(self, 'best_W'):
+            self.best_W = None
+        if not hasattr(self, 'best_error'):
+            self.best_error = float('inf')
+        if not hasattr(self, 'current_W'):
+            self.current_W = None
 
         # Enable cuDNN autotuner if using CUDA
         if self.device.startswith('cuda'):
@@ -5172,11 +5211,20 @@ class GPUDBNN:
 
         # Handle model state based on flags
         if use_previous_model:
-            # Load previous model state
-            pass
+            # Try to load previous model state
+            model_loaded = self._load_model_components()
+            if model_loaded:
+                print(f"{Colors.GREEN}✅ Successfully loaded existing model components{Colors.ENDC}")
+                # Ensure we don't reset components that were just loaded
+                self.fresh_start = False
+            else:
+                print(f"{Colors.YELLOW}⚠️  No existing model found - will initialize fresh{Colors.ENDC}")
+                self.fresh_start = True
         else:
             # Complete fresh start
+            print(f"{Colors.CYAN}🔄 Fresh start requested - cleaning existing model{Colors.ENDC}")
             self._clean_existing_model()
+            self.fresh_start = True
 
         #------------------------------------------Adaptive Learning--------------------------------------
         # Initialize adaptive learning parameters from config
@@ -5503,7 +5551,7 @@ class DBNN(GPUDBNN):
 
         # Initialize visualizer only if visualization is enabled
         if self.enable_visualization:
-            self.visualizer = DBNNVisualizer()
+            self.visualizer = DBNNVisualizer(dataset_name=self.dataset_name)
             self._initialize_visualization_directories()
             self.visualizer5DCT = DBNN_5DCT_Visualizer(self)
             self.enable_5DCTvisualization = True
@@ -5516,6 +5564,7 @@ class DBNN(GPUDBNN):
             print(f"{Colors.CYAN}[DBNN-VISUAL] 🎨 UNIFIED VISUALIZATION ENABLED - All visualization types activated{Colors.ENDC}")
             print(f"{Colors.CYAN}[DBNN-VISUAL] 📊 Includes: 5DCT, 3D Spherical, Tensor Evolution, Performance Dashboards{Colors.ENDC}")
             print(f"{Colors.CYAN}[DBNN-VISUAL] ⚡ Snapshot frequency: every {visualization_frequency} round(s){Colors.ENDC}")
+
         else:
             # Initialize with disabled state but ensure attributes exist
             self.visualizer = None
@@ -5528,18 +5577,30 @@ class DBNN(GPUDBNN):
         """Initialize visualization directory structure for DBNN"""
         if not self.enable_visualization:
             return
-        self.viz_output_dir = "Visualizer"
-        self.tensor_viz_dir = os.path.join(self.viz_output_dir, "Tensor")
-        self.spherical_viz_dir = os.path.join(self.viz_output_dir, "Spherical")
-        self.standard_viz_dir = os.path.join(self.viz_output_dir, "Standard")
-        self.adaptive_viz_dir = os.path.join(self.viz_output_dir, "Adaptive")
-        self.dbnn_viz_dir = os.path.join(self.viz_output_dir, "DBNN")
 
-        # Create directories
-        for dir_path in [self.viz_output_dir, self.tensor_viz_dir,
-                        self.spherical_viz_dir, self.standard_viz_dir,
-                        self.adaptive_viz_dir, self.dbnn_viz_dir]:
-            os.makedirs(dir_path, exist_ok=True)
+        # Use the visualizer's dataset-specific directory structure
+        if hasattr(self, 'visualizer') and self.visualizer:
+            # Directories are already created by the visualizer
+            self.viz_output_dir = self.visualizer.dataset_viz_dir
+            self.tensor_viz_dir = os.path.join(self.viz_output_dir, "Tensor")
+            self.spherical_viz_dir = os.path.join(self.viz_output_dir, "Spherical")
+            self.standard_viz_dir = os.path.join(self.viz_output_dir, "Standard")
+            self.adaptive_viz_dir = os.path.join(self.viz_output_dir, "Adaptive")
+            self.dbnn_viz_dir = os.path.join(self.viz_output_dir, "DBNN")
+        else:
+            # Fallback to old structure if visualizer not available
+            self.viz_output_dir = "Visualizer"
+            self.tensor_viz_dir = os.path.join(self.viz_output_dir, "Tensor")
+            self.spherical_viz_dir = os.path.join(self.viz_output_dir, "Spherical")
+            self.standard_viz_dir = os.path.join(self.viz_output_dir, "Standard")
+            self.adaptive_viz_dir = os.path.join(self.viz_output_dir, "Adaptive")
+            self.dbnn_viz_dir = os.path.join(self.viz_output_dir, "DBNN")
+
+            # Create directories
+            for dir_path in [self.viz_output_dir, self.tensor_viz_dir,
+                            self.spherical_viz_dir, self.standard_viz_dir,
+                            self.adaptive_viz_dir, self.dbnn_viz_dir]:
+                os.makedirs(dir_path, exist_ok=True)
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
@@ -5942,63 +6003,65 @@ class DBNN(GPUDBNN):
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized vectorized batch posterior computation with consistent return type"""
-        features = features.to(self.device)
-        batch_size, n_features = features.shape
-        n_classes = len(self.likelihood_params['classes'])
-        n_pairs = len(self.feature_pairs)
+        # CRITICAL: Ensure no gradient computation during inference
+        with torch.no_grad():
+            features = features.to(self.device)
+            batch_size, n_features = features.shape
+            n_classes = len(self.likelihood_params['classes'])
+            n_pairs = len(self.feature_pairs)
 
-        # Pre-allocate all feature groups at once
-        feature_groups = torch.stack([
-            features[:, pair].contiguous()
-            for pair in self.feature_pairs
-        ])  # [n_pairs, batch_size, 2]
+            # Pre-allocate all feature groups at once
+            feature_groups = torch.stack([
+                features[:, pair].contiguous()
+                for pair in self.feature_pairs
+            ])  # [n_pairs, batch_size, 2]
 
-        # Vectorized binning for all pairs - return as dictionary for compatibility
-        bin_indices_dict = {}
-        for group_idx in range(n_pairs):
-            bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            edges = torch.stack([edge.contiguous() for edge in bin_edges])
+            # Vectorized binning for all pairs - return as dictionary for compatibility
+            bin_indices_dict = {}
+            for group_idx in range(n_pairs):
+                bin_edges = self.likelihood_params['bin_edges'][group_idx]
+                edges = torch.stack([edge.contiguous() for edge in bin_edges])
 
-            # Vectorized bucketize for both dimensions
-            indices_0 = torch.bucketize(feature_groups[group_idx, :, 0], edges[0]) - 1
-            indices_1 = torch.bucketize(feature_groups[group_idx, :, 1], edges[1]) - 1
-            indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
-            indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
+                # Vectorized bucketize for both dimensions
+                indices_0 = torch.bucketize(feature_groups[group_idx, :, 0], edges[0]) - 1
+                indices_1 = torch.bucketize(feature_groups[group_idx, :, 1], edges[1]) - 1
+                indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
+                indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
 
-            bin_indices_dict[group_idx] = (indices_0, indices_1)
+                bin_indices_dict[group_idx] = (indices_0, indices_1)
 
-        # Vectorized probability computation
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+            # Vectorized probability computation
+            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-        # Process pairs in optimal batches for memory efficiency
-        pair_batch_size = min(50, n_pairs)  # Adjust based on memory
-        for batch_start in range(0, n_pairs, pair_batch_size):
-            batch_end = min(batch_start + pair_batch_size, n_pairs)
+            # Process pairs in optimal batches for memory efficiency
+            pair_batch_size = min(50, n_pairs)  # Adjust based on memory
+            for batch_start in range(0, n_pairs, pair_batch_size):
+                batch_end = min(batch_start + pair_batch_size, n_pairs)
 
-            for group_idx in range(batch_start, batch_end):
-                bin_probs = self.likelihood_params['bin_probs'][group_idx]
-                bin_weights = torch.stack([
-                    self.weight_updater.get_histogram_weights(c, group_idx)
-                    for c in range(n_classes)
-                ])
+                for group_idx in range(batch_start, batch_end):
+                    bin_probs = self.likelihood_params['bin_probs'][group_idx]
+                    bin_weights = torch.stack([
+                        self.weight_updater.get_histogram_weights(c, group_idx)
+                        for c in range(n_classes)
+                    ])
 
-                indices_0, indices_1 = bin_indices_dict[group_idx]
+                    indices_0, indices_1 = bin_indices_dict[group_idx]
 
-                # Vectorized probability gathering
-                weighted_probs = bin_probs * bin_weights
-                probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
-                log_likelihoods += torch.log(probs.t() + epsilon)
+                    # Vectorized probability gathering
+                    weighted_probs = bin_probs * bin_weights
+                    probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
+                    log_likelihoods += torch.log(probs.t() + epsilon)
 
-            # Memory cleanup between batches
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                # Memory cleanup between batches
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-        # Vectorized softmax
-        max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
-        posteriors = torch.exp(log_likelihoods - max_log_likelihood)
-        posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
+            # Vectorized softmax
+            max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
+            posteriors = torch.exp(log_likelihoods - max_log_likelihood)
+            posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-        return posteriors, bin_indices_dict  # Return as dictionary for compatibility
+            return posteriors, bin_indices_dict  # Return as dictionary for compatibility
 
     def set_feature_bounds(self, dataset):
         """Initialize global feature bounds from complete dataset"""
@@ -8457,68 +8520,69 @@ class DBNN(GPUDBNN):
 
     def _compute_batch_posterior_std(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Gaussian posterior computation focusing on relative class probabilities"""
-        features = features.to(self.device)
-        batch_size = len(features)
-        n_classes = len(self.likelihood_params['classes'])
-        n_pairs = len(self.feature_pairs)
+        # CRITICAL: Ensure no gradient computation during inference
+        with torch.no_grad():
+            features = features.to(self.device)
+            batch_size = len(features)
+            n_classes = len(self.likelihood_params['classes'])
+            n_pairs = len(self.feature_pairs)
 
-        # Initialize log likelihoods
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+            # Initialize log likelihoods
+            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-        # Setup progress bars
-        with tqdm(total=n_pairs, desc="Processing feature pairs", leave=False) as pair_pbar:
-            # Process each feature pair
-            for pair_idx, pair in enumerate(self.feature_pairs):
-                pair_data = features[:, pair]
+            # Setup progress bars
+            with tqdm(total=n_pairs, desc="Processing feature pairs", leave=False) as pair_pbar:
+                # Process each feature pair
+                for pair_idx, pair in enumerate(self.feature_pairs):
+                    pair_data = features[:, pair]
 
-                # Get weights for this pair
-                pair_weights = [
-                    self.weight_updater.get_gaussian_weights(class_idx, pair_idx)
-                    for class_idx in range(n_classes)
-                ]
+                    # Get weights for this pair
+                    pair_weights = [
+                        self.weight_updater.get_gaussian_weights(class_idx, pair_idx)
+                        for class_idx in range(n_classes)
+                    ]
 
-                # Class processing progress bar
-                with tqdm(total=n_classes, desc=f"Pair {pair_idx+1}/{n_pairs} classes", leave=False) as class_pbar:
-                    # Compute class contributions for this pair
-                    for class_idx in range(n_classes):
-                        mean = self.likelihood_params['means'][class_idx, pair_idx]
-                        cov = self.likelihood_params['covs'][class_idx, pair_idx]
-                        weight = pair_weights[class_idx]
+                    # Class processing progress bar
+                    with tqdm(total=n_classes, desc=f"Pair {pair_idx+1}/{n_pairs} classes", leave=False) as class_pbar:
+                        # Compute class contributions for this pair
+                        for class_idx in range(n_classes):
+                            mean = self.likelihood_params['means'][class_idx, pair_idx]
+                            cov = self.likelihood_params['covs'][class_idx, pair_idx]
+                            weight = pair_weights[class_idx]
 
-                        # Center the data
-                        centered = pair_data - mean.unsqueeze(0)
+                            # Center the data
+                            centered = pair_data - mean.unsqueeze(0)
 
-                        # Compute class likelihood
-                        try:
-                            # Add minimal regularization
-                            reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
-                            prec = torch.inverse(reg_cov)
+                            # Compute class likelihood
+                            try:
+                                # Add minimal regularization
+                                reg_cov = cov + torch.eye(2, device=self.device) * 1e-6
+                                prec = torch.inverse(reg_cov)
 
-                            # Quadratic term
-                            quad = torch.sum(
-                                torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
-                                dim=1
-                            )
+                                # Quadratic term
+                                quad = torch.sum(
+                                    torch.matmul(centered.unsqueeze(1), prec).squeeze(1) * centered,
+                                    dim=1
+                                )
 
-                            # Log likelihood (excluding constant terms)
-                            class_ll = -0.5 * quad + torch.log(weight + epsilon)
+                                # Log likelihood (excluding constant terms)
+                                class_ll = -0.5 * quad + torch.log(weight + epsilon)
 
-                        except RuntimeError:
-                            # Handle numerical issues
-                            class_ll = torch.full_like(quad, -1e10)
+                            except RuntimeError:
+                                # Handle numerical issues
+                                class_ll = torch.full_like(quad, -1e10)
 
-                        log_likelihoods[:, class_idx] += class_ll
-                        class_pbar.update(1)  # Update class progress
+                            log_likelihoods[:, class_idx] += class_ll
+                            class_pbar.update(1)  # Update class progress
 
-                pair_pbar.update(1)  # Update pair progress
+                    pair_pbar.update(1)  # Update pair progress
 
-        # Convert to probabilities using softmax
-        max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
-        exp_ll = torch.exp(log_likelihoods - max_log_ll)
-        posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + epsilon)
+            # Convert to probabilities using softmax
+            max_log_ll = torch.max(log_likelihoods, dim=1, keepdim=True)[0]
+            exp_ll = torch.exp(log_likelihoods - max_log_ll)
+            posteriors = exp_ll / (torch.sum(exp_ll, dim=1, keepdim=True) + epsilon)
 
-        return posteriors, None
-
+            return posteriors, None
 
     def _initialize_bin_weights(self):
         """Initialize weights with config-consistent bin dimensions"""
@@ -8733,6 +8797,7 @@ class DBNN(GPUDBNN):
             - predictions: Tensor of predicted class indices
             - posteriors: Tensor of class probabilities for all classes
         """
+
         # Ensure we have a properly initialized label encoder
         if not hasattr(self.label_encoder, 'classes_'):
             if hasattr(self, 'data'):
@@ -8763,83 +8828,34 @@ class DBNN(GPUDBNN):
             all_predictions = []
             all_posteriors = []
 
-            with tqdm(total=n_batches, desc="Prediction batches",leave=False) as pred_pbar:
-                for i in range(0, len(X_tensor), batch_size):
-                    batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
-                    # Get posteriors (NaN handling happens inside these methods)
-                    if self.model_type == "Histogram":
-                        posteriors, _ = self._compute_batch_posterior(batch_X)
-                    elif self.model_type == "Gaussian":
-                        posteriors, _ = self._compute_batch_posterior_std(batch_X)
-                    else:
-                        raise ValueError(f"Invalid model type: {self.model_type}")
+            # CRITICAL: Disable gradient computation during prediction
+            with torch.no_grad():
+                with tqdm(total=n_batches, desc="Prediction batches",leave=False) as pred_pbar:
+                    for i in range(0, len(X_tensor), batch_size):
+                        batch_X = X_tensor[i:min(i + batch_size, len(X_tensor))]
+                        # Get posteriors (NaN handling happens inside these methods)
+                        if self.model_type == "Histogram":
+                            posteriors, _ = self._compute_batch_posterior(batch_X)
+                        elif self.model_type == "Gaussian":
+                            posteriors, _ = self._compute_batch_posterior_std(batch_X)
+                        else:
+                            raise ValueError(f"Invalid model type: {self.model_type}")
 
-                    # Get predictions and store posteriors
-                    batch_predictions = torch.argmax(posteriors, dim=1)
-                    all_predictions.append(batch_predictions)
-                    all_posteriors.append(posteriors)
-                    pred_pbar.update(1)
+                        # Get predictions and store posteriors
+                        batch_predictions = torch.argmax(posteriors, dim=1)
+                        all_predictions.append(batch_predictions)
+                        all_posteriors.append(posteriors)
+                        pred_pbar.update(1)
 
-            # Concatenate all batches
-            predictions = torch.cat(all_predictions).cpu()
-            posteriors = torch.cat(all_posteriors).cpu()
+                # Concatenate all batches
+                predictions = torch.cat(all_predictions).cpu()
+                posteriors = torch.cat(all_posteriors).cpu()
 
             return predictions, posteriors
 
         finally:
             # Restore original weights
             self.current_W = temp_W
-
-    def _save_best_weights(self):
-        """Save the best weights and corresponding training data to file"""
-        if self.best_W is None:
-            print("\033[KWarning: No best weights to save")
-            return
-
-        try:
-            # Create directory for model components
-            model_dir = os.path.join('Model')
-            os.makedirs(model_dir, exist_ok=True)
-            print(f"\033[KCreated model directory at {model_dir}")
-
-            # Convert weights to numpy and then to list for JSON serialization
-            #weights_np = self.best_W.cpu().numpy()
-            weights_np = self.current_W.cpu().numpy()
-
-            # Save weights
-            weights_dict = {
-                'version': 2,
-                'weights': weights_np.tolist(),
-                'shape': list(weights_np.shape),
-                'dtype': str(weights_np.dtype)
-            }
-
-            weights_file = os.path.join('Model', f'Best_{self.model_type}_{self.dataset_name}_weights.json')
-            print(f"\033[KAttempting to save weights to {weights_file}")
-
-            # Use atomic write to prevent corruption
-            temp_file = weights_file + '.tmp'
-            with open(temp_file, 'w') as f:
-                json.dump(weights_dict, f, indent=2)
-                f.flush()  # Ensure the buffer is flushed to disk
-                os.fsync(f.fileno())  # Force write to disk
-
-            # Atomic rename
-            os.replace(temp_file, weights_file)
-            print(f"\033[KSaved weights to {weights_file}")
-
-            # Save training data if available
-            if hasattr(self, 'train_indices') and hasattr(self, 'data'):
-                train_data = self.data.iloc[self.train_indices]
-                train_data_file = os.path.join(model_dir, 'best_training_data.csv')
-
-                print(f"\033[KAttempting to save training data to {train_data_file}")
-                train_data.to_csv(train_data_file, index=False)
-                print(f"\033[KSaved training data to {train_data_file}")
-
-        except Exception as e:
-            print(f"\033[KError saving best weights: {str(e)}")
-            traceback.print_exc()
 
 
     def _load_best_weights(self):
