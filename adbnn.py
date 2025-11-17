@@ -5084,7 +5084,7 @@ class GPUDBNN:
                  max_epochs: int = Epochs, test_size: float = TestFraction,
                  random_state: int = TrainingRandomSeed, device: str = None,
                  fresh: bool = False, use_previous_model: bool = True,
-                 n_bins_per_dim: int = 128, model_type: str = "Histogram",mode: str=None):
+                 n_bins_per_dim: int = 128, model_type: str = "Histogram", mode: str = None):
         """Initialize GPUDBNN with support for continued training with fresh data"""
 
         # Set dataset_name and model type first
@@ -5098,8 +5098,6 @@ class GPUDBNN:
             raise ValueError(f"Failed to load configuration for dataset: {self.dataset_name}")
 
         training_params = self.config.get('training_params', {})
-
-
 
         # USE CONFIG VALUES DIRECTLY, ignore the passed parameters (they come from wrong source)
         self.learning_rate = training_params.get('learning_rate', LearningRate)
@@ -5129,6 +5127,20 @@ class GPUDBNN:
         else:
             self.device = device
 
+        # CRITICAL: Initialize core model components FIRST
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.likelihood_params = None
+        self.feature_pairs = None
+        self.best_W = None
+        self.best_error = float('inf')
+        self.current_W = None
+        self.bin_edges = None
+        self.gaussian_params = None
+        self.weight_updater = None
+        self.feature_bounds = None
+        self.categorical_encoders = {}
+
         # Initialize computation cache with correct device
         self.computation_cache = ComputationCache(self.device)
 
@@ -5136,11 +5148,6 @@ class GPUDBNN:
         self.train_indices = []
         self.test_indices = None
         self._last_metrics_printed = False
-
-        # Add new attribute for bin-specific weights
-        self.weight_updater = None  # Will be initialized after computing likelihood params
-
-        self.feature_bounds = None  # Store global min/max for each
 
         # Use the n_bins_per_dim from config, not the parameter
         self.n_bins_per_dim = training_params.get('n_bins_per_dim',
@@ -5157,7 +5164,7 @@ class GPUDBNN:
         # Load configuration and data
         self.target_column = self.config['target_column']
 
-        # Handle label encoder initialization based on mode
+        # Handle model state based on flags
         if mode == 'predict':
             # Strict validation for prediction mode
             if not self._load_model_components():
@@ -5170,35 +5177,20 @@ class GPUDBNN:
             # Try to load existing model, but don't fail if it doesn't exist
             try:
                 if not self._load_model_components():
-                    print("\033[K" +f"[INFO] No existing model found - starting fresh training")
+                    print("\033[K" + f"[INFO] No existing model found - starting fresh training")
                     self._initialize_fresh_training()
             except Exception as e:
-                print("\033[K" +f"[WARNING] Failed to load previous model: {str(e)}")
-                print("\033[K" +"Starting fresh training")
+                print("\033[K" + f"[WARNING] Failed to load previous model: {str(e)}")
+                print("\033[K" + "Starting fresh training")
+                # Ensure critical components exist
+                if not hasattr(self, 'label_encoder') or self.label_encoder is None:
+                    self.label_encoder = LabelEncoder()
+                if not hasattr(self, 'scaler') or self.scaler is None:
+                    self.scaler = StandardScaler()
                 self._initialize_fresh_training()
         else:
             # Fresh training requested
             self._initialize_fresh_training()
-
-
-        self.bin_edges = None  # Add bin_edges attribute
-        self.gaussian_params = None  # Add gaussian_params attribute for Gaussian model
-
-        # Model components - ONLY initialize if not loading from existing model
-        if not hasattr(self, 'scaler') or self.scaler is None:
-            self.scaler = StandardScaler()
-        if not hasattr(self, 'label_encoder') or self.label_encoder is None:
-            self.label_encoder = LabelEncoder()
-        if not hasattr(self, 'likelihood_params'):
-            self.likelihood_params = None
-        if not hasattr(self, 'feature_pairs'):
-            self.feature_pairs = None
-        if not hasattr(self, 'best_W'):
-            self.best_W = None
-        if not hasattr(self, 'best_error'):
-            self.best_error = float('inf')
-        if not hasattr(self, 'current_W'):
-            self.current_W = None
 
         # Enable cuDNN autotuner if using CUDA
         if self.device.startswith('cuda'):
@@ -5209,7 +5201,7 @@ class GPUDBNN:
             self.pin_memory = True
             torch.cuda.empty_cache()
 
-        # Handle model state based on flags
+        # Handle model state based on flags (redundant but safe)
         if use_previous_model:
             # Try to load previous model state
             model_loaded = self._load_model_components()
@@ -5264,29 +5256,14 @@ class GPUDBNN:
         self.best_combined_accuracy = 0.00
         self.best_model_weights = None
 
-        # Model components (re-initialize to ensure consistency)
-        self.scaler = StandardScaler()
-        self.label_encoder = LabelEncoder()
-        self.likelihood_params = None
-        self.feature_pairs = None
-        self.best_W = None
-        self.best_error = float('inf')
-        self.current_W = None
-
-        # Categorical feature handling
-        self.categorical_encoders = {}
-
-        # Create Model directory
-        os.makedirs('Model', exist_ok=True)
-
-        # Load dataset configuration and data
-        self.target_column = self.config['target_column']
-        self.data = self._load_dataset()
+        # Load dataset configuration and data (if not already loaded)
+        if not hasattr(self, 'data') or self.data is None:
+            self.target_column = self.config['target_column']
+            self.data = self._load_dataset()
 
         # Load saved weights and encoders
         self._load_best_weights()
         self._load_categorical_encoders()
-
 
     def _initialize_fresh_training(self):
         """Initialize components for fresh training"""
@@ -5299,11 +5276,18 @@ class GPUDBNN:
                 f"Available columns: {list(self.data.columns)}"
             )
 
+        # Ensure label_encoder exists (it should be initialized in __init__)
+        if not hasattr(self, 'label_encoder') or self.label_encoder is None:
+            self.label_encoder = LabelEncoder()
+
+        # Ensure scaler exists
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            self.scaler = StandardScaler()
+
         # Fit label encoder with string conversion for universal handling
         target_data = self.data[self.target_column].astype(str)
         self.label_encoder.fit(target_data)
 
-        self.scaler = StandardScaler()
         self.feature_pairs = None
         self.likelihood_params = None
 
