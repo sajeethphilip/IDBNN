@@ -593,7 +593,7 @@ class DBNNVisualizer:
             # Set dataset-specific output file
             if output_file is None:
                 if self.dataset_name:
-                    output_file = os.path.join(self.dataset_viz_dir, "Spherical", "3d_spherical_tensor_evolution.html")
+                    output_file = os.path.join(self.spherical_viz_dir, "Spherical", "3d_spherical_tensor_evolution.html")
                 else:
                     output_file = "3d_spherical_tensor_evolution.html"
 
@@ -612,7 +612,7 @@ class DBNNVisualizer:
             n_iterations = min(20, len(self.feature_space_snapshots))
             if n_iterations == 0:
                 print("⚠️ No valid snapshots, generating demo")
-                return self._generate_demo_3d_spherical_visualization(output_file)
+                return None
 
             iterations_to_show = np.linspace(0, len(self.feature_space_snapshots)-1, n_iterations, dtype=int)
 
@@ -1312,7 +1312,7 @@ class DBNNVisualizer:
         # Set dataset-specific output file
         if output_file is None:
             if self.dataset_name:
-                output_file = os.path.join(self.dataset_viz_dir, "Polar", "polar_tensor_evolution.html")
+                output_file = os.path.join(self.tensor_viz_dir,  "polar_tensor_evolution.html")
             else:
                 output_file = "polar_tensor_evolution.html"
 
@@ -1945,10 +1945,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
         """Generate enhanced circular coordinate visualization with proper orthogonality history"""
         # Set dataset-specific output file
         if output_file is None:
-            if self.dataset_name:
-                output_file = os.path.join(self.dataset_viz_dir, "Circular", "circular_tensor_evolution_enhanced.html")
-            else:
-                output_file = "circular_tensor_evolution_enhanced.html"
+            output_file = os.path.join(self.tensor_viz_dir, "circular_tensor_evolution_enhanced.html")
 
         # Create help window for this visualization type
         help_content = self.get_visualization_help_content('circular_tensor')
@@ -2004,13 +2001,13 @@ This interactive visualization shows the evolution of your DBNN model during tra
                     targets = targets[indices]
 
                 unique_classes = np.unique(targets)
-                frame_data = []
+                frame_data = []  # This should contain ONLY trace objects, no tuples
 
                 # Calculate progress (0 to 1) based on iteration
                 max_iteration = max(snapshot.get('iteration', 0) for snapshot in self.feature_space_snapshots) if self.feature_space_snapshots else 100
                 progress = iteration / max_iteration if max_iteration > 0 else frame_idx / n_iterations
 
-                # PLOT CLASS DATA
+                # PLOT CLASS DATA - Main circular plot (row=1, col=1)
                 for class_idx, cls in enumerate(unique_classes):
                     class_mask = targets == cls
                     n_class_samples = np.sum(class_mask)
@@ -2036,7 +2033,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
                         x = lengths * np.cos(angles)
                         y = lengths * np.sin(angles)
 
-                        # Main circular plot
+                        # Main circular plot - add to subplot 1,1
                         scatter_trace = go.Scatter(
                             x=x, y=y,
                             mode='markers',
@@ -2062,15 +2059,19 @@ This interactive visualization shows the evolution of your DBNN model during tra
                                 np.full(n_class_samples, iteration)
                             ])
                         )
-                        frame_data.append((scatter_trace, 1, 1))
+                        # Add trace directly to the figure for this subplot
+                        if frame_idx == 0:  # Only add to main figure for first frame
+                            fig.add_trace(scatter_trace, row=1, col=1)
+                        frame_data.append(scatter_trace)  # Add to frame data
 
                 # GET HISTORICAL ORTHOGONALITY FOR THIS ITERATION
                 ortho_info = self.get_current_orthogonality_directions(iteration=iteration)
 
-                # ADD HISTORICAL ORTHOGONAL AXES TO THE PLOT
+                # ADD HISTORICAL ORTHOGONAL AXES TO THE PLOT (row=1, col=1)
+                # This method should add traces directly to frame_data
                 self._add_orthogonality_display_to_plot(fig, ortho_info, frame_data, plot_type='circular')
 
-                # Progress metrics (bottom left plot)
+                # Progress metrics (bottom left plot - row=2, col=1)
                 alignment_data_x = list(range(frame_idx + 1))
                 alignment_data_y = [0.1 + 0.9 * (i/len(iterations_to_show))**1.5 for i in range(frame_idx + 1)]
                 separation_data_y = [0.1 + 0.8 * (i/len(iterations_to_show))**2 for i in range(frame_idx + 1)]
@@ -2083,7 +2084,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
                     showlegend=False,
                     hovertemplate='Iteration: %{x}<br>Alignment: %{y:.3f}<extra></extra>'
                 )
-                frame_data.append((alignment_trace, 2, 1))
+                frame_data.append(alignment_trace)
 
                 separation_trace = go.Scatter(
                     x=alignment_data_x, y=separation_data_y,
@@ -2093,9 +2094,9 @@ This interactive visualization shows the evolution of your DBNN model during tra
                     showlegend=False,
                     hovertemplate='Iteration: %{x}<br>Separation: %{y:.3f}<extra></extra>'
                 )
-                frame_data.append((separation_trace, 2, 1))
+                frame_data.append(separation_trace)
 
-                # ORTHOGONALITY SCORE EVOLUTION (bottom right plot) - USING HISTORICAL DATA
+                # ORTHOGONALITY SCORE EVOLUTION (bottom right plot - row=2, col=2)
                 ortho_scores_up_to_now = []
                 ortho_iterations_up_to_now = []
 
@@ -2127,13 +2128,12 @@ This interactive visualization shows the evolution of your DBNN model during tra
                         showlegend=False,
                         hovertemplate='Iteration: %{x}<br>Ortho Score: %{y:.3f}→0<br>Current Only<extra></extra>'
                     )
+                frame_data.append(ortho_trace)
 
-                frame_data.append((ortho_trace, 2, 2))
-
-                # Create frame with historical data annotation
+                # Create frame - frame_data should contain ONLY trace objects
                 history_source = "Historical" if ortho_info.get('from_history', False) else "Computed"
                 frame = go.Frame(
-                    data=[item[0] for item in frame_data],
+                    data=frame_data,  # This should be a list of trace objects only
                     name=f'frame_{frame_idx}',
                     layout=go.Layout(
                         title_text=f"Tensor Evolution - Iteration {iteration} | Ortho Score: {ortho_info['orthogonality_score']:.3f}→0 ({history_source})",
@@ -2148,11 +2148,6 @@ This interactive visualization shows the evolution of your DBNN model during tra
                     )
                 )
                 frames.append(frame)
-
-            # Add initial frame data
-            if frames:
-                for trace_data in frames[0].data:
-                    fig.add_trace(trace_data)
 
             # Update layout
             fig.update_layout(
@@ -2185,9 +2180,9 @@ This interactive visualization shows the evolution of your DBNN model during tra
             fig.add_annotation(
                 text="🎓 <b>Historical Orthogonality Tracking</b><br>"
                      "• <b>Red Arrows</b>: Orthogonal axes from training history<br>"
-                     "• <b>Ortho Score</b: Shows actual evolution during training<br>"
-                     "• <b>Historical Data</b: Each frame uses orthogonality from that iteration<br>"
-                     "• <b>Real Evolution</b: Watch orthogonality improve over time",
+                     "• <b>Ortho Score</b>: Shows actual evolution during training<br>"
+                     "• <b>Historical Data</b>: Each frame uses orthogonality from that iteration<br>"
+                     "• <b>Real Evolution</b>: Watch orthogonality improve over time",
                 xref="paper", yref="paper",
                 x=0.02, y=0.02,
                 showarrow=False,
@@ -2297,6 +2292,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
 
+            # Set dataset-specific output file
             # Set dataset-specific output file
             if output_file is None:
                 if self.dataset_name:
@@ -2462,10 +2458,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
             # Set dataset-specific output file
             if output_file is None:
-                if self.dataset_name:
                     output_file = os.path.join(self.dataset_viz_dir, "Tensor", "actual_tensor_space.html")
-                else:
-                    output_file = "actual_tensor_space.html"
 
             print("🔄 Generating actual tensor space representation...")
 
@@ -2808,10 +2801,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
             # Set dataset-specific output file
             if output_file is None:
-                if self.dataset_name:
                     output_file = os.path.join(self.dataset_viz_dir, "Tensor", "complex_tensor_evolution.html")
-                else:
-                    output_file = "complex_tensor_evolution.html"
 
             if not self.feature_space_snapshots:
                 print("No feature space snapshots available for tensor visualization")
@@ -3005,10 +2995,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
             # Set dataset-specific output file
             if output_file is None:
-                if self.dataset_name:
                     output_file = os.path.join(self.dataset_viz_dir, "Circular", "fullscreen_circular_visualization.html")
-                else:
-                    output_file = "fullscreen_circular_visualization.html"
 
             if not self.feature_space_snapshots:
                 print("No feature space snapshots available for fullscreen visualization")
@@ -3154,10 +3141,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
             # Set dataset-specific output file
             if output_file is None:
-                if self.dataset_name:
                     output_file = os.path.join(self.dataset_viz_dir, "Spherical", "enhanced_3d_spherical.html")
-                else:
-                    output_file = "enhanced_3d_spherical.html"
 
             if not self.feature_space_snapshots:
                 return None
@@ -3388,7 +3372,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
             import os
             if output_dir is None:
                 if self.dataset_name:
-                    output_dir = os.path.join(self.dataset_viz_dir, "Spherical")
+                    output_dir = self.spherical_viz_dir
                 else:
                     output_dir = "Visualizer/Spherical"
             os.makedirs(output_dir, exist_ok=True)
@@ -3424,10 +3408,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
 
             # Set dataset-specific output file
             if output_file is None:
-                if self.dataset_name:
-                    output_file = os.path.join(self.dataset_viz_dir, "Tensor", "complex_phase_diagram.html")
-                else:
-                    output_file = "complex_phase_diagram.html"
+                    output_file = os.path.join(self.tensor_viz_dir, "complex_phase_diagram.html")
 
             if not self.feature_space_snapshots:
                 return None
@@ -3539,7 +3520,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
             # Set dataset-specific output file
             if output_file is None:
                 if self.dataset_name:
-                    output_file = os.path.join(self.dataset_viz_dir, "Performance", "performance_metrics.html")
+                    output_file = os.path.join(self.standard_viz_dir,  "performance_metrics.html")
                 else:
                     output_file = "performance_metrics.html"
 
@@ -3622,7 +3603,7 @@ This interactive visualization shows the evolution of your DBNN model during tra
             import os
             if output_dir is None:
                 if self.dataset_name:
-                    output_dir = os.path.join(self.dataset_viz_dir, "Standard")
+                    output_dir = self.standard_viz_dir
                 else:
                     output_dir = "Visualizer/Standard"
             os.makedirs(output_dir, exist_ok=True)
@@ -3685,11 +3666,15 @@ This interactive visualization shows the evolution of your DBNN model during tra
         """Generate all visualizations with integrated orthogonality analysis"""
         try:
             import os
+
+            # FIX: Set proper default output directory
             if output_dir is None:
                 if self.dataset_name:
                     output_dir = os.path.join(self.dataset_viz_dir, "Orthogonality")
                 else:
-                    output_dir = "Visualizations/WithOrthogonality"
+                    output_dir = "Visualizer/Orthogonality"
+
+            # Ensure output directory exists
             os.makedirs(output_dir, exist_ok=True)
 
             outputs = {}
@@ -5517,7 +5502,7 @@ class DBNN(GPUDBNN):
         self.adaptive_patience = training_params.get('adaptive_patience', 25)
 
         # Pass self reference to visualizer
-        self.visualizer = DBNNVisualizer()
+        self.visualizer = DBNNVisualizer(dataset_name=self.dataset_name)
         self.visualizer.dbnn_instance = self  # Pass reference
 
         # USE GLOBAL FLAGS AS DEFAULTS
@@ -6604,7 +6589,7 @@ class DBNN(GPUDBNN):
             self.enable_5DCTvisualization = COMMAND_LINE_FLAGS['enable_5DCTvisualization']
         if self.enable_visualization or self.enable_5DCTvisualization:
             try:
-                self.visualizer = DBNNVisualizer()
+                self.visualizer = DBNNVisualizer(dataset_name=self.dataset_name)
                 print(f"{Colors.GREEN}[DBNN-VISUAL] 🎨 Visualization system initialized{Colors.ENDC}")
             except Exception as e:
                 print(f"{Colors.YELLOW}[DBNN-VISUAL] ❌ Failed to initialize visualizer: {e}{Colors.ENDC}")
@@ -7120,13 +7105,13 @@ class DBNN(GPUDBNN):
 
         try:
             # Performance metrics dashboard
-            perf_file = os.path.join(self.dbnn_viz_dir, "dbnn_performance.html")
+            perf_file = os.path.join(self.standard_viz_dir, "dbnn_performance.html")
             result = self.visualizer.generate_performance_metrics(perf_file)
             if result:
                 results['performance'] = result
 
             # Animated confusion matrix
-            confusion_file = os.path.join(self.dbnn_viz_dir, "dbnn_confusion_matrix.html")
+            confusion_file = os.path.join(self.standard_viz_dir, "dbnn_confusion_matrix.html")
             result = self.visualizer.generate_animated_confusion_matrix(confusion_file)
             if result:
                 results['confusion_matrix'] = result
@@ -7152,6 +7137,11 @@ class DBNN(GPUDBNN):
             result = self.visualizer.generate_polar_tensor_evolution(polar_file)
             if result:
                 results['polar'] = result
+
+            result = self.visualizer.generate_all_visualizations_with_orthogonality()
+            if result:
+                results['ortho'] = result
+
 
         except Exception as e:
             print(f"{Colors.YELLOW}[DBNN-VISUAL] Tensor viz failed: {str(e)}{Colors.ENDC}")
@@ -11302,7 +11292,7 @@ def add_visualization_integration():
             # Unified visualization control
             if enable_visualization:
                 # Use the new comprehensive visualizer
-                self.visualizer = DBNNVisualizer()
+                self.visualizer = DBNNVisualizer(dataset_name=self.dataset_name)
                 self._initialize_visualization_directories()
 
                 # Adaptive training data storage for visualization
