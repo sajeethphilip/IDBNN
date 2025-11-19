@@ -305,6 +305,9 @@ class DBNNVisualizer:
         # Help system initialization
         self.help_windows = set()
 
+        # File descriptor management
+        self._cached_memory_info = None
+
     def _initialize_dataset_directories(self):
         """Create dataset-specific directory structure"""
         subdirs = [
@@ -5542,6 +5545,9 @@ class DBNN(GPUDBNN):
             self.adaptive_round_data = []
             self.adaptive_snapshots = []
 
+        self._last_feature_batch_size = None
+        self.epsilon = 1e-10  # Add epsilon as instance variable
+
     def _initialize_visualization_directories(self):
         """Initialize visualization directory structure for DBNN"""
         if not self.enable_visualization:
@@ -5971,7 +5977,8 @@ class DBNN(GPUDBNN):
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Optimized vectorized batch posterior computation with consistent return type"""
+        """Memory-optimized vectorized batch posterior computation with adaptive feature pair batching"""
+
         # CRITICAL: Ensure no gradient computation during inference
         with torch.no_grad():
             features = features.to(self.device)
@@ -5979,58 +5986,166 @@ class DBNN(GPUDBNN):
             n_classes = len(self.likelihood_params['classes'])
             n_pairs = len(self.feature_pairs)
 
-            # Pre-allocate all feature groups at once
-            feature_groups = torch.stack([
-                features[:, pair].contiguous()
-                for pair in self.feature_pairs
-            ])  # [n_pairs, batch_size, 2]
-
-            # Vectorized binning for all pairs - return as dictionary for compatibility
-            bin_indices_dict = {}
-            for group_idx in range(n_pairs):
-                bin_edges = self.likelihood_params['bin_edges'][group_idx]
-                edges = torch.stack([edge.contiguous() for edge in bin_edges])
-
-                # Vectorized bucketize for both dimensions
-                indices_0 = torch.bucketize(feature_groups[group_idx, :, 0], edges[0]) - 1
-                indices_1 = torch.bucketize(feature_groups[group_idx, :, 1], edges[1]) - 1
-                indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
-                indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
-
-                bin_indices_dict[group_idx] = (indices_0, indices_1)
-
-            # Vectorized probability computation
+            # Initialize log likelihoods
             log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
-            # Process pairs in optimal batches for memory efficiency
-            pair_batch_size = min(50, n_pairs)  # Adjust based on memory
-            for batch_start in range(0, n_pairs, pair_batch_size):
-                batch_end = min(batch_start + pair_batch_size, n_pairs)
+            # Compute optimal feature batch size based on available memory
+            feature_batch_size = self._compute_optimal_feature_batch_size(batch_size, n_classes, n_pairs)
 
-                for group_idx in range(batch_start, batch_end):
-                    bin_probs = self.likelihood_params['bin_probs'][group_idx]
+            # Process feature pairs in memory-managed batches
+            for batch_start in range(0, n_pairs, feature_batch_size):
+                batch_end = min(batch_start + feature_batch_size, n_pairs)
+                batch_pairs = self.feature_pairs[batch_start:batch_end]
+
+                # Pre-allocate feature groups for this batch
+                feature_groups = torch.stack([
+                    features[:, pair].contiguous()
+                    for pair in batch_pairs
+                ])  # [batch_size_pairs, batch_size, 2]
+
+                # Vectorized binning for this feature batch
+                batch_log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+
+                for local_idx, pair in enumerate(batch_pairs):
+                    global_pair_idx = batch_start + local_idx
+
+                    # Get bin edges and probabilities
+                    bin_edges = self.likelihood_params['bin_edges'][global_pair_idx]
+                    bin_probs = self.likelihood_params['bin_probs'][global_pair_idx]
+
+                    # Get bin weights for all classes
                     bin_weights = torch.stack([
-                        self.weight_updater.get_histogram_weights(c, group_idx)
+                        self.weight_updater.get_histogram_weights(c, global_pair_idx)
                         for c in range(n_classes)
-                    ])
+                    ])  # [n_classes, n_bins_per_dim, n_bins_per_dim]
 
-                    indices_0, indices_1 = bin_indices_dict[group_idx]
+                    # Vectorized bucketize for both dimensions
+                    edges = torch.stack([edge.contiguous() for edge in bin_edges])
+                    pair_features = feature_groups[local_idx]  # [batch_size, 2]
+
+                    indices_0 = torch.bucketize(pair_features[:, 0], edges[0]) - 1
+                    indices_1 = torch.bucketize(pair_features[:, 1], edges[1]) - 1
+                    indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
+                    indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
 
                     # Vectorized probability gathering
                     weighted_probs = bin_probs * bin_weights
                     probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
-                    log_likelihoods += torch.log(probs.t() + epsilon)
+                    batch_log_likelihoods += torch.log(probs.t() + epsilon)
 
-                # Memory cleanup between batches
+                # Accumulate results from this feature batch
+                log_likelihoods += batch_log_likelihoods
+
+                # Memory cleanup between feature batches
+                del feature_groups, batch_log_likelihoods, bin_weights, weighted_probs
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Vectorized softmax
+            # Vectorized softmax (unchanged)
             max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
             posteriors = torch.exp(log_likelihoods - max_log_likelihood)
             posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-            return posteriors, bin_indices_dict  # Return as dictionary for compatibility
+            # Return bin_indices as dictionary for compatibility
+            bin_indices_dict = self._compute_bin_indices_dict(features, n_pairs, feature_batch_size)
+
+            return posteriors, bin_indices_dict
+
+    def _compute_optimal_feature_batch_size(self, batch_size, n_classes, n_pairs):
+        """Dynamically compute optimal feature batch size based on available memory"""
+
+        if not torch.cuda.is_available():
+            # CPU mode - use larger batches
+            return min(256, n_pairs)
+
+        try:
+            # Calculate available GPU memory
+            if hasattr(torch.cuda, 'memory_reserved'):
+                allocated = torch.cuda.memory_allocated()
+                reserved = torch.cuda.memory_reserved()
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                free_memory = total_memory - allocated
+            else:
+                # Fallback for older PyTorch
+                free_memory = 0.8 * torch.cuda.get_device_properties(0).total_memory
+
+            # Safety margin (use only 70% of available memory)
+            available_memory = free_memory * 0.7
+
+            # Memory estimation per feature pair
+            # Components:
+            # 1. Feature data: batch_size * 2 * 8 bytes (float64)
+            # 2. Bin weights: n_classes * n_bins_per_dim * n_bins_per_dim * 8 bytes
+            # 3. Probabilities: n_classes * batch_size * 8 bytes
+            # 4. Intermediate tensors: additional 20% overhead
+
+            memory_per_pair = (
+                (batch_size * 2 * 8) +  # Feature data
+                (n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8) +  # Bin weights
+                (n_classes * batch_size * 8) +  # Probabilities
+                (0.2 * (batch_size * 2 * 8))  # Overhead
+            )
+
+            # Calculate maximum possible batch size
+            max_batch_size = int(available_memory / memory_per_pair)
+
+            # Apply reasonable bounds
+            min_batch_size = 4   # Minimum for efficiency
+            max_batch_size = min(max_batch_size, 512)  # Upper limit for stability
+
+            optimal_batch_size = max(min_batch_size, min(max_batch_size, n_pairs))
+
+            # Print memory info (debug)
+            if hasattr(self, '_last_feature_batch_size') and self._last_feature_batch_size != optimal_batch_size:
+                print(f"{Colors.CYAN}[MEMORY] Feature batch size: {optimal_batch_size} "
+                      f"(available: {available_memory/1024**3:.1f}GB, "
+                      f"per pair: {memory_per_pair/1024**2:.1f}MB){Colors.ENDC}")
+
+            self._last_feature_batch_size = optimal_batch_size
+            return optimal_batch_size
+
+        except Exception as e:
+            # Fallback to conservative default
+            print(f"{Colors.YELLOW}[WARNING] Memory detection failed, using default feature batch size: {e}{Colors.ENDC}")
+            return min(64, n_pairs)
+
+    def _compute_bin_indices_dict(self, features: torch.Tensor, n_pairs: int, feature_batch_size: int):
+        """Compute bin indices dictionary with feature batching for compatibility"""
+        bin_indices_dict = {}
+
+        # Process in same batches as posterior computation for consistency
+        for batch_start in range(0, n_pairs, feature_batch_size):
+            batch_end = min(batch_start + feature_batch_size, n_pairs)
+            batch_pairs = self.feature_pairs[batch_start:batch_end]
+
+            # Pre-allocate feature groups for this batch
+            feature_groups = torch.stack([
+                features[:, pair].contiguous()
+                for pair in batch_pairs
+            ])
+
+            for local_idx, pair in enumerate(batch_pairs):
+                global_pair_idx = batch_start + local_idx
+
+                # Get bin edges
+                bin_edges = self.likelihood_params['bin_edges'][global_pair_idx]
+                edges = torch.stack([edge.contiguous() for edge in bin_edges])
+                pair_features = feature_groups[local_idx]
+
+                # Compute bin indices
+                indices_0 = torch.bucketize(pair_features[:, 0], edges[0]) - 1
+                indices_1 = torch.bucketize(pair_features[:, 1], edges[1]) - 1
+                indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
+                indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
+
+                bin_indices_dict[global_pair_idx] = (indices_0, indices_1)
+
+            # Cleanup
+            del feature_groups
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return bin_indices_dict
 
     def set_feature_bounds(self, dataset):
         """Initialize global feature bounds from complete dataset"""
@@ -6156,50 +6271,64 @@ class DBNN(GPUDBNN):
 #--------------------compute sample divergence -----------------------
 
     def _compute_sample_divergence(self, sample_data: torch.Tensor, feature_pairs: List[Tuple]) -> torch.Tensor:
-        """Memory-optimized divergence computation with chunked processing"""
+        """Memory-optimized divergence computation with feature pair batching"""
         device = sample_data.device
         n_samples = sample_data.shape[0]
+        n_pairs = len(feature_pairs)
 
         if n_samples <= 1:
             return torch.zeros((1, 1), device=device)
 
-        # For very large sample sizes, use chunked processing
-        if n_samples > 1000:  # Use chunking for large datasets
-            return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
+        # Compute optimal feature batch size
+        feature_batch_size = self._compute_optimal_feature_batch_size(n_samples, 1, n_pairs)
 
-        # For smaller datasets, use the optimized vectorized approach
-        n_pairs = len(feature_pairs)
+        # Initialize distances matrix
         distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float64)
 
-        # Process all feature pairs in one batch if memory allows
-        if n_pairs <= 100 and n_samples <= 500:  # Conservative limits
-            try:
-                # Stack all feature pairs data
-                all_pair_data = torch.stack([sample_data[:, pair] for pair in feature_pairs])  # [n_pairs, n_samples, 2]
+        # Process feature pairs in memory-managed batches
+        for batch_start in range(0, n_pairs, feature_batch_size):
+            batch_end = min(batch_start + feature_batch_size, n_pairs)
+            batch_pairs = feature_pairs[batch_start:batch_end]
 
-                # Memory-efficient pairwise distance calculation
-                # Instead of creating huge 4D tensor, compute distances pair by pair
-                for i in range(n_pairs):
-                    pair_data = all_pair_data[i]  # [n_samples, 2]
+            # Get batch data
+            batch_data = sample_data[:, batch_pairs]  # [n_samples, batch_size, 2]
 
-                    # Efficient pairwise Euclidean distance
-                    diff = pair_data.unsqueeze(0) - pair_data.unsqueeze(1)  # [n_samples, n_samples, 2]
-                    pair_dist = torch.norm(diff, p=2, dim=2)  # [n_samples, n_samples]
-                    distances += pair_dist
+            # Compute distances for this feature batch
+            batch_distances = torch.zeros((n_samples, n_samples), device=device, dtype=torch.float64)
 
-                distances /= n_pairs
+            # Process in sample chunks for very large datasets
+            sample_chunk_size = min(500, n_samples)
+            for i_start in range(0, n_samples, sample_chunk_size):
+                i_end = min(i_start + sample_chunk_size, n_samples)
 
-            except RuntimeError as e:
-                if "alloc" in str(e).lower():
-                    # Fall back to chunked processing if memory fails
-                    return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
-                else:
-                    raise
-        else:
-            # Use chunked processing for larger cases
-            return self._compute_sample_divergence_chunked(sample_data, feature_pairs)
+                for j_start in range(0, n_samples, sample_chunk_size):
+                    j_end = min(j_start + sample_chunk_size, n_samples)
 
-        # Normalize while maintaining numerical stability
+                    # Compute distances for this chunk
+                    chunk_i = batch_data[i_start:i_end]  # [chunk_size, batch_size, 2]
+                    chunk_j = batch_data[j_start:j_end]  # [chunk_size, batch_size, 2]
+
+                    # Expand for pairwise comparison
+                    chunk_i_expanded = chunk_i.unsqueeze(1)  # [chunk_size, 1, batch_size, 2]
+                    chunk_j_expanded = chunk_j.unsqueeze(0)  # [1, chunk_size, batch_size, 2]
+
+                    # Compute differences and distances
+                    diff = chunk_i_expanded - chunk_j_expanded  # [chunk_size, chunk_size, batch_size, 2]
+                    chunk_dist = torch.norm(diff, p=2, dim=3)  # [chunk_size, chunk_size, batch_size]
+
+                    # Average across feature pairs in this batch
+                    chunk_avg_dist = chunk_dist.mean(dim=2)  # [chunk_size, chunk_size]
+                    batch_distances[i_start:i_end, j_start:j_end] += chunk_avg_dist
+
+            # Accumulate batch results (weighted by batch size)
+            distances += batch_distances * (len(batch_pairs) / n_pairs)
+
+            # Memory cleanup
+            del batch_data, batch_distances, chunk_i, chunk_j, diff, chunk_dist, chunk_avg_dist
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Final normalization
         max_val = distances.max()
         return distances / (max_val + 1e-7) if max_val > 0 else distances
 
@@ -6838,7 +6967,7 @@ class DBNN(GPUDBNN):
                         adaptive_patience_counter = 0
                         # Save the last training and test data
                         self.save_last_split(self.train_indices, self.test_indices)
-                        print("\033[K" + "Saved model and data due to improved training accuracy")
+                        print("\033[K" + f"{Colors.GREEN}Saved model and data due to improved training accuracy{Colors.ENDC}")
                     else:
                         adaptive_patience_counter += 1
                         print("\033[K" +f"No significant overall improvement. Adaptive patience: {adaptive_patience_counter}/{patience}")
@@ -6862,6 +6991,7 @@ class DBNN(GPUDBNN):
                         test_predictions = self.label_encoder.transform(test_predictions)
                     else:
                         # If predictions are numeric but stored as object, cast to int64
+                        print(f"{Colors.RED} Considering labels as intigers - Please be asure{Colors.ENDC}")
                         test_predictions = test_predictions.astype(np.int64)
 
                     # Check if we've achieved perfect accuracy
@@ -11632,250 +11762,65 @@ class UnifiedDBNNVisualizer:
         plt.rcParams['axes.titlesize'] = 14
         plt.rcParams['axes.labelsize'] = 12
 
-    def create_comprehensive_visualizations(self, training_history=None, round_stats=None,
-                                         feature_names=None, enable_3d=True):
-        """
-        MAIN ENTRY POINT: Create all visualizations in one call
-        """
-        print("\n" + "="*70)
-        print("🎨 CREATING COMPREHENSIVE UNIFIED DBNN VISUALIZATIONS")
-        print("="*70)
+    def create_comprehensive_visualizations(self, training_history, round_stats, feature_names, enable_3d=True):
+        """Create comprehensive visualizations with SEQUENTIAL processing"""
+        import gc
+        import resource
 
-        # Get data from DBNN model
-        X_full = self.dbnn.X_tensor.cpu().numpy() if hasattr(self.dbnn, 'X_tensor') else None
-        y_full = self.dbnn.y_tensor.cpu().numpy() if hasattr(self.dbnn, 'y_tensor') else None
+        print(f"{Colors.CYAN}[VISUAL] Starting SEQUENTIAL comprehensive visualizations{Colors.ENDC}")
 
-        if X_full is None or y_full is None:
-            print("⚠️  No data available for visualization")
-            return
-
-        # Create all visualizations
-        visualization_tasks = []
-
-        # 1. Performance Analysis
-        if round_stats:
-            visualization_tasks.append(('performance', self._create_performance_analysis, round_stats))
-
-        # 2. Geometric Tensor Analysis
-        visualization_tasks.append(('geometric', self._create_geometric_tensor_analysis, None))
-
-        # 3. Adaptive Learning Analysis
-        if training_history:
-            visualization_tasks.append(('adaptive', self._create_adaptive_learning_analysis,
-                                      (training_history, y_full)))
-
-        # 4. Feature Space Analysis
-        visualization_tasks.append(('feature_space', self._create_feature_space_analysis,
-                                  (X_full, y_full, feature_names)))
-
-        # 5. 3D Visualizations (conditional)
-        if enable_3d and X_full.shape[1] >= 3:
-            visualization_tasks.append(('3d', self._create_3d_visualizations,
-                                      (X_full, y_full, training_history, feature_names)))
-
-        # 6. Interactive Dashboard
-        visualization_tasks.append(('dashboard', self._create_interactive_dashboard,
-                                  (round_stats, training_history, X_full, y_full, feature_names)))
-
-        # Execute visualizations in parallel where possible
-        self._execute_parallel_visualizations(visualization_tasks)
-
-        print(f"✅ All visualizations completed and saved to: {self.output_dir}")
-
-    def _execute_parallel_visualizations(self, tasks):
-        """Advanced parallel visualization with CUDA compatibility and dynamic resource management"""
-        import multiprocessing as mp
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import psutil
-
-        # Set spawn method for CUDA compatibility
         try:
-            mp.set_start_method('spawn', force=True)
-        except RuntimeError:
-            pass  # Already set
+            # Increase file limits
+            soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+            new_soft_limit = min(hard_limit, 8192)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_limit, hard_limit))
+            print(f"{Colors.CYAN}[FILE] Set file descriptor limit: {new_soft_limit}{Colors.ENDC}")
 
-        # Advanced task categorization with resource profiling
-        task_profiles = {
-            '3d': {'type': 'gpu_memory', 'workers': 1, 'timeout': 1200},
-            'geometric': {'type': 'gpu_cpu', 'workers': 2, 'timeout': 900},
-            'feature_space': {'type': 'memory', 'workers': 2, 'timeout': 600},
-            'adaptive': {'type': 'memory', 'workers': 2, 'timeout': 1200},
-            'performance': {'type': 'cpu', 'workers': 4, 'timeout': 300},
-            'dashboard': {'type': 'cpu', 'workers': 3, 'timeout': 400},
-            'training_evolution': {'type': 'cpu', 'workers': 2, 'timeout': 500}
-        }
+            # Create visualization tasks
+            visualization_tasks = [
+                ('geometric', self.create_geometric_tensor_analysis, (training_history, round_stats)),
+                ('3d_visualizations', self.create_3d_visualizations, (training_history, round_stats, enable_3d)),
+                ('feature_space', self.create_feature_space_visualization, (training_history, feature_names)),
+                ('performance', self.create_performance_dashboard, (training_history, round_stats)),
+                ('orthogonality', self.create_orthogonality_analysis, (training_history, round_stats))
+            ]
 
-        # Dynamic resource allocation based on system capacity
-        def get_optimal_workers(task_type):
-            system_cores = psutil.cpu_count()
-            available_memory = psutil.virtual_memory().available / (1024**3)  # GB
-            gpu_memory = self._get_available_gpu_memory() if torch.cuda.is_available() else 0
+            results = self._execute_parallel_visualizations(visualization_tasks)
 
-            base_workers = task_profiles[task_type]['workers']
+            # Print summary
+            successful = sum(1 for _, _, status in results if status == "✅")
+            print(f"{Colors.CYAN}[SUMMARY] Completed {successful}/{len(visualization_tasks)} visualization tasks{Colors.ENDC}")
 
-            if task_type in ['3d', 'geometric'] and gpu_memory < 4:  # Less than 4GB GPU
-                return min(base_workers, 1)
-            elif task_type == 'memory' and available_memory < 8:  # Less than 8GB RAM
-                return min(base_workers, 1)
-            elif system_cores < 8:
-                return min(base_workers, max(1, system_cores // 2))
-            else:
-                return base_workers
+            return results
 
-        # Pre-process tasks for CUDA compatibility
-        def prepare_task_data(task_func, task_args):
-            """Convert GPU tensors to CPU for multiprocessing compatibility"""
-            if task_args and len(task_args) > 0:
-                prepared_args = []
-                for arg in task_args:
-                    if isinstance(arg, torch.Tensor) and arg.is_cuda:
-                        prepared_args.append(arg.cpu().numpy())
-                    elif hasattr(arg, 'device') and str(arg.device) != 'cpu':
-                        # Handle model objects - create CPU state dict
-                        cpu_state = {
-                            'X_tensor': getattr(arg, 'X_tensor', None).cpu().numpy() if hasattr(arg, 'X_tensor') else None,
-                            'y_tensor': getattr(arg, 'y_tensor', None).cpu().numpy() if hasattr(arg, 'y_tensor') else None,
-                            'feature_pairs': getattr(arg, 'feature_pairs', None),
-                            'model_type': getattr(arg, 'model_type', None),
-                            'label_encoder': getattr(arg, 'label_encoder', None)
-                        }
-                        prepared_args.append(cpu_state)
-                    else:
-                        prepared_args.append(arg)
-                return task_func, prepared_args
-            return task_func, task_args
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] Visualization failed: {e}{Colors.ENDC}")
+            return []
+        finally:
+            # Force cleanup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        # Batch execution with resource awareness
-        def execute_task_batch(task_batch, executor, batch_type):
-            """Execute a batch of tasks with appropriate resource allocation"""
-            futures = {}
+    def _get_cached_memory_info(self):
+        """Get memory information with caching to avoid file descriptor exhaustion"""
+        if not hasattr(self, '_cached_memory_info') or self._cached_memory_info is None:
+            try:
+                import psutil
+                # Get memory info once and cache it
+                mem_info = psutil.virtual_memory()
+                self._cached_memory_info = {
+                    'available_gb': mem_info.available / (1024**3),
+                    'total_gb': mem_info.total / (1024**3),
+                    'percent_used': mem_info.percent
+                }
+                print(f"{Colors.CYAN}[MEMORY] Cached memory info: {self._cached_memory_info['available_gb']:.1f}GB available{Colors.ENDC}")
+            except (OSError, FileNotFoundError) as e:
+                print(f"{Colors.YELLOW}[WARNING] Could not cache memory info: {e}, using safe defaults{Colors.ENDC}")
+                # Safe defaults to avoid file access
+                self._cached_memory_info = {'available_gb': 8.0, 'total_gb': 16.0, 'percent_used': 50.0}
 
-            for task_name, task_func, task_args in task_batch:
-                # Prepare data for multiprocessing
-                prepared_func, prepared_args = prepare_task_data(task_func, task_args)
-
-                # Submit with dynamic timeout
-                timeout = task_profiles.get(task_name, {}).get('timeout', 600)
-
-                if prepared_args:
-                    future = executor.submit(prepared_func, *prepared_args)
-                else:
-                    future = executor.submit(prepared_func)
-
-                futures[future] = (task_name, timeout)
-
-            return futures
-
-        # Smart task batching
-        def create_optimal_batches(tasks):
-            gpu_tasks = []
-            memory_tasks = []
-            cpu_tasks = []
-
-            for task in tasks:
-                task_name = task[0]
-                profile = task_profiles.get(task_name, {})
-
-                if profile.get('type', '').startswith('gpu'):
-                    gpu_tasks.append(task)
-                elif profile.get('type') == 'memory':
-                    memory_tasks.append(task)
-                else:
-                    cpu_tasks.append(task)
-
-            # Limit concurrent GPU tasks to avoid memory contention
-            max_gpu_concurrent = min(2, len(gpu_tasks))
-            gpu_batches = [gpu_tasks[i:i+max_gpu_concurrent] for i in range(0, len(gpu_tasks), max_gpu_concurrent)]
-
-            # Memory tasks can run in parallel but limited
-            memory_batches = [memory_tasks[i:i+3] for i in range(0, len(memory_tasks), 3)]
-
-            # CPU tasks can run with higher concurrency
-            cpu_batches = [cpu_tasks[i:i+6] for i in range(0, len(cpu_tasks), 6)]
-
-            return gpu_batches + memory_batches + cpu_batches
-
-        # Results collection
-        results = []
-        failed_tasks = []
-
-        # Create optimal batches
-        task_batches = create_optimal_batches(tasks)
-
-        # Progress tracking
-        total_batches = len(task_batches)
-        completed_tasks = 0
-        total_tasks = len(tasks)
-
-        with tqdm(total=total_tasks, desc="🎨 Advanced Parallel Visualizations",
-                  bar_format="{l_bar}{bar:50}{r_bar}{bar:-50b}") as pbar:
-
-            for batch_idx, batch in enumerate(task_batches):
-                batch_type = "GPU" if any(t[0] in ['3d', 'geometric'] for t in batch) else \
-                           "Memory" if any(t[0] in ['feature_space', 'adaptive'] for t in batch) else "CPU"
-
-                # Dynamic worker allocation per batch
-                batch_workers = max(1, min(len(batch), get_optimal_workers(batch[0][0])))
-
-                # Choose executor based on task type
-                if batch_type == "GPU":
-                    # Use ThreadPool for GPU tasks to share CUDA context
-                    with ThreadPoolExecutor(max_workers=batch_workers) as executor:
-                        batch_futures = execute_task_batch(batch, executor, batch_type)
-
-                        # Process batch results
-                        for future in as_completed(batch_futures):
-                            task_name, timeout = batch_futures[future]
-                            try:
-                                result = future.result(timeout=timeout)
-                                results.append((task_name, result))
-                                completed_tasks += 1
-                                pbar.update(1)
-                                pbar.set_postfix_str(f"✅ {task_name} | Batch {batch_idx+1}/{total_batches}")
-                            except Exception as e:
-                                failed_tasks.append((task_name, str(e)))
-                                pbar.update(1)
-                                pbar.set_postfix_str(f"❌ {task_name} | {str(e)[:50]}...")
-                else:
-                    # Use ProcessPool for CPU/memory tasks
-                    with mp.get_context('spawn').Pool(processes=batch_workers) as pool:
-                        batch_results = []
-
-                        for task_name, task_func, task_args in batch:
-                            prepared_func, prepared_args = prepare_task_data(task_func, task_args)
-                            timeout = task_profiles.get(task_name, {}).get('timeout', 600)
-
-                            if prepared_args:
-                                async_result = pool.apply_async(prepared_func, prepared_args)
-                            else:
-                                async_result = pool.apply_async(prepared_func)
-                            batch_results.append((task_name, async_result, timeout))
-
-                        # Collect results with timeout
-                        for task_name, async_result, timeout in batch_results:
-                            try:
-                                result = async_result.get(timeout=timeout)
-                                results.append((task_name, result))
-                                completed_tasks += 1
-                                pbar.update(1)
-                                pbar.set_postfix_str(f"✅ {task_name} | Batch {batch_idx+1}/{total_batches}")
-                            except mp.TimeoutError:
-                                failed_tasks.append((task_name, f"Timeout after {timeout}s"))
-                                pbar.update(1)
-                                pbar.set_postfix_str(f"⏰ {task_name} | Timeout")
-                            except Exception as e:
-                                failed_tasks.append((task_name, str(e)))
-                                pbar.update(1)
-                                pbar.set_postfix_str(f"❌ {task_name} | {str(e)[:50]}...")
-
-        # Summary report
-        if failed_tasks:
-            print(f"\n⚠️  {len(failed_tasks)} tasks failed:")
-            for task, error in failed_tasks:
-                print(f"   • {task}: {error}")
-
-        print(f"✅ {completed_tasks}/{total_tasks} visualizations completed successfully")
-        return results
+        return self._cached_memory_info
 
     def _get_available_gpu_memory(self):
         """Get available GPU memory in GB"""
