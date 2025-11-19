@@ -1,4 +1,5 @@
-#-------- Memory and Computation optimiations 3 Nov 2025 -----------------------------------------
+#-------- Memory and Computation optimiations 19 Nov 2025 -----------------------------------------
+# With Feature batch enabled to make computation on large number of features in limited memory.
 # Replaced:
 # _compute_batch_posterior
 # _update_priors_parallel
