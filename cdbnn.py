@@ -146,13 +146,15 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
-
 class DistanceCorrelationFeatureSelector:
-    """Helper class to select features based on distance correlation criteria"""
+    """Helper class to select features based on percentile criteria and mutual correlation"""
 
-    def __init__(self, upper_threshold=0.85, lower_threshold=0.01):
-        self.upper_threshold = upper_threshold
-        self.lower_threshold = lower_threshold
+    def __init__(self, correlation_percentile=95, mutual_correlation_threshold=0.7,
+                 min_features=10, max_features=50):
+        self.correlation_percentile = correlation_percentile
+        self.mutual_correlation_threshold = mutual_correlation_threshold
+        self.min_features = min_features
+        self.max_features = max_features
 
     def calculate_distance_correlations(self, features, labels):
         """Calculate distance correlations between features and labels"""
@@ -166,32 +168,95 @@ class DistanceCorrelationFeatureSelector:
         return label_corrs
 
     def select_features(self, features, labels):
-        """Select features based on distance correlation criteria"""
+        """Select features based on percentile criteria and mutual correlation"""
         label_corrs = self.calculate_distance_correlations(features, labels)
 
-        # Get indices of features that meet upper threshold
-        selected_indices = [i for i, corr in enumerate(label_corrs)
-                          if corr >= self.upper_threshold]
+        # Calculate percentile threshold
+        correlation_threshold = np.percentile(label_corrs, self.correlation_percentile)
+        logger.info(f"Percentile {self.correlation_percentile} correlation threshold: {correlation_threshold:.4f}")
+
+        # Get candidate features above percentile threshold
+        candidate_indices = [i for i, corr in enumerate(label_corrs)
+                           if corr >= correlation_threshold]
 
         # Sort by correlation strength (descending)
-        selected_indices.sort(key=lambda i: -label_corrs[i])
+        candidate_indices.sort(key=lambda i: -label_corrs[i])
 
-        # Remove features that are too correlated with each other
-        final_indices = []
-        feature_matrix = features[:, selected_indices]
+        logger.info(f"Candidate features above percentile threshold: {len(candidate_indices)}")
 
-        for i, idx in enumerate(selected_indices):
-            keep = True
-            for j in final_indices:
-                # Calculate correlation between features
-                corr = 1 - correlation(feature_matrix[:, i], feature_matrix[:, selected_indices.index(j)])
-                if corr > self.lower_threshold:
-                    keep = False
-                    break
-            if keep:
-                final_indices.append(idx)
+        # If we have too few candidates, ensure minimum features
+        if len(candidate_indices) < self.min_features:
+            logger.warning(f"Only {len(candidate_indices)} candidates, taking top {self.min_features} features by correlation")
+            # Take top features by correlation regardless of percentile
+            all_indices = np.argsort(label_corrs)[::-1]  # Descending order
+            candidate_indices = all_indices[:max(self.min_features, len(candidate_indices))]
+            candidate_indices = list(candidate_indices)
+
+        # Remove mutually correlated features
+        final_indices = self._remove_mutually_correlated_features(
+            features, candidate_indices, label_corrs
+        )
+
+        # Ensure we don't exceed max_features
+        if len(final_indices) > self.max_features:
+            logger.info(f"Truncating from {len(final_indices)} to {self.max_features} features")
+            final_indices = final_indices[:self.max_features]
+
+        logger.info(f"Final selected features: {len(final_indices)}")
 
         return final_indices, label_corrs
+
+    def _remove_mutually_correlated_features(self, features, candidate_indices, label_corrs):
+        """Remove features that are highly correlated with each other, keeping the best one"""
+        final_indices = []
+        feature_matrix = features[:, candidate_indices]
+
+        # Create a list of (index, correlation_score) for sorting
+        feature_scores = [(idx, label_corrs[idx]) for idx in candidate_indices]
+
+        # Sort by correlation score (descending)
+        feature_scores.sort(key=lambda x: -x[1])
+
+        for current_idx, current_score in feature_scores:
+            if len(final_indices) >= self.max_features:
+                break
+
+            keep = True
+            # Get the position of current_idx in candidate_indices
+            current_pos = candidate_indices.index(current_idx)
+            current_feature = feature_matrix[:, current_pos]
+
+            for existing_idx in final_indices:
+                # Get the position of existing_idx in candidate_indices
+                existing_pos = candidate_indices.index(existing_idx)
+                existing_feature = feature_matrix[:, existing_pos]
+
+                # Calculate mutual correlation
+                try:
+                    mutual_corr = 1 - correlation(current_feature, existing_feature)
+                    if mutual_corr > self.mutual_correlation_threshold:
+                        # Features are highly correlated - keep the one with better correlation to labels
+                        existing_score = label_corrs[existing_idx]
+                        if current_score > existing_score:
+                            # Replace the existing feature with this better one
+                            final_indices.remove(existing_idx)
+                            logger.debug(f"Replaced feature {existing_idx} (score: {existing_score:.4f}) "
+                                       f"with {current_idx} (score: {current_score:.4f}) "
+                                       f"due to high mutual correlation: {mutual_corr:.4f}")
+                        else:
+                            keep = False
+                            logger.debug(f"Dropped feature {current_idx} (score: {current_score:.4f}) "
+                                       f"due to high correlation: {mutual_corr:.4f} with "
+                                       f"better feature {existing_idx} (score: {existing_score:.4f})")
+                        break
+                except Exception as e:
+                    logger.warning(f"Error calculating mutual correlation: {e}")
+                    continue
+
+            if keep and current_idx not in final_indices:
+                final_indices.append(current_idx)
+
+        return final_indices
 
 class PredictionManager:
     """Manages prediction using frozen feature selection"""
@@ -854,7 +919,6 @@ class WindowReconstructor:
         self.output_tensor = torch.zeros(self.original_shape)
         self.weight_tensor = torch.zeros(self.original_shape)
 
-
 class GeneralEnhancementConfig(BaseEnhancementConfig):
     """Configuration manager for general (flexible) enhancement mode"""
 
@@ -1175,6 +1239,177 @@ class BaseAutoencoder(nn.Module):
         self._feature_selection_metadata = {}   # Additional metadata
         self._is_feature_selection_frozen = False  # Lock flag
 
+    def _cleanup_legacy_json_files(self, output_dir: str):
+        """Remove any legacy JSON files that might cause serialization issues"""
+        legacy_files = [
+            'feature_extraction_metadata.json',
+            'feature_selection_metadata.json',
+            'training_metadata.json'
+        ]
+
+        for filename in legacy_files:
+            filepath = os.path.join(output_dir, filename)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Removed legacy JSON file: {filepath}")
+                except Exception as e:
+                    logger.warning(f"Could not remove legacy JSON file {filepath}: {e}")
+
+    def _prepare_features_dataframe(self, feature_dict: Dict[str, torch.Tensor],
+                                  dc_config: Dict = None) -> pd.DataFrame:
+        """
+        Convert features dictionary to pandas DataFrame with optional feature selection.
+        DEBUG VERSION - shows what's happening with correlations.
+        """
+        import numpy as np
+        from scipy.spatial.distance import correlation
+
+        data_dict = {}
+
+        # Get base data
+        if 'embeddings' not in feature_dict:
+            raise ValueError("No embeddings found in features dictionary")
+
+        features = feature_dict['embeddings']
+        if isinstance(features, torch.Tensor):
+            features = features.cpu().numpy()
+
+        # Get labels/class names
+        labels_numeric = None
+        if 'class_names' in feature_dict and len(feature_dict['class_names']) == len(features):
+            data_dict['target'] = feature_dict['class_names']
+            labels_numeric = data_dict['target']
+            # Convert string labels to numeric for correlation
+            unique_labels = list(set(labels_numeric))
+            label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+            labels_numeric = np.array([label_to_idx[label] for label in labels_numeric])
+        elif 'labels' in feature_dict and len(feature_dict['labels']) == len(features):
+            labels = feature_dict['labels']
+            if isinstance(labels, torch.Tensor):
+                labels = labels.cpu().numpy()
+            data_dict['target'] = labels
+            labels_numeric = labels
+        else:
+            # Create dummy labels if none available
+            data_dict['target'] = ['unknown'] * len(features)
+            labels_numeric = np.zeros(len(features))
+
+        logger.info(f"Dataset info: {len(features)} samples, {features.shape[1]} features")
+        logger.info(f"Labels: {len(np.unique(labels_numeric))} classes, distribution: {np.bincount(labels_numeric)}")
+
+        # Apply feature selection if enabled and labels available
+        use_dc = dc_config and dc_config.get('use_distance_correlation', True)
+        has_labels = len(np.unique(labels_numeric)) > 1
+
+        selected_indices = []
+        corr_values_list = []
+
+        if use_dc and has_labels:
+            logger.info("Running distance correlation analysis...")
+
+            # DEBUG: Calculate and log correlation statistics for all features
+            all_correlations = []
+            for i in range(features.shape[1]):
+                try:
+                    feature_col = features[:, i]
+                    corr_val = 1 - correlation(feature_col, labels_numeric)
+                    all_correlations.append((i, corr_val))
+                except Exception as e:
+                    logger.warning(f"Error calculating correlation for feature {i}: {e}")
+                    all_correlations.append((i, 0.0))
+
+            # Log correlation statistics
+            corr_values_only = [corr for idx, corr in all_correlations]
+            logger.info(f"Correlation statistics - Min: {min(corr_values_only):.4f}, Max: {max(corr_values_only):.4f}, "
+                       f"Mean: {np.mean(corr_values_only):.4f}, Std: {np.std(corr_values_only):.4f}")
+
+            # Show top 10 features by correlation
+            top_features = sorted(all_correlations, key=lambda x: -x[1])[:10]
+            logger.info("Top 10 features by correlation:")
+            for idx, corr in top_features:
+                logger.info(f"  Feature {idx}: correlation = {corr:.4f}")
+
+            # Use distance correlation feature selection
+            upper_threshold = dc_config.get('distance_correlation_upper', 0.85)
+            lower_threshold = dc_config.get('distance_correlation_lower', 0.01)
+            logger.info(f"Using thresholds - Upper: {upper_threshold}, Lower: {lower_threshold}")
+
+            selector = DistanceCorrelationFeatureSelector(
+                correlation_percentile=dc_config.get('correlation_percentile', 95),
+                mutual_correlation_threshold=dc_config.get('mutual_correlation_threshold', 0.7),
+                min_features=dc_config.get('min_features', 10),
+                max_features=dc_config.get('max_features', 40)
+            )
+            selected_indices, selector_corr_values = selector.select_features(features, labels_numeric)
+
+            logger.info(f"Distance correlation feature selection: {len(selected_indices)} features selected from {features.shape[1]} total")
+
+            if len(selected_indices) == 0:
+                # FALLBACK: Use more reasonable thresholds or top features
+                logger.warning("No features selected by distance correlation. Checking with relaxed thresholds...")
+
+                # Try with relaxed upper threshold
+                relaxed_upper = 0.5  # Much more reasonable threshold
+                selector_relaxed = DistanceCorrelationFeatureSelector(
+                    upper_threshold=relaxed_upper,
+                    lower_threshold=lower_threshold
+                )
+                selected_indices_relaxed, _ = selector_relaxed.select_features(features, labels_numeric)
+
+                if len(selected_indices_relaxed) > 0:
+                    logger.info(f"Relaxed threshold ({relaxed_upper}) selected {len(selected_indices_relaxed)} features")
+                    selected_indices = selected_indices_relaxed
+                    # Get correlation values for selected indices
+                    corr_values_list = [dict(all_correlations)[idx] for idx in selected_indices]
+                else:
+                    # Final fallback: use top 20 features by correlation
+                    logger.warning("Even relaxed threshold selected 0 features. Using top 20 features by correlation.")
+                    selected_indices = [idx for idx, corr in sorted(all_correlations, key=lambda x: -x[1])[:20]]
+                    corr_values_list = [corr for idx, corr in sorted(all_correlations, key=lambda x: -x[1])[:20]]
+            else:
+                # Use the original selection - get correlation values from our precomputed list
+                corr_values_list = [dict(all_correlations)[idx] for idx in selected_indices]
+        else:
+            # Include all features (no selection or no labels available)
+            reason = "feature selection disabled" if not use_dc else "only one class in labels"
+            logger.info(f"Including all {features.shape[1]} features ({reason})")
+            selected_indices = list(range(features.shape[1]))
+            # Calculate correlations for logging
+            corr_values_list = []
+            for i in range(features.shape[1]):
+                try:
+                    corr_val = 1 - correlation(features[:, i], labels_numeric)
+                    corr_values_list.append(corr_val)
+                except:
+                    corr_values_list.append(0.0)
+
+        # Store selected features
+        logger.info(f"Final selection: {len(selected_indices)} features")
+        for new_idx, (orig_idx, corr_val) in enumerate(zip(selected_indices, corr_values_list)):
+            data_dict[f'feature_{new_idx}'] = features[:, orig_idx]
+            # Store original indices and correlation values
+            data_dict[f'original_feature_idx_{new_idx}'] = [orig_idx] * len(features)
+            data_dict[f'feature_{new_idx}_correlation'] = [corr_val] * len(features)
+
+        # Add additional metadata if available
+        optional_fields = ['indices', 'filenames', 'full_paths']
+        for field in optional_fields:
+            if field in feature_dict and len(feature_dict[field]) == len(features):
+                data_dict[field] = feature_dict[field]
+
+        # Create DataFrame
+        df = pd.DataFrame(data_dict)
+
+        # Ensure all arrays have the same length
+        for col in df.columns:
+            if isinstance(df[col].iloc[0], list) and len(df[col].iloc[0]) == 1:
+                # Unpack single-element lists
+                df[col] = df[col].apply(lambda x: x[0] if isinstance(x, list) and len(x) == 1 else x)
+
+        logger.info(f"Final DataFrame shape: {df.shape}, Features: {len([c for c in df.columns if c.startswith('feature_')])}")
+        return df
+
     def freeze_feature_selection(self, selected_indices: List[int],
                                importance_scores: np.ndarray,
                                metadata: Dict = None):
@@ -1391,11 +1626,12 @@ class BaseAutoencoder(nn.Module):
         """
         Save features for training and test sets with distance correlation feature selection.
         Handles both adaptive and non-adaptive modes with proper configuration.
+        Ensures consistent feature selection across train/test.
 
         Args:
             train_features: Features from training set (dict with 'embeddings', 'labels', etc.)
             test_features: Features from test set (same format as train_features)
-            output_path: Full path for output CSV file (e.g., 'data/dataset/features.csv') - MUST be lowercase 'data'
+            output_path: Full path for output CSV file
         """
         try:
             # Ensure output_path uses lowercase 'data' directory
@@ -1408,6 +1644,9 @@ class BaseAutoencoder(nn.Module):
 
             output_dir = os.path.dirname(output_path)
             os.makedirs(output_dir, exist_ok=True)
+
+            # Clean up legacy JSON files before saving new features
+            self._cleanup_legacy_json_files(output_dir)
 
             # Load distance correlation config (with proper error handling)
             dc_config = self._get_distance_correlation_config(output_dir)
@@ -1431,6 +1670,9 @@ class BaseAutoencoder(nn.Module):
                 # Save metadata
                 feature_columns = [c for c in features_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
+
+                # Generate configuration file with selected features
+                self.generate_configuration(output_path, output_dir)
             else:
                 # Non-adaptive mode - separate train/test files
                 train_df = self._prepare_features_dataframe(
@@ -1456,152 +1698,111 @@ class BaseAutoencoder(nn.Module):
                 feature_columns = [c for c in train_df.columns if c.startswith('feature_')]
                 self._save_feature_metadata(output_dir, feature_columns, dc_config if use_dc else None)
 
+                # Generate configuration file with selected features from training set
+                self.generate_configuration(train_path, output_dir)
+
         except Exception as e:
             logger.error(f"Error in save_features: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
 
-    def _prepare_features_dataframe(self, feature_dict: Dict[str, torch.Tensor],
-                                  dc_config: Optional[Dict]) -> pd.DataFrame:
-        """Prepare DataFrame with frozen feature selection support and full file paths - CSV output only"""
-        data = {}
-        embeddings = feature_dict['embeddings'].cpu().numpy()  # Convert to numpy only for CSV
-        base_length = len(embeddings)
-
-        # CRITICAL FIX: Always use the same feature selection method and parameters
-        has_frozen_selection = (hasattr(self, '_is_feature_selection_frozen') and
-                              self._is_feature_selection_frozen and
-                              self._selected_feature_indices is not None)
-
-        if has_frozen_selection:
-            # Use frozen feature selection - convert tensors to numpy for CSV
-            selected_indices = self._selected_feature_indices.cpu().numpy()
-            importance_scores = self._feature_importance_scores.cpu().numpy()
-            logger.info(f"Using frozen feature selection: {len(selected_indices)} features")
-
-            # Store the selected features with consistent indexing (numpy for CSV)
-            for new_idx, orig_idx in enumerate(selected_indices):
-                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                data[f'original_feature_idx_{new_idx}'] = [int(orig_idx)] * base_length  # Ensure int for CSV
-                data[f'feature_{new_idx}_importance'] = [float(importance_scores[orig_idx])] * base_length  # Ensure float for CSV
-
-        else:
-            # During training, perform feature selection and freeze it
-            use_feature_selection = (dc_config and
-                                   dc_config.get('use_feature_selection', True) and
-                                   'labels' in feature_dict)
-
-            if use_feature_selection:
-                try:
-                    labels = feature_dict['labels'].cpu().numpy()
-
-                    # Get selector type from config
-                    selector_type = dc_config.get('feature_selection', {}).get('method', 'balanced')
-
-                    # Create appropriate selector
-                    selector = FeatureSelectorFactory.create_selector(
-                        selector_type=selector_type,
-                        config=dc_config,
-                        model=self
-                    )
-
-                    logger.info(f"Using {selector_type} feature selection: {selector.get_name()}")
-
-                    # Perform feature selection
-                    selected_indices, importance_scores = selector.select_features(embeddings, labels)
-
-                    # CRITICAL: Freeze the feature selection using tensors for binary storage
-                    self.freeze_feature_selection(selected_indices, importance_scores, {
-                        'method': selector_type,
-                        'timestamp': datetime.now().isoformat(),
-                        'config': dc_config.get('feature_selection', {})
-                    })
-
-                    logger.info(f"Feature selection completed and frozen: {len(selected_indices)} features")
-
-                    # Store selected features for CSV
-                    for new_idx, orig_idx in enumerate(selected_indices):
-                        data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-                        data[f'original_feature_idx_{new_idx}'] = [int(orig_idx)] * base_length
-                        data[f'feature_{new_idx}_importance'] = [float(importance_scores[orig_idx])] * base_length
-
-                except Exception as e:
-                    logger.error(f"Feature selection failed: {str(e)}")
-                    logger.info("Falling back to all features")
-                    # Fallback: use all features with consistent indexing
-                    for i in range(embeddings.shape[1]):
-                        data[f'feature_{i}'] = embeddings[:, i]
-            else:
-                # Use all features with consistent indexing
-                for i in range(embeddings.shape[1]):
-                    data[f'feature_{i}'] = embeddings[:, i]
-
-        # Rest of CSV-specific processing remains the same...
-        # Add full file paths
-        if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
-            data['file_path'] = feature_dict['full_paths']
-            logger.info(f"Included {len(feature_dict['full_paths'])} full file paths in CSV")
-        elif 'filenames' in feature_dict and len(feature_dict['filenames']) == base_length:
-            data['file_path'] = feature_dict['filenames']
-            logger.info(f"Included {len(feature_dict['filenames'])} filenames in CSV (full paths not available)")
-        else:
-            data['file_path'] = [f"sample_{i}" for i in range(base_length)]
-            logger.warning("No file paths available, using sample indices")
-
-        # Add labels and metadata
-        if 'class_names' in feature_dict:
-            class_names = feature_dict['class_names']
-            if len(class_names) == base_length:
-                data['target'] = class_names
-            else:
-                logger.warning(f"Class names length mismatch, using labels")
-                data['target'] = feature_dict['labels'].cpu().numpy()[:base_length]
-        elif 'labels' in feature_dict:
-            data['target'] = feature_dict['labels'].cpu().numpy()[:base_length]
-
-        # Include additional metadata if available
-        optional_fields = ['indices']
-        for field in optional_fields:
-            if field in feature_dict and len(feature_dict[field]) == base_length:
-                data[field] = feature_dict[field]
-
-        return pd.DataFrame(data)
-
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
         Safely load or create distance correlation configuration.
-
-        Args:
-            output_dir: Directory where config should be stored
-
-        Returns:
-            Dictionary with configuration parameters
+        Automatically updates old config formats to new format.
         """
         config_path = os.path.join(output_dir, 'feature_selection_config.json')
+
+        # Default configuration with new parameters
         default_config = {
             'use_distance_correlation': True,
-            'distance_correlation_upper': 0.85,
-            'distance_correlation_lower': 0.01
+            'correlation_percentile': 95,
+            'mutual_correlation_threshold': 0.7,
+            'min_features': 10,
+            'max_features': 40
         }
 
+        # Migration mapping from old parameter names to new
+        parameter_migration = {
+            'upper_threshold': 'correlation_percentile',
+            'lower_threshold': 'mutual_correlation_threshold'
+        }
+
+        # Value conversion for old thresholds to percentiles
+        def convert_old_threshold(old_value):
+            if old_value >= 0.8:
+                return 95
+            elif old_value >= 0.6:
+                return 90
+            elif old_value >= 0.4:
+                return 80
+            else:
+                return 70
+
         try:
+            config_updated = False
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
-                    config = json.load(f)
-                # Validate loaded config
-                return {**default_config, **config}
+                    loaded_config = json.load(f)
+
+                # Check if this is an old config format that needs migration
+                has_old_params = any(old_param in loaded_config for old_param in parameter_migration.keys())
+
+                if has_old_params:
+                    logger.info("Found old feature selection config format, migrating to new format...")
+
+                    # Migrate old parameters to new ones
+                    for old_param, new_param in parameter_migration.items():
+                        if old_param in loaded_config:
+                            old_value = loaded_config.pop(old_param)
+                            if new_param == 'correlation_percentile':
+                                new_value = convert_old_threshold(old_value)
+                                logger.info(f"Converted {old_param}={old_value} to {new_param}={new_value}")
+                            else:
+                                new_value = old_value
+                                logger.info(f"Migrated {old_param}={old_value} to {new_param}={new_value}")
+
+                            loaded_config[new_param] = new_value
+                            config_updated = True
+
+                # Ensure all required parameters exist
+                for key, default_value in default_config.items():
+                    if key not in loaded_config:
+                        logger.info(f"Adding missing parameter: {key}={default_value}")
+                        loaded_config[key] = default_value
+                        config_updated = True
+
+                # Merge with defaults (new parameters take precedence)
+                final_config = {**default_config, **loaded_config}
+
             else:
+                # Create new config with defaults
+                final_config = default_config
+                config_updated = True
+
+            # Save updated config if changes were made
+            if config_updated:
                 with open(config_path, 'w') as f:
-                    json.dump(default_config, f, indent=4)
-                return default_config
+                    json.dump(final_config, f, indent=4)
+                logger.info(f"Updated feature selection configuration saved to {config_path}")
+
+            logger.info(f"Using feature selection config: {final_config}")
+            return final_config
+
         except Exception as e:
             logger.warning(f"Could not load/create config: {str(e)} - using defaults")
+            # Ensure defaults are saved
+            try:
+                with open(config_path, 'w') as f:
+                    json.dump(default_config, f, indent=4)
+            except:
+                pass
             return default_config
 
     def generate_configuration(self, features_path: str,
                              output_dir: str = None) -> str:
         """
-        Generate final .conf configuration file from extracted features.
+        Generate final .conf configuration file from extracted features with selected features.
         Should be called after save_features().
 
         Args:
@@ -1616,47 +1817,136 @@ class BaseAutoencoder(nn.Module):
                 output_dir = os.path.dirname(features_path)
             os.makedirs(output_dir, exist_ok=True)
 
-            # Load features and metadata
+            # Load features CSV to get the actual selected features
             features_df = pd.read_csv(features_path)
-            metadata_path = os.path.join(output_dir, 'feature_selection_metadata.json')
 
-            # Get config settings
+            # Get feature columns that were actually selected (those with feature_ prefix)
+            feature_columns = [col for col in features_df.columns if col.startswith('feature_')]
+
+            # Get the original feature indices from the CSV if available
+            original_indices = []
+            for col in feature_columns:
+                orig_idx_col = f'original_feature_idx_{col.split("_")[1]}'
+                if orig_idx_col in features_df.columns:
+                    idx_value = features_df[orig_idx_col].iloc[0]
+                    # Convert numpy types to Python native types
+                    if hasattr(idx_value, 'item'):
+                        idx_value = idx_value.item()
+                    original_indices.append(int(idx_value))
+                else:
+                    # If no original indices stored, use sequential
+                    original_indices.append(int(col.split('_')[1]))
+
+            # Load distance correlation config
             dc_config = self._get_distance_correlation_config(output_dir)
             use_dc = dc_config.get('use_distance_correlation', True)
 
-            # Prepare base configuration
+            # Convert numpy types in dc_config to Python native types
+            safe_dc_config = {}
+            if use_dc and dc_config:
+                for key, value in dc_config.items():
+                    if hasattr(value, 'item'):  # Handle numpy types
+                        safe_dc_config[key] = value.item()
+                    else:
+                        safe_dc_config[key] = value
+            else:
+                safe_dc_config = {}
+
+            # Prepare base configuration in your required format
             config = {
-                'dataset': self.config['dataset']['name'],
-                'feature_count': len([c for c in features_df.columns
-                                     if c.startswith('feature_')]),
-                'generated_at': datetime.now().isoformat(),
-                'feature_selection': {
-                    'method': 'distance_correlation' if use_dc else 'none',
-                    'parameters': dc_config if use_dc else {}
+                "file_path": os.path.basename(features_path),
+                "column_names": feature_columns + ["target"],
+                "target_column": "target",
+                "separator": ",",
+                "has_header": True,
+                "likelihood_config": {
+                    "feature_group_size": 2,
+                    "max_combinations": 90000000,
+                    "bin_sizes": [128]
+                },
+                "active_learning": {
+                    "tolerance": 1.0,
+                    "cardinality_threshold_percentile": 95,
+                    "strong_margin_threshold": 0.01,
+                    "marginal_margin_threshold": 0.01,
+                    "min_divergence": 0.1,
+                    "max_class_addition_percent": 99,
+                    "similarity_threshold": 0.25,
+                    "update_condition": "bin_overlap"
+                },
+                "training_params": {
+                    "override_global_cardinality": False,
+                    "trials": 100,
+                    "cardinality_threshold": 0.9,
+                    "minimum_training_accuracy": 0.95,
+                    "cardinality_tolerance": 8,
+                    "learning_rate": 0.001,
+                    "random_seed": 42,
+                    "epochs": 1000,
+                    "test_fraction": 0.2,
+                    "n_bins_per_dim": 21,
+                    "enable_adaptive": True,
+                    "compute_device": "auto",
+                    "invert_DBNN": True,
+                    "reconstruction_weight": 0.5,
+                    "feedback_strength": 0.3,
+                    "inverse_learning_rate": 0.001,
+                    "save_plots": False,
+                    "class_preference": True,
+                    "resol": 100,
+                    "gain": 2.0,
+                    "margin": 0.2,
+                    "patience": 10,
+                    "max_epochs": 100,
+                    "min_improvement": 1e-07,
+                    "adaptive_rounds": 20,
+                    "initial_samples": 5,
+                    "max_samples_per_round": 25,
+                    "enable_acid_test": True,
+                    "enable_kl_divergence": True,
+                    "disable_sample_limit": False,
+                    "margin_tolerance": 0.15,
+                    "kl_threshold": 0.1,
+                    "training_convergence_epochs": 50,
+                    "min_training_accuracy": 0.95,
+                    "adaptive_margin_relaxation": 0.1,
+                    "modelType": "Histogram",
+                    "enable_visualization": True,
+                    "enable_5DCTvisualization": True,
+                    "batch_size": 128
+                },
+                "dataset_name": self.config['dataset']['name'],
+                "modelType": "Histogram",
+                "execution_flags": {
+                    "train": True,
+                    "train_only": False,
+                    "predict": True,
+                    "fresh_start": False,
+                    "use_previous_model": True,
+                    "gen_samples": False
+                },
+                "anomaly_detection": {
+                    "initial_weight": 1e-06,
+                    "threshold": 0.01,
+                    "missing_value": -99999,
+                    "missing_weight_multiplier": 0.1
+                },
+                "feature_selection_info": {
+                    "method": "distance_correlation" if use_dc else "none",
+                    "selected_features_count": len(feature_columns),
+                    "original_feature_count": int(self.feature_dims),  # Convert to Python int
+                    "selected_feature_indices": [int(idx) for idx in original_indices],  # Convert all to Python int
+                    "parameters": safe_dc_config if use_dc else {}  # Use safe converted config
                 }
             }
 
-            # Add feature-specific info if selection was used
-            if use_dc and os.path.exists(metadata_path):
-                with open(metadata_path, 'r') as f:
-                    metadata = json.load(f)
-                config['feature_selection'].update({
-                    'original_feature_count': metadata['original_feature_count'],
-                    'selected_features': [
-                        {'name': col, 'original_index': features_df[f'original_feature_idx_{i}'][0],
-                         'correlation': features_df[f'feature_{i}_correlation'][0]}
-                        for i, col in enumerate([c for c in features_df.columns
-                                               if c.startswith('feature_')])
-                    ]
-                })
-
             # Save .conf file
-            conf_path = os.path.join(output_dir,
-                                    f"{self.config['dataset']['name']}.conf")
+            conf_path = os.path.join(output_dir, f"{self.config['dataset']['name']}.conf")
             with open(conf_path, 'w') as f:
-                json.dump(config, f, indent=4)
+                json.dump(config, f, indent=2)
 
             logger.info(f"Configuration file generated at {conf_path}")
+            logger.info(f"Selected {len(feature_columns)} features for configuration")
             return conf_path
 
         except Exception as e:
@@ -1697,14 +1987,8 @@ class BaseAutoencoder(nn.Module):
     def _save_feature_metadata(self, output_dir: str, feature_columns: List[str], dc_config: Dict = None):
         """Save comprehensive metadata about the saved features and feature selection process using binary format ONLY"""
 
-        # Delete any existing JSON metadata files to prevent serialization errors
-        json_metadata_path = os.path.join(output_dir, 'feature_extraction_metadata.json')
-        if os.path.exists(json_metadata_path):
-            try:
-                os.remove(json_metadata_path)
-                logger.info(f"Removed legacy JSON metadata file: {json_metadata_path}")
-            except Exception as e:
-                logger.warning(f"Could not remove legacy JSON file {json_metadata_path}: {e}")
+        # Clean up legacy JSON files first
+        self._cleanup_legacy_json_files(output_dir)
 
         # Prepare ALL metadata in binary format - no JSON for any data
         binary_data = {
@@ -1779,8 +2063,10 @@ class BaseAutoencoder(nn.Module):
 
             # Select features based on distance correlation
             selector = DistanceCorrelationFeatureSelector(
-                upper_threshold=dc_config['distance_correlation_upper'],
-                lower_threshold=dc_config['distance_correlation_lower']
+                correlation_percentile=dc_config.get('correlation_percentile', 95),
+                mutual_correlation_threshold=dc_config.get('mutual_correlation_threshold', 0.7),
+                min_features=dc_config.get('min_features', 10),
+                max_features=dc_config.get('max_features', 40)
             )
             selected_indices, corr_values = selector.select_features(features, labels)
 
@@ -2107,7 +2393,7 @@ class BaseAutoencoder(nn.Module):
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
         """
-        Extract features from a DataLoader with improved batch handling.
+        Extract features from a DataLoader with improved batch handling and all metadata.
         """
         self.eval()
         all_embeddings = []
@@ -2115,7 +2401,11 @@ class BaseAutoencoder(nn.Module):
         all_indices = []
         all_filenames = []
         all_class_names = []
-        all_full_paths = []  # NEW: Store full file paths
+        all_full_paths = []
+        all_cluster_assignments = []
+        all_cluster_confidence = []
+        all_class_predictions = []
+        all_class_probabilities = []
 
         try:
             with torch.no_grad():
@@ -2129,7 +2419,7 @@ class BaseAutoencoder(nn.Module):
                     if hasattr(loader.dataset, 'get_additional_info'):
                         indices = []
                         filenames = []
-                        full_paths = []  # NEW: Store full paths
+                        full_paths = []
                         class_names = []
 
                         for i in range(batch_size):
@@ -2139,8 +2429,8 @@ class BaseAutoencoder(nn.Module):
                                 indices.append(idx_info[0])
                                 filenames.append(idx_info[1])
 
-                                # NEW: Get full path if available
-                                if len(idx_info) > 2:  # If full path is provided
+                                # Get full path if available
+                                if len(idx_info) > 2:
                                     full_paths.append(idx_info[2])
                                 else:
                                     # Fallback: construct path from available info
@@ -2149,7 +2439,7 @@ class BaseAutoencoder(nn.Module):
                                     else:
                                         full_paths.append(f"batch_{batch_idx}_{i}")
 
-                                # Class name handling
+                                # Class name handling - use reverse encoder for consistent naming
                                 if hasattr(loader.dataset, 'reverse_encoder'):
                                     class_names.append(loader.dataset.reverse_encoder[labels[i].item()])
                                 elif hasattr(loader.dataset, 'classes'):
@@ -2160,25 +2450,39 @@ class BaseAutoencoder(nn.Module):
                                 # Handle edge case for last incomplete batch
                                 indices.append(f"batch_{batch_idx}_{i}")
                                 filenames.append(f"batch_{batch_idx}_{i}")
-                                full_paths.append(f"batch_{batch_idx}_{i}")  # NEW
+                                full_paths.append(f"batch_{batch_idx}_{i}")
                                 class_names.append(f"class_{labels[i].item()}")
                     else:
                         # Dataset without metadata
                         indices = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]
                         filenames = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]
-                        full_paths = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]  # NEW
+                        full_paths = [f"batch_{batch_idx}_{i}" for i in range(batch_size)]
 
                         if hasattr(loader.dataset, 'classes'):
                             class_names = [loader.dataset.classes[labels[i].item()] for i in range(batch_size)]
                         else:
                             class_names = [str(labels[i].item()) for i in range(batch_size)]
 
-                    # Extract embeddings - handle potential tuple returns
-                    embeddings = self.encode(inputs)
+                    # Extract embeddings and additional outputs
+                    outputs = self(inputs)
 
-                    # Handle case where encode returns tuple (embedding, features)
-                    if isinstance(embeddings, tuple):
-                        embeddings = embeddings[0]  # Take only the embedding
+                    # Handle different output formats
+                    if isinstance(outputs, tuple):
+                        embeddings = outputs[0]
+                        reconstruction = outputs[1]
+                    elif isinstance(outputs, dict):
+                        embeddings = outputs.get('embedding', outputs.get('selected_embedding'))
+                        # Extract additional outputs if available
+                        if 'cluster_assignments' in outputs:
+                            all_cluster_assignments.append(outputs['cluster_assignments'].cpu())
+                        if 'cluster_confidence' in outputs:
+                            all_cluster_confidence.append(outputs['cluster_confidence'].cpu())
+                        if 'class_predictions' in outputs:
+                            all_class_predictions.append(outputs['class_predictions'].cpu())
+                        if 'class_probabilities' in outputs:
+                            all_class_probabilities.append(outputs['class_probabilities'].cpu())
+                    else:
+                        embeddings = outputs
 
                     # Ensure embeddings is the right shape
                     if embeddings.dim() > 2:
@@ -2193,52 +2497,76 @@ class BaseAutoencoder(nn.Module):
                         labels = labels[:min_size]
                         indices = indices[:min_size]
                         filenames = filenames[:min_size]
-                        full_paths = full_paths[:min_size]  # NEW
+                        full_paths = full_paths[:min_size]
                         class_names = class_names[:min_size]
 
                     # Append to lists
-                    all_embeddings.append(embeddings)
-                    all_labels.append(labels)
+                    all_embeddings.append(embeddings.cpu())
+                    all_labels.append(labels.cpu())
                     all_indices.extend(indices)
                     all_filenames.extend(filenames)
-                    all_full_paths.extend(full_paths)  # NEW
+                    all_full_paths.extend(full_paths)
                     all_class_names.extend(class_names)
 
                 # Concatenate all results
                 if all_embeddings:
                     embeddings = torch.cat(all_embeddings)
                     labels = torch.cat(all_labels)
+
+                    # Concatenate additional outputs if available
+                    if all_cluster_assignments:
+                        cluster_assignments = torch.cat(all_cluster_assignments)
+                    else:
+                        cluster_assignments = torch.zeros(len(embeddings), dtype=torch.long)
+
+                    if all_cluster_confidence:
+                        cluster_confidence = torch.cat(all_cluster_confidence)
+                    else:
+                        cluster_confidence = torch.zeros(len(embeddings))
+
+                    if all_class_predictions:
+                        class_predictions = torch.cat(all_class_predictions)
+                    else:
+                        class_predictions = torch.zeros(len(embeddings), dtype=torch.long)
+
+                    if all_class_probabilities:
+                        class_probabilities = torch.cat(all_class_probabilities)
+                    else:
+                        class_probabilities = torch.zeros(len(embeddings), dtype=torch.float32)
                 else:
                     raise ValueError("No embeddings extracted")
 
                 # Final length verification
                 total_samples = len(embeddings)
-                logger.info(f"Extracted {total_samples} embeddings")
+                logger.info(f"Extracted {total_samples} embeddings with full metadata")
 
                 # Ensure all arrays have the same length
-                if len(all_indices) != total_samples:
-                    logger.warning(f"Truncating indices from {len(all_indices)} to {total_samples}")
-                    all_indices = all_indices[:total_samples]
-                if len(all_filenames) != total_samples:
-                    logger.warning(f"Truncating filenames from {len(all_filenames)} to {total_samples}")
-                    all_filenames = all_filenames[:total_samples]
-                if len(all_full_paths) != total_samples:
-                    logger.warning(f"Truncating full_paths from {len(all_full_paths)} to {total_samples}")
-                    all_full_paths = all_full_paths[:total_samples]  # NEW
-                if len(all_class_names) != total_samples:
-                    logger.warning(f"Truncating class_names from {len(all_class_names)} to {total_samples}")
-                    all_class_names = all_class_names[:total_samples]
+                arrays_to_check = {
+                    'indices': all_indices,
+                    'filenames': all_filenames,
+                    'full_paths': all_full_paths,
+                    'class_names': all_class_names
+                }
+
+                for name, array in arrays_to_check.items():
+                    if len(array) != total_samples:
+                        logger.warning(f"Truncating {name} from {len(array)} to {total_samples}")
+                        arrays_to_check[name] = array[:total_samples]
 
                 feature_dict = {
                     'embeddings': embeddings,
                     'labels': labels,
-                    'indices': all_indices,
-                    'filenames': all_filenames,
-                    'full_paths': all_full_paths,  # NEW: Include full paths
-                    'class_names': all_class_names
+                    'indices': arrays_to_check['indices'],
+                    'filenames': arrays_to_check['filenames'],
+                    'full_paths': arrays_to_check['full_paths'],
+                    'class_names': arrays_to_check['class_names'],
+                    'cluster_assignments': cluster_assignments,
+                    'cluster_confidence': cluster_confidence,
+                    'class_predictions': class_predictions,
+                    'class_probabilities': class_probabilities
                 }
 
-                logger.info(f"Feature extraction completed: {total_samples} samples")
+                logger.info(f"Feature extraction completed: {total_samples} samples with full metadata")
                 return feature_dict
 
         except Exception as e:
@@ -2322,7 +2650,6 @@ class BaseAutoencoder(nn.Module):
             })
 
         return output
-
 
 class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
     """Autoencoder specialized for astronomical imaging features"""
@@ -3394,23 +3721,6 @@ class UnifiedCheckpoint:
                       f"Loss: {state['best']['loss']:.4f}")
             print(f"  History - {len(state['history'])} entries")
 
-    def cleanup_legacy_json_files(self, output_dir: str):
-        """Remove any legacy JSON files that might cause serialization issues"""
-        legacy_files = [
-            'feature_extraction_metadata.json',
-            'feature_selection_metadata.json',
-            'training_metadata.json'
-        ]
-
-        for filename in legacy_files:
-            filepath = os.path.join(output_dir, filename)
-            if os.path.exists(filepath):
-                try:
-                    os.remove(filepath)
-                    logger.info(f"Removed legacy JSON file: {filepath}")
-                except Exception as e:
-                    logger.warning(f"Could not remove legacy JSON file {filepath}: {e}")
-
 
 class ModelFactory:
     """Factory for creating appropriate model based on configuration"""
@@ -3981,6 +4291,9 @@ def train_model(model: nn.Module, train_loader: DataLoader,
 
     history = defaultdict(list)
 
+    # FIX: Initialize checkpoint manager at the start and use it consistently
+    checkpoint_manager = UnifiedCheckpoint(config)
+
     # Initialize starting epoch and phase
     start_epoch = getattr(model, 'current_epoch', 0)
     current_phase = getattr(model, 'training_phase', 1)
@@ -3994,7 +4307,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         phase1_history = _train_phase(
             model, train_loader, optimizer, loss_manager,
             config['training']['epochs'], 1, config,
-            start_epoch=start_epoch
+            start_epoch=start_epoch,
+            checkpoint_manager=checkpoint_manager  # Pass checkpoint_manager to _train_phase
         )
         history.update(phase1_history)
 
@@ -4018,7 +4332,8 @@ def train_model(model: nn.Module, train_loader: DataLoader,
         phase2_history = _train_phase(
             model, train_loader, optimizer, loss_manager,
             config['training']['epochs'], 2, config,
-            start_epoch=start_epoch if current_phase == 2 else 0
+            start_epoch=start_epoch if current_phase == 2 else 0,
+            checkpoint_manager=checkpoint_manager  # Pass checkpoint_manager to _train_phase
         )
 
         # Merge histories
@@ -4027,6 +4342,37 @@ def train_model(model: nn.Module, train_loader: DataLoader,
 
     return history
 
+def save_training_results(model: nn.Module, train_loader: DataLoader,
+                         test_loader: DataLoader, config: Dict, output_dir: str):
+    """Save training results and features with proper checkpoint management"""
+    try:
+        # Ensure checkpoint_manager is available
+        checkpoint_manager = UnifiedCheckpoint(config)
+
+        # Extract features
+        logger.info("Extracting training features...")
+        train_features = model.extract_features(train_loader, "train")
+
+        test_features = None
+        if test_loader:
+            logger.info("Extracting test features...")
+            test_features = model.extract_features(test_loader, "test")
+
+        # Save features
+        dataset_name = config['dataset']['name'].lower()
+        output_path = os.path.join(output_dir, f"{dataset_name}.csv")
+
+        model.save_features(train_features, test_features, output_path)
+
+        # Generate configuration
+        model.generate_configuration(output_path, output_dir)
+
+        logger.info(f"Training results saved successfully to {output_path}")
+
+    except Exception as e:
+        logger.error(f"Error saving training results: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -4129,15 +4475,20 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
-                epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
+                epochs: int, phase: int, config: Dict, start_epoch: int = 0,
+                checkpoint_manager: UnifiedCheckpoint = None) -> Dict[str, List]:
     """Training logic with class-balanced loss calculation and robust size handling"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
     best_loss = float('inf')
     min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
-    checkpoint_manager = UnifiedCheckpoint(config)
-    use_classwise = config['training'].get('use_classwise_acc', True)  # Config flag
+
+    # FIX: Use the passed checkpoint_manager instead of initializing here
+    if checkpoint_manager is None:
+        checkpoint_manager = UnifiedCheckpoint(config)
+
+    use_classwise = config['training'].get('use_classwise_acc', True)
     patience_counter = 0
 
     try:
@@ -4271,21 +4622,15 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 avg_acc = running_acc / num_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
 
-            # Log epoch progress
-           # logger.info(f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}" +
-           #            (f" - Accuracy: {avg_acc:.2%}" if phase == 2 and model.use_class_encoding else ""))
-
-            # Checkpointing
+            # Checkpointing - FIX: Now checkpoint_manager is properly passed
             if (best_loss - avg_loss) > min_thr:
                 best_loss = avg_loss
                 patience_counter = 0
                 checkpoint_manager.save_model_state(
                     model, optimizer, phase, epoch, avg_loss, True
                 )
-               #logger.info(f"New best model saved with loss: {best_loss:.4f}")
             else:
                 patience_counter += 1
-                #logger.info(f"No improvement - Patience counter: {patience_counter}")
 
             # Early stopping
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
@@ -5311,11 +5656,13 @@ class CustomImageDataset(Dataset):
             else:
                 self.data_name = os.path.basename(os.path.normpath(data_dir)).lower() or 'dataset'
 
-        # Create label mappings only for valid classes
-        valid_classes = sorted(valid_classes)
+        # Create label mappings only for valid classes - ALPHABETICAL ORDER for consistency
+        valid_classes = sorted(valid_classes)  # This ensures consistent ordering across runs
         for idx, class_name in enumerate(valid_classes):
             self.label_encoder[class_name] = idx
             self.reverse_encoder[idx] = class_name
+
+        logger.info(f"Label encoding: {self.label_encoder}")
 
         # Collect images from valid classes
         for class_idx, class_name in enumerate(valid_classes):
@@ -5330,7 +5677,7 @@ class CustomImageDataset(Dataset):
                 self.image_files.append(full_path)
                 self.full_paths.append(full_path)  # Store full path
                 self.filenames.append(img_name)    # Store just filename
-                self.labels.append(class_idx)
+                self.labels.append(class_idx)      # Use consistent numeric encoding
                 self.file_indices.append(len(self.image_files) - 1)
 
         # Fallback to CSV if no directory structure found
@@ -5354,6 +5701,9 @@ class CustomImageDataset(Dataset):
 
         # Preprocess all images
         self._preprocess_all_images()
+
+        logger.info(f"Dataset initialized with {len(self.image_files)} images, {len(valid_classes)} classes")
+        logger.info(f"Class distribution: { {cls: self.labels.count(idx) for idx, cls in self.reverse_encoder.items()} }")
 
     def _preprocess_image(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -5896,10 +6246,11 @@ class DatasetProcessor:
                 "use_feature_selection": True,
                 "method": "balanced",  # Options: 'simple', 'balanced', 'complex'
                 "parameters": {
-                    # Simple method parameters (preserves existing behavior)
-                    "upper_threshold": 0.85,
-                    "lower_threshold": 0.01,
-
+                    # New percentile-based parameters
+                    "correlation_percentile": 95,
+                    "mutual_correlation_threshold": 0.7,
+                    "min_features": 10,
+                    "max_features": 40,
                     # Balanced/Complex parameters
                     "target_features": min(20, feature_dims),  # Don't exceed available features
                     "min_correlation": 0.3,
@@ -7719,7 +8070,6 @@ def handle_training_mode(args, logger):
         logger.error(f"Error in training mode: {str(e)}")
         raise
 
-
 def handle_prediction_mode(args, logger):
     """Handle prediction/reconstruction mode operations."""
     try:
@@ -7920,129 +8270,6 @@ def browse_local_folders(start_path="."):
 
     return None
 
-def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
-    """Handle training mode operations with torchvision support"""
-    try:
-        # Validate arguments
-        if not args.data_name:
-            raise ValueError("data_name argument is required")
-        if not args.data_type:
-            raise ValueError("data_type argument is required")
-
-        # Setup paths - use lowercase for directory names
-        data_name = str(args.data_name).lower()
-        data_dir = os.path.join('data', data_name)
-        config_path = os.path.join(data_dir, f"{data_name}.json")
-
-        logger.info(f"Processing dataset: {args.data_name} (type: {args.data_type})")
-
-        # Process dataset - handle torchvision vs custom differently
-        if args.data_type == 'torchvision':
-            # For torchvision, use the dataset name in uppercase for torchvision lookup
-            # but lowercase for directory structure
-            torchvision_dataset_name = str(args.data_name).upper()
-            logger.info(f"Using torchvision dataset: {torchvision_dataset_name}")
-
-            processor = DatasetProcessor(
-                datafile=torchvision_dataset_name,  # Uppercase for torchvision dataset name (e.g., "CIFAR10")
-                datatype=args.data_type,
-                output_dir=getattr(args, 'output', 'data'),
-                data_name=data_name  # Lowercase for directory structure (e.g., "cifar10")
-            )
-        else:
-            # For custom datasets, use the provided input path
-            if not hasattr(args, 'input_path') or not args.input_path:
-                raise ValueError("input_path argument is required for custom datasets")
-
-            processor = DatasetProcessor(
-                datafile=args.input_path,
-                datatype=args.data_type,
-                output_dir=getattr(args, 'output', 'data'),
-                data_name=data_name
-            )
-
-        train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
-
-        # Generate/verify configurations
-        logger.info("Generating/verifying configurations...")
-        config = processor.generate_default_config(train_dir)
-
-        # Configure enhancements
-        config = configure_image_processing(config, logger)
-
-        # Update configuration with command line arguments
-        config = update_config_with_args(config, args)
-
-        # Get feature dimensions from user
-        fd = config['model']['feature_dims']
-        feature_dims_input = input(f"Please specify the output feature dimensions[{fd}]: ").strip()
-        if feature_dims_input:
-            try:
-                feature_dims = int(feature_dims_input)
-                if feature_dims <= 0:
-                    logger.warning(f"Invalid feature dimensions {feature_dims}, using default {fd}")
-                    feature_dims = fd
-            except ValueError:
-                logger.warning(f"Invalid feature dimensions input, using default {fd}")
-                feature_dims = fd
-        else:
-            feature_dims = fd
-
-        config['model']['feature_dims'] = feature_dims
-        logger.info(f"Using feature dimensions: {feature_dims}")
-
-        # Save updated config
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        logger.info(f"Configuration saved to: {config_path}")
-
-        # Setup data loading
-        transform = processor.get_transforms(config)
-        train_dataset, test_dataset = get_dataset(config, transform)
-
-        if train_dataset is None:
-            raise ValueError("No training dataset available")
-
-        logger.info(f"Training dataset size: {len(train_dataset)}")
-        if test_dataset:
-            logger.info(f"Test dataset size: {len(test_dataset)}")
-
-        # Create data loaders
-        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
-        logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
-
-        # Initialize model and loss manager
-        model, loss_manager = initialize_model_components(config, logger)
-
-        # Log model information
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Model initialized with {total_params:,} parameters")
-        logger.info(f"Using device: {next(model.parameters()).device}")
-
-        # Get training confirmation
-        if not get_training_confirmation(logger):
-            logger.info("Training cancelled by user")
-            return 0
-
-        # Perform training and feature extraction
-        logger.info("Starting training process...")
-        features_dict = perform_training_and_extraction(
-            model, train_loader, test_loader, config, loss_manager, logger
-        )
-
-        # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name, logger)
-
-        logger.info("Processing completed successfully!")
-        return 0
-
-    except Exception as e:
-        logger.error(f"Error in training mode: {str(e)}")
-        if hasattr(args, 'debug') and args.debug:
-            logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
-
 def interactive_input():
     """Collect inputs interactively with torchvision support"""
     print("\nInteractive Mode - Please enter the following information:")
@@ -8159,16 +8386,45 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
-    """Handle training mode operations"""
+    """Handle training mode operations with consistent path handling"""
     try:
-        # Setup paths
-        #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name=args.data_name
+        # Validate arguments
+        if not hasattr(args, 'data_name') or not args.data_name:
+            raise ValueError("data_name argument is required")
+        if not hasattr(args, 'data_type') or not args.data_type:
+            raise ValueError("data_type argument is required")
+
+        # Setup paths - use lowercase for directory names (consistent with codebase)
+        data_name = str(args.data_name).lower()
         data_dir = os.path.join('data', data_name)
         config_path = os.path.join(data_dir, f"{data_name}.json")
 
-        # Process dataset
-        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'),data_name=args.data_name)
+        logger.info(f"Processing dataset: {args.data_name} (type: {args.data_type})")
+
+        # Process dataset - handle torchvision vs custom differently
+        if args.data_type == 'torchvision':
+            # For torchvision, use uppercase for dataset name lookup but lowercase for directories
+            torchvision_dataset_name = str(args.data_name).upper()
+            logger.info(f"Using torchvision dataset: {torchvision_dataset_name}")
+
+            processor = DatasetProcessor(
+                datafile=torchvision_dataset_name,  # Uppercase for torchvision lookup
+                datatype=args.data_type,
+                output_dir='data',  # Consistent lowercase
+                data_name=data_name  # Lowercase for directory structure
+            )
+        else:
+            # For custom datasets, use the provided input path
+            if not hasattr(args, 'input_path') or not args.input_path:
+                raise ValueError("input_path argument is required for custom datasets")
+
+            processor = DatasetProcessor(
+                datafile=args.input_path,
+                datatype=args.data_type,
+                output_dir='data',  # Consistent lowercase
+                data_name=data_name
+            )
+
         train_dir, test_dir = processor.process()
         logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
 
@@ -8182,12 +8438,29 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
 
-        fd= config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
-        config['model']['feature_dims']=feature_dims
-        # Get model type
+        # Get feature dimensions from user
+        fd = config['model']['feature_dims']
+        feature_dims_input = input(f"Please specify the output feature dimensions[{fd}]: ").strip()
+        if feature_dims_input:
+            try:
+                feature_dims = int(feature_dims_input)
+                if feature_dims <= 0:
+                    logger.warning(f"Invalid feature dimensions {feature_dims}, using default {fd}")
+                    feature_dims = fd
+            except ValueError:
+                logger.warning(f"Invalid feature dimensions input, using default {fd}")
+                feature_dims = fd
+        else:
+            feature_dims = fd
+
+        config['model']['feature_dims'] = feature_dims
+        logger.info(f"Using feature dimensions: {feature_dims}")
+
+        # Save updated config
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
+        logger.info(f"Configuration saved to: {config_path}")
+
         # Setup data loading
         transform = processor.get_transforms(config)
         train_dataset, test_dataset = get_dataset(config, transform)
@@ -8195,29 +8468,43 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
         if train_dataset is None:
             raise ValueError("No training dataset available")
 
+        logger.info(f"Training dataset size: {len(train_dataset)}")
+        if test_dataset:
+            logger.info(f"Test dataset size: {len(test_dataset)}")
+
         # Create data loaders
         train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
+        logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
 
         # Initialize model and loss manager
         model, loss_manager = initialize_model_components(config, logger)
 
+        # Log model information
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Model initialized with {total_params:,} parameters")
+        logger.info(f"Using device: {next(model.parameters()).device}")
+
         # Get training confirmation
         if not get_training_confirmation(logger):
+            logger.info("Training cancelled by user")
             return 0
 
         # Perform training and feature extraction
+        logger.info("Starting training process...")
         features_dict = perform_training_and_extraction(
             model, train_loader, test_loader, config, loss_manager, logger
         )
 
-        # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name, logger)
+        # Save results - FIXED: Remove logger parameter to match function signature
+        save_training_results(model, train_loader, test_loader, config, data_dir)
 
         logger.info("Processing completed successfully!")
         return 0
 
     except Exception as e:
         logger.error(f"Error in training mode: {str(e)}")
+        if hasattr(args, 'debug') and args.debug:
+            logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
 def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
@@ -8295,15 +8582,37 @@ def perform_training_and_extraction(
     logger: logging.Logger
 ) -> Dict:
     """Perform model training and feature extraction"""
+    # FIX: Initialize checkpoint_manager here to ensure it's available throughout
+    checkpoint_manager = UnifiedCheckpoint(config)
+
     # Training
     logger.info("Starting model training...")
-    # HERE: train_loader is passed but train_dataset isn't stored anywhere
+
+    # Store dataset reference BEFORE training to ensure it's available for feature extraction
+    model.set_dataset(train_loader.dataset)
+
     history = train_model(model, train_loader, config, loss_manager)
 
-    # Feature extraction
+    # Feature extraction - use the save_training_results function which handles checkpoint_manager
     logger.info("Extracting features...")
-    # HERE: We need train_dataset but it's not accessible
-    features_dict = extract_features_from_model(model, train_loader, test_loader)
+
+    # Create output directory
+    output_dir = config['output'].get('features_dir', 'data/features')
+    os.makedirs(output_dir, exist_ok=True)
+
+    # FIX: Call save_training_results without logger parameter to match its signature
+    save_training_results(model, train_loader, test_loader, config, output_dir)
+
+    # Extract and return features for immediate use if needed
+    train_features = model.extract_features(train_loader, "train")
+    test_features = model.extract_features(test_loader, "test") if test_loader else None
+
+    features_dict = {
+        'train_features': train_features,
+        'test_features': test_features,
+        'history': history
+    }
+
     return features_dict
 
 def extract_features_from_model(
@@ -8334,79 +8643,6 @@ def extract_features_from_model(
         features_dict = {'features': features, 'labels': labels}
 
     return features_dict
-
-def perform_training_and_extraction(
-    model: nn.Module,
-    train_loader: DataLoader,
-    test_loader: Optional[DataLoader],
-    config: Dict,
-    loss_manager: EnhancedLossManager,
-    logger: logging.Logger
-) -> Dict[str, torch.Tensor]:
-    """Perform model training and feature extraction"""
-    # Training
-    logger.info("Starting model training...")
-    history = train_model(model, train_loader, config, loss_manager)
-
-    # Feature extraction
-    logger.info("Extracting features...")
-    features_dict = model.extract_features(train_loader)
-
-    # If test loader exists, extract and combine features
-    if test_loader:
-        test_features_dict = model.extract_features(test_loader)
-        features_dict = merge_feature_dicts(features_dict, test_features_dict)
-
-    return features_dict
-
-def save_training_results(
-    features_dict: Dict[str, torch.Tensor],
-    model: nn.Module,
-    config: Dict,
-    data_dir: str,
-    data_name: str,
-    logger: logging.Logger
-) -> None:
-    """Save training results and features"""
-    # Save features
-    model.cleanup_legacy_json_files(output_dir)
-    output_path = os.path.join(data_dir, f"{data_name}.csv")
-    model.save_features(features_dict,features_dict, output_path)
-
-    # Save training history if available
-    if hasattr(model, 'history') and model.history:
-        history_path = os.path.join(data_dir, 'training_history.json')
-        with open(history_path, 'w') as f:
-            # Convert tensor values to float for JSON serialization
-            serializable_history = {
-                k: [float(v) if isinstance(v, torch.Tensor) else v
-                   for v in vals]
-                for k, vals in model.history.items()
-            }
-            json.dump(serializable_history, f, indent=4)
-
-        # Plot training history
-        plot_path = os.path.join(data_dir, 'training_history.png')
-        if isinstance(model, BaseAutoencoder):
-            model.plot_training_history(save_path=plot_path)
-
-    # Ensure feature selection is frozen in the model
-    if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
-        logger.info(f"Feature selection frozen with {len(model._selected_feature_indices)} features")
-
-        # Save feature selection metadata
-        fs_metadata = {
-            'selected_indices': model._selected_feature_indices,
-            'importance_scores': model._feature_importance_scores,
-            'metadata': model._feature_selection_metadata,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        metadata_path = os.path.join(data_dir, 'feature_selection_metadata.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(fs_metadata, f, indent=2)
-
-        logger.info(f"Feature selection metadata saved to {metadata_path}")
 
 def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
                        dict2: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
