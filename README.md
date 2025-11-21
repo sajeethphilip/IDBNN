@@ -101,6 +101,130 @@ flowchart TD
     N --> AL
     U --> AP
 ```
+adbnn modue:
+``` mermaid
+flowchart TD
+    %% Main Entry Points
+    A[Start DBNN Execution] --> B{Parse Command Line Flags}
+    B --> C{Mode Selection}
+    
+    C -->|train_predict| D[Training & Prediction Mode]
+    C -->|predict_only| E[Prediction Only Mode]
+    C -->|train_only| F[Training Only Mode]
+    
+    %% Training & Prediction Flow
+    subgraph D [Training & Prediction]
+        D1[Load Dataset Config] --> D2{Check Existing Model}
+        D2 -->|Fresh Start| D3[Initialize Fresh Training]
+        D2 -->|Use Previous| D4[Load Model Components]
+        
+        D3 --> D5[Preprocess Data]
+        D4 --> D5
+        
+        D5 --> D6[Compute Feature Pairs]
+        D6 --> D7[Initialize Likelihood Model]
+        
+        D7 --> D8[Adaptive Training Loop]
+        
+        subgraph D8 [Adaptive Training]
+            D8A[Training Round] --> D8B[Compute Posteriors]
+            D8B --> D8C[Update Weights]
+            D8C --> D8D{Check Convergence}
+            D8D -->|Not Converged| D8A
+            D8D -->|Converged| D8E[Save Best Model]
+        end
+        
+        D8E --> D9[Generate Predictions]
+        D9 --> D10[Evaluate Performance]
+    end
+    
+    %% Prediction Only Flow
+    subgraph E [Prediction Only]
+        E1[Load Dataset Config] --> E2{Model Exists?}
+        E2 -->|Yes| E3[Load Model Components]
+        E2 -->|No| E4[Error: No Model]
+        
+        E3 --> E5[Preprocess Data]
+        E5 --> E6[Compute Posteriors]
+        E6 --> E7[Generate Predictions]
+        E7 --> E8[Save Results]
+    end
+    
+    %% Training Only Flow
+    subgraph F [Training Only]
+        F1[Load Dataset Config] --> F2[Initialize Fresh Training]
+        F2 --> F3[Preprocess Data]
+        F3 --> F4[Compute Feature Pairs]
+        F4 --> F5[Training Loop]
+        F5 --> F6[Save Model]
+    end
+    
+    %% Common Components
+    subgraph G [Core DBNN Components]
+        G1[DatasetProcessor] --> G2[DatasetConfig]
+        G3[GPUDBNN Base Class] --> G4[DBNN Enhanced Class]
+        G5[ComputationCache] --> G6[BinWeightUpdater]
+        G7[InvertibleDBNN] --> G8[Visualization System]
+    end
+    
+    %% Visualization Subsystem
+    subgraph H [Visualization Engine]
+        H1[DBNNVisualizer] --> H2[3D Spherical Visualizations]
+        H1 --> H3[Circular Tensor Evolution]
+        H1 --> H4[Polar Tensor Evolution]
+        H1 --> H5[Orthogonality Analysis]
+        H1 --> H6[Performance Metrics]
+        H1 --> H7[Confusion Matrices]
+    end
+    
+    %% Data Flow Connections
+    D10 --> H1
+    E8 --> H1
+    F6 --> H1
+    
+    %% Model Types
+    subgraph I [Model Types]
+        I1[Histogram Model] --> I2[Bin-based Likelihood]
+        I3[Gaussian Model] --> I4[GMM-based Likelihood]
+    end
+    
+    D7 --> I1
+    D7 --> I3
+    
+    %% Memory Management
+    subgraph J [Memory Optimization]
+        J1[Feature Batch Processing] --> J2[GPU Memory Management]
+        J3[Computation Caching] --> J4[Chunked Processing]
+    end
+    
+    D8B --> J1
+    E6 --> J1
+    
+    %% Error Handling
+    subgraph K [Error Handling]
+        K1[Model Validation] --> K2[Data Integrity Checks]
+        K3[Memory Overflow Protection] --> K4[Graceful Degradation]
+    end
+    
+    %% Final Outputs
+    D10 --> L[Training Reports & Metrics]
+    E8 --> M[Prediction Results]
+    F6 --> N[Trained Model Files]
+    H1 --> O[Interactive Visualizations]
+    
+    %% Styling
+    classDef training fill:#e1f5fe
+    classDef prediction fill:#f3e5f5
+    classDef visualization fill:#e8f5e8
+    classDef core fill:#fff3e0
+    classDef memory fill:#fce4ec
+    
+    class D,F training
+    class E prediction
+    class H visualization
+    class G,I core
+    class J memory
+```
 Nov 2025 Updates:
 
 python adbnn.py --mode train_predict --visualize --file_path data/mnist/mnist.csv
