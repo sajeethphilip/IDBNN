@@ -225,6 +225,192 @@ flowchart TD
     class G,I core
     class J memory
 ```
+``` mermaid
+flowchart TD
+    Start([DBNN Start]) --> ParseFlags{Parse Command Line Flags}
+    
+    ParseFlags --> ModeSelect{Execution Mode}
+    
+    ModeSelect -->|--mode train_predict| TrainPredict[Training & Prediction]
+    ModeSelect -->|--mode predict_only| PredictOnly[Prediction Only]
+    ModeSelect -->|--mode train_only| TrainOnly[Training Only]
+    ModeSelect -->|--list_datasets| ListDatasets[List Available Datasets]
+    
+    subgraph TrainPredictFlow [Training & Prediction]
+        TP1[Load Dataset Configuration] --> TP2{Model Exists?}
+        TP2 -->|No / --fresh_start| TP3[Initialize Fresh Training]
+        TP2 -->|Yes / --use_previous_model| TP4[Load Existing Model]
+        
+        TP3 --> TP5[Preprocess Data & Split]
+        TP4 --> TP5
+        
+        TP5 --> TP6[Compute Feature Pairs]
+        TP6 --> TP7[Initialize Likelihood Model]
+        TP7 --> TP8[Adaptive Training Loop]
+        TP8 --> TP9[Generate Predictions]
+        TP9 --> TP10[Evaluate Model]
+    end
+    
+    subgraph PredictOnlyFlow [Prediction Only]
+        PO1[Load Dataset Configuration] --> PO2{Model Exists?}
+        PO2 -->|Yes| PO3[Load Model & Predict]
+        PO2 -->|No| PO4[Error: Train First]
+        PO3 --> PO5[Save Prediction Results]
+    end
+    
+    subgraph TrainOnlyFlow [Training Only]
+        TO1[Load Dataset Configuration] --> TO2[Fresh Training]
+        TO2 --> TO3[Save Trained Model]
+    end
+    
+    ListDatasets --> ListOut[Display Dataset List]
+    
+    TrainPredict --> TrainPredictFlow
+    PredictOnly --> PredictOnlyFlow
+    TrainOnly --> TrainOnlyFlow
+    
+    TrainPredictFlow --> Outputs[Output Generation]
+    PredictOnlyFlow --> Outputs
+    TrainOnlyFlow --> ModelSaved[Model Files Saved]
+    
+    subgraph Outputs [Outputs & Visualizations]
+        O1[Performance Metrics] --> O2[Classification Reports]
+        O3[Interactive Visualizations] --> O4[3D Tensor Plots]
+        O3 --> O5[Evolution Charts]
+        O3 --> O6[Confusion Matrices]
+        O7[Model Analysis] --> O8[Orthogonality Reports]
+    end
+    
+    classDef primary fill:#2196f3,stroke:#0d47a1,color:white
+    classDef success fill:#4caf50,stroke:#1b5e20,color:white
+    classDef warning fill:#ff9800,stroke:#e65100,color:white
+    classDef error fill:#f44336,stroke:#b71c1c,color:white
+    classDef info fill:#00bcd4,stroke:#006064,color:white
+    
+    class Start,ParseFlags primary
+    class TrainPredictFlow,PredictOnlyFlow,TrainOnlyFlow success
+    class ListDatasets info
+    class PO4 error
+    class Outputs,ModelSaved warning
+```
+```mermaid
+flowchart TB
+    subgraph InputLayer [Input Layer]
+        A1[Command Line Arguments]
+        A2[Dataset Configuration Files]
+        A3[CSV Data Files]
+    end
+    
+    subgraph CoreLayer [Core DBNN Engine]
+        B1[DatasetProcessor] --> B2[DatasetConfig]
+        B3[GPUDBNN Base Class] --> B4[DBNN Enhanced Class]
+        B5[ComputationCache] --> B6[BinWeightUpdater]
+    end
+    
+    subgraph ModelLayer [Model Types]
+        C1[Histogram Model] --> C2[Bin-based Likelihood]
+        C3[Gaussian Model] --> C4[GMM-based Likelihood]
+        C5[InvertibleDBNN] --> C6[Feature Reconstruction]
+    end
+    
+    subgraph TrainingLayer [Training System]
+        D1[Adaptive Learning] --> D2[Weight Updates]
+        D3[Convergence Checking] --> D4[Model Saving]
+        D5[Memory-Optimized Batches] --> D6[GPU Acceleration]
+    end
+    
+    subgraph VizLayer [Visualization Engine]
+        E1[DBNNVisualizer] --> E2[3D Spherical]
+        E1 --> E3[Circular Tensor]
+        E1 --> E4[Polar Evolution]
+        E1 --> E5[Orthogonality Analysis]
+        E1 --> E6[Performance Dashboards]
+    end
+    
+    subgraph OutputLayer [Output System]
+        F1[Prediction Results]
+        F2[Model Files]
+        F3[Interactive HTML Reports]
+        F4[Training Metrics]
+    end
+    
+    InputLayer --> CoreLayer
+    CoreLayer --> ModelLayer
+    ModelLayer --> TrainingLayer
+    TrainingLayer --> VizLayer
+    VizLayer --> OutputLayer
+    
+    %% Data Flow
+    A2 -.-> B2
+    A3 -.-> B1
+    B4 -.-> C1
+    B4 -.-> C3
+    C2 -.-> D1
+    C4 -.-> D1
+    D4 -.-> F2
+    E1 -.-> F3
+    
+    classDef input fill:#e3f2fd,stroke:#1976d2
+    classDef core fill:#f3e5f5,stroke:#7b1fa2
+    classDef model fill:#e8f5e8,stroke:#388e3c
+    classDef training fill:#fff3e0,stroke:#f57c00
+    classDef visualization fill:#fce4ec,stroke:#c2185b
+    classDef output fill:#e1f5fe,stroke:#0288d1
+    
+    class InputLayer input
+    class CoreLayer core
+    class ModelLayer model
+    class TrainingLayer training
+    class VizLayer visualization
+    class OutputLayer output
+```
+```mermaid
+flowchart LR
+    subgraph DataSources [Data Sources]
+        DS1[Local CSV Files]
+        DS2[UCI Repository URLs]
+        DS3[Config Files .conf]
+    end
+    
+    subgraph Processing [Data Processing]
+        P1[Dataset Loading] --> P2[Feature Filtering]
+        P2 --> P3[Data Preprocessing]
+        P3 --> P4[Train/Test Split]
+    end
+    
+    subgraph ModelTraining [Model Training]
+        MT1[Feature Pair Generation] --> MT2[Likelihood Computation]
+        MT2 --> MT3[Weight Updates]
+        MT3 --> MT4[Convergence Check]
+    end
+    
+    subgraph Prediction [Prediction]
+        PD1[Posterior Computation] --> PD2[Class Prediction]
+        PD2 --> PD3[Confidence Scoring]
+    end
+    
+    subgraph Results [Results & Visualization]
+        R1[Performance Metrics] --> R2[Interactive Plots]
+        R3[Model Analysis] --> R4[Export Reports]
+    end
+    
+    DataSources --> Processing
+    Processing --> ModelTraining
+    ModelTraining --> Prediction
+    Prediction --> Results
+    
+    classDef sources fill:#e8f5e8,stroke:#2e7d32
+    classDef process fill:#e3f2fd,stroke:#1565c0
+    classDef training fill:#fff3e0,stroke:#ef6c00
+    classDef prediction fill:#fce4ec,stroke:#ad1457
+    classDef results fill:#f3e5f5,stroke:#6a1b9a
+    
+    class DataSources sources
+    class Processing process
+    class ModelTraining training
+    class Prediction prediction
+    class Results results
+```
 Nov 2025 Updates:
 
 python adbnn.py --mode train_predict --visualize --file_path data/mnist/mnist.csv
