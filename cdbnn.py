@@ -259,8 +259,8 @@ class PredictionManager:
         return model
 
         #--------------------Prediction -----------------------
-    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict using frozen feature selection with full path support"""
+    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = False):
+        """Predict using frozen feature selection with optional attention heatmap generation"""
         # Get image files with full paths and class labels from subfolders
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
@@ -288,21 +288,35 @@ class PredictionManager:
 
         self.model.eval()
 
+        # NEW: Register attention hooks if heatmaps are requested
+        if generate_heatmaps and hasattr(self.model, 'register_attention_hooks'):
+            self.model.register_attention_hooks()
+            logger.info("Registered attention hooks for heatmap generation")
+
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Predicting")):
                 # Handle different dataset return types
                 if isinstance(batch_data, (list, tuple)):
                     batch_tensor = batch_data[0]
+                    batch_labels = batch_data[1] if len(batch_data) > 1 else None
                 elif isinstance(batch_data, dict):
                     batch_tensor = batch_data.get('window', batch_data.get('image'))
+                    batch_labels = batch_data.get('labels', None)
                 else:
                     batch_tensor = batch_data
+                    batch_labels = None
 
                 batch_tensor = batch_tensor.to(self.device)
 
                 # Forward pass
                 output = self.model(batch_tensor)
-                embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
+
+                # NEW: Handle both compressed and original embeddings
+                if 'compressed_embedding' in output:
+                    embedding = output['compressed_embedding']  # Use compressed features for efficiency
+                    logger.debug("Using compressed features for prediction")
+                else:
+                    embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
 
                 # CRITICAL: Always use frozen features for consistency
                 if hasattr(self.model, '_is_feature_selection_frozen') and self.model._is_feature_selection_frozen:
@@ -344,6 +358,24 @@ class PredictionManager:
 
                 if 'cluster_confidence' in output:
                     all_predictions['cluster_confidence'].extend(output['cluster_confidence'].cpu().numpy())
+
+                # NEW: Generate batch-level heatmaps if requested
+                if generate_heatmaps and batch_labels is not None:
+                    self._generate_batch_heatmaps(batch_tensor, batch_labels, batch_filenames, output)
+
+        # NEW: Generate comprehensive classwise heatmaps if requested
+        if generate_heatmaps:
+            logger.info("Generating comprehensive attention heatmaps...")
+            try:
+                self.generate_classwise_attention_heatmaps(data_path)
+                logger.info("Attention heatmaps generated successfully")
+            except Exception as e:
+                logger.error(f"Failed to generate heatmaps: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+
+        # NEW: Remove attention hooks if they were registered
+        if generate_heatmaps and hasattr(self.model, 'remove_attention_hooks'):
+            self.model.remove_attention_hooks()
 
         # Save predictions
         if output_csv:
@@ -598,6 +630,293 @@ class PredictionManager:
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         df.to_csv(output_csv, index=False)
         logger.info(f"Predictions saved to {output_csv}")
+
+    def _compute_attention_heatmap(self, image_tensor: torch.Tensor, target_class: int) -> Dict[str, np.ndarray]:
+        """Compute attention heatmap showing what regions influence clustering"""
+
+        # Forward pass through model
+        outputs = self.model(image_tensor)
+
+        # Get compressed features and clustering information
+        if 'compressed_embedding' in outputs:
+            features = outputs['compressed_embedding']
+        else:
+            features = outputs['embedding']
+
+        # Get cluster assignments and probabilities
+        latent_info = self.model.organize_latent_space(features)
+
+        if 'cluster_probabilities' not in latent_info:
+            logger.warning("No clustering information available for heatmap generation")
+            return {}
+
+        # Compute gradients for attention
+        target_prob = latent_info['cluster_probabilities'][0, target_class]
+
+        # Compute gradients of target probability w.r.t. input image
+        image_tensor.requires_grad_(True)
+
+        outputs_grad = self.model(image_tensor)
+        if 'compressed_embedding' in outputs_grad:
+            features_grad = outputs_grad['compressed_embedding']
+        else:
+            features_grad = outputs_grad['embedding']
+
+        latent_info_grad = self.model.organize_latent_space(features_grad)
+        target_prob_grad = latent_info_grad['cluster_probabilities'][0, target_class]
+
+        # Compute gradients
+        target_prob_grad.backward()
+
+        # Get attention map from gradients
+        gradients = image_tensor.grad.data.cpu().numpy()[0]
+        attention_map = np.max(np.abs(gradients), axis=0)
+
+        # Normalize attention map
+        if attention_map.max() > attention_map.min():
+            attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min())
+
+        return {
+            'attention_map': attention_map,
+            'cluster_probs': latent_info['cluster_probabilities'][0].cpu().numpy(),
+            'cluster_assignment': latent_info['cluster_assignments'][0].item(),
+            'target_prob': target_prob.item(),
+            'features': features[0].cpu().numpy()
+        }
+
+    def _save_attention_heatmap(self, original_image: Image.Image, heatmap_data: Dict,
+                              img_path: str, class_name: str, sample_idx: int,
+                              output_dir: str, class_idx: int):
+        """Save attention heatmap visualization"""
+
+        # Create figure
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f'Class: {class_name} | Image: {os.path.basename(img_path)}',
+                     fontsize=14, fontweight='bold')
+
+        # Original image
+        axes[0, 0].imshow(original_image)
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+
+        # Attention heatmap
+        if 'attention_map' in heatmap_data:
+            attention_map = heatmap_data['attention_map']
+            h, w = original_image.size[1], original_image.size[0]
+            attention_resized = np.array(Image.fromarray(attention_map).resize((w, h), Image.BILINEAR))
+
+            im = axes[0, 1].imshow(attention_resized, cmap='hot', alpha=0.7)
+            axes[0, 1].set_title('Attention Heatmap')
+            axes[0, 1].axis('off')
+            plt.colorbar(im, ax=axes[0, 1])
+
+        # Overlay heatmap on original
+        axes[0, 2].imshow(original_image)
+        if 'attention_map' in heatmap_data:
+            axes[0, 2].imshow(attention_resized, cmap='hot', alpha=0.5)
+        axes[0, 2].set_title('Attention Overlay')
+        axes[0, 2].axis('off')
+
+        # Cluster probability distribution
+        if 'cluster_probs' in heatmap_data:
+            probs = heatmap_data['cluster_probs']
+            classes = list(range(len(probs)))
+
+            bars = axes[1, 0].bar(classes, probs, color='skyblue', alpha=0.7)
+            # Highlight target class
+            if class_idx < len(bars):
+                bars[class_idx].set_color('red')
+
+            axes[1, 0].set_title('Cluster Probabilities')
+            axes[1, 0].set_xlabel('Cluster')
+            axes[1, 0].set_ylabel('Probability')
+            axes[1, 0].set_ylim(0, 1)
+            axes[1, 0].grid(True, alpha=0.3)
+
+        # Feature importance (if using compressed features)
+        if 'features' in heatmap_data and hasattr(self.model, 'compressed_dims'):
+            features = heatmap_data['features']
+            feature_importance = np.abs(features)
+
+            axes[1, 1].bar(range(len(feature_importance)), feature_importance,
+                          color='lightgreen', alpha=0.7)
+            axes[1, 1].set_title(f'Compressed Features ({len(features)}D)')
+            axes[1, 1].set_xlabel('Feature Dimension')
+            axes[1, 1].set_ylabel('Absolute Value')
+            axes[1, 1].grid(True, alpha=0.3)
+
+        # Metadata
+        metadata_text = []
+        if 'cluster_assignment' in heatmap_data:
+            metadata_text.append(f"Assigned Cluster: {heatmap_data['cluster_assignment']}")
+        if 'target_prob' in heatmap_data:
+            metadata_text.append(f"Target Prob: {heatmap_data['target_prob']:.3f}")
+        if hasattr(self.model, 'compressed_dims'):
+            metadata_text.append(f"Features: {self.model.feature_dims}D → {self.model.compressed_dims}D")
+
+        axes[1, 2].text(0.1, 0.9, '\n'.join(metadata_text), transform=axes[1, 2].transAxes,
+                       fontsize=10, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        axes[1, 2].set_title('Model Metadata')
+        axes[1, 2].axis('off')
+
+        plt.tight_layout()
+
+        # Save figure
+        filename = f"heatmap_{class_name}_{sample_idx}_{os.path.basename(img_path).split('.')[0]}.png"
+        output_path = os.path.join(output_dir, filename)
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        logger.debug(f"Saved heatmap: {output_path}")
+
+    def _generate_batch_heatmaps(self, batch_tensor: torch.Tensor, batch_labels: torch.Tensor,
+                               batch_filenames: List[str], model_output: Dict):
+        """Generate heatmaps for a batch of images"""
+        if not hasattr(self, 'heatmap_output_dir'):
+            dataset_name = self.config['dataset']['name'].lower()
+            self.heatmap_output_dir = os.path.join('data', dataset_name, 'batch_heatmaps')
+            os.makedirs(self.heatmap_output_dir, exist_ok=True)
+
+        batch_size = batch_tensor.shape[0]
+
+        for i in range(min(3, batch_size)):  # Limit to first 3 images per batch
+            try:
+                single_image = batch_tensor[i:i+1]
+                single_label = batch_labels[i].item() if batch_labels is not None else 0
+                filename = batch_filenames[i]
+
+                # Compute attention heatmap
+                heatmap_data = self._compute_attention_heatmap(single_image, single_label)
+
+                # Convert tensor to PIL image for visualization
+                image_np = single_image[0].cpu().permute(1, 2, 0).numpy()
+                image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min()) * 255
+                image_pil = Image.fromarray(image_np.astype(np.uint8))
+
+                # Save heatmap
+                self._save_batch_heatmap(image_pil, heatmap_data, filename, single_label, i)
+
+            except Exception as e:
+                logger.debug(f"Could not generate heatmap for image {i}: {str(e)}")
+                continue
+
+    def _save_batch_heatmap(self, image: Image.Image, heatmap_data: Dict,
+                           filename: str, label: int, index: int):
+        """Save a simplified heatmap for batch images"""
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
+
+        # Original image
+        ax1.imshow(image)
+        ax1.set_title(f'Original: {filename}')
+        ax1.axis('off')
+
+        # Attention heatmap
+        if 'attention_map' in heatmap_data:
+            attention_map = heatmap_data['attention_map']
+            h, w = image.size[1], image.size[0]
+            attention_resized = np.array(Image.fromarray(attention_map).resize((w, h), Image.BILINEAR))
+
+            im = ax2.imshow(attention_resized, cmap='hot', alpha=0.7)
+            ax2.set_title('Attention Heatmap')
+            ax2.axis('off')
+            plt.colorbar(im, ax=ax2)
+
+        # Overlay
+        ax3.imshow(image)
+        if 'attention_map' in heatmap_data:
+            ax3.imshow(attention_resized, cmap='hot', alpha=0.5)
+        ax3.set_title('Attention Overlay')
+        ax3.axis('off')
+
+        # Add metadata
+        if 'cluster_assignment' in heatmap_data:
+            plt.figtext(0.02, 0.02, f"Label: {label} | Cluster: {heatmap_data['cluster_assignment']} | "
+                      f"Confidence: {heatmap_data.get('target_prob', 0):.3f}",
+                      fontsize=10, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        plt.tight_layout()
+
+        # Save with simplified filename
+        safe_filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_')).rstrip()
+        output_path = os.path.join(self.heatmap_output_dir, f"heatmap_{safe_filename}_{index}.png")
+        plt.savefig(output_path, dpi=120, bbox_inches='tight')
+        plt.close()
+
+        logger.debug(f"Saved batch heatmap: {output_path}")
+
+    def generate_classwise_attention_heatmaps(self, data_path: str, output_dir: str = None,
+                                            num_samples_per_class: int = 5):
+        """Generate comprehensive attention heatmaps showing what features drive classwise clustering"""
+
+        # Get image files with labels
+        image_files, class_labels, _ = self._get_image_files_with_labels(data_path)
+        if not image_files:
+            logger.warning(f"No image files found in {data_path}")
+            return
+
+        # Create class mapping
+        class_mapping = self._get_class_mapping(data_path)
+        if not class_mapping:
+            logger.warning("No class structure found for heatmap generation")
+            return
+
+        # Setup output directory
+        if output_dir is None:
+            dataset_name = self.config['dataset']['name'].lower()
+            output_dir = os.path.join('data', dataset_name, 'attention_heatmaps')
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get transforms
+        transform = self.get_transforms(self.config, is_train=False)
+
+        logger.info(f"Generating classwise attention heatmaps for {len(class_mapping)} classes")
+
+        self.model.eval()
+
+        # Register attention hooks for detailed feature map capture
+        if hasattr(self.model, 'register_attention_hooks'):
+            self.model.register_attention_hooks()
+
+        with torch.no_grad():
+            for class_idx, class_name in class_mapping.items():
+                logger.info(f"Processing class: {class_name} (idx: {class_idx})")
+
+                # Get samples for this class
+                class_images = [img for img, lbl in zip(image_files, class_labels)
+                              if lbl == class_name]
+
+                if not class_images:
+                    logger.warning(f"No images found for class {class_name}")
+                    continue
+
+                # Select representative samples
+                selected_images = class_images[:num_samples_per_class]
+
+                for sample_idx, img_path in enumerate(selected_images):
+                    try:
+                        # Load and process image
+                        image = Image.open(img_path).convert('RGB')
+                        image_tensor = transform(image).unsqueeze(0).to(self.device)
+
+                        # Generate heatmap for this sample
+                        heatmap_data = self._compute_attention_heatmap(image_tensor, class_idx)
+
+                        # Create visualization
+                        self._save_attention_heatmap(
+                            image, heatmap_data, img_path, class_name,
+                            sample_idx, output_dir, class_idx
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Error processing {img_path}: {str(e)}")
+                        continue
+
+        # Remove attention hooks
+        if hasattr(self.model, 'remove_attention_hooks'):
+            self.model.remove_attention_hooks()
+
+        logger.info(f"Classwise heatmaps saved to: {output_dir}")
+
 
 class SlidingWindowDataset(Dataset):
     """Dataset that processes large images using sliding windows"""
@@ -2557,6 +2876,123 @@ class BaseAutoencoder(nn.Module):
         }
 
         return total_loss
+
+    def register_attention_hooks(self):
+        """Register hooks to capture intermediate feature maps for attention visualization"""
+        self.attention_maps = {}
+        self.hook_handles = []
+
+        def hook_fn(module, input, output, name):
+            self.attention_maps[name] = output.detach()
+
+        # Register hooks on encoder layers
+        for idx, layer in enumerate(self.encoder_layers):
+            handle = layer.register_forward_hook(
+                lambda m, i, o, idx=idx: hook_fn(m, i, o, f'encoder_{idx}')
+            )
+            self.hook_handles.append(handle)
+
+        logger.info(f"Registered {len(self.hook_handles)} attention hooks")
+
+    def remove_attention_hooks(self):
+        """Remove all registered hooks"""
+        for handle in self.hook_handles:
+            handle.remove()
+        self.hook_handles = []
+        self.attention_maps = {}
+        logger.info("Removed all attention hooks")
+
+    def get_feature_importance_scores(self, features: torch.Tensor, target_class: int) -> np.ndarray:
+        """Compute importance scores for each feature dimension"""
+
+        if not hasattr(self, 'classifier') or not self.use_class_encoding:
+            return np.ones(features.shape[1])
+
+        # Compute how much each feature contributes to class prediction
+        features.requires_grad_(True)
+        class_logits = self.classifier(features)
+        target_score = class_logits[0, target_class]
+
+        # Compute gradients
+        target_score.backward()
+        feature_gradients = features.grad.data.cpu().numpy()[0]
+
+        # Importance = gradient * feature value
+        feature_values = features.data.cpu().numpy()[0]
+        importance_scores = np.abs(feature_gradients * feature_values)
+
+        # Normalize
+        if importance_scores.max() > 0:
+            importance_scores = importance_scores / importance_scores.max()
+
+        return importance_scores
+
+    def generate_cluster_analysis_heatmaps(self, data_path: str, output_dir: str = None):
+        """Generate comprehensive analysis of what drives each cluster"""
+
+        # Get all data
+        image_files, class_labels, _ = self._get_image_files_with_labels(data_path)
+        if not image_files:
+            return
+
+        transform = self.get_transforms(self.config, is_train=False)
+
+        # Setup output
+        if output_dir is None:
+            dataset_name = self.config['dataset']['name'].lower()
+            output_dir = os.path.join('data', dataset_name, 'cluster_analysis')
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.model.eval()
+        self.model.register_attention_hooks()  # NEW: Enable feature map capture
+
+        all_features = []
+        all_cluster_assignments = []
+        all_images = []
+
+        with torch.no_grad():
+            for img_path in tqdm(image_files, desc="Processing images for cluster analysis"):
+                try:
+                    image = Image.open(img_path).convert('RGB')
+                    image_tensor = transform(image).unsqueeze(0).to(self.device)
+
+                    outputs = self.model(image_tensor)
+                    features = outputs.get('compressed_embedding', outputs['embedding'])
+                    latent_info = self.model.organize_latent_space(features)
+
+                    all_features.append(features[0].cpu().numpy())
+                    all_cluster_assignments.append(latent_info['cluster_assignments'][0].item())
+                    all_images.append((img_path, image))
+
+                except Exception as e:
+                    continue
+
+        # Analyze each cluster
+        all_features = np.array(all_features)
+        all_cluster_assignments = np.array(all_cluster_assignments)
+
+        unique_clusters = np.unique(all_cluster_assignments)
+
+        for cluster_id in unique_clusters:
+            cluster_mask = all_cluster_assignments == cluster_id
+            cluster_features = all_features[cluster_mask]
+            cluster_images = [img for i, img in enumerate(all_images) if cluster_mask[i]]
+
+            if len(cluster_features) == 0:
+                continue
+
+            # Compute cluster centroid and characteristic features
+            centroid = np.mean(cluster_features, axis=0)
+            characteristic_features = np.argsort(np.abs(centroid))[-5:][::-1]  # Top 5 features
+
+            # Create cluster summary
+            self._create_cluster_summary(
+                cluster_id, centroid, characteristic_features,
+                cluster_images, cluster_features, output_dir
+            )
+
+        self.model.remove_attention_hooks()
+        logger.info(f"Cluster analysis complete: {output_dir}")
 
 def make_json_serializable(obj):
     """Convert an object to be JSON serializable"""
@@ -7733,185 +8169,238 @@ def interactive_dataset_selection():
             print("Invalid option. Please try again.")
 
 def main():
-        """Main function for CDBNN processing with interactive dataset selection."""
-        args = None
+    """Main function for CDBNN processing with interactive dataset selection and heatmap generation."""
+    args = None
 
-        # Setup logging
-        logger = setup_logging()
+    # Setup logging
+    logger = setup_logging()
 
-        # Parse arguments
-        args = parse_arguments()
+    # Parse arguments
+    args = parse_arguments()
 
-        # Handle list-datasets option
-        if hasattr(args, 'list_datasets') and args.list_datasets:
-            list_datasets_simple()
-            return 0
+    # Handle list-datasets option
+    if hasattr(args, 'list_datasets') and args.list_datasets:
+        list_datasets_simple()
+        return 0
 
-        # Handle download mode
-        if hasattr(args, 'mode') and args.mode == 'download' or (hasattr(args, 'download') and args.download):
-            downloaded_path = interactive_torchvision_download()
-            if downloaded_path:
-                if isinstance(downloaded_path, list):
-                    print("\nDownloaded datasets:")
-                    for dataset_name, path in downloaded_path:
-                        print(f"  - {dataset_name}: {path}")
-                else:
-                    print(f"\nDataset ready at: {downloaded_path}")
-                    print(f"You can now train using: python cdbnn.py --input_path {downloaded_path} --data_type custom --mode train")
-            return 0
+    # Handle download mode
+    if hasattr(args, 'mode') and args.mode == 'download' or (hasattr(args, 'download') and args.download):
+        downloaded_path = interactive_torchvision_download()
+        if downloaded_path:
+            if isinstance(downloaded_path, list):
+                print("\nDownloaded datasets:")
+                for dataset_name, path in downloaded_path:
+                    print(f"  - {dataset_name}: {path}")
+            else:
+                print(f"\nDataset ready at: {downloaded_path}")
+                print(f"You can now train using: python cdbnn.py --input_path {downloaded_path} --data_type custom --mode train")
+        return 0
 
-        # If no data source provided, use interactive selection
-        if (not hasattr(args, 'data_name') or not args.data_name) and \
-           (not hasattr(args, 'input_path') or not args.input_path) or \
-           (hasattr(args, 'interactive') and args.interactive):
+    # If no data source provided, use interactive selection
+    if (not hasattr(args, 'data_name') or not args.data_name) and \
+       (not hasattr(args, 'input_path') or not args.input_path) or \
+       (hasattr(args, 'interactive') and args.interactive):
 
-            print("No dataset specified. Starting interactive mode...")
+        print("No dataset specified. Starting interactive mode...")
+        dataset_info = interactive_dataset_selection()
+
+        if not dataset_info:
+            return 0  # User chose to exit
+
+        # Set the arguments based on selected dataset
+        if not hasattr(args, 'data_name'):
+            # Use the exact dataset name without uppercase conversion for custom datasets
+            if 'is_local' in dataset_info and dataset_info['is_local']:
+                args.data_name = dataset_info['dataset_name']  # Keep original case
+            else:
+                args.data_name = dataset_info['dataset_name_upper']  # Use uppercase for torchvision
+        if not hasattr(args, 'input_path'):
+            args.input_path = dataset_info['input_path']
+        if not hasattr(args, 'data_type'):
+            args.data_type = 'torchvision' if 'is_local' not in dataset_info else 'custom'
+
+        print(f"\nUsing dataset: {args.data_name}")
+        print(f"Data path: {args.input_path}")
+
+    # Handle the specific case where data_name is provided but might be invalid
+    if hasattr(args, 'data_name') and args.data_name:
+        # Check if it's a valid torchvision dataset name
+        available_datasets = []
+        for name in dir(datasets):
+            if (not name.startswith('_') and
+                hasattr(getattr(datasets, name), '__call__') and
+                name not in ['VisionDataset', 'DatasetFolder', 'ImageFolder', 'FakeData']):
+                available_datasets.append(name)
+
+        # If it's a torchvision dataset but not a valid one, show error
+        if (hasattr(args, 'data_type') and args.data_type == 'torchvision' and
+            args.data_name.upper() not in available_datasets):
+
+            logger.error(f"Invalid torchvision dataset: {args.data_name}")
+            logger.info(f"Available datasets: {', '.join(available_datasets)}")
+
+            # Fall back to interactive selection
+            print("Falling back to interactive dataset selection...")
             dataset_info = interactive_dataset_selection()
-
-            if not dataset_info:
-                return 0  # User chose to exit
-
-            # Set the arguments based on selected dataset
-            if not hasattr(args, 'data_name'):
-                # Use the exact dataset name without uppercase conversion for custom datasets
+            if dataset_info:
                 if 'is_local' in dataset_info and dataset_info['is_local']:
                     args.data_name = dataset_info['dataset_name']  # Keep original case
                 else:
                     args.data_name = dataset_info['dataset_name_upper']  # Use uppercase for torchvision
-            if not hasattr(args, 'input_path'):
                 args.input_path = dataset_info['input_path']
-            if not hasattr(args, 'data_type'):
                 args.data_type = 'torchvision' if 'is_local' not in dataset_info else 'custom'
-
-            print(f"\nUsing dataset: {args.data_name}")
-            print(f"Data path: {args.input_path}")
-
-        # Handle the specific case where data_name is provided but might be invalid
-        if hasattr(args, 'data_name') and args.data_name:
-            # Check if it's a valid torchvision dataset name
-            available_datasets = []
-            for name in dir(datasets):
-                if (not name.startswith('_') and
-                    hasattr(getattr(datasets, name), '__call__') and
-                    name not in ['VisionDataset', 'DatasetFolder', 'ImageFolder', 'FakeData']):
-                    available_datasets.append(name)
-
-            # If it's a torchvision dataset but not a valid one, show error
-            if (hasattr(args, 'data_type') and args.data_type == 'torchvision' and
-                args.data_name.upper() not in available_datasets):
-
-                logger.error(f"Invalid torchvision dataset: {args.data_name}")
-                logger.info(f"Available datasets: {', '.join(available_datasets)}")
-
-                # Fall back to interactive selection
-                print("Falling back to interactive dataset selection...")
-                dataset_info = interactive_dataset_selection()
-                if dataset_info:
-                    if 'is_local' in dataset_info and dataset_info['is_local']:
-                        args.data_name = dataset_info['dataset_name']  # Keep original case
-                    else:
-                        args.data_name = dataset_info['dataset_name_upper']  # Use uppercase for torchvision
-                    args.input_path = dataset_info['input_path']
-                    args.data_type = 'torchvision' if 'is_local' not in dataset_info else 'custom'
-                else:
-                    return 1
-
-        # Handle automatic torchvision dataset setup
-        if (hasattr(args, 'data_type') and args.data_type == 'torchvision' and
-            hasattr(args, 'data_name') and args.data_name and
-            (not hasattr(args, 'input_path') or not args.input_path) and
-            hasattr(args, 'mode') and args.mode == 'train'):
-
-            logger.info(f"Automatically setting up torchvision dataset: {args.data_name}")
-            try:
-                downloaded_path = download_and_setup_torchvision_dataset(args.data_name)
-                args.input_path = downloaded_path
-                args.data_type = 'custom'
-                logger.info(f"Using downloaded dataset as custom dataset from: {downloaded_path}")
-            except Exception as e:
-                logger.error(f"Failed to download torchvision dataset {args.data_name}: {str(e)}")
-                logger.info("Falling back to standard torchvision processing...")
-
-        # Process based on mode
-        if hasattr(args, 'mode'):
-            if args.mode == 'predict':
-                # Prediction mode - load model and predict on new images
-                logger.info("Starting prediction mode...")
-                if not hasattr(args, 'input_path') or not args.input_path:
-                    logger.error("Input path required for prediction mode")
-                    return 1
-
-                # Load configuration - use Data/ (uppercase) directory
-                config_path = args.config if hasattr(args, 'config') and args.config else None
-                if not config_path and hasattr(args, 'data_name') and args.data_name:
-                    # Use 'Data/' directory (uppercase) and exact data_name for JSON
-                    config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
-
-                if not config_path or not os.path.exists(config_path):
-                    logger.error(f"Configuration file not found: {config_path}")
-                    return 1
-
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-
-                # Initialize prediction manager
-                prediction_manager = PredictionManager(config)
-
-                # Run prediction - use 'data/' directory (lowercase) for output CSV
-                output_csv = getattr(args, 'output_csv', None)
-                if not output_csv and hasattr(args, 'data_name') and args.data_name:
-                    # Use 'data/' directory (lowercase) and lowercase dataset_name.csv
-                    dataset_name_lower = args.data_name.lower()
-                    output_csv = os.path.join('data', dataset_name_lower, f"{dataset_name_lower}.csv")
-
-                batch_size = getattr(args, 'batch_size', 128)
-                prediction_manager.predict_images(args.input_path, output_csv, batch_size)
-                logger.info(f"Prediction completed successfully! Output: {output_csv}")
-                return 0
-
-            elif args.mode == 'train':
-                return handle_training_mode(args, logger)
-
-            elif args.mode == 'reconstruct':
-                # Reconstruction mode - generate images from features
-                logger.info("Starting reconstruction mode...")
-                if not hasattr(args, 'input_csv') or not args.input_csv:
-                    logger.error("Input CSV path required for reconstruction mode")
-                    return 1
-
-                # Load configuration - use Data/ (uppercase) directory
-                config_path = args.config if hasattr(args, 'config') and args.config else None
-                if not config_path and hasattr(args, 'data_name') and args.data_name:
-                    # Use 'Data/' directory (uppercase) and exact data_name for JSON
-                    config_path = os.path.join('data', args.data_name, f"{args.data_name}.json")
-
-                if not config_path or not os.path.exists(config_path):
-                    logger.error(f"Configuration file not found: {config_path}")
-                    return 1
-
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-
-                # Initialize reconstruction manager
-                reconstruction_manager = ReconstructionManager(config)
-
-                # Run reconstruction - use 'data/' directory (lowercase) for output
-                output_dir = getattr(args, 'output_dir', None)
-                if not output_dir and hasattr(args, 'data_name') and args.data_name:
-                    # Use 'data/' directory (lowercase) for output
-                    dataset_name_lower = args.data_name.lower()
-                    output_dir = os.path.join('data', dataset_name_lower, 'reconstructions')
-
-                reconstruction_manager.predict_from_csv(args.input_csv, output_dir)
-                logger.info("Reconstruction completed successfully!")
-                return 0
-
             else:
-                logger.error(f"Invalid mode: {args.mode}")
                 return 1
+
+    # Handle automatic torchvision dataset setup
+    if (hasattr(args, 'data_type') and args.data_type == 'torchvision' and
+        hasattr(args, 'data_name') and args.data_name and
+        (not hasattr(args, 'input_path') or not args.input_path) and
+        hasattr(args, 'mode') and args.mode == 'train'):
+
+        logger.info(f"Automatically setting up torchvision dataset: {args.data_name}")
+        try:
+            downloaded_path = download_and_setup_torchvision_dataset(args.data_name)
+            args.input_path = downloaded_path
+            args.data_type = 'custom'
+            logger.info(f"Using downloaded dataset as custom dataset from: {downloaded_path}")
+        except Exception as e:
+            logger.error(f"Failed to download torchvision dataset {args.data_name}: {str(e)}")
+            logger.info("Falling back to standard torchvision processing...")
+
+    # Process based on mode
+    if hasattr(args, 'mode'):
+        if args.mode == 'predict':
+            # Prediction mode - load model and predict on new images
+            logger.info("Starting prediction mode...")
+            if not hasattr(args, 'input_path') or not args.input_path:
+                logger.error("Input path required for prediction mode")
+                return 1
+
+            # Load configuration - use Data/ (uppercase) directory
+            config_path = args.config if hasattr(args, 'config') and args.config else None
+            if not config_path and hasattr(args, 'data_name') and args.data_name:
+                # Use 'Data/' directory (uppercase) and exact data_name for JSON
+                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
+
+            if not config_path or not os.path.exists(config_path):
+                logger.error(f"Configuration file not found: {config_path}")
+                return 1
+
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Initialize prediction manager
+            prediction_manager = PredictionManager(config)
+
+            # Run prediction - use 'data/' directory (lowercase) for output CSV
+            output_csv = getattr(args, 'output_csv', None)
+            if not output_csv and hasattr(args, 'data_name') and args.data_name:
+                # Use 'data/' directory (lowercase) and lowercase dataset_name.csv
+                dataset_name_lower = args.data_name.lower()
+                output_csv = os.path.join('data', dataset_name_lower, f"{dataset_name_lower}.csv")
+
+            batch_size = getattr(args, 'batch_size', 128)
+
+            # NEW: Check if heatmap generation is requested
+            generate_heatmaps = getattr(args, 'generate_heatmaps', False)
+            if generate_heatmaps:
+                logger.info("Heatmap generation enabled - will create attention visualizations")
+
+            # Updated prediction call with heatmap support
+            prediction_manager.predict_images(
+                args.input_path,
+                output_csv,
+                batch_size,
+                generate_heatmaps=generate_heatmaps
+            )
+
+            # NEW: Provide heatmap location info
+            if generate_heatmaps:
+                dataset_name_lower = args.data_name.lower()
+                heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
+                logger.info(f"Attention heatmaps saved to: {heatmap_dir}")
+
+            logger.info(f"Prediction completed successfully! Output: {output_csv}")
+            return 0
+
+        elif args.mode == 'train':
+            return handle_training_mode(args, logger)
+
+        elif args.mode == 'reconstruct':
+            # Reconstruction mode - generate images from features
+            logger.info("Starting reconstruction mode...")
+            if not hasattr(args, 'input_csv') or not args.input_csv:
+                logger.error("Input CSV path required for reconstruction mode")
+                return 1
+
+            # Load configuration - use Data/ (uppercase) directory
+            config_path = args.config if hasattr(args, 'config') and args.config else None
+            if not config_path and hasattr(args, 'data_name') and args.data_name:
+                # Use 'Data/' directory (uppercase) and exact data_name for JSON
+                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json")
+
+            if not config_path or not os.path.exists(config_path):
+                logger.error(f"Configuration file not found: {config_path}")
+                return 1
+
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Initialize reconstruction manager
+            reconstruction_manager = ReconstructionManager(config)
+
+            # Run reconstruction - use 'data/' directory (lowercase) for output
+            output_dir = getattr(args, 'output_dir', None)
+            if not output_dir and hasattr(args, 'data_name') and args.data_name:
+                # Use 'data/' directory (lowercase) for output
+                dataset_name_lower = args.data_name.lower()
+                output_dir = os.path.join('data', dataset_name_lower, 'reconstructions')
+
+            reconstruction_manager.predict_from_csv(args.input_csv, output_dir)
+            logger.info("Reconstruction completed successfully!")
+            return 0
+
+        # NEW: Heatmap-only mode for existing models
+        elif args.mode == 'heatmaps':
+            logger.info("Starting heatmap generation mode...")
+            if not hasattr(args, 'input_path') or not args.input_path:
+                logger.error("Input path required for heatmap generation mode")
+                return 1
+
+            # Load configuration
+            config_path = args.config if hasattr(args, 'config') and args.config else None
+            if not config_path and hasattr(args, 'data_name') and args.data_name:
+                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
+
+            if not config_path or not os.path.exists(config_path):
+                logger.error(f"Configuration file not found: {config_path}")
+                return 1
+
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Initialize prediction manager
+            prediction_manager = PredictionManager(config)
+
+            # Generate heatmaps only
+            num_samples = getattr(args, 'num_samples', 5)
+            prediction_manager.generate_classwise_attention_heatmaps(
+                args.input_path,
+                num_samples_per_class=num_samples
+            )
+
+            dataset_name_lower = args.data_name.lower() if hasattr(args, 'data_name') else 'dataset'
+            heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
+            logger.info(f"Heatmap generation completed! Visualizations saved to: {heatmap_dir}")
+            return 0
+
         else:
-            logger.error("No mode specified")
+            logger.error(f"Invalid mode: {args.mode}")
             return 1
+    else:
+        logger.error("No mode specified")
+        return 1
 
 
 
@@ -8448,6 +8937,8 @@ def parse_arguments():
     parser.add_argument('--list_datasets', action='store_true', help='List available datasets')
     parser.add_argument('--interactive', action='store_true', help='Use interactive mode')
     parser.add_argument('--download', action='store_true', help='Download datasets')
+    parser.add_argument('--generate_heatmaps', action='store_true',default=True,
+                       help='Generate attention heatmaps for model interpretation')
 
     args = parser.parse_args()
 
