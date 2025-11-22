@@ -1,4 +1,4 @@
-#-------- Memory and Computation optimiations 19 Nov 2025 -----------------------------------------
+#-------- Memory and Computation optimiations 22 Nov 2025 - Training and predcition fixed---------------------------------------
 # With Feature batch enabled to make computation on large number of features in limited memory.
 # Replaced:
 # _compute_batch_posterior
@@ -4521,7 +4521,7 @@ parse_command_line_flags()
 #---------------------------------------Feature Filter with a #------------------------------------
 def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
-    Filter DataFrame to only include specified columns from config
+    Filter DataFrame to only include specified columns from config - FIXED VERSION
 
     Args:
         df: Input DataFrame
@@ -4531,38 +4531,29 @@ def _filter_features_from_config(df: pd.DataFrame, config: Dict) -> pd.DataFrame
         DataFrame with only the specified columns
     """
     # If no column names in config, return original DataFrame
-
     if 'column_names' not in config or not config['column_names']:
         print("\033[K" +"No column names specified in config. Keeping all columns.")
         return df
 
-    # Get current DataFrame columns
-    current_cols = df.columns.tolist()
-    #print("\033[K" +f"Current DataFrame columns: {current_cols}")
-
-    # Get column names from config (only those not commented out)
+    # Get column names from config (only those not commented out and existing in DataFrame)
     requested_columns = [
         name.strip() for name in config['column_names']
-        if not name.strip().startswith('#')
+        if not name.strip().startswith('#') and name.strip() in df.columns
     ]
 
-    # If no uncommented columns found in config, return original DataFrame
+    # If no valid columns found, show clear error
     if not requested_columns:
-        print("\033[K" +"No uncommented column names found in config. Returning original DataFrame.")
-        return df
+        available_cols = list(df.columns)
+        print(f"\033[K{Colors.RED}ERROR: No configured columns found in dataset!{Colors.ENDC}")
+        print(f"\033[K{Colors.RED}Configured: {config['column_names']}{Colors.ENDC}")
+        print(f"\033[K{Colors.RED}Available: {available_cols}{Colors.ENDC}")
+        raise ValueError("No valid configured columns found in dataset")
 
-    # Check if any requested columns exist in the DataFrame
-    valid_columns = [col for col in requested_columns if col in current_cols]
+    # Return DataFrame with only the valid configured columns
+    print(f"\033[K{Colors.GREEN}✅ Using configured columns: {requested_columns}{Colors.ENDC}")
+    return df[requested_columns]
 
-    # If no valid columns found, return original DataFrame
-    if not valid_columns:
-        print("\033[K" +"None of the requested columns exist in the DataFrame. Returning original DataFrame.")
-        return df
-
-    # Return DataFrame with only the columns to keep
-    #print("\033[K" +f"Keeping only these features: {valid_columns}")
-    return df[valid_columns]
-#-------------------------------------------------
+    #-------------------------------------------------
 class ComputationCache:
     """Cache for frequently used computations"""
     def __init__(self, device):
@@ -4908,32 +4899,6 @@ class BinWeightUpdater:
 
         return log_likelihoods
 
-    # Modified posterior computation for Histogram model
-    def compute_histogram_posterior_old(self, features, bin_indices):
-        batch_size = features.shape[0]
-        n_classes = len(self.likelihood_params['classes'])
-        log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
-
-        for group_idx, feature_group in enumerate(self.likelihood_params['feature_pairs']):
-            bin_edges = self.likelihood_params['bin_edges'][group_idx]
-            bin_probs = self.likelihood_params['bin_probs'][group_idx]
-
-            # Get bin-specific weights
-            bin_weights = self.weight_updater.get_histogram_weights(
-                class_idx,
-                group_idx
-            )[bin_indices[group_idx]]
-
-            # Apply bin-specific weights to probabilities
-            weighted_probs = bin_probs * bin_weights.unsqueeze(0)
-
-            # Continue with regular posterior computation...
-            group_log_likelihoods = torch.log(weighted_probs + epsilon)
-            log_likelihoods.add_(group_log_likelihoods)
-
-        return log_likelihoods
-
-    # Modified posterior computation for Gaussian model
     def compute_gaussian_posterior(self, features, component_responsibilities):
         batch_size = features.shape[0]
         n_classes = len(self.likelihood_params['classes'])
@@ -5439,8 +5404,11 @@ class DBNN(GPUDBNN):
                  enable_visualization: bool = False, visualization_frequency: int = 1,
                  enable_5DCTvisualization: bool = False):
 
-        # First load the actual dataset configuration
+        # Store mode and dataset name FIRST
+        self.mode = mode
         self.dataset_name = dataset_name
+
+        # STEP 1: Load configuration and basic data FIRST (before any model initialization)
         self.config = DatasetConfig.load_config(dataset_name)
         if self.config is None:
             raise ValueError(f"Failed to load configuration for dataset: {dataset_name}")
@@ -5484,7 +5452,13 @@ class DBNN(GPUDBNN):
                     config[key] = training_params[key]
             config = DBNNConfig(**config)
 
-        # Now call parent with CORRECT parameters from JSON config
+        # STEP 2: For PREDICTION mode, load minimal data first to avoid state corruption
+        if mode == 'predict':
+            # Load only the raw data without any processing
+            self.target_column = self.config['target_column']
+            self._load_minimal_data_for_prediction()
+
+        # STEP 3: Now call parent initialization (this may load model components)
         super().__init__(
             dataset_name=dataset_name,
             learning_rate=learning_rate,      # From JSON config
@@ -5498,8 +5472,11 @@ class DBNN(GPUDBNN):
             mode=mode
         )
 
+        # STEP 4: For PREDICTION mode, verify and complete initialization after parent init
+        if mode == 'predict':
+            self._complete_prediction_initialization()
+
         # Store the actual parameters that will be used
-        self.mode = mode
         self.cardinality_threshold = cardinality_threshold
         self.trials = trials
         self.patience = trials
@@ -5548,6 +5525,126 @@ class DBNN(GPUDBNN):
 
         self._last_feature_batch_size = None
         self.epsilon = 1e-10  # Add epsilon as instance variable
+
+    def _load_minimal_data_for_prediction(self):
+        """Load only the raw data for prediction without any processing"""
+        DEBUG.log(f"Loading minimal data for prediction: {self.dataset_name}")
+
+        try:
+            file_path = self.config.get('file_path')
+            if not file_path:
+                raise ValueError("No file path in config")
+
+            # Load raw data only
+            if file_path.startswith(('http://', 'https://')):
+                self.data = pd.read_csv(StringIO(requests.get(file_path).text),
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None,
+                               low_memory=False)
+            else:
+                self.data = pd.read_csv(file_path,
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None,
+                               low_memory=False)
+
+            # Store original target dtype
+            if self.target_column in self.data.columns:
+                self.original_target_dtype = self.data[self.target_column].dtype
+            else:
+                self.original_target_dtype = np.dtype('object')
+
+            DEBUG.log(f"Loaded minimal data: {len(self.data)} samples, {len(self.data.columns)} columns")
+
+        except Exception as e:
+            DEBUG.log(f"Minimal data load error: {str(e)}")
+            raise RuntimeError(f"Failed to load minimal data for {self.dataset_name}: {str(e)}")
+
+    def _complete_prediction_initialization(self):
+        """Complete prediction initialization after model components are loaded"""
+        DEBUG.log("Completing prediction initialization with loaded model state")
+
+        # Verify critical components are loaded
+        self._verify_prediction_components()
+
+        # FIX: Ensure scaler is properly reconstructed if it's a dictionary
+        self._fix_scaler_if_needed()
+
+        # Now preprocess data using the LOADED components (no reinitialization)
+        self._preprocess_prediction_data()
+
+        DEBUG.log("✅ Prediction initialization completed successfully")
+
+    def _verify_prediction_components(self):
+        """Verify all critical components are properly loaded for prediction with scaler tolerance"""
+        DEBUG.log("Verifying prediction components...")
+
+        # More tolerant scaler check - allow unfitted scaler for prediction
+        scaler_exists = (hasattr(self, 'scaler') and self.scaler is not None)
+        scaler_fitted = False
+
+        if scaler_exists:
+            # Check if scaler has fitted attributes
+            if hasattr(self.scaler, 'mean_') and hasattr(self.scaler, 'scale_'):
+                scaler_fitted = True
+            elif isinstance(self.scaler, dict) and 'mean_' in self.scaler and 'scale_' in self.scaler:
+                scaler_fitted = True
+
+        critical_components = [
+            ('likelihood_params', hasattr(self, 'likelihood_params') and self.likelihood_params is not None),
+            ('feature_pairs', hasattr(self, 'feature_pairs') and self.feature_pairs is not None),
+            ('weight_updater', hasattr(self, 'weight_updater') and self.weight_updater is not None),
+            ('label_encoder', hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_')),
+            ('scaler', scaler_exists)  # Only check existence, not fitted state
+        ]
+
+        missing_components = []
+        for name, exists in critical_components:
+            if not exists:
+                missing_components.append(name)
+                DEBUG.log(f"❌ Missing: {name}")
+            else:
+                DEBUG.log(f"✅ Found: {name}")
+
+        if missing_components:
+            raise RuntimeError(f"Missing critical components for prediction: {missing_components}")
+
+        # Verify label encoder has classes
+        if not hasattr(self.label_encoder, 'classes_') or len(self.label_encoder.classes_) == 0:
+            raise RuntimeError("Label encoder has no classes - model not properly trained")
+
+        # Warn about scaler state but don't fail
+        if scaler_exists and not scaler_fitted:
+            print(f"{Colors.YELLOW}⚠️  Scaler exists but is not fitted. Predictions may be inaccurate.{Colors.ENDC}")
+            DEBUG.log("Scaler exists but lacks fitted parameters")
+
+        DEBUG.log(f"✅ All {len(critical_components)} critical components verified")
+
+
+    def _fix_scaler_if_needed(self):
+        """Fix scaler issues for prediction mode"""
+        if not hasattr(self, 'scaler') or self.scaler is None:
+            DEBUG.log("❌ No scaler found - creating placeholder")
+            self.scaler = StandardScaler()
+            return
+
+        if isinstance(self.scaler, dict):
+            DEBUG.log("Reconstructing StandardScaler from dictionary state")
+            new_scaler = StandardScaler()
+            if 'mean_' in self.scaler and 'scale_' in self.scaler:
+                new_scaler.mean_ = self.scaler['mean_']
+                new_scaler.scale_ = self.scaler['scale_']
+                new_scaler.var_ = self.scaler.get('var_', self.scaler['scale_'] ** 2)
+                new_scaler.n_features_in_ = self.scaler.get('n_features_in_', len(self.scaler['mean_']))
+                new_scaler.feature_names_in_ = self.scaler.get('feature_names_in_', None)
+                DEBUG.log("✅ StandardScaler reconstructed from dictionary")
+            else:
+                DEBUG.log("❌ Dictionary scaler missing required parameters")
+            self.scaler = new_scaler
+        elif hasattr(self.scaler, 'mean_') and hasattr(self.scaler, 'scale_'):
+            DEBUG.log("✅ Scaler is properly fitted")
+        else:
+            DEBUG.log("⚠️  Scaler exists but is not fitted")
+
 
     def _initialize_visualization_directories(self):
         """Initialize visualization directory structure for DBNN"""
@@ -5603,8 +5700,9 @@ class DBNN(GPUDBNN):
         self.global_std[self.global_std == 0] = 1.0
 
     def _preprocess_and_split_data(self):
-        """Preprocess data and split into training and testing sets with prediction mode support.
+        """Preprocess data and split into training and testing sets with proper scaler fitting.
         ENSURES: No independent label encoding during prediction - demands trained model
+        ENSURES: Scaler is properly fitted during training for consistent predictions
         """
         # Load dataset
         self.target_column = self.config['target_column']
@@ -5676,7 +5774,7 @@ class DBNN(GPUDBNN):
                 DEBUG.log(f"Fitted new label encoder with classes: {self.label_encoder.classes_}")
                 print(f"\033[K{Colors.GREEN}✅ Fitted new label encoder with {len(self.label_encoder.classes_)} classes{Colors.ENDC}")
 
-        # Preprocess features
+        # CRITICAL: Preprocess features with proper scaler fitting
         X_processed = self._preprocess_data(X, is_training=not predict_mode)
 
         # Convert to tensors
@@ -5862,7 +5960,7 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Optimized dataset loader with GPU memory management"""
+        """Optimized dataset loader with GPU memory management - FIXED VERSION"""
         DEBUG.log(f"Loading dataset: {self.dataset_name}")
 
         try:
@@ -5886,6 +5984,22 @@ class DBNN(GPUDBNN):
 
             predict_mode = (self.mode == 'predict')
 
+            # CRITICAL FIX 1: Filter to ONLY configured columns BEFORE any processing
+            if 'column_names' in self.config and self.config['column_names']:
+                # Filter to only include configured columns
+                valid_columns = [col for col in self.config['column_names']
+                               if col in df.columns and not col.startswith('#')]
+
+                if not valid_columns:
+                    available_cols = list(df.columns)
+                    print(f"{Colors.RED}❌ ERROR: No valid configured columns found in dataset!{Colors.ENDC}")
+                    print(f"{Colors.RED}   Configured: {self.config['column_names']}{Colors.ENDC}")
+                    print(f"{Colors.RED}   Available: {available_cols}{Colors.ENDC}")
+                    raise ValueError("No valid configured columns found in dataset")
+
+                df = df[valid_columns]
+                DEBUG.log(f"✅ Filtered to configured columns: {valid_columns}")
+
             # Store original target data type for proper decoding
             if self.target_column in df.columns:
                 self.original_target_dtype = df[self.target_column].dtype
@@ -5899,7 +6013,7 @@ class DBNN(GPUDBNN):
                 DEBUG.log(f"Target column '{self.target_column}' found in prediction data - will use for evaluation if needed")
                 # Keep target column for potential evaluation, but don't use for encoding
 
-            # Store original data (CPU only)
+            # Store original data (CPU only) - AFTER column filtering
             self.Original_data = df.copy()
 
             # Handle data splitting based on mode
@@ -5917,10 +6031,6 @@ class DBNN(GPUDBNN):
                     raise ValueError(f"Target column '{self.target_column}' not found in dataset")
                 self.X_Orig = df.drop(columns=[self.target_column]).copy()
                 DEBUG.log(f"Using {len(df.columns) - 1} features for training")
-
-            # Filter features if specified
-            if 'column_names' in self.config:
-                df = _filter_features_from_config(df, self.config)
 
             # Handle target column configuration
             target_col = self.config['target_column']
@@ -5976,6 +6086,69 @@ class DBNN(GPUDBNN):
         except Exception as e:
             DEBUG.log(f"Dataset load error: {str(e)}")
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
+
+    def _preprocess_prediction_data(self):
+        """Preprocess prediction data with robust scaler handling - FIXED VERSION"""
+        DEBUG.log("Preprocessing prediction data with robust scaler handling")
+
+        # CRITICAL FIX 2: Ensure we only use configured feature columns
+        if self.target_column in self.data.columns:
+            # Get configured feature columns (excluding target)
+            feature_columns = [col for col in self.config.get('column_names', [])
+                             if col != self.target_column and col in self.data.columns]
+            if not feature_columns:
+                raise ValueError(f"No feature columns found in config. Config columns: {self.config.get('column_names', [])}")
+
+            X = self.data[feature_columns]
+            self.prediction_true_labels = self.data[self.target_column].astype(str)
+            DEBUG.log(f"Using {len(feature_columns)} configured features: {feature_columns}")
+        else:
+            # Pure prediction - use all configured columns
+            feature_columns = [col for col in self.config.get('column_names', [])
+                             if col in self.data.columns]
+            if not feature_columns:
+                raise ValueError(f"No configured columns found in data. Config columns: {self.config.get('column_names', [])}")
+
+            X = self.data[feature_columns]
+            self.prediction_true_labels = None
+            DEBUG.log(f"Using {len(feature_columns)} configured features (no target): {feature_columns}")
+
+        # CRITICAL FIX 3: Validate that all features are numeric before processing
+        non_numeric_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+        if non_numeric_cols:
+            print(f"{Colors.RED}❌ ERROR: Non-numeric columns found in features: {non_numeric_cols}{Colors.ENDC}")
+            print(f"{Colors.RED}   All features must be numeric. Configured columns: {self.config.get('column_names', [])}{Colors.ENDC}")
+            print(f"{Colors.RED}   Please check your config file and ensure all feature columns contain numeric data.{Colors.ENDC}")
+            raise ValueError(f"Non-numeric columns found: {non_numeric_cols}")
+
+        # ROBUST scaler handling
+        if hasattr(self, 'scaler') and self.scaler is not None:
+            # Check if scaler is fitted
+            is_fitted = (hasattr(self.scaler, 'mean_') and
+                        hasattr(self.scaler, 'scale_') and
+                        self.scaler.mean_ is not None)
+
+            if is_fitted:
+                try:
+                    X_processed = self.scaler.transform(X)
+                    DEBUG.log(f"Data transformed using fitted scaler: {X_processed.shape}")
+                except Exception as e:
+                    print(f"{Colors.YELLOW}⚠️  Scaler transformation failed: {e}. Using original data.{Colors.ENDC}")
+                    X_processed = X.values.astype(np.float64)
+            else:
+                print(f"{Colors.YELLOW}⚠️  Using original data without scaling (scaler not fitted){Colors.ENDC}")
+                X_processed = X.values.astype(np.float64)
+        else:
+            print(f"{Colors.YELLOW}⚠️  No scaler available. Using original data.{Colors.ENDC}")
+            X_processed = X.values.astype(np.float64)
+
+        self.X_tensor = torch.tensor(X_processed, dtype=torch.float64).to(self.device)
+
+        # For prediction, all data is "test" data
+        self.X_test = self.X_tensor
+        self.y_test = torch.zeros(len(self.X_tensor), dtype=torch.long).to(self.device)
+
+        DEBUG.log(f"✅ Prediction data preprocessed: {len(self.X_tensor)} samples")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Memory-optimized vectorized batch posterior computation with adaptive feature pair batching"""
@@ -7512,7 +7685,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with robust NaN handling and type safety."""
+        """Preprocess data with robust NaN handling, proper scaler fitting, and type safety."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
         # Check if X is a DataFrame or a tensor
@@ -7566,11 +7739,29 @@ class DBNN(GPUDBNN):
                 if self.high_cardinality_columns:
                     DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
 
-            # Compute statistics ONLY on the selected features
-            self.global_mean = X.mean(axis=0).values
-            self.global_std = X.std(axis=0).values
+            # Convert to numpy for scaler fitting
+            if isinstance(X, pd.DataFrame):
+                X_numpy = X.values.astype(np.float64)
+            else:
+                X_numpy = X.cpu().numpy() if torch.is_tensor(X) else np.array(X, dtype=np.float64)
+
+            # CRITICAL: Fit scaler during training
+            print(f"\033[K{Colors.CYAN}[INFO] Fitting scaler on training data shape: {X_numpy.shape}{Colors.ENDC}")
+            self.scaler.fit(X_numpy)
+
+            # Verify scaler was fitted properly
+            if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+                print(f"\033[K{Colors.RED}[ERROR] Scaler fitting failed - mean_ attribute not set!{Colors.ENDC}")
+                raise RuntimeError("Scaler failed to fit during training")
+
+            print(f"\033[K{Colors.GREEN}[SUCCESS] Scaler fitted - mean: {self.scaler.mean_.shape}, scale: {self.scaler.scale_.shape}{Colors.ENDC}")
+
+            # Compute statistics for backward compatibility
+            self.global_mean = X_numpy.mean(axis=0)
+            self.global_std = X_numpy.std(axis=0)
             self.global_std[self.global_std == 0] = 1  # Avoid division by zero
             self.global_stats_computed = True
+
         else:
             # During prediction: enforce exact feature matching
             if isinstance(X, pd.DataFrame):
@@ -7609,12 +7800,30 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
-        # Step 4: Standardize using the correct stats
+        # Step 4: Apply scaling using the fitted scaler
         try:
-            X_scaled = (X_numpy - self.global_mean) / (self.global_std + 1e-8)  # Add epsilon to avoid division by zero
-            DEBUG.log("Scaling successful")
+            if is_training:
+                # Use scaler.transform for training data (already fitted above)
+                X_scaled = self.scaler.transform(X_numpy)
+                DEBUG.log("Training data scaled using fitted scaler")
+            else:
+                # Prediction mode: use existing fitted scaler
+                if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
+                    print(f"\033[K{Colors.GREEN}[INFO] Using fitted scaler for prediction data{Colors.ENDC}")
+                    X_scaled = self.scaler.transform(X_numpy)
+                    DEBUG.log("Prediction data scaled using fitted scaler")
+                else:
+                    # Fallback: use global stats if scaler isn't fitted
+                    print(f"\033[K{Colors.YELLOW}[WARNING] Using global stats for scaling (scaler not fitted){Colors.ENDC}")
+                    X_scaled = (X_numpy - self.global_mean) / (self.global_std + 1e-8)
+                    DEBUG.log("Used global stats fallback for scaling")
+
+            # Log scaling results
+            print(f"\033[K{Colors.GREEN}[INFO] Data range after scaling: [{X_scaled.min():.3f}, {X_scaled.max():.3f}]{Colors.ENDC}")
+
         except Exception as e:
-            DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
+            DEBUG.log(f"Scaling failed: {str(e)}. Using manual scaling as fallback")
+            print(f"\033[K{Colors.YELLOW}[WARNING] Scaling failed, using manual fallback: {str(e)}{Colors.ENDC}")
             means = np.nanmean(X_numpy, axis=0)
             stds = np.nanstd(X_numpy, axis=0)
             stds[stds == 0] = 1
@@ -7854,169 +8063,6 @@ class DBNN(GPUDBNN):
         return Paragraph("No heatmap available", style)
 
     #---------------------------------------------------------------------------------
-    def generate_class_pdf_mosaics_old(self, predictions_df, output_dir, columns=4, rows=4):
-        """
-        Generate PDF mosaics with configurable grid layout (columns x rows per page).
-        Captions are clickable hyperlinks to the original image paths.
-
-        Args:
-            predictions_df: DataFrame containing predictions and image paths.
-            output_dir: Directory to save the PDF files.
-            columns: Number of columns per page (default: 4).
-            rows: Number of rows per page (default: 4).
-        """
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Add custom styles
-        styles = getSampleStyleSheet()
-        if 'Caption' not in styles:
-            from reportlab.lib.styles import ParagraphStyle
-            styles.add(ParagraphStyle(
-                name='Caption',
-                parent=styles['Normal'],
-                fontSize=8,
-                leading=9,
-                spaceBefore=2,
-                spaceAfter=2,
-                alignment=1  # Center aligned
-            ))
-
-        # Add hyperlink style
-        if 'Hyperlink' not in styles:
-            styles.add(ParagraphStyle(
-                name='Hyperlink',
-                parent=styles['Caption'],
-                textColor=colors.blue,
-                underline=1
-            ))
-
-        # Group by predicted class
-        class_groups = predictions_df.groupby('predicted_class')
-        images_per_page = columns * rows
-
-        for class_name, group_df in class_groups:
-            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
-            pdf_path = os.path.join(output_dir, f"class_{safe_name}_mosaic.pdf")
-
-            # Sort by prediction confidence (highest first)
-            sorted_df = group_df.sort_values('prediction_confidence', ascending=False)
-            n_images = len(sorted_df)
-            n_pages = math.ceil(n_images / images_per_page)
-
-            # PDF setup with margins
-            doc = SimpleDocTemplate(
-                pdf_path,
-                pagesize=letter,
-                rightMargin=0.5*inch,
-                leftMargin=0.5*inch,
-                topMargin=0.5*inch,
-                bottomMargin=0.5*inch
-            )
-            elements = []
-
-            # Calculate image dimensions based on page size and grid
-            usable_width = letter[0] - inch  # Account for margins
-            usable_height = letter[1] - 2*inch
-            img_width = usable_width / columns
-            img_height = (usable_height / rows) * 0.85  # 85% of row height for image, 15% for caption
-
-            # Single progress bar for the entire class
-            with tqdm(total=n_images,
-                     desc=f"{str(class_name)[:15]:<15}",
-                     unit="img",
-                     bar_format="{l_bar}{bar:40}{r_bar}{bar:-40b}",
-                     leave=False) as pbar:
-
-                processed_images = 0
-
-                for page_num in range(n_pages):
-                    start_idx = page_num * images_per_page
-                    end_idx = min(start_idx + images_per_page, n_images)
-                    page_images = sorted_df.iloc[start_idx:end_idx]
-
-                    # Page header (skip for first page)
-                    if page_num > 0:
-                        elements.extend([
-                            Spacer(1, 0.25*inch),
-                            Paragraph(f"Page {page_num+1} of {n_pages}", styles['Normal']),
-                            Spacer(1, 0.25*inch)
-                        ])
-
-                    elements.append(Paragraph(
-                        f"Class: {class_name} (Sorted by Confidence)",
-                        styles['Heading2']
-                    ))
-                    elements.append(Spacer(1, 0.1*inch))
-
-                    # Create image grid table
-                    table_data = []
-                    row_data = []
-
-                    for _, row in page_images.iterrows():
-                        img_path = row['filepath']
-                        img_name = os.path.basename(img_path)
-                        confidence = row['prediction_confidence']
-
-                        try:
-                            # Verify and load image
-                            with PILImage.open(img_path) as img:
-                                img.verify()
-
-                            # Create clickable caption with hyperlink
-                            caption_text = f'<link href="{img_path}">{img_name[:15]}...</link><br/>Conf: {confidence:.2%}'
-                            caption = Paragraph(caption_text, styles['Hyperlink'])
-
-                            # Create table cell with image and caption
-                            cell_content = [
-                                ReportLabImage(img_path, width=img_width*0.9, height=img_height*0.85),
-                                caption
-                            ]
-                            row_data.append(cell_content)
-
-                            # Start new row when current row is full
-                            if len(row_data) == columns:
-                                table_data.append(row_data)
-                                row_data = []
-
-                        except Exception as e:
-                            print(f"\033[K⚠️ Error loading {img_path}: {str(e)}")
-                            continue
-
-                        # Update progress
-                        processed_images += 1
-                        pbar.update(1)
-
-                    # Add any remaining images in the last row
-                    if row_data:
-                        # Pad with empty cells if needed
-                        while len(row_data) < columns:
-                            row_data.append("")
-                        table_data.append(row_data)
-
-                    # Add table to PDF elements
-                    if table_data:
-                        table_style = [
-                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                            ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-                            ('TOPPADDING', (0, 0), (-1, -1), 3),
-                            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                        ]
-                        table = Table(table_data, colWidths=[img_width] * columns)
-                        table.setStyle(TableStyle(table_style))
-                        elements.append(table)
-
-                    # Add page break if not the last page
-                    if page_num < n_pages - 1:
-                        elements.append(PageBreak())
-
-                # Build the PDF after processing all pages
-                doc.build(elements)
-
-                # Print completion message
-                print(f"\033[K✅ {class_name} - Saved {n_images} images to {os.path.basename(pdf_path)}")
 #--------------Option 3 ----------------
     def generate_class_pdf(self, image_paths: List[str], posteriors: np.ndarray, output_pdf: str):
         """Generate professional multi-page PDF with 2x4 image grids per class, sorted by confidence.
@@ -9160,8 +9206,23 @@ class DBNN(GPUDBNN):
             print("\033[K" + f"Best Overall (Classwise) Accuracy till now is: {Colors.GREEN}{self.best_combined_accuracy:.2%}{Colors.ENDC}")
 
     def train(self, X_train: torch.Tensor, y_train: torch.Tensor, X_test: torch.Tensor, y_test: torch.Tensor, batch_size: int = 128):
-        """Optimized training loop with vectorized operations and proper error handling"""
+        """Optimized training loop with proper scaler fitting and vectorized operations"""
         print("\033[K" + "Starting training...", end="\r", flush=True)
+
+        # CRITICAL FIX: Ensure scaler is fitted before training
+        if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+            print(f"\033[K{Colors.YELLOW}[WARNING] Scaler not fitted - attempting to fit from training data...{Colors.ENDC}")
+
+            # Get the original unscaled data to fit the scaler
+            if hasattr(self, 'X_Orig') and self.X_Orig is not None:
+                # Use the original unscaled data to fit the scaler
+                X_unscaled = self.X_Orig.values if hasattr(self.X_Orig, 'values') else self.X_Orig
+                print(f"\033[K[INFO] Fitting scaler on original data shape: {X_unscaled.shape}")
+                self.scaler.fit(X_unscaled)
+                print(f"\033[K{Colors.GREEN}[SUCCESS] Scaler fitted with mean shape: {self.scaler.mean_.shape}{Colors.ENDC}")
+            else:
+                print(f"\033[K{Colors.RED}[ERROR] Cannot fit scaler - no original data available!{Colors.ENDC}")
+                print(f"\033[K{Colors.YELLOW}[WARNING] Training will continue but predictions may be inaccurate{Colors.ENDC}")
 
         # Initialize visualization if enabled
         enable_visualization = self.config.get('training_params', {}).get('enable_visualization', True)
@@ -9181,7 +9242,9 @@ class DBNN(GPUDBNN):
                 'likelihood_params': self.likelihood_params,
                 'feature_pairs': self.feature_pairs,
                 'bin_edges': self.bin_edges,
-                'gaussian_params': self.gaussian_params
+                'gaussian_params': self.gaussian_params,
+                # CRITICAL: Also save scaler state in initial conditions
+                'scaler_fitted': hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None
             }
 
         # Initialize progress tracking
@@ -9279,9 +9342,15 @@ class DBNN(GPUDBNN):
 
                     # Capture snapshot every 5 epochs to avoid too much data
                     if epoch % 5 == 0 or epoch == self.max_epochs - 1:
-                       visualizer.capture_epoch_snapshot(
+                        # Get current features and targets for visualization
+                        current_features = X_all.cpu().numpy()
+                        current_targets = y_all.cpu().numpy()
+                        current_predictions = all_pred.cpu().numpy()
+                        current_weights = self.current_W.cpu().numpy() if self.current_W is not None else None
+
+                        self.visualizer.capture_epoch_snapshot(
                             epoch=epoch,
-                            accuracy=accuracy,
+                            accuracy=overall_accuracy,
                             features=current_features,
                             targets=current_targets,
                             weights=current_weights,
@@ -9298,7 +9367,8 @@ class DBNN(GPUDBNN):
             epoch_pbar.update(1)
             epoch_pbar.set_postfix({
                 'train_err': f"{train_error_rate:.4f}",
-                'train_acc': f"{train_accuracy:.4f}"
+                'train_acc': f"{train_accuracy:.4f}",
+                'scaler': '✓' if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None else '✗'
             })
 
             # Check for best round
@@ -9310,7 +9380,9 @@ class DBNN(GPUDBNN):
                     'likelihood_params': self.likelihood_params,
                     'feature_pairs': self.feature_pairs,
                     'bin_edges': self.bin_edges,
-                    'gaussian_params': self.gaussian_params
+                    'gaussian_params': self.gaussian_params,
+                    # CRITICAL: Also save scaler state in best conditions
+                    'scaler_fitted': hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None
                 }
 
             # Update best model if improved
@@ -9340,7 +9412,16 @@ class DBNN(GPUDBNN):
                     print(f"\033[KWarning: Failed to update priors: {str(e)}")
                     # Continue training even if weight update fails
 
-        # Training complete
+        # Training complete - CRITICAL: Save components with fitted scaler
+        print(f"\033[K[INFO] Training completed - saving model components with scaler state")
+        self._save_model_components()
+
+        # Verify scaler was saved properly
+        if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
+            print(f"\033[K{Colors.GREEN}[SUCCESS] Model saved with fitted scaler (mean shape: {self.scaler.mean_.shape}){Colors.ENDC}")
+        else:
+            print(f"\033[K{Colors.RED}[WARNING] Model saved but scaler is NOT fitted!{Colors.ENDC}")
+
         epoch_pbar.close()
         return self.current_W.cpu(), error_rates
 
@@ -9701,7 +9782,7 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _get_train_test_split(self, X_tensor, y_tensor):
-        """Get or create consistent train-test split using smaller chunks to avoid memory issues."""
+        """Get or create consistent train-test split with proper indices handling."""
         dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
         base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
         split_path = os.path.join(base_path, dataset_folder, 'train_test_split.pkl')
@@ -9710,41 +9791,76 @@ class DBNN(GPUDBNN):
             with open(split_path, 'rb') as f:
                 split_indices = pickle.load(f)
                 train_idx, test_idx = split_indices['train'], split_indices['test']
+
+                # Verify indices match data size
+                if len(train_idx) + len(test_idx) != len(X_tensor):
+                    print(f"\033[K{Colors.YELLOW}[WARNING] Saved split indices don't match data size. Recreating split.{Colors.ENDC}")
+                    os.remove(split_path)
+                    return self._get_train_test_split(X_tensor, y_tensor)
+
                 return (X_tensor[train_idx], X_tensor[test_idx],
                         y_tensor[train_idx], y_tensor[test_idx])
 
-        # If no saved split exists, create one using smaller chunks
-        X_cpu = X_tensor.cpu().numpy()  # Move data to CPU for sklearn compatibility
+        # Create new split
+        print(f"\033[K{Colors.CYAN}[INFO] Creating new train-test split (test_size={self.test_size}){Colors.ENDC}")
+
+        X_cpu = X_tensor.cpu().numpy()
         y_cpu = y_tensor.cpu().numpy()
 
-        # Perform train-test split on CPU in smaller chunks
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_cpu,  # Use NumPy array for sklearn compatibility
-            y_cpu,
+        # Generate indices for the split
+        indices = np.arange(len(X_cpu))
+        train_indices, test_indices = train_test_split(
+            indices,
             test_size=self.test_size,
-            random_state=self.random_state,
-            shuffle=(self.shuffle_state != -1)
+            random_state=self.random_state if self.random_state != -1 else None,
+            shuffle=(self.shuffle_state != -1),
+            stratify=y_cpu
         )
 
-        # Convert back to PyTorch tensors and move to the appropriate device
-        X_train = torch.tensor(X_train, dtype=torch.float64).to(self.device)
-        X_test = torch.tensor(X_test, dtype=torch.float64).to(self.device)
-        y_train = torch.tensor(y_train, dtype=torch.long).to(self.device)
-        y_test = torch.tensor(y_test, dtype=torch.long).to(self.device)
+        # Split the data using indices
+        X_train = X_cpu[train_indices]
+        X_test = X_cpu[test_indices]
+        y_train = y_cpu[train_indices]
+        y_test = y_cpu[test_indices]
 
-        # Save split indices to avoid recomputing
+        # Convert to tensors
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float64).to(self.device)
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float64).to(self.device)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.long).to(self.device)
+        y_test_tensor = torch.tensor(y_test, dtype=torch.long).to(self.device)
+
+        # Save split indices
         os.makedirs(os.path.dirname(split_path), exist_ok=True)
         split_indices = {
-            'train': torch.arange(len(X_train)),  # Indices for training set
-            'test': torch.arange(len(X_train), len(X_train) + len(X_test))  # Indices for test set
+            'train': train_indices,
+            'test': test_indices,
+            'config': {
+                'test_size': self.test_size,
+                'random_state': self.random_state,
+                'shuffle': self.shuffle_state != -1,
+                'dataset_name': self.dataset_name,
+                'created_at': time.time()
+            }
         }
+
         with open(split_path, 'wb') as f:
             pickle.dump(split_indices, f)
 
-        # Store test indices for later use
-        self.test_indices = split_indices['test']
+        # Store indices for later use
+        self.test_indices = test_indices
+        self.train_indices = train_indices
 
-        return X_train, X_test, y_train, y_test
+        print(f"\033[K{Colors.GREEN}[SUCCESS] Created train-test split: {len(X_train_tensor)} train, {len(X_test_tensor)} test samples{Colors.ENDC}")
+
+        # Log class distribution
+        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+            train_classes, train_counts = np.unique(y_train, return_counts=True)
+            test_classes, test_counts = np.unique(y_test, return_counts=True)
+
+            print(f"\033[K[INFO] Training class distribution: {dict(zip(self.label_encoder.inverse_transform(train_classes), train_counts))}")
+            print(f"\033[K[INFO] Test class distribution: {dict(zip(self.label_encoder.inverse_transform(test_classes), test_counts))}")
+
+        return X_train_tensor, X_test_tensor, y_train_tensor, y_test_tensor
 
     def _train_test_split_tensor(self, X, y, test_size, random_state):
         """Split data consistently using fixed indices"""
@@ -10262,7 +10378,7 @@ class DBNN(GPUDBNN):
         return result_df
 
     def _save_model_components(self):
-        """Enhanced model component saving with validation and atomic writes"""
+        """Enhanced model component saving with proper scaler state preservation"""
         try:
             # Validate critical components exist before saving
             required_components = {
@@ -10282,15 +10398,17 @@ class DBNN(GPUDBNN):
             if not hasattr(self.label_encoder, 'classes_'):
                 raise ValueError("Label encoder not properly fitted")
 
+            # CRITICAL FIX: Check if scaler is actually fitted and save its state properly
+            scaler_is_fitted = (hasattr(self.scaler, 'mean_') and
+                               hasattr(self.scaler, 'scale_') and
+                               self.scaler.mean_ is not None)
+
+            if not scaler_is_fitted:
+                print(f"\033[K[WARNING] Scaler is not fitted! This will cause prediction issues.")
+
             # Prepare components dictionary with validation
             components = {
-                'version': 4,  # Updated version for new format with original_target_dtype
-                'scaler': self.scaler,
-                'label_encoder': {
-                    'classes_': self.label_encoder.classes_.tolist(),
-                    'fitted': hasattr(self.label_encoder, 'classes_')
-                },
-                'original_target_dtype': str(getattr(self, 'original_target_dtype', 'object')),  # NEW: Store original target dtype
+                'version': 5,  # Updated version for enhanced scaler state
                 'model_type': self.model_type,
                 'feature_pairs': self.feature_pairs.cpu().tolist() if torch.is_tensor(self.feature_pairs) else self.feature_pairs,
                 'global_mean': self.global_mean,
@@ -10309,7 +10427,26 @@ class DBNN(GPUDBNN):
                     'means': self.gaussian_params['means'].cpu().tolist() if torch.is_tensor(self.gaussian_params['means']) else self.gaussian_params['means'],
                     'covs': self.gaussian_params['covs'].cpu().tolist() if torch.is_tensor(self.gaussian_params['covs']) else self.gaussian_params['covs'],
                     'classes': self.gaussian_params['classes'].cpu().tolist() if torch.is_tensor(self.gaussian_params['classes']) else self.gaussian_params['classes']
-                } if hasattr(self, 'gaussian_params') and self.gaussian_params is not None else None
+                } if hasattr(self, 'gaussian_params') and self.gaussian_params is not None else None,
+
+                # CRITICAL FIX: Save scaler state as separate attributes for reliable restoration
+                'scaler_state': {
+                    'fitted': scaler_is_fitted,
+                    'mean_': self.scaler.mean_.tolist() if scaler_is_fitted else None,
+                    'scale_': self.scaler.scale_.tolist() if scaler_is_fitted else None,
+                    'var_': self.scaler.var_.tolist() if scaler_is_fitted and hasattr(self.scaler, 'var_') else None,
+                    'n_features_in_': self.scaler.n_features_in_ if scaler_is_fitted and hasattr(self.scaler, 'n_features_in_') else None,
+                    'feature_names_in_': self.scaler.feature_names_in_.tolist() if scaler_is_fitted and hasattr(self.scaler, 'feature_names_in_') and self.scaler.feature_names_in_ is not None else None
+                },
+
+                # Save the actual scaler object as well for compatibility
+                'scaler': self.scaler,
+
+                'label_encoder': {
+                    'classes_': self.label_encoder.classes_.tolist(),
+                    'fitted': hasattr(self.label_encoder, 'classes_')
+                },
+                'original_target_dtype': str(getattr(self, 'original_target_dtype', 'object')),
             }
 
             # Add model-specific components with validation
@@ -10351,6 +10488,10 @@ class DBNN(GPUDBNN):
             os.replace(temp_file, components_file)
 
             print(f"\033[K[SUCCESS] Saved model components to {components_file} (Size: {os.path.getsize(components_file)/1024:.2f} KB)")
+            if scaler_is_fitted:
+                print(f"\033[K[INFO] Scaler state saved: mean_shape={self.scaler.mean_.shape}")
+            else:
+                print(f"\033[K[WARNING] Scaler was NOT fitted - prediction accuracy will be affected!")
             return True
 
         except Exception as e:
@@ -10362,7 +10503,7 @@ class DBNN(GPUDBNN):
             return False
 
     def _load_model_components(self):
-        """Enhanced model component loading with comprehensive validation and proper label encoder restoration"""
+        """Enhanced model component loading with reliable scaler state restoration"""
         components_file = self._get_model_components_filename()
 
         if not os.path.exists(components_file):
@@ -10379,14 +10520,10 @@ class DBNN(GPUDBNN):
             if not isinstance(components, dict) or 'version' not in components:
                 raise ValueError("Invalid components file format")
 
-            # Version-specific validation
-            if components['version'] < 2:
-                raise ValueError(f"Unsupported components version: {components['version']}")
-
             # Store current visualization setting before loading config
             current_visualization = self.config.get('training_params', {}).get('enable_visualization', False)
 
-            # Load and validate label encoder - FIXED: Properly restore the label encoder
+            # Load and validate label encoder
             if 'label_encoder' not in components or not components['label_encoder'].get('fitted', False):
                 raise ValueError("Label encoder not properly saved or not fitted")
 
@@ -10411,14 +10548,39 @@ class DBNN(GPUDBNN):
                     print(f"\033[K[WARNING] Failed to load original target dtype '{dtype_str}': {str(e)}")
                     self.original_target_dtype = np.dtype('object')
             else:
-                # For backward compatibility with older models
                 self.original_target_dtype = np.dtype('object')
                 print(f"\033[K[WARNING] No original_target_dtype found, using default: {self.original_target_dtype}")
 
+            # CRITICAL FIX: Restore scaler state with priority to explicit state over object
+            self.scaler = StandardScaler()  # Always create fresh scaler
+
+            # First try to restore from explicit scaler_state (most reliable)
+            if 'scaler_state' in components and components['scaler_state'].get('fitted', False):
+                scaler_state = components['scaler_state']
+                try:
+                    self.scaler.mean_ = np.array(scaler_state['mean_'])
+                    self.scaler.scale_ = np.array(scaler_state['scale_'])
+                    if scaler_state.get('var_') is not None:
+                        self.scaler.var_ = np.array(scaler_state['var_'])
+                    if scaler_state.get('n_features_in_') is not None:
+                        self.scaler.n_features_in_ = scaler_state['n_features_in_']
+                    if scaler_state.get('feature_names_in_') is not None:
+                        self.scaler.feature_names_in_ = np.array(scaler_state['feature_names_in_'])
+
+                    print(f"\033[K[INFO] Restored fitted scaler from explicit state with mean shape: {self.scaler.mean_.shape}")
+
+                except Exception as e:
+                    print(f"\033[K[WARNING] Failed to restore scaler from explicit state: {str(e)}")
+                    # Fall back to scaler object
+                    self._restore_scaler_from_object(components)
+
+            else:
+                # Fall back to scaler object restoration
+                self._restore_scaler_from_object(components)
+
             # Validate and load core components
             required_components = [
-                'scaler', 'model_type', 'feature_pairs',
-                'target_column', 'n_bins_per_dim'
+                'model_type', 'feature_pairs', 'target_column', 'n_bins_per_dim'
             ]
             for comp in required_components:
                 if comp not in components:
@@ -10472,10 +10634,8 @@ class DBNN(GPUDBNN):
 
             # Load config but preserve current visualization setting
             if 'config' in components:
-                # Update the config but preserve the current visualization setting
                 loaded_config = components['config']
                 if 'training_params' in loaded_config and 'training_params' in self.config:
-                    # Preserve the current visualization setting from the active config
                     loaded_config['training_params']['enable_visualization'] = current_visualization
                 self.config.update(loaded_config)
 
@@ -10485,12 +10645,36 @@ class DBNN(GPUDBNN):
         except Exception as e:
             print(f"\033[K[ERROR] Failed to load model components: {str(e)}")
             traceback.print_exc()
-            # Reset critical components to prevent partial state
+
+            # Reset critical components on error
+            print(f"\033[K[WARNING] Model loading failed - resetting critical components")
             self.label_encoder = LabelEncoder()
             self.scaler = StandardScaler()
             self.feature_pairs = None
-            self.original_target_dtype = np.dtype('object')  # Reset to default
+            self.original_target_dtype = np.dtype('object')
+
             return False
+
+    def _restore_scaler_from_object(self, components):
+        """Helper method to restore scaler from saved scaler object"""
+        if 'scaler' in components and components['scaler'] is not None:
+            try:
+                saved_scaler = components['scaler']
+                # Check if the saved scaler has fitted attributes
+                if (hasattr(saved_scaler, 'mean_') and
+                    hasattr(saved_scaler, 'scale_') and
+                    saved_scaler.mean_ is not None):
+
+                    self.scaler = saved_scaler
+                    print(f"\033[K[INFO] Restored fitted scaler from object with mean shape: {self.scaler.mean_.shape}")
+                else:
+                    print(f"\033[K[WARNING] Loaded scaler object is not fitted! This may cause prediction issues.")
+            except Exception as e:
+                print(f"\033[K[WARNING] Failed to restore scaler from object: {str(e)}")
+                # Keep the fresh StandardScaler() we created earlier
+        else:
+            print(f"\033[K[WARNING] No scaler object found in saved components!")
+
 
 #--------------------------------------------------Class Ends ----------------------------------------------------------
     # DBNN class to handle prediction functionality
