@@ -206,7 +206,7 @@ class PredictionManager:
         self.model = self._load_model()
 
     def _load_model(self) -> nn.Module:
-        """Load model with frozen feature selection"""
+        """Load model with invertible feature compression"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
@@ -234,7 +234,7 @@ class PredictionManager:
             raise ValueError("No suitable checkpoint state found")
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict, strict=False)  # Allow missing keys for new components
 
         # Load feature selection state
         config_state = checkpoint['model_states'][state_key]['best']['config']
@@ -247,12 +247,18 @@ class PredictionManager:
 
             logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices else 'None'} features")
 
+        # NEW: Load compressed dimensions info
+        if 'compressed_dims' in config_state:
+            model.compressed_dims = config_state['compressed_dims']
+            logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
+
         model.set_training_phase(2)
         model.eval()
 
-        logger.info("Model loaded successfully with frozen feature selection")
+        logger.info("Model loaded successfully with invertible feature compression")
         return model
-#--------------------Prediction -----------------------
+
+        #--------------------Prediction -----------------------
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
         """Predict using frozen feature selection with full path support"""
         # Get image files with full paths and class labels from subfolders
@@ -262,7 +268,7 @@ class PredictionManager:
             return
 
         # Create dataset and dataloader
-        transform = self._get_transforms()
+        transform = self.get_transforms(self.config, is_train=False)
         dataset = self._create_dataset(image_files, transform)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                                num_workers=min(4, os.cpu_count() or 1))
@@ -271,7 +277,7 @@ class PredictionManager:
 
         all_predictions = {
             'filename': [],
-            'file_path': [],
+            'filepath': [],
             'target': class_labels,  # Add class labels from subfolders
             'features_phase1': [],
             'class_predictions': [],
@@ -304,7 +310,7 @@ class PredictionManager:
                     logger.debug("Using frozen feature selection for prediction")
                 else:
                     features = embedding.detach().cpu().numpy()
-                    logger.warning("No frozen feature selection available, using all features")
+                    #logger.warning("No frozen feature selection available, using all features")
 
                 # Store predictions
                 batch_size_actual = features.shape[0]
@@ -323,7 +329,7 @@ class PredictionManager:
                         batch_full_paths.append(f"batch_{batch_idx}_{i}")
 
                 all_predictions['filename'].extend(batch_filenames)
-                all_predictions['file_path'].extend(batch_full_paths)
+                all_predictions['filepath'].extend(batch_full_paths)
                 all_predictions['features_phase1'].extend(features)
 
                 # Store additional outputs if available
@@ -574,7 +580,7 @@ class PredictionManager:
 
         # Add filename, full path and other metadata
         df.insert(0, 'filename', predictions['filename'])
-        df.insert(1, 'file_path', predictions['file_path'])  # NEW: Add full path column
+        df.insert(1, 'filepath', predictions['filepath'])  # NEW: Add full path column
 
         # Add class predictions if available
         if predictions.get('class_predictions') and len(predictions['class_predictions']) == len(df):
@@ -1101,13 +1107,7 @@ class BaseAutoencoder(nn.Module):
     """Base autoencoder class with frozen feature selection capabilities"""
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: Dict):
-        """Initialize base autoencoder with dynamic shape management and all core components.
-
-        Args:
-            input_shape: Tuple of (channels, height, width)
-            feature_dims: Dimension of latent space features
-            config: Configuration dictionary
-        """
+        """Initialize base autoencoder with invertible information preservation."""
         super().__init__()
 
         # Basic configuration
@@ -1147,11 +1147,31 @@ class BaseAutoencoder(nn.Module):
         self.checkpoint_path = os.path.join(self.checkpoint_dir,
                                           f"{self.dataset_name}_unified.pth")
 
-        # Create network layers
+        # Create network layers with invertibility constraints
         self.encoder_layers = self._create_encoder_layers()
         self.embedder = self._create_embedder()
         self.unembedder = self._create_unembedder()
         self.decoder_layers = self._create_decoder_layers()
+
+        # NEW: Invertible feature compression components
+        self.compressed_dims = config['model'].get('compressed_dims',
+                                                 max(8, feature_dims // 4))
+
+        # Feature space autoencoder for invertible compression
+        self.feature_compressor = nn.Sequential(
+            nn.Linear(feature_dims, feature_dims // 2),
+            nn.BatchNorm1d(feature_dims // 2),
+            nn.LeakyReLU(0.2),
+            nn.Linear(feature_dims // 2, self.compressed_dims),
+            nn.Tanh()  # Constrained output for stability
+        )
+
+        self.feature_decompressor = nn.Sequential(
+            nn.Linear(self.compressed_dims, feature_dims // 2),
+            nn.BatchNorm1d(feature_dims // 2),
+            nn.LeakyReLU(0.2),
+            nn.Linear(feature_dims // 2, feature_dims)
+        )
 
         # Initialize enhancement components
         self.use_kl_divergence = (config['model']
@@ -1168,10 +1188,10 @@ class BaseAutoencoder(nn.Module):
         if self.use_class_encoding:
             num_classes = config['dataset'].get('num_classes', 10)
             self.classifier = nn.Sequential(
-                nn.Linear(feature_dims, feature_dims // 2),
+                nn.Linear(self.compressed_dims, self.compressed_dims // 2),  # Use compressed dims
                 nn.ReLU(),
                 nn.Dropout(0.3),
-                nn.Linear(feature_dims // 2, num_classes)
+                nn.Linear(self.compressed_dims // 2, num_classes)
             )
             self.shape_registry['classifier_output'] = (num_classes,)
 
@@ -1239,7 +1259,8 @@ class BaseAutoencoder(nn.Module):
         return embedding
 
     def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass with frozen feature selection support"""
+        """Forward pass with invertible feature compression"""
+        # Standard encoding
         embedding = self.encode(x)
 
         # Safety check for embedding type
@@ -1247,11 +1268,18 @@ class BaseAutoencoder(nn.Module):
             logger.warning("Embedding is tuple in forward(), taking first element")
             embedding = embedding[0]
 
-        reconstruction = self.decode(embedding)
+        # NEW: Invertible feature compression
+        compressed_embedding = self.feature_compressor(embedding)
+        reconstructed_embedding = self.feature_decompressor(compressed_embedding)
+
+        # Standard decoding using compressed features for efficiency
+        reconstruction = self.decode(compressed_embedding)
 
         if self.training_phase == 2:
             output = {
-                'embedding': embedding,
+                'embedding': embedding,  # Original 128D
+                'compressed_embedding': compressed_embedding,  # Compressed 32D
+                'reconstructed_embedding': reconstructed_embedding,  # Reconstructed 128D
                 'reconstruction': reconstruction
             }
 
@@ -1262,17 +1290,20 @@ class BaseAutoencoder(nn.Module):
                 output['feature_importance_scores'] = self._feature_importance_scores
 
             if self.use_class_encoding and hasattr(self, 'classifier'):
-                class_logits = self.classifier(embedding)
+                # Use compressed features for classification (more efficient)
+                class_logits = self.classifier(compressed_embedding)
                 output['class_logits'] = class_logits
                 output['class_predictions'] = class_logits.argmax(dim=1)
 
             if self.use_kl_divergence:
-                latent_info = self.organize_latent_space(embedding)
+                # Use compressed features for clustering (more efficient)
+                latent_info = self.organize_latent_space(compressed_embedding)
                 output.update(latent_info)
 
             return output
         else:
-            return embedding, reconstruction
+            # Phase 1: Return both compressed and reconstructed
+            return compressed_embedding, reconstruction
 
     def _calculate_spatial_progression(self):
         """Calculate spatial dimensions with exact reversal for decoder"""
@@ -1506,13 +1537,13 @@ class BaseAutoencoder(nn.Module):
 
         # Add full file paths
         if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
-            data['file_path'] = feature_dict['full_paths']
+            data['filepath'] = feature_dict['full_paths']
             logger.info(f"Included {len(feature_dict['full_paths'])} full file paths in CSV")
         elif 'filenames' in feature_dict and len(feature_dict['filenames']) == base_length:
-            data['file_path'] = feature_dict['filenames']
+            data['filepath'] = feature_dict['filenames']
             logger.info(f"Included {len(feature_dict['filenames'])} filenames in CSV (full paths not available)")
         else:
-            data['file_path'] = [f"sample_{i}" for i in range(base_length)]
+            data['filepath'] = [f"sample_{i}" for i in range(base_length)]
             logger.warning("No file paths available, using sample indices")
 
         # Add labels and metadata - TARGET COLUMN
@@ -1541,12 +1572,12 @@ class BaseAutoencoder(nn.Module):
         column_order.extend(sorted(feature_columns, key=lambda x: int(x.split('_')[1])))
 
         # Add other columns in order
-        other_columns = [col for col in df.columns if col not in column_order and col != 'file_path']
+        other_columns = [col for col in df.columns if col not in column_order and col != 'filepath']
         column_order.extend(other_columns)
 
         # Add file_path last if it exists
-        if 'file_path' in df.columns:
-            column_order.append('file_path')
+        if 'filepath' in df.columns:
+            column_order.append('filepath')
 
         # Reorder the DataFrame
         df = df[column_order]
@@ -2085,7 +2116,12 @@ class BaseAutoencoder(nn.Module):
         )
 
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """Basic decoding process with dynamic shape handling"""
+        """Enhanced decoding that handles both compressed and full embeddings"""
+        # If input is compressed features, first decompress
+        if x.shape[1] == self.compressed_dims:
+            x = self.feature_decompressor(x)
+
+        # Standard decoding process
         x = self.unembedder(x)
         x = x.view(x.size(0), self.layer_sizes[-1],
                   self.final_spatial_dim_h, self.final_spatial_dim_w)
@@ -2333,25 +2369,41 @@ class BaseAutoencoder(nn.Module):
         return enhancement_dict
 
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Organize latent space using KL divergence with consistent behavior for prediction"""
+        """Organize latent space using compressed features"""
+        # Use compressed features if available and appropriate size
+        if hasattr(self, 'compressed_dims') and embeddings.shape[1] != self.compressed_dims:
+            # If we have full embeddings but need compressed, compress them
+            embeddings = self.feature_compressor(embeddings)
+
         output = {'embeddings': embeddings}  # Keep on same device as input
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
-            # Ensure cluster centers are on same device
+            # Ensure cluster centers are on same device and correct dimension
             cluster_centers = self.cluster_centers.to(embeddings.device)
+
+            # If cluster centers dimension doesn't match embeddings, adjust
+            if cluster_centers.shape[1] != embeddings.shape[1]:
+                # Create properly dimensioned cluster centers
+                num_clusters = cluster_centers.shape[0]
+                if not hasattr(self, '_adjusted_cluster_centers'):
+                    self._adjusted_cluster_centers = nn.Parameter(
+                        torch.randn(num_clusters, embeddings.shape[1], device=embeddings.device)
+                    )
+                cluster_centers = self._adjusted_cluster_centers
+
             temperature = self.clustering_temperature
 
             # Calculate distances to cluster centers
             distances = torch.cdist(embeddings, cluster_centers)
 
             # Convert distances to probabilities (soft assignments)
-            q_dist = 1.0 / (1.0 + (distances / self.clustering_temperature) ** 2)
+            q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
             if labels is not None:
                 # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
-                for i in range(self.cluster_centers.size(0)):
+                for i in range(cluster_centers.size(0)):
                     mask = (labels == i)
                     if mask.any():
                         p_dist[mask, i] = 1.0
@@ -2450,6 +2502,61 @@ class BaseAutoencoder(nn.Module):
 
         logger.info(f"Cleaned history: {len(cleaned_history)} metrics")
         return cleaned_history
+
+    def compute_invertibility_loss(self, outputs: Dict[str, torch.Tensor],
+                                 targets: torch.Tensor,
+                                 labels: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute multi-objective loss with invertibility constraints"""
+
+        # 1. Standard pixel reconstruction loss
+        pixel_loss = F.mse_loss(outputs['reconstruction'], targets)
+
+        # 2. Feature reconstruction loss (invertibility constraint)
+        feature_recon_loss = F.mse_loss(outputs['reconstructed_embedding'], outputs['embedding'])
+
+        # 3. Cycle consistency loss (strong invertibility guarantee)
+        # Re-encode the reconstruction to verify invertibility
+        with torch.no_grad():
+            cycle_embedding = self.encode(outputs['reconstruction'])
+            if isinstance(cycle_embedding, tuple):
+                cycle_embedding = cycle_embedding[0]
+
+        cycle_compressed = self.feature_compressor(cycle_embedding)
+        cycle_loss = F.mse_loss(cycle_compressed, outputs['compressed_embedding'])
+
+        # 4. Class preservation loss (if labels available)
+        class_loss = torch.tensor(0.0)
+        if labels is not None and self.use_class_encoding and hasattr(self, 'classifier'):
+            class_logits = self.classifier(outputs['compressed_embedding'])
+            class_loss = F.cross_entropy(class_logits, labels)
+
+        # 5. Variance preservation regularization
+        original_variance = torch.var(outputs['embedding'], dim=0)
+        compressed_variance = torch.var(outputs['compressed_embedding'], dim=0)
+        # Scale target variance based on compression ratio
+        target_variance = original_variance * (self.compressed_dims / self.feature_dims)
+        variance_loss = F.mse_loss(compressed_variance, target_variance)
+
+        # Combine losses with adaptive weights
+        total_loss = (pixel_loss +
+                      0.5 * feature_recon_loss +
+                      0.3 * cycle_loss +
+                      0.2 * class_loss +
+                      0.1 * variance_loss)
+
+        # Store individual losses for monitoring
+        if not hasattr(self, 'loss_components'):
+            self.loss_components = {}
+
+        self.loss_components = {
+            'pixel_loss': pixel_loss.item(),
+            'feature_recon_loss': feature_recon_loss.item(),
+            'cycle_loss': cycle_loss.item(),
+            'class_loss': class_loss.item() if isinstance(class_loss, torch.Tensor) else class_loss,
+            'variance_loss': variance_loss.item()
+        }
+
+        return total_loss
 
 def make_json_serializable(obj):
     """Convert an object to be JSON serializable"""
@@ -3588,17 +3695,21 @@ class ModelFactory:
 
     @staticmethod
     def create_model(config: Dict) -> nn.Module:
-        """Create model with proper channel handling."""
+        """Create model with invertible feature compression"""
         input_shape = (
             config['dataset']['in_channels'],  # Use configured channels
             config['dataset']['input_size'][0],
             config['dataset']['input_size'][1]
         )
-        feature_dims= config['model']['feature_dims']
+        feature_dims = config['model']['feature_dims']
+
+        # NEW: Set compressed dimensions in config
+        if 'compressed_dims' not in config['model']:
+            config['model']['compressed_dims'] = max(8, feature_dims // 4)
 
         image_type = config['dataset'].get('image_type', 'general')
 
-        # Create appropriate model with proper channel handling
+        # Create appropriate model with invertible compression
         if image_type == 'astronomical':
             model = AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
         elif image_type == 'medical':
@@ -3613,8 +3724,8 @@ class ModelFactory:
             if model.in_channels != config['dataset']['in_channels']:
                 logger.warning(f"Model expects {model.in_channels} channels but config specifies {config['dataset']['in_channels']}")
 
+        logger.info(f"Created model with {feature_dims}D → {config['model']['compressed_dims']}D invertible compression")
         return model
-
 
 
 class BaseFeatureSelector(ABC):
@@ -4306,7 +4417,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic with class-balanced loss calculation and robust size handling"""
+    """Training logic with invertible feature compression and class-balanced loss calculation"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
@@ -4330,9 +4441,48 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 # Forward pass
                 if phase == 1:
-                    # Phase 1: Reconstruction loss only
-                    embedding = model.encode(data)
-                    reconstruction = model.decode(embedding)
+                    # NEW: Phase 1 with invertible feature compression
+                    outputs = model(data)
+
+                    # Handle both return types for backward compatibility
+                    if isinstance(outputs, tuple):
+                        # Old format: (embedding, reconstruction) - maintain compatibility
+                        compressed_embedding, reconstruction = outputs
+
+                        # Ensure reconstruction matches input size before loss calculation
+                        if reconstruction.shape != data.shape:
+                            reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
+                                                         mode='bilinear', align_corners=False)
+                            logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
+
+                        # Standard MSE loss for backward compatibility
+                        loss = F.mse_loss(reconstruction, data)
+                    else:
+                        # NEW: Enhanced format with invertibility loss
+                        reconstruction = outputs['reconstruction']
+
+                        # Ensure reconstruction matches input size before loss calculation
+                        if reconstruction.shape != data.shape:
+                            reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
+                                                         mode='bilinear', align_corners=False)
+                            logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
+
+                        # Use enhanced invertibility-preserving loss
+                        loss = model.compute_invertibility_loss(outputs, data, labels)
+
+                        # Log invertibility metrics occasionally
+                        if batch_idx % 50 == 0 and hasattr(model, 'loss_components'):
+                            logger.debug(f"Invertibility losses: {model.loss_components}")
+                else:
+                    # Phase 2: Enhanced losses with compressed features
+                    output = model(data)
+                    reconstruction = output['reconstruction']
+
+                    # Use compressed features for efficiency in Phase 2
+                    if 'compressed_embedding' in output:
+                        embedding = output['compressed_embedding']  # Use compressed features
+                    else:
+                        embedding = output['embedding']  # Fallback to original
 
                     # Ensure reconstruction matches input size before loss calculation
                     if reconstruction.shape != data.shape:
@@ -4340,26 +4490,13 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                                                      mode='bilinear', align_corners=False)
                         logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
 
-                    loss = F.mse_loss(reconstruction, data)
-                else:
-                    # Phase 2: Enhanced losses
-                    output = model(data)
-                    reconstruction = output['reconstruction']
-                    embedding = output['embedding']
-
-                    # Ensure reconstruction matches input size before loss calculation
-                    if reconstruction.shape != data.shape:
-                        reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
-                                                     mode='bilinear', align_corners=False)
-                        logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2]}")
-
                     # Base reconstruction loss
                     recon_loss = F.mse_loss(reconstruction, data)
 
                     # Initialize total loss
                     total_loss = recon_loss
 
-                    # KL Divergence loss
+                    # KL Divergence loss using compressed features
                     if model.use_kl_divergence:
                         latent_info = model.organize_latent_space(embedding, labels)
                         kl_loss = F.kl_div(
@@ -4369,9 +4506,13 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                         )
                         total_loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
 
-                    # Class-balanced classification loss
+                    # Class-balanced classification loss using compressed features
                     if model.use_class_encoding and hasattr(model, 'classifier'):
-                        class_logits = model.classifier(embedding)
+                        # Use compressed features for classification
+                        if 'compressed_embedding' in output:
+                            class_logits = model.classifier(output['compressed_embedding'])
+                        else:
+                            class_logits = model.classifier(embedding)
 
                         if use_classwise:  # Class-balanced loss calculation
                             class_losses = []
@@ -4428,6 +4569,13 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     'patience': f"{patience_counter}"
                 }
 
+                # NEW: Add invertibility metrics for Phase 1
+                if phase == 1 and hasattr(model, 'loss_components'):
+                    feature_loss = model.loss_components.get('feature_recon_loss', 0)
+                    cycle_loss = model.loss_components.get('cycle_loss', 0)
+                    status['feat'] = f"{feature_loss:.4f}"
+                    status['cycle'] = f"{cycle_loss:.4f}"
+
                 if phase == 2 and model.use_class_encoding:
                     avg_acc = running_acc / (batch_idx + 1)
                     status['acc'] = f"{avg_acc:.2%}"
@@ -4443,13 +4591,28 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             avg_loss = running_loss / num_batches
             history[f'phase{phase}_loss'].append(avg_loss)
 
+            # NEW: Store invertibility metrics for Phase 1
+            if phase == 1 and hasattr(model, 'loss_components'):
+                history[f'phase{phase}_feature_recon_loss'].append(
+                    model.loss_components.get('feature_recon_loss', 0)
+                )
+                history[f'phase{phase}_cycle_loss'].append(
+                    model.loss_components.get('cycle_loss', 0)
+                )
+
             if phase == 2 and model.use_class_encoding:
                 avg_acc = running_acc / num_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
 
-            # Log epoch progress
-           # logger.info(f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}" +
-           #            (f" - Accuracy: {avg_acc:.2%}" if phase == 2 and model.use_class_encoding else ""))
+            # Log epoch progress with enhanced information
+            log_message = f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}"
+            if phase == 1 and hasattr(model, 'loss_components'):
+                feature_loss = model.loss_components.get('feature_recon_loss', 0)
+                cycle_loss = model.loss_components.get('cycle_loss', 0)
+                log_message += f" | Feature: {feature_loss:.4f} | Cycle: {cycle_loss:.4f}"
+            if phase == 2 and model.use_class_encoding:
+                log_message += f" | Accuracy: {avg_acc:.2%}"
+            #logger.info(log_message)
 
             # Checkpointing
             if (best_loss - avg_loss) > min_thr:
@@ -4458,7 +4621,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 checkpoint_manager.save_model_state(
                     model, optimizer, phase, epoch, avg_loss, True
                 )
-               #logger.info(f"New best model saved with loss: {best_loss:.4f}")
+                #logger.info(f"New best model saved with loss: {best_loss:.4f}")
             else:
                 patience_counter += 1
                 #logger.info(f"No improvement - Patience counter: {patience_counter}")
@@ -4485,8 +4648,11 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
-    # Log training completion
-    logger.info(f"Phase {phase} training completed. Best loss: {best_loss:.4f}")
+    # Log training completion with enhanced information
+    completion_message = f"Phase {phase} training completed. Best loss: {best_loss:.4f}"
+    if phase == 1 and hasattr(model, 'compressed_dims'):
+        completion_message += f" | Compression: {model.feature_dims}D → {model.compressed_dims}D"
+    logger.info(completion_message)
 
     return history
 
@@ -5662,10 +5828,9 @@ class DatasetProcessor:
 
         os.makedirs(self.dataset_dir, exist_ok=True)
 
-        # Use exact dataset name for JSON files (no lowercase conversion)
-        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json")
-        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf")
-        self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf")
+        self.config_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.json").lower()
+        self.conf_path = os.path.join(self.dataset_dir, f"{self.dataset_name}.conf").lower()
+        self.dbnn_conf_path = os.path.join(self.dataset_dir, "adaptive_dbnn.conf").lower()
 
     def _extract_archive(self, archive_path: str) -> str:
         """Extract compressed archive to temporary directory"""
@@ -6249,7 +6414,7 @@ class DatasetProcessor:
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
         """Generate dataset-specific configuration"""
         return {
-            "file_path": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
+            "filepath": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
             "separator": ",",
             "has_header": True,
@@ -7128,7 +7293,7 @@ def get_interactive_args():
     # Handle predict mode
     if args.mode == 'predict':
         # Set default model path using Data/ directory (uppercase)
-        default_model = f"Data/{args.data_name}/checkpoints/{args.data_name}_unified.pth"
+        default_model = f"data/{args.data_name}/checkpoints/{args.data_name}_unified.pth"
         prompt = f"Enter path to trained model [{default_model}]: "
         args.model_path = input(prompt).strip() or default_model
 
@@ -7680,7 +7845,7 @@ def main():
                 config_path = args.config if hasattr(args, 'config') and args.config else None
                 if not config_path and hasattr(args, 'data_name') and args.data_name:
                     # Use 'Data/' directory (uppercase) and exact data_name for JSON
-                    config_path = os.path.join('Data', args.data_name, f"{args.data_name}.json")
+                    config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
 
                 if not config_path or not os.path.exists(config_path):
                     logger.error(f"Configuration file not found: {config_path}")
@@ -7718,7 +7883,7 @@ def main():
                 config_path = args.config if hasattr(args, 'config') and args.config else None
                 if not config_path and hasattr(args, 'data_name') and args.data_name:
                     # Use 'Data/' directory (uppercase) and exact data_name for JSON
-                    config_path = os.path.join('Data', args.data_name, f"{args.data_name}.json")
+                    config_path = os.path.join('data', args.data_name, f"{args.data_name}.json")
 
                 if not config_path or not os.path.exists(config_path):
                     logger.error(f"Configuration file not found: {config_path}")
