@@ -259,13 +259,19 @@ class PredictionManager:
         return model
 
         #--------------------Prediction -----------------------
-    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = False):
-        """Predict using frozen feature selection with optional attention heatmap generation"""
+    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = True):
+        """Predict using frozen feature selection with automatic target label preservation"""
         # Get image files with full paths and class labels from subfolders
         image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
         if not image_files:
             logger.warning(f"No image files found in {data_path}")
             return
+
+        # NEW: Load training class mapping to preserve target labels
+        training_class_mapping = self._load_training_class_mapping()
+
+        # NEW: Map folder names to training target labels
+        mapped_labels = self._map_labels_to_training_classes(class_labels, training_class_mapping)
 
         # Create dataset and dataloader
         transform = self.get_transforms(self.config, is_train=False)
@@ -275,10 +281,15 @@ class PredictionManager:
 
         logger.info(f"Processing {len(image_files)} images in batches of {batch_size}")
 
+        # NEW: Log label mapping statistics
+        known_labels = [lbl for lbl in mapped_labels if lbl != "unknown"]
+        unknown_labels = [lbl for lbl in mapped_labels if lbl == "unknown"]
+        logger.info(f"Label mapping: {len(known_labels)} known classes, {len(unknown_labels)} unknown samples")
+
         all_predictions = {
             'filename': [],
             'filepath': [],
-            'target': class_labels,  # Add class labels from subfolders
+            'target': mapped_labels,  # NEW: Use mapped labels instead of raw folder names
             'features_phase1': [],
             'class_predictions': [],
             'class_probabilities': [],
@@ -288,14 +299,14 @@ class PredictionManager:
 
         self.model.eval()
 
-        # NEW: Register attention hooks if heatmaps are requested
+        # Register attention hooks if heatmaps are requested
         if generate_heatmaps and hasattr(self.model, 'register_attention_hooks'):
             self.model.register_attention_hooks()
             logger.info("Registered attention hooks for heatmap generation")
 
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Predicting")):
-                # Handle different dataset return types
+                # CRITICAL: Handle different dataset return types (from original)
                 if isinstance(batch_data, (list, tuple)):
                     batch_tensor = batch_data[0]
                     batch_labels = batch_data[1] if len(batch_data) > 1 else None
@@ -311,14 +322,14 @@ class PredictionManager:
                 # Forward pass
                 output = self.model(batch_tensor)
 
-                # NEW: Handle both compressed and original embeddings
+                # Handle both compressed and original embeddings
                 if 'compressed_embedding' in output:
-                    embedding = output['compressed_embedding']  # Use compressed features for efficiency
+                    embedding = output['compressed_embedding']
                     logger.debug("Using compressed features for prediction")
                 else:
                     embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
 
-                # CRITICAL: Always use frozen features for consistency
+                # CRITICAL: Always use frozen features for consistency (from original)
                 if hasattr(self.model, '_is_feature_selection_frozen') and self.model._is_feature_selection_frozen:
                     features = self.model.get_frozen_features(embedding).detach().cpu().numpy()
                     logger.debug("Using frozen feature selection for prediction")
@@ -326,7 +337,7 @@ class PredictionManager:
                     features = embedding.detach().cpu().numpy()
                     #logger.warning("No frozen feature selection available, using all features")
 
-                # Store predictions
+                # CRITICAL: Store predictions with proper batch indexing (from original)
                 batch_size_actual = features.shape[0]
                 start_idx = batch_idx * batch_size
 
@@ -346,7 +357,7 @@ class PredictionManager:
                 all_predictions['filepath'].extend(batch_full_paths)
                 all_predictions['features_phase1'].extend(features)
 
-                # Store additional outputs if available
+                # CRITICAL: Store additional outputs if available (from original)
                 if 'class_predictions' in output:
                     all_predictions['class_predictions'].extend(output['class_predictions'].cpu().numpy())
 
@@ -381,7 +392,7 @@ class PredictionManager:
         if output_csv:
             self._save_predictions(all_predictions, output_csv)
 
-            # Verify consistency if training files exist
+            # CRITICAL: Verify consistency if training files exist (from original)
             dataset_name = self.config['dataset']['name'].lower()
             train_csv = f"data/{dataset_name}/{dataset_name}_train.csv"
             test_csv = f"data/{dataset_name}/{dataset_name}_test.csv"
@@ -390,7 +401,82 @@ class PredictionManager:
                 self.verify_feature_consistency(train_csv, test_csv, output_csv)
 
         logger.info(f"Prediction completed for {len(image_files)} images")
+        logger.info(f"Target labels: {len(known_labels)} known classes, {len(unknown_labels)} marked as 'unknown'")
         return all_predictions
+
+    def _load_training_class_mapping(self) -> Dict[str, str]:
+        """Load the class mapping from training data to preserve target labels"""
+        dataset_name = self.config['dataset']['name'].lower()
+
+        # Try to load from training CSV first
+        train_csv = f"data/{dataset_name}/{dataset_name}_train.csv"
+        if os.path.exists(train_csv):
+            try:
+                train_df = pd.read_csv(train_csv)
+                if 'target' in train_df.columns:
+                    unique_targets = train_df['target'].unique()
+                    # Create mapping from class names to themselves (identity mapping)
+                    class_mapping = {str(target): str(target) for target in unique_targets}
+                    logger.info(f"Loaded {len(class_mapping)} training classes from {train_csv}")
+                    return class_mapping
+            except Exception as e:
+                logger.warning(f"Could not load training classes from CSV: {e}")
+
+        # Fallback: try to load from dataset directory structure
+        dataset_dir = os.path.join('data', dataset_name, 'train')
+        if os.path.exists(dataset_dir):
+            try:
+                class_dirs = [d for d in os.listdir(dataset_dir)
+                             if os.path.isdir(os.path.join(dataset_dir, d))]
+                class_mapping = {cls: cls for cls in class_dirs}
+                logger.info(f"Loaded {len(class_mapping)} training classes from directory structure")
+                return class_mapping
+            except Exception as e:
+                logger.warning(f"Could not load training classes from directory: {e}")
+
+        # Final fallback: use config or empty mapping
+        num_classes = self.config['dataset'].get('num_classes', 0)
+        if num_classes > 0:
+            logger.info(f"Using {num_classes} classes from config (no specific class names)")
+            return {}
+        else:
+            logger.warning("No training class mapping found - all labels will be marked as 'unknown'")
+            return {}
+
+    def _map_labels_to_training_classes(self, folder_labels: List[str], training_mapping: Dict[str, str]) -> List[str]:
+        """Map folder names to training target labels, using 'unknown' for unmapped classes"""
+        mapped_labels = []
+
+        for folder_label in folder_labels:
+            # Direct match
+            if folder_label in training_mapping:
+                mapped_labels.append(training_mapping[folder_label])
+            # Case-insensitive match
+            elif folder_label.lower() in [k.lower() for k in training_mapping.keys()]:
+                matched_key = next(k for k in training_mapping.keys() if k.lower() == folder_label.lower())
+                mapped_labels.append(training_mapping[matched_key])
+            # Partial match (e.g., "spiral_galaxy" matches "spiral")
+            elif any(key.lower() in folder_label.lower() for key in training_mapping.keys()):
+                matched_key = next(key for key in training_mapping.keys() if key.lower() in folder_label.lower())
+                mapped_labels.append(training_mapping[matched_key])
+            else:
+                mapped_labels.append("unknown")
+
+        return mapped_labels
+
+    def _clean_class_label(self, label: str) -> str:
+        """Clean and normalize class labels"""
+        # Remove common numeric prefixes (e.g., "001_cat" -> "cat")
+        if '_' in label and label.split('_')[0].isdigit():
+            label = '_'.join(label.split('_')[1:])
+
+        # Remove file extensions if any
+        label = os.path.splitext(label)[0]
+
+        # Convert to lowercase and replace spaces with underscores
+        label = label.lower().replace(' ', '_')
+
+        return label
 
     def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
         """Extract a compressed archive to a directory."""
@@ -463,8 +549,7 @@ class PredictionManager:
     def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
         """
         Get a list of image files, their corresponding class labels, and original filenames from the input path.
-        Returns:
-            Tuple[List[str], List[str], List[str]]: (image_paths, class_labels, original_filenames)
+        Enhanced to handle nested directory structures and provide better label extraction.
         """
         image_files = []
         class_labels = []
@@ -486,15 +571,16 @@ class PredictionManager:
                         image_files.append(os.path.join(root, file))
                         original_filenames.append(file)
 
-                        # FIX: Extract class label from the immediate subfolder name
-                        # Get the relative path from input_path to the file's directory
+                        # Enhanced label extraction
                         rel_path = os.path.relpath(root, input_path)
 
-                        # If the file is in a subfolder, use that as class label
                         if rel_path != '.':
-                            # Use the immediate subfolder name as class label
+                            # Use the most specific directory name as class label
                             path_parts = rel_path.split(os.sep)
-                            class_label = path_parts[0]  # First subfolder name
+                            class_label = path_parts[-1]  # Use the immediate directory name
+
+                            # Clean up the label (remove any numeric prefixes, etc.)
+                            class_label = self._clean_class_label(class_label)
                         else:
                             # File is directly in input_path, use "unknown"
                             class_label = "unknown"
@@ -509,6 +595,7 @@ class PredictionManager:
         else:
             raise ValueError(f"Invalid input path: {input_path}")
 
+        logger.info(f"Found {len(image_files)} images with {len(set(class_labels))} unique folder labels")
         return image_files, class_labels, original_filenames
 
     def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
@@ -601,7 +688,7 @@ class PredictionManager:
         return transforms.Compose(transform_list)
 
     def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
-        """Save predictions to a CSV file with full path support."""
+        """Save predictions to a CSV file with proper target column handling"""
         # Convert features to a DataFrame
         if predictions['features_phase1']:
             feature_array = np.array(predictions['features_phase1'])
@@ -610,9 +697,10 @@ class PredictionManager:
         else:
             df = pd.DataFrame()
 
-        # Add filename, full path and other metadata
-        df.insert(0, 'filename', predictions['filename'])
-        df.insert(1, 'filepath', predictions['filepath'])  # NEW: Add full path column
+        # Add filename, full path and target column (CRITICAL: target comes first)
+        df.insert(0, 'target', predictions['target'])  # NEW: Target column first
+        df.insert(1, 'filename', predictions['filename'])
+        df.insert(2, 'filepath', predictions['filepath'])
 
         # Add class predictions if available
         if predictions.get('class_predictions') and len(predictions['class_predictions']) == len(df):
@@ -626,10 +714,27 @@ class PredictionManager:
         if predictions.get('cluster_confidence') and len(predictions['cluster_confidence']) == len(df):
             df['cluster_confidence'] = predictions['cluster_confidence']
 
+        # NEW: Add prediction status column
+        unknown_count = sum(1 for target in predictions['target'] if target == "unknown")
+        known_count = len(predictions['target']) - unknown_count
+
+        df['prediction_status'] = ['known' if target != "unknown" else 'unknown'
+                                  for target in predictions['target']]
+
         # Save to CSV
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         df.to_csv(output_csv, index=False)
+
+        # NEW: Log detailed statistics
         logger.info(f"Predictions saved to {output_csv}")
+        logger.info(f"Target distribution: {known_count} known classes, {unknown_count} unknown samples")
+
+        if known_count > 0:
+            known_targets = [t for t in predictions['target'] if t != "unknown"]
+            target_counts = pd.Series(known_targets).value_counts()
+            logger.info("Known class distribution:")
+            for target, count in target_counts.items():
+                logger.info(f"  {target}: {count} samples")
 
     def _compute_attention_heatmap(self, image_tensor: torch.Tensor, target_class: int) -> Dict[str, np.ndarray]:
         """Compute attention heatmap showing what regions influence clustering"""
@@ -771,7 +876,7 @@ class PredictionManager:
 
     def _generate_batch_heatmaps(self, batch_tensor: torch.Tensor, batch_labels: torch.Tensor,
                                batch_filenames: List[str], model_output: Dict):
-        """Generate heatmaps for a batch of images"""
+        """Generate heatmaps for ALL images in a batch"""
         if not hasattr(self, 'heatmap_output_dir'):
             dataset_name = self.config['dataset']['name'].lower()
             self.heatmap_output_dir = os.path.join('data', dataset_name, 'batch_heatmaps')
@@ -779,7 +884,8 @@ class PredictionManager:
 
         batch_size = batch_tensor.shape[0]
 
-        for i in range(min(3, batch_size)):  # Limit to first 3 images per batch
+        # NEW: Process ALL images in the batch, not just first 3
+        for i in range(batch_size):
             try:
                 single_image = batch_tensor[i:i+1]
                 single_label = batch_labels[i].item() if batch_labels is not None else 0
@@ -845,8 +951,8 @@ class PredictionManager:
         logger.debug(f"Saved batch heatmap: {output_path}")
 
     def generate_classwise_attention_heatmaps(self, data_path: str, output_dir: str = None,
-                                            num_samples_per_class: int = 5):
-        """Generate comprehensive attention heatmaps showing what features drive classwise clustering"""
+                                            num_samples_per_class: int = None):
+        """Generate comprehensive attention heatmaps for ALL samples showing what features drive classwise clustering"""
 
         # Get image files with labels
         image_files, class_labels, _ = self._get_image_files_with_labels(data_path)
@@ -869,7 +975,11 @@ class PredictionManager:
         # Get transforms
         transform = self.get_transforms(self.config, is_train=False)
 
-        logger.info(f"Generating classwise attention heatmaps for {len(class_mapping)} classes")
+        # NEW: Process ALL samples if num_samples_per_class is None
+        if num_samples_per_class is None:
+            logger.info(f"Generating attention heatmaps for ALL {len(image_files)} samples across {len(class_mapping)} classes")
+        else:
+            logger.info(f"Generating attention heatmaps for {num_samples_per_class} samples per class across {len(class_mapping)} classes")
 
         self.model.eval()
 
@@ -877,11 +987,12 @@ class PredictionManager:
         if hasattr(self.model, 'register_attention_hooks'):
             self.model.register_attention_hooks()
 
+        total_processed = 0
         with torch.no_grad():
             for class_idx, class_name in class_mapping.items():
                 logger.info(f"Processing class: {class_name} (idx: {class_idx})")
 
-                # Get samples for this class
+                # Get ALL samples for this class
                 class_images = [img for img, lbl in zip(image_files, class_labels)
                               if lbl == class_name]
 
@@ -889,10 +1000,19 @@ class PredictionManager:
                     logger.warning(f"No images found for class {class_name}")
                     continue
 
-                # Select representative samples
-                selected_images = class_images[:num_samples_per_class]
+                # NEW: Limit samples if specified, otherwise process all
+                if num_samples_per_class is not None:
+                    selected_images = class_images[:num_samples_per_class]
+                    logger.info(f"  Processing {len(selected_images)} samples (limited)")
+                else:
+                    selected_images = class_images
+                    logger.info(f"  Processing ALL {len(selected_images)} samples")
 
-                for sample_idx, img_path in enumerate(selected_images):
+                # Create class subdirectory for better organization
+                class_output_dir = os.path.join(output_dir, f"class_{class_name}")
+                os.makedirs(class_output_dir, exist_ok=True)
+
+                for sample_idx, img_path in enumerate(tqdm(selected_images, desc=f"Class {class_name}", leave=False)):
                     try:
                         # Load and process image
                         image = Image.open(img_path).convert('RGB')
@@ -904,8 +1024,10 @@ class PredictionManager:
                         # Create visualization
                         self._save_attention_heatmap(
                             image, heatmap_data, img_path, class_name,
-                            sample_idx, output_dir, class_idx
+                            sample_idx, class_output_dir, class_idx
                         )
+
+                        total_processed += 1
 
                     except Exception as e:
                         logger.error(f"Error processing {img_path}: {str(e)}")
@@ -915,7 +1037,8 @@ class PredictionManager:
         if hasattr(self.model, 'remove_attention_hooks'):
             self.model.remove_attention_hooks()
 
-        logger.info(f"Classwise heatmaps saved to: {output_dir}")
+        logger.info(f"Heatmap generation completed! Processed {total_processed} samples across {len(class_mapping)} classes")
+        logger.info(f"All heatmaps saved to: {output_dir}")
 
 
 class SlidingWindowDataset(Dataset):
@@ -8169,7 +8292,7 @@ def interactive_dataset_selection():
             print("Invalid option. Please try again.")
 
 def main():
-    """Main function for CDBNN processing with interactive dataset selection and heatmap generation."""
+    """Main function for CDBNN processing with interactive dataset selection and default heatmap generation."""
     args = None
 
     # Setup logging
@@ -8302,12 +8425,19 @@ def main():
 
             batch_size = getattr(args, 'batch_size', 128)
 
-            # NEW: Check if heatmap generation is requested
-            generate_heatmaps = getattr(args, 'generate_heatmaps', False)
-            if generate_heatmaps:
-                logger.info("Heatmap generation enabled - will create attention visualizations")
+            # UPDATED: Heatmap generation now defaults to True
+            generate_heatmaps = getattr(args, 'generate_heatmaps', True)  # Default to True
+            num_samples = getattr(args, 'num_samples', None)  # None means all samples by default
 
-            # Updated prediction call with heatmap support
+            if generate_heatmaps:
+                if num_samples is None:
+                    logger.info("Heatmap generation enabled (default) - creating attention visualizations for ALL samples")
+                else:
+                    logger.info(f"Heatmap generation enabled (default) - creating attention visualizations for {num_samples} samples per class")
+            else:
+                logger.info("Heatmap generation disabled (--no_heatmaps flag used)")
+
+            # Updated prediction call with default heatmap support
             prediction_manager.predict_images(
                 args.input_path,
                 output_csv,
@@ -8315,11 +8445,12 @@ def main():
                 generate_heatmaps=generate_heatmaps
             )
 
-            # NEW: Provide heatmap location info
+            # UPDATED: Enhanced heatmap location info
             if generate_heatmaps:
                 dataset_name_lower = args.data_name.lower()
                 heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
                 logger.info(f"Attention heatmaps saved to: {heatmap_dir}")
+                logger.info("To disable heatmaps in future runs, use --no_heatmaps flag")
 
             logger.info(f"Prediction completed successfully! Output: {output_csv}")
             return 0
@@ -8361,7 +8492,7 @@ def main():
             logger.info("Reconstruction completed successfully!")
             return 0
 
-        # NEW: Heatmap-only mode for existing models
+        # UPDATED: Heatmap-only mode for existing models
         elif args.mode == 'heatmaps':
             logger.info("Starting heatmap generation mode...")
             if not hasattr(args, 'input_path') or not args.input_path:
@@ -8383,8 +8514,15 @@ def main():
             # Initialize prediction manager
             prediction_manager = PredictionManager(config)
 
+            # UPDATED: Default to all samples
+            num_samples = getattr(args, 'num_samples', None)  # None means all samples by default
+
+            if num_samples is None:
+                logger.info("Generating heatmaps for ALL samples (default)")
+            else:
+                logger.info(f"Generating heatmaps for {num_samples} samples per class")
+
             # Generate heatmaps only
-            num_samples = getattr(args, 'num_samples', 5)
             prediction_manager.generate_classwise_attention_heatmaps(
                 args.input_path,
                 num_samples_per_class=num_samples
@@ -8401,7 +8539,6 @@ def main():
     else:
         logger.error("No mode specified")
         return 1
-
 
 
 def handle_training_mode(args, logger):
@@ -8923,10 +9060,11 @@ def interactive_input():
     return args
 
 def parse_arguments():
-    """Parse command line arguments with new interactive options."""
+    """Parse command line arguments with new interactive options and default heatmap generation."""
     parser = argparse.ArgumentParser(description='CDBNN Image Processor')
     parser.add_argument('--data_name', type=str, help='Dataset name (e.g., cifar100, galaxies)')
-    parser.add_argument('--mode', type=str, choices=['train', 'reconstruct', 'predict', 'download'], help='Operation mode')
+    parser.add_argument('--mode', type=str, choices=['train', 'reconstruct', 'predict', 'download', 'heatmaps'],
+                       help='Operation mode')
     parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], help='Dataset type')
     parser.add_argument('--data', type=str, help='Dataset path or torchvision dataset name')
     parser.add_argument('--input_path', type=str, help='Input path for prediction')
@@ -8937,8 +9075,14 @@ def parse_arguments():
     parser.add_argument('--list_datasets', action='store_true', help='List available datasets')
     parser.add_argument('--interactive', action='store_true', help='Use interactive mode')
     parser.add_argument('--download', action='store_true', help='Download datasets')
-    parser.add_argument('--generate_heatmaps', action='store_true',default=True,
-                       help='Generate attention heatmaps for model interpretation')
+
+    # UPDATED: Heatmap generation with proper default=True behavior
+    parser.add_argument('--generate_heatmaps', action='store_true', default=True,
+                       help='Generate attention heatmaps for model interpretation (default: True)')
+    parser.add_argument('--no_heatmaps', action='store_false', dest='generate_heatmaps',
+                       help='Disable attention heatmap generation')
+    parser.add_argument('--num_samples', type=int, default=None,
+                       help='Number of samples per class for heatmap generation (default: None = all samples)')
 
     args = parser.parse_args()
 
