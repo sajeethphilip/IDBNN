@@ -148,16 +148,17 @@ class Colors:
         else:
             return f"{Colors.RED}{time_value:.2f}{Colors.ENDC}"
 
-
 class DistanceCorrelationFeatureSelector:
-    """Helper class to select features based on distance correlation criteria"""
+    """Enhanced feature selector with better handling of complex datasets"""
 
-    def __init__(self, upper_threshold=0.85, lower_threshold=0.01):
+    def __init__(self, upper_threshold=0.85, lower_threshold=0.01, min_features=8, max_features=50):
         self.upper_threshold = upper_threshold
         self.lower_threshold = lower_threshold
+        self.min_features = min_features
+        self.max_features = max_features
 
     def calculate_distance_correlations(self, features, labels):
-        """Calculate distance correlations between features and labels"""
+        """Calculate enhanced distance correlations with class separation focus"""
         n_features = features.shape[1]
         label_corrs = np.zeros(n_features)
 
@@ -165,48 +166,194 @@ class DistanceCorrelationFeatureSelector:
         for i in range(n_features):
             label_corrs[i] = 1 - correlation(features[:, i], labels)
 
+        # NEW: Add class separation metrics for complex datasets
+        if len(np.unique(labels)) > 10:  # For datasets with many classes
+            separation_scores = self._calculate_class_separation_scores(features, labels)
+            # Combine correlation with separation scores
+            combined_scores = 0.7 * label_corrs + 0.3 * separation_scores
+            return combined_scores
+
         return label_corrs
 
+    def _calculate_class_separation_scores(self, features, labels):
+        """Calculate how well features separate different classes"""
+        n_features = features.shape[1]
+        separation_scores = np.zeros(n_features)
+        unique_labels = np.unique(labels)
+
+        for i in range(n_features):
+            feature_values = features[:, i]
+
+            # Calculate between-class variance / within-class variance
+            overall_mean = np.mean(feature_values)
+            between_var = 0
+            within_var = 0
+
+            for label in unique_labels:
+                class_mask = labels == label
+                class_values = feature_values[class_mask]
+                class_mean = np.mean(class_values)
+                class_size = len(class_values)
+
+                between_var += class_size * (class_mean - overall_mean) ** 2
+                within_var += np.sum((class_values - class_mean) ** 2)
+
+            if within_var > 0:
+                separation_scores[i] = between_var / within_var
+            else:
+                separation_scores[i] = between_var
+
+        # Normalize scores
+        if np.max(separation_scores) > 0:
+            separation_scores = separation_scores / np.max(separation_scores)
+
+        return separation_scores
+
     def select_features(self, features, labels):
-        """Select features based on distance correlation criteria"""
+        """Enhanced feature selection with adaptive thresholds"""
         label_corrs = self.calculate_distance_correlations(features, labels)
 
         # Get indices of features that meet upper threshold
         selected_indices = [i for i, corr in enumerate(label_corrs)
                           if corr >= self.upper_threshold]
 
+        # If too few features, relax threshold
+        if len(selected_indices) < self.min_features:
+            # Take top min_features by correlation
+            top_indices = np.argsort(label_corrs)[-self.min_features:]
+            selected_indices = list(top_indices)
+            logger.info(f"Relaxed threshold: selected top {self.min_features} features")
+
         # Sort by correlation strength (descending)
         selected_indices.sort(key=lambda i: -label_corrs[i])
 
         # Remove features that are too correlated with each other
-        final_indices = []
-        feature_matrix = features[:, selected_indices]
+        final_indices = self._remove_redundant_features(features, selected_indices, label_corrs)
 
-        for i, idx in enumerate(selected_indices):
-            keep = True
-            for j in final_indices:
-                # Calculate correlation between features
-                corr = 1 - correlation(feature_matrix[:, i], feature_matrix[:, selected_indices.index(j)])
-                if corr > self.lower_threshold:
-                    keep = False
-                    break
-            if keep:
-                final_indices.append(idx)
+        # Ensure we have reasonable number of features
+        if len(final_indices) > self.max_features:
+            final_indices = final_indices[:self.max_features]
+            logger.info(f"Limited to top {self.max_features} features")
+
+        logger.info(f"Final feature selection: {len(final_indices)} features "
+                   f"(correlation range: {min(label_corrs[final_indices]):.3f}-{max(label_corrs[final_indices]):.3f})")
 
         return final_indices, label_corrs
 
+    def _remove_redundant_features(self, features, candidate_indices, corr_values):
+        """Remove redundant features while preserving diversity"""
+        final_indices = []
+        feature_matrix = features[:, candidate_indices]
+
+        for i, idx in enumerate(candidate_indices):
+            keep = True
+
+            for j in final_indices:
+                # Calculate correlation between features
+                corr = 1 - correlation(feature_matrix[:, i],
+                                     feature_matrix[:, candidate_indices.index(j)])
+                if corr > self.lower_threshold:
+                    # Keep the feature with higher correlation to labels
+                    if corr_values[idx] <= corr_values[j]:
+                        keep = False
+                        break
+
+            if keep:
+                final_indices.append(idx)
+
+                # Stop if we have enough diverse features
+                if len(final_indices) >= self.max_features:
+                    break
+
+        return final_indices
+
 class PredictionManager:
-    """Manages prediction using frozen feature selection"""
+    """Manages prediction using frozen feature selection with config synchronization"""
 
     def __init__(self, config: Dict, device: str = None):
         self.config = config
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # NEW: Validate and sync config with actual CSV before loading model
+        self._validate_and_sync_config_with_csv()
+
+        # Use actual feature dimensions if available, fallback to configured
+        self.actual_feature_dims = config['model'].get('actual_feature_dims',
+                                                     config['model'].get('feature_dims', 128))
+        logger.info(f"Using {self.actual_feature_dims} feature dimensions for prediction")
+
         self.heatmap_attn = config['model'].get('heatmap_attn', True)
         self.checkpoint_manager = UnifiedCheckpoint(config)
         self.model = self._load_model()
 
+    def _validate_and_sync_config_with_csv(self):
+        """Validate that config matches actual CSV feature dimensions and sync if needed"""
+        dataset_name = self.config['dataset']['name'].lower()
+        csv_paths = [
+            f"data/{dataset_name}/{dataset_name}.csv",
+            f"data/{dataset_name}/{dataset_name}_train.csv"
+        ]
+
+        for csv_path in csv_paths:
+            if os.path.exists(csv_path):
+                try:
+                    # Read CSV to get actual feature count
+                    df = pd.read_csv(csv_path)
+                    feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+                    actual_count = len(feature_columns)
+
+                    # Get configured count
+                    configured_count = self.config['model'].get('actual_feature_dims',
+                                                              self.config['model'].get('feature_dims', 128))
+
+                    if actual_count != configured_count:
+                        logger.warning(f"Feature dimension mismatch: CSV has {actual_count}, config expects {configured_count}")
+
+                        # Auto-correct the config
+                        self.config['model']['actual_feature_dims'] = actual_count
+                        self.config['model']['compressed_dims'] = actual_count
+
+                        logger.info(f"Auto-corrected config to use {actual_count} features")
+                    else:
+                        logger.info(f"Feature dimensions validated: {actual_count} features")
+
+                    # NEW: Update column_names in config to match CSV
+                    self._update_config_column_names_from_csv(csv_path)
+
+                    break  # Stop after first valid CSV found
+
+                except Exception as e:
+                    logger.warning(f"Could not validate config with CSV {csv_path}: {str(e)}")
+                    continue
+
+    def _update_config_column_names_from_csv(self, csv_path: str):
+        """Update config column_names to match actual CSV features"""
+        try:
+            # Read CSV to get actual feature columns
+            df = pd.read_csv(csv_path)
+
+            # Get all feature columns (excluding metadata columns)
+            feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+            feature_columns.sort(key=lambda x: int(x.split('_')[1]))
+
+            # Get non-feature columns that should be preserved
+            non_feature_columns = [col for col in df.columns if not col.startswith('feature_')]
+
+            # Update config with actual column names
+            if 'column_names' in self.config:
+                # Replace the hardcoded column_names with actual ones from CSV
+                # Order: target first, then features, then other columns
+                updated_column_names = ['target'] + feature_columns + [col for col in non_feature_columns if col != 'target']
+                self.config['column_names'] = updated_column_names
+                logger.info(f"Updated config column_names to match CSV: {len(feature_columns)} features")
+            else:
+                logger.warning("Config does not have 'column_names' key to update")
+
+        except Exception as e:
+            logger.error(f"Failed to update config column_names from CSV: {str(e)}")
+
     def _load_model(self) -> nn.Module:
-        """Load model with invertible feature compression"""
+        """Load model with invertible feature compression and proper dimension handling"""
         model = ModelFactory.create_model(self.config)
         model.to(self.device)
 
@@ -231,10 +378,17 @@ class PredictionManager:
                 break
 
         if state_key is None:
+            # Fallback to any phase2 state
+            for key in checkpoint['model_states']:
+                if 'phase2' in key:
+                    state_key = key
+                    break
+
+        if state_key is None:
             raise ValueError("No suitable checkpoint state found")
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
-        model.load_state_dict(state_dict, strict=False)  # Allow missing keys for new components
+        model.load_state_dict(state_dict, strict=False)
 
         # Load feature selection state
         config_state = checkpoint['model_states'][state_key]['best']['config']
@@ -244,21 +398,462 @@ class PredictionManager:
             model._feature_importance_scores = fs_state.get('feature_importance_scores')
             model._feature_selection_metadata = fs_state.get('feature_selection_metadata', {})
             model._is_feature_selection_frozen = True
-
             logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices else 'None'} features")
 
-        # NEW: Load compressed dimensions info
+        # CRITICAL: Load and use actual feature dimensions from config
         if 'compressed_dims' in config_state:
             model.compressed_dims = config_state['compressed_dims']
+            # Update the prediction manager's actual feature dimensions
+            self.actual_feature_dims = model.compressed_dims
             logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
+
+        # CRITICAL: Also check for actual_feature_dims in config
+        if 'actual_feature_dims' in config_state:
+            self.actual_feature_dims = config_state['actual_feature_dims']
+            logger.info(f"Using actual feature dimensions from config: {self.actual_feature_dims}")
+
+        # CRITICAL FIX: Ensure model's compressed_dims matches our actual_feature_dims
+        if hasattr(model, 'compressed_dims') and model.compressed_dims != self.actual_feature_dims:
+            logger.warning(f"Model compressed_dims ({model.compressed_dims}) doesn't match actual_feature_dims ({self.actual_feature_dims}). Updating model.")
+            model.compressed_dims = self.actual_feature_dims
+
+        # Final fallback: use compressed dimensions or default
+        if not hasattr(self, 'actual_feature_dims') or self.actual_feature_dims is None:
+            self.actual_feature_dims = getattr(model, 'compressed_dims', 32)
+            logger.info(f"Using fallback feature dimensions: {self.actual_feature_dims}")
 
         model.set_training_phase(2)
         model.eval()
 
-        logger.info("Model loaded successfully with invertible feature compression")
+        logger.info(f"Model loaded successfully with {self.actual_feature_dims} feature dimensions for prediction")
         return model
 
-        #--------------------Prediction -----------------------
+    def _get_image_files_with_labels(self, data_path: str) -> Tuple[List[str], List[str], List[str]]:
+        """Get image files with class labels from folder structure, preserving exact case"""
+        image_files = []
+        class_labels = []
+        original_filenames = []
+
+        supported_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+
+        if not os.path.exists(data_path):
+            logger.error(f"Data path does not exist: {data_path}")
+            return [], [], []
+
+        # Check if it's a single image file
+        if os.path.isfile(data_path) and any(data_path.lower().endswith(ext) for ext in supported_extensions):
+            image_files.append(data_path)
+            # For single files, try to extract class name from parent folder
+            parent_folder = os.path.basename(os.path.dirname(data_path))
+            if parent_folder and parent_folder not in ['', '.', '..']:
+                class_labels.append(parent_folder)
+            else:
+                class_labels.append("single_image")
+            original_filenames.append(os.path.basename(data_path))
+            logger.info(f"Processing single image: {data_path} with label: {class_labels[0]}")
+            return image_files, class_labels, original_filenames
+
+        # Process directory structure - look for train/test subfolders first
+        potential_subfolders = ['train', 'test', 'validation', 'val']
+        found_subfolders = []
+
+        for subfolder in potential_subfolders:
+            subfolder_path = os.path.join(data_path, subfolder)
+            if os.path.exists(subfolder_path):
+                found_subfolders.append(subfolder_path)
+
+        # If no train/test subfolders found, use the root directory
+        search_paths = found_subfolders if found_subfolders else [data_path]
+
+        logger.info(f"Searching for images in: {search_paths}")
+
+        for search_path in search_paths:
+            for root, dirs, files in os.walk(search_path):
+                for file in files:
+                    if any(file.lower().endswith(ext) for ext in supported_extensions):
+                        full_path = os.path.join(root, file)
+                        image_files.append(full_path)
+
+                        # Extract class label from folder structure - PRESERVE EXACT CASE
+                        # Get the relative path from the search path to preserve hierarchy
+                        rel_path = os.path.relpath(root, search_path)
+
+                        if rel_path == '.':
+                            # If image is directly in search_path, use the folder name
+                            class_label = os.path.basename(search_path)
+                            if class_label in potential_subfolders:
+                                # If the folder is a split folder (train/test), use parent
+                                class_label = os.path.basename(data_path)
+                        else:
+                            # Use the immediate parent folder as class label - EXACT CASE
+                            class_label = os.path.basename(root)
+
+                        # PRESERVE EXACT CASE - no cleaning or transformation
+                        class_label = class_label.strip()
+
+                        class_labels.append(class_label)
+                        original_filenames.append(file)
+
+        # Log statistics about found classes
+        unique_classes = set(class_labels)
+        class_counts = {cls: class_labels.count(cls) for cls in unique_classes}
+
+        logger.info(f"Found {len(image_files)} images in {len(unique_classes)} classes:")
+        for cls, count in sorted(class_counts.items()):
+            logger.info(f"  {cls}: {count} images")
+
+        return image_files, class_labels, original_filenames
+
+    def _load_training_class_mapping(self) -> Dict[str, str]:
+        """Load class mapping from training data to preserve consistent labels"""
+        dataset_name = self.config['dataset']['name'].lower()
+        train_csv_path = f"data/{dataset_name}/{dataset_name}_train.csv"
+
+        class_mapping = {}
+
+        if os.path.exists(train_csv_path):
+            try:
+                df = pd.read_csv(train_csv_path)
+                if 'target' in df.columns:
+                    unique_classes = df['target'].unique()
+                    for cls in unique_classes:
+                        class_mapping[str(cls).lower()] = str(cls)
+                    logger.info(f"Loaded training class mapping: {len(class_mapping)} classes")
+            except Exception as e:
+                logger.warning(f"Could not load training class mapping: {str(e)}")
+
+        return class_mapping
+
+    def _map_labels_to_training_classes(self, folder_labels: List[str], training_mapping: Dict[str, str]) -> List[str]:
+        """Map folder names to training target labels, preserving exact case"""
+        mapped_labels = []
+
+        # Create case-sensitive mapping first
+        exact_mapping = {}
+        for train_class_original in training_mapping.values():
+            exact_mapping[train_class_original] = train_class_original  # Exact match
+            exact_mapping[train_class_original.lower()] = train_class_original  # Lowercase match
+
+        for folder_label in folder_labels:
+            # Try exact match first
+            if folder_label in exact_mapping:
+                mapped_labels.append(exact_mapping[folder_label])
+                continue
+
+            # Try lowercase match
+            folder_lower = folder_label.lower()
+            if folder_lower in exact_mapping:
+                mapped_labels.append(exact_mapping[folder_lower])
+                continue
+
+            # If no match found, use the original folder label (preserving exact case)
+            mapped_labels.append(folder_label)
+            #logger.info(f"Using original folder label (case preserved): '{folder_label}'")
+
+        return mapped_labels
+
+    def _are_classes_similar(self, label1: str, label2: str, similarity_threshold: float = 0.7) -> bool:
+        """Check if two class labels are similar using fuzzy matching"""
+        try:
+            from difflib import SequenceMatcher
+            similarity = SequenceMatcher(None, label1, label2).ratio()
+            return similarity >= similarity_threshold
+        except:
+            # Fallback: simple containment check
+            return label1 in label2 or label2 in label1
+
+    def get_transforms(self, config: Dict, is_train: bool = False) -> transforms.Compose:
+        """Get transforms for prediction with proper DatasetProcessor handling"""
+        try:
+            # Try to find and use DatasetProcessor if available
+            dataset_processor_class = None
+
+            # Look for DatasetProcessor in current module
+            current_module = sys.modules[__name__]
+            if hasattr(current_module, 'DatasetProcessor'):
+                dataset_processor_class = getattr(current_module, 'DatasetProcessor')
+
+            # If not found, check globals
+            if not dataset_processor_class and 'DatasetProcessor' in globals():
+                dataset_processor_class = globals()['DatasetProcessor']
+
+            if dataset_processor_class and hasattr(dataset_processor_class, 'get_transforms'):
+                # Try to create DatasetProcessor instance with proper arguments
+                # This depends on how DatasetProcessor is initialized
+                try:
+                    processor = dataset_processor_class()
+                    return processor.get_transforms(config, is_train)
+                except TypeError:
+                    # If DatasetProcessor needs different arguments, use fallback
+                    return self._create_fallback_transforms(config, is_train)
+            else:
+                return self._create_fallback_transforms(config, is_train)
+
+        except Exception as e:
+            logger.warning(f"Could not use DatasetProcessor transforms: {str(e)}. Using fallback transforms.")
+            return self._create_fallback_transforms(config, is_train)
+
+    def _create_fallback_transforms(self, config: Dict, is_train: bool = False) -> transforms.Compose:
+        """Create basic transforms as fallback"""
+        mean = config['dataset']['mean']
+        std = config['dataset']['std']
+        input_size = config['dataset']['input_size']
+
+        transform_list = [
+            transforms.Resize(input_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ]
+
+        return transforms.Compose(transform_list)
+
+    def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
+        """Create dataset from image files"""
+        class SimpleImageDataset(Dataset):
+            def __init__(self, image_files, transform=None):
+                self.image_files = image_files
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.image_files)
+
+            def __getitem__(self, idx):
+                try:
+                    image = Image.open(self.image_files[idx]).convert('RGB')
+                    if self.transform:
+                        image = self.transform(image)
+                    return image
+                except Exception as e:
+                    logger.error(f"Error loading image {self.image_files[idx]}: {str(e)}")
+                    # Return a dummy image
+                    dummy_image = torch.zeros(3, 224, 224)
+                    return dummy_image
+
+        return SimpleImageDataset(image_files, transform)
+
+    def _generate_batch_heatmaps(self, batch_tensor: torch.Tensor, batch_labels: torch.Tensor,
+                               batch_filenames: List[str], output: Dict[str, torch.Tensor]):
+        """Generate heatmaps for a batch of images"""
+        try:
+            if not hasattr(self.model, 'attention_maps') or not self.model.attention_maps:
+                return
+
+            # Create heatmap directory
+            dataset_name = self.config['dataset']['name'].lower()
+            heatmap_dir = os.path.join('data', dataset_name, 'prediction_heatmaps')
+            os.makedirs(heatmap_dir, exist_ok=True)
+
+            for i in range(len(batch_tensor)):
+                try:
+                    # Get attention maps for this sample
+                    attention_key = list(self.model.attention_maps.keys())[0]
+                    attention_map = self.model.attention_maps[attention_key][i].mean(dim=0).cpu()
+
+                    # Convert to numpy and resize to match input
+                    attention_np = attention_map.numpy()
+                    if attention_np.shape != batch_tensor[i].shape[1:]:
+                        import cv2
+                        attention_np = cv2.resize(attention_np, batch_tensor[i].shape[1:][::-1])
+
+                    # Normalize and create heatmap
+                    attention_np = (attention_np - attention_np.min()) / (attention_np.max() - attention_np.min() + 1e-8)
+
+                    # Save heatmap
+                    filename = batch_filenames[i].replace('.', '_')
+                    heatmap_path = os.path.join(heatmap_dir, f"{filename}_heatmap.png")
+
+                    import matplotlib.pyplot as plt
+                    plt.figure(figsize=(8, 6))
+                    plt.imshow(attention_np, cmap='hot')
+                    plt.colorbar()
+                    plt.title(f"Attention Heatmap: {batch_filenames[i]}")
+                    plt.savefig(heatmap_path, bbox_inches='tight', dpi=150)
+                    plt.close()
+
+                except Exception as e:
+                    logger.warning(f"Could not generate heatmap for {batch_filenames[i]}: {str(e)}")
+
+        except Exception as e:
+            logger.warning(f"Batch heatmap generation failed: {str(e)}")
+
+    def generate_classwise_attention_heatmaps(self, data_path: str):
+        """Generate comprehensive classwise attention heatmaps"""
+        try:
+            # This is a placeholder - implement comprehensive heatmap generation
+            logger.info("Classwise attention heatmap generation would be implemented here")
+        except Exception as e:
+            logger.error(f"Classwise heatmap generation failed: {str(e)}")
+
+    def _save_predictions(self, predictions: Dict[str, List], output_csv: str):
+        """Use the comprehensive save method from ReconstructionManager for consistency"""
+        # Convert the predictions format to match what ReconstructionManager expects
+        predictions_numpy = {}
+        for key, values in predictions.items():
+            if key == 'features_phase1':
+                # Convert list of arrays to single numpy array
+                predictions_numpy[key] = np.array(values)
+            elif key in ['class_probabilities', 'cluster_confidence'] and values:
+                # Handle probability arrays
+                if hasattr(values[0], '__len__'):
+                    predictions_numpy[key] = np.array(values)
+                else:
+                    predictions_numpy[key] = np.array(values)
+            else:
+                predictions_numpy[key] = np.array(values)
+
+        # Create output directory from output_csv path
+        output_dir = os.path.dirname(output_csv)
+        if not output_dir:
+            output_dir = os.path.join('data', self.config['dataset']['name'].lower(), 'predictions')
+
+        # Use the comprehensive save method
+        reconstruction_manager = ReconstructionManager(self.config)
+        reconstruction_manager._save_predictions(predictions_numpy, output_dir, self.config)
+
+        # Also save the simplified CSV version for backward compatibility
+        self._save_simple_csv(predictions, output_csv)
+
+    def _save_simple_csv(self, predictions: Dict[str, List], output_csv: str):
+        """Save simplified CSV with main prediction columns"""
+        try:
+            df_data = {}
+
+            # Handle different prediction types
+            for key, values in predictions.items():
+                if key == 'features_phase1':
+                    # Flatten feature arrays
+                    feature_arrays = np.array(values)
+                    for i in range(feature_arrays.shape[1]):
+                        df_data[f'feature_{i}'] = feature_arrays[:, i]
+                elif key in ['class_probabilities', 'cluster_confidence']:
+                    # Handle probability arrays
+                    if values and hasattr(values[0], '__len__'):
+                        prob_arrays = np.array(values)
+                        for i in range(prob_arrays.shape[1]):
+                            df_data[f'{key}_{i}'] = prob_arrays[:, i]
+                    else:
+                        df_data[key] = values
+                else:
+                    df_data[key] = values
+
+            df = pd.DataFrame(df_data)
+            df.to_csv(output_csv, index=False)
+            logger.info(f"Predictions CSV saved to {output_csv}")
+
+        except Exception as e:
+            logger.error(f"Error saving predictions CSV to {output_csv}: {str(e)}")
+
+    def verify_feature_consistency(self, train_csv: str, test_csv: str, pred_csv: str) -> bool:
+        """Use the base autoencoder's comprehensive feature consistency verification"""
+        return self.model.verify_feature_consistency(train_csv, test_csv, pred_csv)
+
+    def validate_feature_config(self, csv_path: str):
+        """Validate that config matches actual CSV feature dimensions and auto-correct if needed"""
+        try:
+            # Read CSV to get actual feature count
+            df = pd.read_csv(csv_path)
+            feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+            actual_count = len(feature_columns)
+
+            # Get configured count
+            configured_count = self.config['model'].get('actual_feature_dims',
+                                                      self.config['model'].get('feature_dims', 128))
+
+            if actual_count != configured_count:
+                logger.warning(f"Feature dimension mismatch: CSV has {actual_count}, config expects {configured_count}")
+                # Auto-correct the config
+                self.config['model']['actual_feature_dims'] = actual_count
+                self.config['model']['compressed_dims'] = actual_count
+                logger.info(f"Auto-corrected config to use {actual_count} features")
+
+                # Update the model if it exists
+                if hasattr(self, 'model') and self.model is not None:
+                    if hasattr(self.model, 'compressed_dims'):
+                        self.model.compressed_dims = actual_count
+                    self.actual_feature_dims = actual_count
+                    logger.info(f"Updated model to use {actual_count} feature dimensions")
+            else:
+                logger.info(f"Feature dimensions validated: {actual_count} features")
+
+        except Exception as e:
+            logger.error(f"Feature config validation failed: {str(e)}")
+
+    def _load_model(self) -> nn.Module:
+        """Load model with invertible feature compression and proper dimension handling"""
+        model = ModelFactory.create_model(self.config)
+        model.to(self.device)
+
+        checkpoint_path = self.checkpoint_manager.checkpoint_path
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                logger.warning("CUDA not available. Falling back to CPU.")
+                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            else:
+                raise e
+
+        # Find the best state
+        state_key = None
+        for key in checkpoint['model_states']:
+            if 'phase2' in key and 'kld' in key and 'cls' in key:
+                state_key = key
+                break
+
+        if state_key is None:
+            # Fallback to any phase2 state
+            for key in checkpoint['model_states']:
+                if 'phase2' in key:
+                    state_key = key
+                    break
+
+        if state_key is None:
+            raise ValueError("No suitable checkpoint state found")
+
+        state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
+        model.load_state_dict(state_dict, strict=False)
+
+        # Load feature selection state
+        config_state = checkpoint['model_states'][state_key]['best']['config']
+        if 'feature_selection' in config_state:
+            fs_state = config_state['feature_selection']
+            model._selected_feature_indices = fs_state.get('selected_feature_indices')
+            model._feature_importance_scores = fs_state.get('feature_importance_scores')
+            model._feature_selection_metadata = fs_state.get('feature_selection_metadata', {})
+            model._is_feature_selection_frozen = True
+            logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices else 'None'} features")
+
+        # CRITICAL: Load and use actual feature dimensions from config
+        if 'compressed_dims' in config_state:
+            model.compressed_dims = config_state['compressed_dims']
+            # Update the prediction manager's actual feature dimensions
+            self.actual_feature_dims = model.compressed_dims
+            logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
+
+        # CRITICAL: Also check for actual_feature_dims in config
+        if 'actual_feature_dims' in config_state:
+            self.actual_feature_dims = config_state['actual_feature_dims']
+            logger.info(f"Using actual feature dimensions from config: {self.actual_feature_dims}")
+
+        # CRITICAL FIX: Ensure model's compressed_dims matches our actual_feature_dims
+        if hasattr(model, 'compressed_dims') and model.compressed_dims != self.actual_feature_dims:
+            logger.warning(f"Model compressed_dims ({model.compressed_dims}) doesn't match actual_feature_dims ({self.actual_feature_dims}). Updating model.")
+            model.compressed_dims = self.actual_feature_dims
+
+        # Final fallback: use compressed dimensions or default
+        if not hasattr(self, 'actual_feature_dims') or self.actual_feature_dims is None:
+            self.actual_feature_dims = getattr(model, 'compressed_dims', 32)
+            logger.info(f"Using fallback feature dimensions: {self.actual_feature_dims}")
+
+        model.set_training_phase(2)
+        model.eval()
+
+        logger.info(f"Model loaded successfully with {self.actual_feature_dims} feature dimensions for prediction")
+        return model
+
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = True):
         """Predict using frozen feature selection with automatic target label preservation"""
         # Get image files with full paths and class labels from subfolders
@@ -337,6 +932,20 @@ class PredictionManager:
                     features = embedding.detach().cpu().numpy()
                     #logger.warning("No frozen feature selection available, using all features")
 
+                # CRITICAL: Validate feature dimensions match expected
+                if features.shape[1] != self.actual_feature_dims:
+                    logger.warning(f"Feature dimension mismatch: got {features.shape[1]}, expected {self.actual_feature_dims}")
+                    # If dimensions don't match, take first actual_feature_dims features
+                    if features.shape[1] > self.actual_feature_dims:
+                        features = features[:, :self.actual_feature_dims]
+                        logger.info(f"Truncated features to {self.actual_feature_dims} dimensions")
+                    else:
+                        # Pad with zeros if needed
+                        padded_features = np.zeros((features.shape[0], self.actual_feature_dims))
+                        padded_features[:, :features.shape[1]] = features
+                        features = padded_features
+                        logger.info(f"Padded features to {self.actual_feature_dims} dimensions")
+
                 # CRITICAL: Store predictions with proper batch indexing (from original)
                 batch_size_actual = features.shape[0]
                 start_idx = batch_idx * batch_size
@@ -403,642 +1012,6 @@ class PredictionManager:
         logger.info(f"Prediction completed for {len(image_files)} images")
         logger.info(f"Target labels: {len(known_labels)} known classes, {len(unknown_labels)} marked as 'unknown'")
         return all_predictions
-
-    def _load_training_class_mapping(self) -> Dict[str, str]:
-        """Load the class mapping from training data to preserve target labels"""
-        dataset_name = self.config['dataset']['name'].lower()
-
-        # Try to load from training CSV first
-        train_csv = f"data/{dataset_name}/{dataset_name}_train.csv"
-        if os.path.exists(train_csv):
-            try:
-                train_df = pd.read_csv(train_csv)
-                if 'target' in train_df.columns:
-                    unique_targets = train_df['target'].unique()
-                    # Create mapping from class names to themselves (identity mapping)
-                    class_mapping = {str(target): str(target) for target in unique_targets}
-                    logger.info(f"Loaded {len(class_mapping)} training classes from {train_csv}")
-                    return class_mapping
-            except Exception as e:
-                logger.warning(f"Could not load training classes from CSV: {e}")
-
-        # Fallback: try to load from dataset directory structure
-        dataset_dir = os.path.join('data', dataset_name, 'train')
-        if os.path.exists(dataset_dir):
-            try:
-                class_dirs = [d for d in os.listdir(dataset_dir)
-                             if os.path.isdir(os.path.join(dataset_dir, d))]
-                class_mapping = {cls: cls for cls in class_dirs}
-                logger.info(f"Loaded {len(class_mapping)} training classes from directory structure")
-                return class_mapping
-            except Exception as e:
-                logger.warning(f"Could not load training classes from directory: {e}")
-
-        # Final fallback: use config or empty mapping
-        num_classes = self.config['dataset'].get('num_classes', 0)
-        if num_classes > 0:
-            logger.info(f"Using {num_classes} classes from config (no specific class names)")
-            return {}
-        else:
-            logger.warning("No training class mapping found - all labels will be marked as 'unknown'")
-            return {}
-
-    def _map_labels_to_training_classes(self, folder_labels: List[str], training_mapping: Dict[str, str]) -> List[str]:
-        """Map folder names to training target labels, using 'unknown' for unmapped classes"""
-        mapped_labels = []
-
-        for folder_label in folder_labels:
-            # Direct match
-            if folder_label in training_mapping:
-                mapped_labels.append(training_mapping[folder_label])
-            # Case-insensitive match
-            elif folder_label.lower() in [k.lower() for k in training_mapping.keys()]:
-                matched_key = next(k for k in training_mapping.keys() if k.lower() == folder_label.lower())
-                mapped_labels.append(training_mapping[matched_key])
-            # Partial match (e.g., "spiral_galaxy" matches "spiral")
-            elif any(key.lower() in folder_label.lower() for key in training_mapping.keys()):
-                matched_key = next(key for key in training_mapping.keys() if key.lower() in folder_label.lower())
-                mapped_labels.append(training_mapping[matched_key])
-            else:
-                mapped_labels.append("unknown")
-
-        return mapped_labels
-
-    def _clean_class_label(self, label: str) -> str:
-        """Clean and normalize class labels"""
-        # Remove common numeric prefixes (e.g., "001_cat" -> "cat")
-        if '_' in label and label.split('_')[0].isdigit():
-            label = '_'.join(label.split('_')[1:])
-
-        # Remove file extensions if any
-        label = os.path.splitext(label)[0]
-
-        # Convert to lowercase and replace spaces with underscores
-        label = label.lower().replace(' ', '_')
-
-        return label
-
-    def _extract_archive(self, archive_path: str, extract_dir: str) -> str:
-        """Extract a compressed archive to a directory."""
-        if os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir)
-        os.makedirs(extract_dir, exist_ok=True)
-
-        if archive_path.endswith('.zip'):
-            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-        elif archive_path.endswith('.tar.gz') or archive_path.endswith('.tgz'):
-            with tarfile.open(archive_path, 'r:gz') as tar_ref:
-                tar_ref.extractall(extract_dir)
-        elif archive_path.endswith('.tar'):
-            with tarfile.open(archive_path, 'r:') as tar_ref:
-                tar_ref.extractall(extract_dir)
-        else:
-            raise ValueError(f"Unsupported archive format: {archive_path}")
-        return extract_dir
-
-    def _get_image_files(self, input_path: str) -> List[str]:
-        """Get a list of image files from the input path."""
-        if not isinstance(input_path, (str, bytes, os.PathLike)):
-            raise ValueError(f"input_path must be a string or PathLike object, got {type(input_path)}")
-
-        image_files = []
-        dataset_name = self.config['dataset']['name']
-        if os.path.isfile(input_path):
-            # Single image file
-            if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                return [input_path]
-            # Compressed archive
-            elif input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-                extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
-                os.makedirs(extract_dir, exist_ok=True)
-                self._extract_archive(input_path, extract_dir)
-                return self._get_image_files(extract_dir)  # Recursively process extracted files
-        elif os.path.isdir(input_path):
-            # Directory of images - recursively search for image files
-            for root, _, files in os.walk(input_path):
-                for file in files:
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                        image_files.append(os.path.join(root, file))
-            return image_files
-        else:
-            raise ValueError(f"Invalid input path: {input_path}")
-
-    def _get_class_mapping(self, data_path: str) -> Dict[int, str]:
-        """Build class name to index mapping from directory structure"""
-        class_mapping = {}
-        class_dirs = []
-
-        if os.path.isdir(data_path):
-            # Get immediate subdirectories
-            with os.scandir(data_path) as entries:
-                for entry in entries:
-                    if entry.is_dir():
-                        class_dirs.append(entry.path)
-
-            # Sort alphabetically for consistent indexing
-            class_dirs = sorted(class_dirs, key=lambda x: os.path.basename(x))
-
-            # Create mapping
-            for idx, class_dir in enumerate(class_dirs):
-                class_name = os.path.basename(class_dir)
-                class_mapping[idx] = class_name
-
-        return class_mapping
-#-----------------------------------------------------------
-    def _get_image_files_with_labels(self, input_path: str) -> Tuple[List[str], List[str], List[str]]:
-        """
-        Get a list of image files, their corresponding class labels, and original filenames from the input path.
-        Enhanced to handle nested directory structures and provide better label extraction.
-        """
-        image_files = []
-        class_labels = []
-        original_filenames = []
-        dataset_name = self.config['dataset']['name']
-
-        if os.path.isfile(input_path) and input_path.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar')):
-            # Handle compressed archive
-            extract_dir = os.path.join(os.path.dirname(input_path), f"{dataset_name}/extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            self._extract_archive(input_path, extract_dir)
-            return self._get_image_files_with_labels(extract_dir)
-
-        elif os.path.isdir(input_path):
-            # Directory of images - recursively search for image files
-            for root, _, files in os.walk(input_path):
-                for file in files:
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                        image_files.append(os.path.join(root, file))
-                        original_filenames.append(file)
-
-                        # Enhanced label extraction
-                        rel_path = os.path.relpath(root, input_path)
-
-                        if rel_path != '.':
-                            # Use the most specific directory name as class label
-                            path_parts = rel_path.split(os.sep)
-                            class_label = path_parts[-1]  # Use the immediate directory name
-
-                            # Clean up the label (remove any numeric prefixes, etc.)
-                            class_label = self._clean_class_label(class_label)
-                        else:
-                            # File is directly in input_path, use "unknown"
-                            class_label = "unknown"
-
-                        class_labels.append(class_label)
-
-        elif os.path.isfile(input_path) and input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-            # Single image file
-            image_files.append(input_path)
-            original_filenames.append(os.path.basename(input_path))
-            class_labels.append("unknown")
-        else:
-            raise ValueError(f"Invalid input path: {input_path}")
-
-        logger.info(f"Found {len(image_files)} images with {len(set(class_labels))} unique folder labels")
-        return image_files, class_labels, original_filenames
-
-    def _create_dataset(self, image_files: List[str], transform: transforms.Compose) -> Dataset:
-        """Create dataset with proper channel handling for torchvision datasets."""
-        if self.config.get('data_type') == 'torchvision':
-            # Special handling for torchvision datasets
-            dataset_class = getattr(torchvision.datasets, self.config['dataset']['name'].upper())
-            return dataset_class(
-                root='data',
-                train=False,
-                download=True,
-                transform=transform
-            )
-        else:
-            # Enhanced folder-based dataset with full path support
-            class PredictionDataset(Dataset):
-                def __init__(self, image_files, transform):
-                    self.image_files = image_files
-                    self.full_paths = image_files  # Store full paths
-                    self.filenames = [os.path.basename(path) for path in image_files]  # Extract filenames
-                    self.transform = transform
-
-                def __len__(self):
-                    return len(self.image_files)
-
-                def __getitem__(self, idx):
-                    image = Image.open(self.image_files[idx])
-                    if self.transform:
-                        image = self.transform(image)
-                    return image, 0  # Dummy label
-
-                def get_additional_info(self, idx):
-                    """Return file index, filename, and full path for feature extraction"""
-                    return idx, self.filenames[idx], self.full_paths[idx]
-
-            return PredictionDataset(image_files, transform)
-
-    def get_transforms(self, config: Dict, is_train: bool = True) -> transforms.Compose:
-        """Get transforms that preserve the detected image dimensions"""
-        transform_list = []
-
-        # Use detected dimensions, don't force resize - with safe access
-        dataset_config = config.get('dataset', {})
-        target_size = tuple(dataset_config.get('input_size', [256, 256]))
-        target_channels = dataset_config.get('in_channels', 3)
-
-        logger.info(f"Using transforms for size: {target_size}, channels: {target_channels}")
-
-        # Only resize if images are very large (optional)
-        max_size = 512
-        if target_size[0] > max_size or target_size[1] > max_size:
-            logger.info(f"Resizing large images from {target_size} to max {max_size}")
-            transform_list.append(transforms.Resize(max_size))
-        else:
-            logger.info(f"Using original image size: {target_size}")
-
-        # Channel conversion if needed
-        if target_channels == 1:
-            transform_list.append(transforms.Grayscale(num_output_channels=1))
-        elif target_channels == 3:
-            transform_list.append(transforms.Lambda(lambda x: x.convert('RGB') if x.mode != 'RGB' else x))
-
-        # Training augmentations - with safe access
-        if is_train:
-            # Safely get augmentation config with defaults
-            aug_config = config.get('augmentation', {})
-            enabled = aug_config.get('enabled', True)
-
-            if enabled:
-                # Random crop with safe access
-                random_crop_config = aug_config.get('random_crop', {})
-                if random_crop_config.get('enabled', False):
-                    padding = random_crop_config.get('padding', 4)
-                    transform_list.append(transforms.RandomCrop(target_size, padding=padding))
-
-                # Horizontal flip with safe access
-                horizontal_flip_config = aug_config.get('horizontal_flip', {})
-                if horizontal_flip_config.get('enabled', False):
-                    transform_list.append(transforms.RandomHorizontalFlip())
-
-        # Final transforms with safe access to mean and std
-        mean = dataset_config.get('mean', [0.5] if target_channels == 1 else [0.485, 0.456, 0.406])
-        std = dataset_config.get('std', [0.5] if target_channels == 1 else [0.229, 0.224, 0.225])
-
-        transform_list.extend([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
-
-        return transforms.Compose(transform_list)
-
-    def _save_predictions(self, predictions: Dict, output_csv: str) -> None:
-        """Save predictions to a CSV file with proper target column handling"""
-        # Convert features to a DataFrame
-        if predictions['features_phase1']:
-            feature_array = np.array(predictions['features_phase1'])
-            feature_cols = [f'feature_{i}' for i in range(feature_array.shape[1])]
-            df = pd.DataFrame(feature_array, columns=feature_cols)
-        else:
-            df = pd.DataFrame()
-
-        # Add filename, full path and target column (CRITICAL: target comes first)
-        df.insert(0, 'target', predictions['target'])  # NEW: Target column first
-        df.insert(1, 'filename', predictions['filename'])
-        df.insert(2, 'filepath', predictions['filepath'])
-
-        # Add class predictions if available
-        if predictions.get('class_predictions') and len(predictions['class_predictions']) == len(df):
-            df['class_prediction'] = predictions['class_predictions']
-
-        # Add cluster assignments if available
-        if predictions.get('cluster_assignments') and len(predictions['cluster_assignments']) == len(df):
-            df['cluster_assignment'] = predictions['cluster_assignments']
-
-        # Add confidence scores if available
-        if predictions.get('cluster_confidence') and len(predictions['cluster_confidence']) == len(df):
-            df['cluster_confidence'] = predictions['cluster_confidence']
-
-        # NEW: Add prediction status column
-        unknown_count = sum(1 for target in predictions['target'] if target == "unknown")
-        known_count = len(predictions['target']) - unknown_count
-
-        df['prediction_status'] = ['known' if target != "unknown" else 'unknown'
-                                  for target in predictions['target']]
-
-        # Save to CSV
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        df.to_csv(output_csv, index=False)
-
-        # NEW: Log detailed statistics
-        logger.info(f"Predictions saved to {output_csv}")
-        logger.info(f"Target distribution: {known_count} known classes, {unknown_count} unknown samples")
-
-        if known_count > 0:
-            known_targets = [t for t in predictions['target'] if t != "unknown"]
-            target_counts = pd.Series(known_targets).value_counts()
-            logger.info("Known class distribution:")
-            for target, count in target_counts.items():
-                logger.info(f"  {target}: {count} samples")
-
-    def _compute_attention_heatmap(self, image_tensor: torch.Tensor, target_class: int) -> Dict[str, np.ndarray]:
-        """Compute attention heatmap showing what regions influence clustering"""
-
-        # Forward pass through model
-        outputs = self.model(image_tensor)
-
-        # Get compressed features and clustering information
-        if 'compressed_embedding' in outputs:
-            features = outputs['compressed_embedding']
-        else:
-            features = outputs['embedding']
-
-        # Get cluster assignments and probabilities
-        latent_info = self.model.organize_latent_space(features)
-
-        if 'cluster_probabilities' not in latent_info:
-            logger.warning("No clustering information available for heatmap generation")
-            return {}
-
-        # Compute gradients for attention
-        target_prob = latent_info['cluster_probabilities'][0, target_class]
-
-        # Compute gradients of target probability w.r.t. input image
-        image_tensor.requires_grad_(True)
-
-        outputs_grad = self.model(image_tensor)
-        if 'compressed_embedding' in outputs_grad:
-            features_grad = outputs_grad['compressed_embedding']
-        else:
-            features_grad = outputs_grad['embedding']
-
-        latent_info_grad = self.model.organize_latent_space(features_grad)
-        target_prob_grad = latent_info_grad['cluster_probabilities'][0, target_class]
-
-        # Compute gradients
-        target_prob_grad.backward()
-
-        # Get attention map from gradients
-        gradients = image_tensor.grad.data.cpu().numpy()[0]
-        attention_map = np.max(np.abs(gradients), axis=0)
-
-        # Normalize attention map
-        if attention_map.max() > attention_map.min():
-            attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min())
-
-        return {
-            'attention_map': attention_map,
-            'cluster_probs': latent_info['cluster_probabilities'][0].cpu().numpy(),
-            'cluster_assignment': latent_info['cluster_assignments'][0].item(),
-            'target_prob': target_prob.item(),
-            'features': features[0].cpu().numpy()
-        }
-
-    def _save_attention_heatmap(self, original_image: Image.Image, heatmap_data: Dict,
-                              img_path: str, class_name: str, sample_idx: int,
-                              output_dir: str, class_idx: int):
-        """Save attention heatmap visualization"""
-
-        # Create figure
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        fig.suptitle(f'Class: {class_name} | Image: {os.path.basename(img_path)}',
-                     fontsize=14, fontweight='bold')
-
-        # Original image
-        axes[0, 0].imshow(original_image)
-        axes[0, 0].set_title('Original Image')
-        axes[0, 0].axis('off')
-
-        # Attention heatmap
-        if 'attention_map' in heatmap_data:
-            attention_map = heatmap_data['attention_map']
-            h, w = original_image.size[1], original_image.size[0]
-            attention_resized = np.array(Image.fromarray(attention_map).resize((w, h), Image.BILINEAR))
-
-            im = axes[0, 1].imshow(attention_resized, cmap='hot', alpha=0.7)
-            axes[0, 1].set_title('Attention Heatmap')
-            axes[0, 1].axis('off')
-            plt.colorbar(im, ax=axes[0, 1])
-
-        # Overlay heatmap on original
-        axes[0, 2].imshow(original_image)
-        if 'attention_map' in heatmap_data:
-            axes[0, 2].imshow(attention_resized, cmap='hot', alpha=0.5)
-        axes[0, 2].set_title('Attention Overlay')
-        axes[0, 2].axis('off')
-
-        # Cluster probability distribution
-        if 'cluster_probs' in heatmap_data:
-            probs = heatmap_data['cluster_probs']
-            classes = list(range(len(probs)))
-
-            bars = axes[1, 0].bar(classes, probs, color='skyblue', alpha=0.7)
-            # Highlight target class
-            if class_idx < len(bars):
-                bars[class_idx].set_color('red')
-
-            axes[1, 0].set_title('Cluster Probabilities')
-            axes[1, 0].set_xlabel('Cluster')
-            axes[1, 0].set_ylabel('Probability')
-            axes[1, 0].set_ylim(0, 1)
-            axes[1, 0].grid(True, alpha=0.3)
-
-        # Feature importance (if using compressed features)
-        if 'features' in heatmap_data and hasattr(self.model, 'compressed_dims'):
-            features = heatmap_data['features']
-            feature_importance = np.abs(features)
-
-            axes[1, 1].bar(range(len(feature_importance)), feature_importance,
-                          color='lightgreen', alpha=0.7)
-            axes[1, 1].set_title(f'Compressed Features ({len(features)}D)')
-            axes[1, 1].set_xlabel('Feature Dimension')
-            axes[1, 1].set_ylabel('Absolute Value')
-            axes[1, 1].grid(True, alpha=0.3)
-
-        # Metadata
-        metadata_text = []
-        if 'cluster_assignment' in heatmap_data:
-            metadata_text.append(f"Assigned Cluster: {heatmap_data['cluster_assignment']}")
-        if 'target_prob' in heatmap_data:
-            metadata_text.append(f"Target Prob: {heatmap_data['target_prob']:.3f}")
-        if hasattr(self.model, 'compressed_dims'):
-            metadata_text.append(f"Features: {self.model.feature_dims}D → {self.model.compressed_dims}D")
-
-        axes[1, 2].text(0.1, 0.9, '\n'.join(metadata_text), transform=axes[1, 2].transAxes,
-                       fontsize=10, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        axes[1, 2].set_title('Model Metadata')
-        axes[1, 2].axis('off')
-
-        plt.tight_layout()
-
-        # Save figure
-        filename = f"heatmap_{class_name}_{sample_idx}_{os.path.basename(img_path).split('.')[0]}.png"
-        output_path = os.path.join(output_dir, filename)
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-
-        logger.debug(f"Saved heatmap: {output_path}")
-
-    def _generate_batch_heatmaps(self, batch_tensor: torch.Tensor, batch_labels: torch.Tensor,
-                               batch_filenames: List[str], model_output: Dict):
-        """Generate heatmaps for ALL images in a batch"""
-        if not hasattr(self, 'heatmap_output_dir'):
-            dataset_name = self.config['dataset']['name'].lower()
-            self.heatmap_output_dir = os.path.join('data', dataset_name, 'batch_heatmaps')
-            os.makedirs(self.heatmap_output_dir, exist_ok=True)
-
-        batch_size = batch_tensor.shape[0]
-
-        # NEW: Process ALL images in the batch, not just first 3
-        for i in range(batch_size):
-            try:
-                single_image = batch_tensor[i:i+1]
-                single_label = batch_labels[i].item() if batch_labels is not None else 0
-                filename = batch_filenames[i]
-
-                # Compute attention heatmap
-                heatmap_data = self._compute_attention_heatmap(single_image, single_label)
-
-                # Convert tensor to PIL image for visualization
-                image_np = single_image[0].cpu().permute(1, 2, 0).numpy()
-                image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min()) * 255
-                image_pil = Image.fromarray(image_np.astype(np.uint8))
-
-                # Save heatmap
-                self._save_batch_heatmap(image_pil, heatmap_data, filename, single_label, i)
-
-            except Exception as e:
-                logger.debug(f"Could not generate heatmap for image {i}: {str(e)}")
-                continue
-
-    def _save_batch_heatmap(self, image: Image.Image, heatmap_data: Dict,
-                           filename: str, label: int, index: int):
-        """Save a simplified heatmap for batch images"""
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
-
-        # Original image
-        ax1.imshow(image)
-        ax1.set_title(f'Original: {filename}')
-        ax1.axis('off')
-
-        # Attention heatmap
-        if 'attention_map' in heatmap_data:
-            attention_map = heatmap_data['attention_map']
-            h, w = image.size[1], image.size[0]
-            attention_resized = np.array(Image.fromarray(attention_map).resize((w, h), Image.BILINEAR))
-
-            im = ax2.imshow(attention_resized, cmap='hot', alpha=0.7)
-            ax2.set_title('Attention Heatmap')
-            ax2.axis('off')
-            plt.colorbar(im, ax=ax2)
-
-        # Overlay
-        ax3.imshow(image)
-        if 'attention_map' in heatmap_data:
-            ax3.imshow(attention_resized, cmap='hot', alpha=0.5)
-        ax3.set_title('Attention Overlay')
-        ax3.axis('off')
-
-        # Add metadata
-        if 'cluster_assignment' in heatmap_data:
-            plt.figtext(0.02, 0.02, f"Label: {label} | Cluster: {heatmap_data['cluster_assignment']} | "
-                      f"Confidence: {heatmap_data.get('target_prob', 0):.3f}",
-                      fontsize=10, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        plt.tight_layout()
-
-        # Save with simplified filename
-        safe_filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_')).rstrip()
-        output_path = os.path.join(self.heatmap_output_dir, f"heatmap_{safe_filename}_{index}.png")
-        plt.savefig(output_path, dpi=120, bbox_inches='tight')
-        plt.close()
-
-        logger.debug(f"Saved batch heatmap: {output_path}")
-
-    def generate_classwise_attention_heatmaps(self, data_path: str, output_dir: str = None,
-                                            num_samples_per_class: int = None):
-        """Generate comprehensive attention heatmaps for ALL samples showing what features drive classwise clustering"""
-
-        # Get image files with labels
-        image_files, class_labels, _ = self._get_image_files_with_labels(data_path)
-        if not image_files:
-            logger.warning(f"No image files found in {data_path}")
-            return
-
-        # Create class mapping
-        class_mapping = self._get_class_mapping(data_path)
-        if not class_mapping:
-            logger.warning("No class structure found for heatmap generation")
-            return
-
-        # Setup output directory
-        if output_dir is None:
-            dataset_name = self.config['dataset']['name'].lower()
-            output_dir = os.path.join('data', dataset_name, 'attention_heatmaps')
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Get transforms
-        transform = self.get_transforms(self.config, is_train=False)
-
-        # NEW: Process ALL samples if num_samples_per_class is None
-        if num_samples_per_class is None:
-            logger.info(f"Generating attention heatmaps for ALL {len(image_files)} samples across {len(class_mapping)} classes")
-        else:
-            logger.info(f"Generating attention heatmaps for {num_samples_per_class} samples per class across {len(class_mapping)} classes")
-
-        self.model.eval()
-
-        # Register attention hooks for detailed feature map capture
-        if hasattr(self.model, 'register_attention_hooks'):
-            self.model.register_attention_hooks()
-
-        total_processed = 0
-        with torch.no_grad():
-            for class_idx, class_name in class_mapping.items():
-                logger.info(f"Processing class: {class_name} (idx: {class_idx})")
-
-                # Get ALL samples for this class
-                class_images = [img for img, lbl in zip(image_files, class_labels)
-                              if lbl == class_name]
-
-                if not class_images:
-                    logger.warning(f"No images found for class {class_name}")
-                    continue
-
-                # NEW: Limit samples if specified, otherwise process all
-                if num_samples_per_class is not None:
-                    selected_images = class_images[:num_samples_per_class]
-                    logger.info(f"  Processing {len(selected_images)} samples (limited)")
-                else:
-                    selected_images = class_images
-                    logger.info(f"  Processing ALL {len(selected_images)} samples")
-
-                # Create class subdirectory for better organization
-                class_output_dir = os.path.join(output_dir, f"class_{class_name}")
-                os.makedirs(class_output_dir, exist_ok=True)
-
-                for sample_idx, img_path in enumerate(tqdm(selected_images, desc=f"Class {class_name}", leave=False)):
-                    try:
-                        # Load and process image
-                        image = Image.open(img_path).convert('RGB')
-                        image_tensor = transform(image).unsqueeze(0).to(self.device)
-
-                        # Generate heatmap for this sample
-                        heatmap_data = self._compute_attention_heatmap(image_tensor, class_idx)
-
-                        # Create visualization
-                        self._save_attention_heatmap(
-                            image, heatmap_data, img_path, class_name,
-                            sample_idx, class_output_dir, class_idx
-                        )
-
-                        total_processed += 1
-
-                    except Exception as e:
-                        logger.error(f"Error processing {img_path}: {str(e)}")
-                        continue
-
-        # Remove attention hooks
-        if hasattr(self.model, 'remove_attention_hooks'):
-            self.model.remove_attention_hooks()
-
-        logger.info(f"Heatmap generation completed! Processed {total_processed} samples across {len(class_mapping)} classes")
-        logger.info(f"All heatmaps saved to: {output_dir}")
 
 
 class SlidingWindowDataset(Dataset):
@@ -1335,6 +1308,117 @@ class WindowReconstructor:
         self.output_tensor = torch.zeros(self.original_shape)
         self.weight_tensor = torch.zeros(self.original_shape)
 
+class ReconstructionSampler:
+    """Samples and saves reconstruction comparisons during training"""
+
+    def __init__(self, config: Dict, output_dir: str = None):
+        self.config = config
+        self.device = torch.device('cuda' if config['execution_flags']['use_gpu']
+                                 and torch.cuda.is_available() else 'cpu')
+
+        # Setup output directory
+        dataset_name = config['dataset']['name'].lower()
+        if output_dir is None:
+            output_dir = os.path.join('data', dataset_name, 'reconstruction_samples')
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        self.samples_per_class = config.get('training', {}).get('samples_per_class', 2)
+
+    def save_reconstruction_samples(self, model: nn.Module, dataloader: DataLoader,
+                                  epoch: int, phase: int = 1):
+        """Save reconstruction samples for visual inspection"""
+        model.eval()
+        samples_collected = defaultdict(list)
+
+        with torch.no_grad():
+            for batch_idx, (data, labels) in enumerate(dataloader):
+                if len(samples_collected) >= 10:  # Limit to 10 classes for efficiency
+                    break
+
+                data = data.to(self.device)
+                labels = labels.to(self.device)
+
+                # Get reconstructions
+                if phase == 1:
+                    outputs = model(data)
+                    if isinstance(outputs, tuple):
+                        _, reconstructions = outputs
+                    else:
+                        reconstructions = outputs.get('reconstruction', data)
+                else:
+                    outputs = model(data)
+                    reconstructions = outputs.get('reconstruction', data)
+
+                # Store samples by class
+                for i in range(len(data)):
+                    label = labels[i].item()
+                    if len(samples_collected[label]) < self.samples_per_class:
+                        samples_collected[label].append({
+                            'original': data[i].cpu(),
+                            'reconstruction': reconstructions[i].cpu(),
+                            'label': label
+                        })
+
+        # Create visualization
+        self._create_comparison_grid(samples_collected, epoch, phase)
+
+    def _create_comparison_grid(self, samples_collected: Dict, epoch: int, phase: int):
+        """Create side-by-side comparison of originals vs reconstructions"""
+        if not samples_collected:
+            return
+
+        # Prepare figure
+        n_classes = len(samples_collected)
+        n_samples = self.samples_per_class
+        fig, axes = plt.subplots(n_classes, n_samples * 2,
+                               figsize=(4 * n_samples, 3 * n_classes))
+
+        if n_classes == 1:
+            axes = axes.reshape(1, -1)
+
+        # Plot each class
+        for class_idx, (label, samples) in enumerate(samples_collected.items()):
+            for sample_idx, sample in enumerate(samples):
+                # Original
+                orig_ax = axes[class_idx, sample_idx * 2]
+                self._tensor_to_axis(sample['original'], orig_ax)
+                if sample_idx == 0:
+                    orig_ax.set_ylabel(f'Class {label}', rotation=90, size=12)
+                orig_ax.set_title('Original' if class_idx == 0 else '')
+
+                # Reconstruction
+                recon_ax = axes[class_idx, sample_idx * 2 + 1]
+                self._tensor_to_axis(sample['reconstruction'], recon_ax)
+                recon_ax.set_title('Reconstructed' if class_idx == 0 else '')
+
+        plt.tight_layout()
+
+        # Save figure
+        filename = f"reconstruction_phase{phase}_epoch{epoch:03d}.png"
+        output_path = os.path.join(self.output_dir, filename)
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Saved reconstruction samples to {output_path}")
+
+    def _tensor_to_axis(self, tensor: torch.Tensor, ax):
+        """Convert tensor to matplotlib axis"""
+        img = self._tensor_to_image(tensor)
+        ax.imshow(img)
+        ax.axis('off')
+
+    def _tensor_to_image(self, tensor: torch.Tensor) -> np.ndarray:
+        """Convert tensor to image array with proper normalization"""
+        tensor = tensor.detach().cpu()
+        if len(tensor.shape) == 3:
+            tensor = tensor.permute(1, 2, 0)
+
+        mean = torch.tensor(self.config['dataset']['mean']).view(1, 1, -1)
+        std = torch.tensor(self.config['dataset']['std']).view(1, 1, -1)
+        tensor = tensor * std + mean
+
+        return tensor.clamp(0, 1).numpy()
 
 class GeneralEnhancementConfig(BaseEnhancementConfig):
     """Configuration manager for general (flexible) enhancement mode"""
@@ -1673,7 +1757,7 @@ class BaseAutoencoder(nn.Module):
     def get_frozen_features(self, embeddings: torch.Tensor) -> torch.Tensor:
         """Extract only the frozen selected features from embeddings using tensor indexing"""
         if self._selected_feature_indices is None:
-            logger.warning("No frozen feature selection available, returning all features")
+            #logger.warning("No frozen feature selection available, returning all features")
             return embeddings
 
         # Use tensor indexing (much faster and compatible with binary serialization)
@@ -1857,31 +1941,320 @@ class BaseAutoencoder(nn.Module):
         return torch.cat(confident_samples) if confident_samples else None
 
     def _select_features_using_distance_correlation(self, features, labels, config):
-        """Select features based on distance correlation criteria"""
+        """Enhanced feature selection with reliability checks"""
         selector = DistanceCorrelationFeatureSelector(
-            upper_threshold=config['distance_correlation_upper'],
-            lower_threshold=config['distance_correlation_lower']
+            upper_threshold=config.get('distance_correlation_upper', 0.7),  # Lower default
+            lower_threshold=config.get('distance_correlation_lower', 0.05),
+            min_features=config.get('min_features', 8),
+            max_features=config.get('max_features', 50)
         )
 
         selected_indices, corr_values = selector.select_features(features, labels)
 
-        # Create new feature matrix with only selected features
-        selected_features = features[:, selected_indices]
-        feature_names = [f'feature_{i}' for i in selected_indices]
+        # NEW: Reliability check
+        n_features = features.shape[1]
+        min_acceptable = max(config.get('min_features', 8), n_features // 4)  # At least 25%
 
-        return selected_features, feature_names, corr_values
+        if len(selected_indices) < min_acceptable:
+            logger.warning(f"Feature selection unreliable: {len(selected_indices)} features (< {min_acceptable} min)")
+            # Return empty to trigger fallback
+            return [], corr_values
+
+        logger.info(f"Reliable feature selection: {len(selected_indices)} features "
+                   f"(correlation range: {min(corr_values[selected_indices]):.3f}-{max(corr_values[selected_indices]):.3f})")
+
+        return selected_indices, corr_values
+
+    def _calculate_min_features_required(self, n_features, n_classes, n_samples):
+        """Calculate minimum features needed based on dataset complexity"""
+        # Base minimum: at least 2 features per class, but not more than 50% of total
+        base_min = min(n_classes * 2, n_features // 2)
+
+        # Adjust based on sample size
+        sample_factor = min(1.0, n_samples / 10000)  # Scale with dataset size
+
+        # Adjust based on number of classes (more classes need more features)
+        class_factor = min(2.0, 1.0 + (n_classes / 20))
+
+        min_features = int(base_min * sample_factor * class_factor)
+
+        # Ensure reasonable bounds
+        min_features = max(8, min(min_features, n_features // 4))
+
+        return min_features
+
+    def _expand_feature_selection(self, features, labels, initial_indices, corr_values, target_count):
+        """Expand feature selection when initial selection is too sparse"""
+        n_features = features.shape[1]
+
+        # Get all features sorted by correlation strength
+        all_indices = np.argsort(corr_values)[::-1]
+
+        # Start with initially selected features
+        expanded_indices = set(initial_indices)
+
+        # Add features until we reach target count
+        for idx in all_indices:
+            if len(expanded_indices) >= target_count:
+                break
+            if idx not in expanded_indices:
+                # Check if this feature adds diversity
+                if self._is_feature_diverse(features, idx, expanded_indices):
+                    expanded_indices.add(idx)
+
+        return sorted(expanded_indices)
+
+    def _is_feature_diverse(self, features: np.ndarray, candidate_idx: int,
+                           selected_indices: set, threshold: float = 0.8) -> bool:
+        """
+        Check if candidate feature is sufficiently different from already selected features.
+
+        Args:
+            features: All feature vectors (n_samples x n_features)
+            candidate_idx: Index of candidate feature to check
+            selected_indices: Set of already selected feature indices
+            threshold: Correlation threshold for considering features redundant
+
+        Returns:
+            bool: True if feature is diverse enough to add
+        """
+        if not selected_indices:
+            return True
+
+        candidate_feature = features[:, candidate_idx]
+
+        for selected_idx in selected_indices:
+            selected_feature = features[:, selected_idx]
+            try:
+                # Calculate correlation between features
+                correlation = abs(np.corrcoef(candidate_feature, selected_feature)[0, 1])
+                if correlation > threshold:
+                    # Features are too similar, candidate is redundant
+                    return False
+            except (ValueError, RuntimeError):
+                # If correlation calculation fails, assume features are different
+                continue
+
+        return True
+
+    def _validate_feature_csv(self, csv_path: str, expected_feature_count: int):
+        """Validate that the saved CSV has the correct number of features"""
+        try:
+            df = pd.read_csv(csv_path)
+            feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+            actual_count = len(feature_columns)
+
+            if actual_count != expected_feature_count:
+                logger.warning(f"CSV validation: Expected {expected_feature_count} features, found {actual_count}")
+            else:
+                logger.info(f"CSV validation passed: {actual_count} features confirmed")
+
+        except Exception as e:
+            logger.warning(f"CSV validation failed: {str(e)}")
+
+    def _update_config_column_names_from_csv(self, csv_path: str):
+        """Update config column_names to match actual CSV features"""
+        try:
+            # Read CSV to get actual feature columns
+            df = pd.read_csv(csv_path)
+
+            # Get all feature columns (excluding metadata columns)
+            feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+            feature_columns.sort(key=lambda x: int(x.split('_')[1]))
+
+            # Get non-feature columns that should be preserved
+            non_feature_columns = [col for col in df.columns if not col.startswith('feature_')]
+
+            # Update config with actual column names
+            if 'column_names' in self.config:
+                # Replace the hardcoded column_names with actual ones from CSV
+                # Order: target first, then features, then other columns
+                updated_column_names = ['target'] + feature_columns + [col for col in non_feature_columns if col != 'target']
+                self.config['column_names'] = updated_column_names
+                logger.info(f"Updated config column_names to match CSV: {len(feature_columns)} features")
+            else:
+                logger.warning("Config does not have 'column_names' key to update")
+
+        except Exception as e:
+            logger.error(f"Failed to update config column_names from CSV: {str(e)}")
+
+    def _save_synchronized_config(self, output_dir: str):
+        """Save the synchronized configuration to ensure consistency"""
+        try:
+            config_path = os.path.join(output_dir, 'synchronized_config.json')
+            # Clean config for JSON serialization
+            clean_config = self._clean_config_for_json(self.config)
+            with open(config_path, 'w') as f:
+                json.dump(clean_config, f, indent=2)
+            logger.info(f"Saved synchronized config to {config_path}")
+        except Exception as e:
+            logger.warning(f"Could not save synchronized config: {str(e)}")
+
+    def _clean_config_for_json(self, config: Dict) -> Dict:
+        """Clean configuration for JSON serialization"""
+        def clean_value(value):
+            if isinstance(value, (torch.Tensor, np.ndarray)):
+                return value.tolist() if hasattr(value, 'tolist') else str(value)
+            elif isinstance(value, dict):
+                return {k: clean_value(v) for k, v in value.items()}
+            elif isinstance(value, (list, tuple)):
+                return [clean_value(v) for v in value]
+            else:
+                return value
+
+        return clean_value(config)
+
+
+    def _prepare_features_dataframe_enhanced(self, feature_dict: Dict[str, torch.Tensor],
+                                           n_classes: int, n_samples: int) -> pd.DataFrame:
+        """Enhanced feature preparation for folder-based datasets with guaranteed config synchronization"""
+        data = {}
+        embeddings = feature_dict['embeddings'].cpu().numpy()
+        base_length = len(embeddings)
+        total_features = embeddings.shape[1]
+
+        # CRITICAL: Always use compressed features as they are most informative
+        feature_source = "compressed"
+        actual_feature_count = None
+
+        # Use compressed features by default (they are more informative than correlation selection)
+        if hasattr(self, 'feature_compressor'):
+            # Convert to tensor and compress to compressed_dims
+            embeddings_tensor = torch.tensor(embeddings).to(self.device)
+            with torch.no_grad():
+                compressed_embeddings = self.feature_compressor(embeddings_tensor).cpu().numpy()
+
+            # Use compressed features - these are the most informative
+            actual_feature_count = compressed_embeddings.shape[1]
+
+            # CRITICAL FIX: Update config with the actual compressed dimensions
+            self.config['model']['actual_feature_dims'] = actual_feature_count
+            self.config['model']['compressed_dims'] = actual_feature_count
+
+            for i in range(actual_feature_count):
+                data[f'feature_{i}'] = compressed_embeddings[:, i]
+
+            logger.info(f"Using compressed features: {actual_feature_count}D (most informative)")
+
+            # Optional: Log feature importance for verification
+            if 'labels' in feature_dict:
+                labels = feature_dict['labels'].cpu().numpy()
+                # Calculate variance explained by each compressed feature
+                feature_variance = np.var(compressed_embeddings, axis=0)
+                logger.info(f"Compressed feature variance range: {np.min(feature_variance):.4f}-{np.max(feature_variance):.4f}")
+
+        else:
+            # Fallback: use first 32 features
+            actual_feature_count = min(32, total_features)
+            # CRITICAL FIX: Update config with fallback dimensions
+            self.config['model']['actual_feature_dims'] = actual_feature_count
+            self.config['model']['compressed_dims'] = actual_feature_count
+            for i in range(actual_feature_count):
+                data[f'feature_{i}'] = embeddings[:, i]
+            feature_source = "sequential"
+            logger.info(f"Using sequential features: {actual_feature_count}D")
+
+        # CRITICAL FIX: Double verification and logging
+        logger.info(f"Config synchronized: {total_features}D → {actual_feature_count}D actual features in CSV")
+
+        # FIXED: Enhanced target column handling for folder-based datasets
+        target_added = False
+
+        # Priority 1: Use class_names from folder structure (most reliable)
+        if 'class_names' in feature_dict and len(feature_dict['class_names']) == base_length:
+            data['target'] = feature_dict['class_names']
+            target_added = True
+            logger.debug("Added target from class_names")
+
+        # Priority 2: Convert numeric labels to class names using dataset classes
+        elif 'labels' in feature_dict:
+            labels_tensor = feature_dict['labels']
+            if isinstance(labels_tensor, torch.Tensor):
+                labels_numpy = labels_tensor.cpu().numpy()
+                if len(labels_numpy) == base_length:
+                    # Convert numeric labels to class names using dataset information
+                    if hasattr(self, 'train_dataset') and hasattr(self.train_dataset, 'classes'):
+                        try:
+                            class_names = [self.train_dataset.classes[label] for label in labels_numpy]
+                            data['target'] = class_names
+                            logger.debug("Converted numeric labels to class names using dataset classes")
+                        except Exception as e:
+                            logger.warning(f"Could not convert labels to class names: {e}")
+                            data['target'] = labels_numpy
+                            logger.debug("Added target as numeric labels (fallback)")
+                    else:
+                        data['target'] = labels_numpy
+                        logger.debug("Added target as numeric labels")
+                    target_added = True
+
+        # Priority 3: Fallback - create target from available information
+        if not target_added:
+            logger.warning(f"No target information found. Creating target column from available data for {base_length} samples.")
+            # Try to extract class names from filepaths
+            if 'full_paths' in feature_dict:
+                class_names = []
+                for path in feature_dict['full_paths']:
+                    # Extract class name from path (assuming folder structure: .../class_name/filename)
+                    path_parts = path.split(os.sep)
+                    if len(path_parts) >= 2:
+                        class_name = path_parts[-2]  # Second last part is class folder
+                        class_names.append(class_name)
+                    else:
+                        class_names.append("unknown")
+
+                if len(class_names) == base_length:
+                    data['target'] = class_names
+                    logger.debug("Created target from filepath folder structure")
+                else:
+                    data['target'] = [f"class_{i % n_classes}" for i in range(base_length)] if n_classes > 0 else ["unknown"] * base_length
+                    logger.debug("Created dummy target column")
+            else:
+                data['target'] = [f"class_{i % n_classes}" for i in range(base_length)] if n_classes > 0 else ["unknown"] * base_length
+                logger.debug("Created dummy target column")
+
+        # Add file paths and metadata
+        if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
+            data['filepath'] = feature_dict['full_paths']
+        elif 'filenames' in feature_dict and len(feature_dict['filenames']) == base_length:
+            data['filepath'] = feature_dict['filenames']
+        else:
+            data['filepath'] = [f"sample_{i}" for i in range(base_length)]
+
+        # Add feature source metadata
+        data['feature_source'] = [feature_source] * base_length
+
+        # Create DataFrame and ensure target column is first
+        df = pd.DataFrame(data)
+
+        # Column ordering with target first
+        column_order = ['target']
+
+        # Extract only numeric feature columns (feature_0, feature_1, etc.)
+        numeric_feature_columns = [col for col in df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+
+        # Sort numeric features properly
+        if numeric_feature_columns:
+            numeric_feature_columns.sort(key=lambda x: int(x.split('_')[1]))
+            column_order.extend(numeric_feature_columns)
+
+        # Add other columns
+        other_columns = [col for col in df.columns if col not in column_order]
+        column_order.extend(other_columns)
+
+        # Reorder the DataFrame
+        df = df[column_order]
+
+        # Final verification
+        final_feature_count = len(numeric_feature_columns)
+        logger.info(f"Final DataFrame: {final_feature_count} features for {n_classes} classes (source: {feature_source})")
+
+        return df
 
     def save_features(self, train_features: Dict[str, torch.Tensor],
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        Save ALL features without any selection - use full feature dimensions.
-        Handles both adaptive and non-adaptive modes with proper configuration.
-
-        Args:
-            train_features: Features from training set (dict with 'embeddings', 'labels', etc.)
-            test_features: Features from test set (same format as train_features)
-            output_path: Full path for output CSV file
+        Enhanced feature saving with guaranteed config synchronization and validation
         """
         try:
             # Ensure output_path uses lowercase 'data' directory
@@ -1895,28 +2268,61 @@ class BaseAutoencoder(nn.Module):
             output_dir = os.path.dirname(output_path)
             os.makedirs(output_dir, exist_ok=True)
 
-            # CLEAN UP LEGACY JSON FILES FIRST - THIS IS THE CRITICAL MISSING LINE
+            # Clean up legacy JSON files first
             self.cleanup_legacy_json_files(output_dir)
 
             # Get adaptive mode setting
             enable_adaptive = self.config['model'].get('enable_adaptive', True)
 
-            # Process features - NO FEATURE SELECTION, USE ALL FEATURES
+            # Enhanced feature analysis for complex datasets
+            n_classes = len(np.unique(train_features['labels'].cpu().numpy()))
+            n_samples = len(train_features['embeddings'])
+
+            logger.info(f"Feature analysis: {n_samples} samples, {n_classes} classes")
+
+            # Track actual feature dimensions for config synchronization
+            actual_feature_count = None
+
+            # Process features - use compressed features as they are most informative
             if enable_adaptive:
                 # Adaptive mode - single combined output
-                features_df = self._prepare_features_dataframe(train_features, dc_config=None)
+                features_df = self._prepare_features_dataframe_enhanced(
+                    train_features, n_classes, n_samples
+                )
+
+                # CRITICAL: Double-verify and update config with actual feature count
+                feature_columns = [col for col in features_df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+                actual_feature_count = len(feature_columns)
+
+                # CRITICAL FIX: Ensure config is fully synchronized
+                self.config['model']['actual_feature_dims'] = actual_feature_count
+                self.config['model']['compressed_dims'] = actual_feature_count
 
                 # Save features
                 features_df.to_csv(output_path, index=False)
-                logger.info(f"Saved ALL {features_df.shape[1]-2} features to {output_path} (adaptive mode)")
+                logger.info(f"Saved {actual_feature_count} compressed features to {output_path}")
 
-                # Save metadata USING BINARY FORMAT
-                feature_columns = [c for c in features_df.columns if c.startswith('feature_')]
+                # NEW: Update config column_names to match actual CSV
+                self._update_config_column_names_from_csv(output_path)
+
+                # Save metadata using binary format
                 self._save_feature_metadata(output_dir, feature_columns, None)
             else:
                 # Non-adaptive mode - separate train/test files
-                train_df = self._prepare_features_dataframe(train_features, dc_config=None)
-                test_df = self._prepare_features_dataframe(test_features, dc_config=None)
+                train_df = self._prepare_features_dataframe_enhanced(
+                    train_features, n_classes, n_samples
+                )
+                test_df = self._prepare_features_dataframe_enhanced(
+                    test_features, n_classes, n_samples
+                )
+
+                # CRITICAL: Double-verify and update config with actual feature count
+                feature_columns = [col for col in train_df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+                actual_feature_count = len(feature_columns)
+
+                # CRITICAL FIX: Ensure config is fully synchronized
+                self.config['model']['actual_feature_dims'] = actual_feature_count
+                self.config['model']['compressed_dims'] = actual_feature_count
 
                 # Save features - ensure lowercase data directory
                 base_path = output_path.replace(".csv", "")
@@ -1925,107 +2331,30 @@ class BaseAutoencoder(nn.Module):
 
                 train_df.to_csv(train_path, index=False)
                 test_df.to_csv(test_path, index=False)
-                logger.info(f"Saved ALL {train_df.shape[1]-2} train features to {train_path}")
-                logger.info(f"Saved ALL {test_df.shape[1]-2} test features to {test_path}")
+                logger.info(f"Saved {actual_feature_count} train features to {train_path}")
+                logger.info(f"Saved {actual_feature_count} test features to {test_path}")
 
-                # Save metadata USING BINARY FORMAT
-                feature_columns = [c for c in train_df.columns if c.startswith('feature_')]
+                # NEW: Update config column_names to match actual CSV
+                self._update_config_column_names_from_csv(train_path)
+
+                # Save metadata using binary format
                 self._save_feature_metadata(output_dir, feature_columns, None)
+
+            # Final config synchronization logging
+            original_dims = self.config['model'].get('feature_dims', 128)
+            compressed_dims = self.config['model'].get('compressed_dims', 32)
+            logger.info(f"Config fully synchronized: {original_dims}D → {compressed_dims}D compressed → {actual_feature_count}D in CSV")
+
+            # Validate the output
+            self._validate_feature_csv(output_path, actual_feature_count)
+
+            # CRITICAL FIX: Save the synchronized config to checkpoint
+            self._save_synchronized_config(output_dir)
 
         except Exception as e:
             logger.error(f"Error in save_features: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save features: {str(e)}")
-
-    def _prepare_features_dataframe(self, feature_dict: Dict[str, torch.Tensor],
-                                  dc_config: Optional[Dict]= None) -> pd.DataFrame:
-        """Prepare DataFrame with ALL features but ensure consistent feature ordering across runs"""
-        data = {}
-        embeddings = feature_dict['embeddings'].cpu().numpy()  # Convert to numpy only for CSV
-        base_length = len(embeddings)
-        total_features = embeddings.shape[1]
-
-        # CRITICAL: Always use frozen feature indices to ensure consistent ordering
-        # This ensures feature_0 always means the same latent dimension across runs
-        has_frozen_selection = (hasattr(self, '_is_feature_selection_frozen') and
-                              self._is_feature_selection_frozen and
-                              self._selected_feature_indices is not None)
-
-        if has_frozen_selection:
-            # Use frozen feature indices for consistent ordering (but use ALL features)
-            selected_indices = self._selected_feature_indices.cpu().numpy()
-            logger.info(f"Using frozen feature ordering: {len(selected_indices)} features")
-
-            # Store ALL features using the frozen indices for consistent ordering
-            for new_idx, orig_idx in enumerate(selected_indices):
-                data[f'feature_{new_idx}'] = embeddings[:, orig_idx]
-        else:
-            # First time - create and freeze the feature ordering
-            logger.info(f"Creating and freezing feature ordering for {total_features} features")
-
-            # Create sequential indices [0, 1, 2, ..., total_features-1]
-            sequential_indices = list(range(total_features))
-
-            # Freeze this ordering for consistency
-            self.freeze_feature_selection(
-                sequential_indices,
-                np.ones(total_features),  # Dummy importance scores
-                {'method': 'sequential', 'timestamp': datetime.now().isoformat()}
-            )
-
-            # Store all features with consistent ordering
-            for i in range(total_features):
-                data[f'feature_{i}'] = embeddings[:, i]
-
-        # Add full file paths
-        if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
-            data['filepath'] = feature_dict['full_paths']
-            logger.info(f"Included {len(feature_dict['full_paths'])} full file paths in CSV")
-        elif 'filenames' in feature_dict and len(feature_dict['filenames']) == base_length:
-            data['filepath'] = feature_dict['filenames']
-            logger.info(f"Included {len(feature_dict['filenames'])} filenames in CSV (full paths not available)")
-        else:
-            data['filepath'] = [f"sample_{i}" for i in range(base_length)]
-            logger.warning("No file paths available, using sample indices")
-
-        # Add labels and metadata - TARGET COLUMN
-        if 'class_names' in feature_dict:
-            class_names = feature_dict['class_names']
-            if len(class_names) == base_length:
-                data['target'] = class_names
-            else:
-                logger.warning(f"Class names length mismatch, using labels")
-                data['target'] = feature_dict['labels'].cpu().numpy()[:base_length]
-        elif 'labels' in feature_dict:
-            data['target'] = feature_dict['labels'].cpu().numpy()[:base_length]
-
-        # Include additional metadata if available
-        optional_fields = ['indices']
-        for field in optional_fields:
-            if field in feature_dict and len(feature_dict[field]) == base_length:
-                data[field] = feature_dict[field]
-
-        # Create DataFrame and ensure target column is first
-        df = pd.DataFrame(data)
-
-        # Reorder columns to have target first, then features, then file_path
-        column_order = ['target']
-        feature_columns = [col for col in df.columns if col.startswith('feature_')]
-        column_order.extend(sorted(feature_columns, key=lambda x: int(x.split('_')[1])))
-
-        # Add other columns in order
-        other_columns = [col for col in df.columns if col not in column_order and col != 'filepath']
-        column_order.extend(other_columns)
-
-        # Add file_path last if it exists
-        if 'filepath' in df.columns:
-            column_order.append('filepath')
-
-        # Reorder the DataFrame
-        df = df[column_order]
-
-        logger.info(f"Created DataFrame with {len(feature_columns)} features, target column first")
-        return df
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -2059,10 +2388,9 @@ class BaseAutoencoder(nn.Module):
             logger.warning(f"Could not load/create config: {str(e)} - using defaults")
             return default_config
 
-
     def verify_feature_consistency(self, train_csv: str, test_csv: str, pred_csv: str) -> bool:
         """
-        Verify that features are consistent across train, test, and prediction CSV files.
+        Enhanced feature consistency verification with config synchronization
         """
         try:
             train_df = pd.read_csv(train_csv)
@@ -2084,7 +2412,28 @@ class BaseAutoencoder(nn.Module):
                 logger.error("Feature dimensions don't match across CSV files")
                 return False
 
-            logger.info(f"Feature consistency verified: {len(train_features)} features match across all files")
+            # NEW: Check feature dimensions against config and synchronize
+            actual_dims = len(train_features)
+            expected_dims = self.config['model'].get('actual_feature_dims',
+                                                   self.config['model'].get('feature_dims', 128))
+
+            if actual_dims != expected_dims:
+                logger.warning(f"Feature dimension mismatch: CSV has {actual_dims}, config expects {expected_dims}")
+                # Update config to match reality
+                self.config['model']['actual_feature_dims'] = actual_dims
+                logger.info(f"Updated config to use actual feature dimensions: {actual_dims}")
+
+            # NEW: Check feature source consistency
+            train_source = train_df['feature_source'].iloc[0] if 'feature_source' in train_df.columns else 'unknown'
+            test_source = test_df['feature_source'].iloc[0] if 'feature_source' in test_df.columns else 'unknown'
+            pred_source = pred_df['feature_source'].iloc[0] if 'feature_source' in pred_df.columns else 'unknown'
+
+            if train_source != test_source or train_source != pred_source:
+                logger.warning(f"Feature sources differ: train={train_source}, test={test_source}, pred={pred_source}")
+            else:
+                logger.info(f"Feature source consistent: {train_source}")
+
+            logger.info(f"Feature consistency verified: {actual_dims} features match across all files")
             return True
 
         except Exception as e:
@@ -2887,31 +3236,6 @@ class BaseAutoencoder(nn.Module):
                 except Exception as e:
                     logger.warning(f"Could not remove legacy JSON file {filepath}: {e}")
 
-    def _clean_config_for_json(self, config: Dict) -> Dict:
-        """Recursively clean configuration dictionary for JSON serialization"""
-        cleaned = {}
-        for key, value in config.items():
-            if isinstance(value, (torch.Tensor, np.ndarray)):
-                # Convert tensors/arrays to lists or scalars
-                if hasattr(value, 'tolist'):
-                    cleaned[key] = value.tolist()
-                else:
-                    cleaned[key] = str(value)
-            elif isinstance(value, dict):
-                # Recursively clean nested dictionaries
-                cleaned[key] = self._clean_config_for_json(value)
-            elif isinstance(value, (list, tuple)):
-                # Clean lists/tuples
-                cleaned[key] = [self._clean_config_for_json(item) if isinstance(item, dict) else
-                               (item.tolist() if hasattr(item, 'tolist') else item) for item in value]
-            else:
-                # Ensure basic types
-                if isinstance(value, (int, float, str, bool)) or value is None:
-                    cleaned[key] = value
-                else:
-                    # Convert anything else to string
-                    cleaned[key] = str(value)
-        return cleaned
 
     def _clean_history_for_serialization(self, history: Dict[str, List]) -> Dict[str, List]:
         """
@@ -4734,7 +5058,83 @@ class FeatureSelectorFactory:
             logger.warning(f"Unknown selector type: {selector_type}. Using balanced.")
             return BalancedFeatureSelector()
 
+def extract_features_sliding_window(model, large_image_paths, config, logger):
+    """Extract features from large images using sliding window approach"""
+    logger.info(f"Extracting features from {len(large_image_paths)} large images using sliding window")
 
+    features_dict = {
+        'train': {'embeddings': [], 'labels': [], 'filenames': [], 'full_paths': []},
+        'test': {'embeddings': [], 'labels': [], 'filenames': [], 'full_paths': []}
+    }
+
+    model.eval()
+
+    # Setup sliding window parameters
+    window_size = config['training'].get('window_size', 512)
+    stride = config['training'].get('stride', 256)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=config['dataset']['mean'],
+                           std=config['dataset']['std'])
+    ])
+
+    with torch.no_grad():
+        for image_path in tqdm(large_image_paths, desc="Processing large images"):
+            try:
+                # Create sliding window dataset for this image
+                dataset = SlidingWindowDataset(
+                    image_paths=[image_path],
+                    window_size=window_size,
+                    stride=stride,
+                    transform=transform,
+                    overlap=0.5
+                )
+
+                loader = DataLoader(
+                    dataset,
+                    batch_size=config['training'].get('window_batch_size', 4),
+                    shuffle=False,
+                    num_workers=1
+                )
+
+                # Process all windows for this image
+                image_embeddings = []
+                for batch_data in loader:
+                    windows = batch_data['window'].to(model.device)
+
+                    # Extract embeddings from windows
+                    embeddings = model.encode(windows)
+                    if isinstance(embeddings, tuple):
+                        embeddings = embeddings[0]  # Take main embedding
+
+                    image_embeddings.append(embeddings.cpu())
+
+                if image_embeddings:
+                    # Aggregate window embeddings (mean pooling)
+                    all_embeddings = torch.cat(image_embeddings, dim=0)
+                    aggregated_embedding = all_embeddings.mean(dim=0, keepdim=True)
+
+                    # Store features
+                    features_dict['train']['embeddings'].append(aggregated_embedding)
+                    features_dict['train']['labels'].append(torch.tensor([0]))  # Dummy label
+                    features_dict['train']['filenames'].append(os.path.basename(image_path))
+                    features_dict['train']['full_paths'].append(image_path)
+
+                    logger.debug(f"Extracted features from {image_path}: {aggregated_embedding.shape}")
+
+            except Exception as e:
+                logger.error(f"Error processing {image_path}: {str(e)}")
+                continue
+
+    # Convert lists to tensors
+    for split in ['train', 'test']:
+        if features_dict[split]['embeddings']:
+            features_dict[split]['embeddings'] = torch.cat(features_dict[split]['embeddings'], dim=0)
+            features_dict[split]['labels'] = torch.cat(features_dict[split]['labels'], dim=0)
+
+    logger.info(f"Extracted features from {len(features_dict['train']['embeddings'])} images")
+    return features_dict
 
 def train_sliding_window_model(model, large_image_paths, config):
     """Train model using sliding window approach for large images"""
@@ -4813,12 +5213,17 @@ def process_very_large_image(model, image_path, output_path, config):
     return embedding
 
 
-# Update the training loop to handle the new feature dictionary format
-def train_model(model: nn.Module, train_loader: DataLoader,
+def train_model(model: nn.Module, train_loader: DataLoader, test_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
-    """Two-phase training implementation with checkpoint handling"""
-    # Store dataset reference in model
+    """Two-phase training implementation with folder-based dataset handling"""
+    # Store dataset reference in model for class information
     model.set_dataset(train_loader.dataset)
+
+    # Update config with dataset information
+    if hasattr(train_loader.dataset, 'classes'):
+        config['dataset']['num_classes'] = len(train_loader.dataset.classes)
+        config['dataset']['class_names'] = train_loader.dataset.classes
+        logger.info(f"Dataset: {len(train_loader.dataset.classes)} classes - {train_loader.dataset.classes}")
 
     history = defaultdict(list)
 
@@ -4854,7 +5259,7 @@ def train_model(model: nn.Module, train_loader: DataLoader,
 
         # Lower learning rate for fine-tuning
         optimizer = optim.Adam(model.parameters(),
-                             lr=config['model']['learning_rate'])
+                             lr=config['model']['learning_rate'] * 0.1)  # Lower LR for phase 2
 
         phase2_history = _train_phase(
             model, train_loader, optimizer, loss_manager,
@@ -4873,6 +5278,42 @@ def train_model(model: nn.Module, train_loader: DataLoader,
     return cleaned_history
 
 
+def extract_features_from_model(
+    model: nn.Module,
+    train_loader: DataLoader,
+    test_loader: Optional[DataLoader] = None
+) -> Dict:
+    """Extract features from the model using folder-based dataset structure"""
+    logger.info("Extracting features from model...")
+
+    # Extract train features
+    train_features = model.extract_features(train_loader, "train")
+    logger.info(f"Extracted {len(train_features['embeddings'])} training samples")
+
+    features_dict = {'train': train_features}
+
+    # Extract test features if available
+    if test_loader is not None:
+        test_features = model.extract_features(test_loader, "test")
+        logger.info(f"Extracted {len(test_features['embeddings'])} test samples")
+        features_dict['test'] = test_features
+
+        # Combine train and test features for unified processing
+        combined_features = {}
+        for key in train_features:
+            if isinstance(train_features[key], torch.Tensor):
+                combined_features[key] = torch.cat([train_features[key], test_features[key]])
+            elif isinstance(train_features[key], list):
+                combined_features[key] = train_features[key] + test_features[key]
+            else:
+                combined_features[key] = train_features[key]  # Use train version for non-combinable items
+
+        features_dict['combined'] = combined_features
+        logger.info(f"Combined features: {len(combined_features['embeddings'])} total samples")
+    else:
+        features_dict['combined'] = train_features
+
+    return features_dict
 
 def _get_checkpoint_identifier(model: nn.Module, phase: int, config: Dict) -> str:
     """
@@ -4976,7 +5417,7 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic with invertible feature compression and class-balanced loss calculation"""
+    """Training logic with invertible feature compression, reconstruction sampling, and training heatmaps"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
@@ -4985,6 +5426,24 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     checkpoint_manager = UnifiedCheckpoint(config)
     use_classwise = config['training'].get('use_classwise_acc', True)  # Config flag
     patience_counter = 0
+
+    # NEW: Initialize reconstruction sampler
+    sampler_enabled = config['training'].get('reconstruction_samples', {}).get('enabled', True)
+    if sampler_enabled:
+        sampler = ReconstructionSampler(config)
+        save_frequency = config['training'].get('reconstruction_samples', {}).get('save_frequency', 5)
+        logger.info(f"Reconstruction sampling enabled - saving samples every {save_frequency} epochs")
+
+    # NEW: Initialize training heatmap generator
+    heatmap_enabled = config['training'].get('generate_training_heatmaps', True)
+    heatmap_frequency = config['training'].get('heatmap_frequency', 10)  # Every 10 epochs
+
+    if heatmap_enabled:
+        # Create training heatmap directory
+        dataset_name = config['dataset']['name'].lower()
+        training_heatmap_dir = os.path.join('data', dataset_name, 'training_heatmaps', f'phase{phase}')
+        os.makedirs(training_heatmap_dir, exist_ok=True)
+        logger.info(f"Training heatmaps enabled - saving every {heatmap_frequency} epochs to {training_heatmap_dir}")
 
     try:
         for epoch in range(start_epoch, epochs):
@@ -5163,6 +5622,25 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 avg_acc = running_acc / num_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
 
+            # NEW: Save reconstruction samples periodically
+            if sampler_enabled and (epoch % save_frequency == 0 or epoch == epochs - 1):
+                logger.info(f"Saving reconstruction samples for phase {phase} epoch {epoch+1}")
+                try:
+                    sampler.save_reconstruction_samples(model, train_loader, epoch+1, phase)
+                    logger.info(f"✓ Reconstruction samples saved for epoch {epoch+1}")
+                except Exception as e:
+                    logger.warning(f"Could not save reconstruction samples: {str(e)}")
+
+            # NEW: Generate training heatmaps periodically (headless-safe)
+            if (heatmap_enabled and
+                (epoch % heatmap_frequency == 0 or epoch == epochs - 1 or epoch == 0)):
+                logger.info(f"Generating training heatmaps for phase {phase} epoch {epoch+1}")
+                try:
+                    _generate_training_heatmaps(model, train_loader, config, epoch+1, phase, training_heatmap_dir)
+                    logger.info(f"✓ Training heatmaps saved for epoch {epoch+1}")
+                except Exception as e:
+                    logger.warning(f"Could not generate training heatmaps: {str(e)}")
+
             # Log epoch progress with enhanced information
             log_message = f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}"
             if phase == 1 and hasattr(model, 'loss_components'):
@@ -5183,11 +5661,25 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 #logger.info(f"New best model saved with loss: {best_loss:.4f}")
             else:
                 patience_counter += 1
-                #logger.info(f"No improvement - Patience counter: {patience_counter}")
+                logger.info(f"No improvement - Patience counter: {patience_counter}")
 
             # Early stopping
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                # NEW: Save final samples before early stopping
+                if sampler_enabled:
+                    logger.info("Saving final reconstruction samples before early stopping")
+                    try:
+                        sampler.save_reconstruction_samples(model, train_loader, epoch+1, phase)
+                    except Exception as e:
+                        logger.warning(f"Could not save final reconstruction samples: {str(e)}")
+                # NEW: Generate final heatmaps before early stopping
+                if heatmap_enabled:
+                    logger.info("Generating final training heatmaps before early stopping")
+                    try:
+                        _generate_training_heatmaps(model, train_loader, config, epoch+1, phase, training_heatmap_dir)
+                    except Exception as e:
+                        logger.warning(f"Could not generate final training heatmaps: {str(e)}")
                 break
 
             # Learning rate scheduling (if configured)
@@ -5207,6 +5699,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
+    # REMOVED: No need for final samples after training since we already generate them during training
+
     # Log training completion with enhanced information
     completion_message = f"Phase {phase} training completed. Best loss: {best_loss:.4f}"
     if phase == 1 and hasattr(model, 'compressed_dims'):
@@ -5214,6 +5708,412 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
     logger.info(completion_message)
 
     return history
+
+def _generate_training_heatmaps(model: nn.Module, dataloader: DataLoader, config: Dict,
+                              epoch: int, phase: int, output_dir: str):
+    """Generate heatmaps during training to monitor feature learning - ensures all classes are represented"""
+    model.eval()
+
+    # Use Agg backend for headless compatibility
+    import matplotlib
+    matplotlib.use('Agg')  # Set backend before importing pyplot
+    import matplotlib.pyplot as plt
+
+    # Create main output directory
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Register attention hooks if available
+    hooks_registered = False
+    if hasattr(model, 'register_attention_hooks'):
+        try:
+            model.register_attention_hooks()
+            hooks_registered = True
+            logger.info("✓ Registered attention hooks for training heatmaps")
+        except Exception as e:
+            logger.warning(f"Could not register attention hooks: {str(e)}")
+
+    try:
+        # Get information about all classes in the dataset
+        if hasattr(dataloader.dataset, 'classes'):
+            all_classes = list(range(len(dataloader.dataset.classes)))
+            class_names = dataloader.dataset.classes
+            logger.info(f"Dataset has {len(all_classes)} classes: {class_names}")
+        else:
+            # If we don't have class info, we'll collect what we find
+            all_classes = set()
+            class_names = None
+
+        # Sample from all classes - more intelligent collection
+        samples_collected = defaultdict(list)
+        max_samples_per_class = 1  # We only need one sample per class for the heatmap
+        max_batches_to_process = min(10, len(dataloader))  # Process more batches to find rare classes
+        samples_per_batch = 2  # How many samples to check per batch
+
+        logger.info(f"Collecting samples from all classes (processing up to {max_batches_to_process} batches)")
+
+        with torch.no_grad():
+            batches_processed = 0
+            classes_found = set()
+
+            for batch_idx, (data, labels) in enumerate(dataloader):
+                if batches_processed >= max_batches_to_process:
+                    break
+
+                data = data.to(model.device)
+                labels = labels.to(model.device)
+
+                # Forward pass to populate attention maps
+                if phase == 1:
+                    outputs = model(data)
+                    if isinstance(outputs, tuple):
+                        _, reconstructions = outputs
+                    else:
+                        reconstructions = outputs.get('reconstruction', data)
+                else:
+                    outputs = model(data)
+                    reconstructions = outputs.get('reconstruction', data)
+
+                # Track all classes we see in this batch
+                batch_classes = set(labels.cpu().numpy())
+                classes_found.update(batch_classes)
+
+                # Store samples for classes we haven't collected yet
+                for i in range(min(samples_per_batch, len(data))):
+                    label = labels[i].item()
+
+                    # Only collect if we don't have this class yet, or if we want multiple samples
+                    if len(samples_collected[label]) < max_samples_per_class:
+                        samples_collected[label].append({
+                            'original': data[i].cpu(),
+                            'reconstruction': reconstructions[i].cpu(),
+                            'label': label
+                        })
+
+                batches_processed += 1
+
+                # Stop early if we've found samples from all classes
+                if all_classes and len(samples_collected) >= len(all_classes):
+                    logger.info(f"Found samples from all {len(all_classes)} classes after {batches_processed} batches")
+                    break
+                elif not all_classes and len(samples_collected) >= len(classes_found):
+                    logger.info(f"Found samples from all {len(classes_found)} discovered classes after {batches_processed} batches")
+                    break
+
+        # If we still don't have all classes, try a more aggressive approach
+        if all_classes and len(samples_collected) < len(all_classes):
+            missing_classes = set(all_classes) - set(samples_collected.keys())
+            logger.warning(f"Missing samples for {len(missing_classes)} classes: {missing_classes}")
+
+            # Try to find missing classes by processing more batches
+            logger.info("Searching for missing classes...")
+            additional_batches_processed = 0
+
+            for batch_idx, (data, labels) in enumerate(dataloader):
+                if additional_batches_processed >= 5:  # Limit additional search
+                    break
+
+                data = data.to(model.device)
+                labels = labels.to(model.device)
+
+                if phase == 1:
+                    outputs = model(data)
+                    if isinstance(outputs, tuple):
+                        _, reconstructions = outputs
+                    else:
+                        reconstructions = outputs.get('reconstruction', data)
+                else:
+                    outputs = model(data)
+                    reconstructions = outputs.get('reconstruction', data)
+
+                # Look specifically for missing classes
+                for i in range(len(data)):
+                    label = labels[i].item()
+                    if label in missing_classes and len(samples_collected[label]) < max_samples_per_class:
+                        samples_collected[label].append({
+                            'original': data[i].cpu(),
+                            'reconstruction': reconstructions[i].cpu(),
+                            'label': label
+                        })
+                        missing_classes.remove(label)
+                        logger.info(f"Found missing class {label}")
+
+                        if not missing_classes:
+                            break
+
+                additional_batches_processed += 1
+                if not missing_classes:
+                    break
+
+        # Final report
+        total_classes_found = len(samples_collected)
+        if all_classes:
+            coverage = total_classes_found / len(all_classes) * 100
+            logger.info(f"Class coverage: {total_classes_found}/{len(all_classes)} classes ({coverage:.1f}%)")
+        else:
+            logger.info(f"Collected samples from {total_classes_found} classes")
+
+        # Generate heatmaps for collected samples
+        if samples_collected:
+            _save_training_heatmap_comparison(model, samples_collected, epoch, phase, output_dir, config)
+            logger.info(f"✓ Training heatmaps saved for {total_classes_found} classes in {output_dir}")
+        else:
+            logger.warning("No samples collected for heatmap generation")
+
+    except Exception as e:
+        logger.error(f"Could not generate training heatmaps: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    finally:
+        # Always remove hooks
+        if hooks_registered and hasattr(model, 'remove_attention_hooks'):
+            try:
+                model.remove_attention_hooks()
+                logger.debug("✓ Removed attention hooks")
+            except Exception as e:
+                logger.warning(f"Could not remove attention hooks: {str(e)}")
+        plt.close('all')  # Clean up all figures
+
+def _save_training_heatmap_comparison(model: nn.Module, samples_collected: Dict, epoch: int, phase: int,
+                                    output_dir: str, config: Dict):
+    """Create comprehensive training heatmap visualization - optimized for many classes"""
+    import matplotlib
+    matplotlib.use('Agg')  # Headless backend
+    import matplotlib.pyplot as plt
+
+    n_classes = len(samples_collected)
+    if n_classes == 0:
+        logger.warning("No samples to create heatmaps")
+        return
+
+    logger.info(f"Creating heatmap comparison for {n_classes} classes")
+
+    # For many classes, create multiple figures to avoid overwhelming single image
+    max_classes_per_figure = 8  # Maximum classes per figure for readability
+
+    if n_classes <= max_classes_per_figure:
+        # Single figure for small number of classes
+        _create_single_heatmap_figure(model, samples_collected, epoch, phase, output_dir, config, n_classes)
+    else:
+        # Multiple figures for many classes
+        _create_multiple_heatmap_figures(model, samples_collected, epoch, phase, output_dir, config, max_classes_per_figure)
+
+def _create_single_heatmap_figure(model: nn.Module, samples_collected: Dict, epoch: int, phase: int,
+                                output_dir: str, config: Dict, n_classes: int):
+    """Create a single heatmap figure for up to 8 classes"""
+    import matplotlib.pyplot as plt
+
+    num_columns = 4  # Original, Reconstruction, Error, Attention
+    fig, axes = plt.subplots(n_classes, num_columns, figsize=(4 * num_columns, 3 * n_classes))  # Smaller height per row
+
+    # Handle single class case
+    if n_classes == 1:
+        axes = axes.reshape(1, -1)
+
+    for class_idx, (label, samples) in enumerate(samples_collected.items()):
+        if not samples:
+            continue
+
+        sample = samples[0]  # Use first sample for visualization
+        _plot_single_class_heatmap(axes[class_idx], sample, label, epoch, model, config)
+
+    plt.suptitle(f'Training Phase {phase} - Epoch {epoch} - {n_classes} Classes', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    # Save figure
+    output_path = os.path.join(output_dir, f'training_heatmaps_phase{phase}_epoch{epoch:03d}.png')
+    try:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+        logger.info(f"✓ Saved training heatmap: {output_path}")
+    except Exception as e:
+        logger.error(f"Failed to save heatmap {output_path}: {str(e)}")
+
+    plt.close(fig)
+
+def _create_multiple_heatmap_figures(model: nn.Module, samples_collected: Dict, epoch: int, phase: int,
+                                   output_dir: str, config: Dict, max_classes_per_figure: int):
+    """Create multiple heatmap figures when there are many classes"""
+    import matplotlib.pyplot as plt
+
+    all_classes = list(samples_collected.items())
+    num_figures = (len(all_classes) + max_classes_per_figure - 1) // max_classes_per_figure
+
+    logger.info(f"Creating {num_figures} heatmap figures for {len(all_classes)} classes")
+
+    for fig_idx in range(num_figures):
+        start_idx = fig_idx * max_classes_per_figure
+        end_idx = min(start_idx + max_classes_per_figure, len(all_classes))
+        figure_classes = dict(all_classes[start_idx:end_idx])
+
+        num_columns = 4
+        n_classes_in_fig = len(figure_classes)
+        fig, axes = plt.subplots(n_classes_in_fig, num_columns, figsize=(4 * num_columns, 3 * n_classes_in_fig))
+
+        if n_classes_in_fig == 1:
+            axes = axes.reshape(1, -1)
+
+        for class_idx, (label, samples) in enumerate(figure_classes.items()):
+            if not samples:
+                continue
+
+            sample = samples[0]
+            _plot_single_class_heatmap(axes[class_idx], sample, label, epoch, model, config)
+
+        plt.suptitle(f'Training Phase {phase} - Epoch {epoch} - Classes {start_idx+1}-{end_idx} of {len(all_classes)}',
+                    fontsize=12, fontweight='bold')
+        plt.tight_layout()
+
+        # Save figure with part number
+        output_path = os.path.join(output_dir, f'training_heatmaps_phase{phase}_epoch{epoch:03d}_part{fig_idx+1}.png')
+        try:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+            logger.info(f"✓ Saved training heatmap part {fig_idx+1}: {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to save heatmap {output_path}: {str(e)}")
+
+        plt.close(fig)
+
+def _plot_single_class_heatmap(axes, sample, label, epoch, model, config):
+    """Plot heatmap for a single class"""
+    try:
+        # Original image
+        orig_img = _tensor_to_image(sample['original'], config)
+        axes[0].imshow(orig_img)
+        axes[0].set_title(f'Class {label}\nOriginal', fontsize=8)
+        axes[0].axis('off')
+
+        # Reconstruction
+        recon_img = _tensor_to_image(sample['reconstruction'], config)
+        axes[1].imshow(recon_img)
+        axes[1].set_title(f'Epoch {epoch}\nReconstruction', fontsize=8)
+        axes[1].axis('off')
+
+        # Difference (error) - with size matching
+        try:
+            original_tensor = sample['original']
+            reconstruction_tensor = sample['reconstruction']
+
+            if original_tensor.shape != reconstruction_tensor.shape:
+                reconstruction_tensor = F.interpolate(
+                    reconstruction_tensor.unsqueeze(0),
+                    size=original_tensor.shape[1:],
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0)
+
+            diff = torch.abs(original_tensor - reconstruction_tensor)
+            diff_img = _tensor_to_image(diff, config)
+            im = axes[2].imshow(diff_img, cmap='hot')
+            axes[2].set_title('Error', fontsize=8)
+            axes[2].axis('off')
+
+        except Exception as diff_error:
+            axes[2].text(0.5, 0.5, 'Error', ha='center', va='center', fontsize=6,
+                        transform=axes[2].transAxes)
+            axes[2].set_title('Error', fontsize=8)
+            axes[2].axis('off')
+
+        # Attention map (if available)
+        if hasattr(model, 'attention_maps') and model.attention_maps:
+            try:
+                attention_key = list(model.attention_maps.keys())[0]
+                attention_map = model.attention_maps[attention_key][0].mean(dim=0).cpu()
+
+                target_height, target_width = orig_img.shape[0], orig_img.shape[1]
+                if attention_map.shape != (target_height, target_width):
+                    attention_map = F.interpolate(
+                        attention_map.unsqueeze(0).unsqueeze(0),
+                        size=(target_height, target_width),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze().numpy()
+                else:
+                    attention_map = attention_map.numpy()
+
+                axes[3].imshow(attention_map, cmap='hot')
+                axes[3].set_title('Attention', fontsize=8)
+                axes[3].axis('off')
+
+            except Exception:
+                axes[3].text(0.5, 0.5, 'No Attn', ha='center', va='center', fontsize=6,
+                            transform=axes[3].transAxes)
+                axes[3].set_title('Attention', fontsize=8)
+                axes[3].axis('off')
+        else:
+            axes[3].text(0.5, 0.5, 'No Attn', ha='center', va='center', fontsize=6,
+                        transform=axes[3].transAxes)
+            axes[3].set_title('Attention', fontsize=8)
+            axes[3].axis('off')
+
+    except Exception as e:
+        logger.error(f"Error plotting class {label}: {str(e)}")
+        for col in range(4):
+            axes[col].text(0.5, 0.5, 'Error', ha='center', va='center', fontsize=6,
+                          transform=axes[col].transAxes)
+            axes[col].axis('off')
+
+def _tensor_to_image(tensor: torch.Tensor, config: Dict) -> np.ndarray:
+    """Convert tensor to image array with proper normalization and size handling"""
+    try:
+        tensor = tensor.detach().cpu()
+
+        # Ensure tensor is in CHW format (Channels, Height, Width)
+        if len(tensor.shape) == 3 and tensor.shape[0] in [1, 3]:
+            # Already in CHW format
+            pass
+        elif len(tensor.shape) == 3 and tensor.shape[2] in [1, 3]:
+            # Convert from HWC to CHW
+            tensor = tensor.permute(2, 0, 1)
+        else:
+            logger.warning(f"Unexpected tensor shape: {tensor.shape}")
+            # Try to handle gracefully
+            if len(tensor.shape) == 2:
+                tensor = tensor.unsqueeze(0)  # Add channel dimension
+            elif len(tensor.shape) == 3:
+                tensor = tensor.permute(2, 0, 1)  # Assume HWC
+
+        # Convert back to HWC for matplotlib
+        if len(tensor.shape) == 3:
+            tensor = tensor.permute(1, 2, 0)
+
+        # Handle different channel configurations
+        if tensor.shape[-1] == 1:  # Grayscale
+            tensor = tensor.squeeze(-1)
+            mean = torch.tensor(config['dataset']['mean'][0] if isinstance(config['dataset']['mean'], list) else config['dataset']['mean'])
+            std = torch.tensor(config['dataset']['std'][0] if isinstance(config['dataset']['std'], list) else config['dataset']['std'])
+        else:  # RGB or other
+            mean = torch.tensor(config['dataset']['mean']).view(1, 1, -1)
+            std = torch.tensor(config['dataset']['std']).view(1, 1, -1)
+
+            # Ensure mean/std have correct number of channels
+            if mean.shape[-1] != tensor.shape[-1]:
+                if mean.shape[-1] == 1 and tensor.shape[-1] == 3:
+                    mean = mean.repeat(1, 1, 3)
+                    std = std.repeat(1, 1, 3)
+                elif mean.shape[-1] == 3 and tensor.shape[-1] == 1:
+                    mean = mean.mean(dim=-1, keepdim=True)
+                    std = std.mean(dim=-1, keepdim=True)
+
+        # Denormalize
+        tensor = tensor * std + mean
+
+        # Ensure proper value range
+        tensor = tensor.clamp(0, 1)
+
+        # Convert to numpy and ensure correct shape
+        img_array = tensor.numpy()
+
+        # Ensure 3 channels for display
+        if len(img_array.shape) == 2:  # Grayscale
+            img_array = np.stack([img_array] * 3, axis=-1)  # Convert to RGB for display
+        elif img_array.shape[-1] == 1:  # Single channel
+            img_array = np.repeat(img_array, 3, axis=-1)  # Convert to RGB
+
+        return img_array
+
+    except Exception as e:
+        logger.error(f"Error converting tensor to image: {str(e)}")
+        logger.error(f"Tensor shape: {tensor.shape if 'tensor' in locals() else 'unknown'}")
+        # Return a blank image as fallback
+        return np.ones((100, 100, 3)) * 0.5  # Gray fallback image
 
 
 class ReconstructionManager:
@@ -6598,14 +7498,21 @@ class DatasetProcessor:
         return result
 
     def _generate_main_config(self, train_dir: str) -> Dict:
-        """Generate main configuration with all necessary parameters"""
+        """Generate main configuration with enhanced settings for complex datasets"""
         input_size, in_channels = self._detect_image_properties(train_dir)
         class_dirs = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
         num_classes = len(class_dirs)
 
         mean = [0.5] if in_channels == 1 else [0.485, 0.456, 0.406]
         std = [0.5] if in_channels == 1 else [0.229, 0.224, 0.225]
-        feature_dims = min(128, np.prod(input_size) // 4)
+
+        # NEW: Adaptive feature dimensions based on dataset complexity
+        base_feature_dims = min(128, np.prod(input_size) // 4)
+        if num_classes > 50:  # Complex datasets like CIFAR-100
+            feature_dims = min(256, base_feature_dims * 2)
+            logger.info(f"Enhanced feature dimensions: {feature_dims} for {num_classes} classes")
+        else:
+            feature_dims = base_feature_dims
 
         return {
             "dataset": {
@@ -6624,6 +7531,7 @@ class DatasetProcessor:
                 "encoder_type": "autoenc",
                 'enable_adaptive': True,  # Default value
                 "feature_dims": feature_dims,
+                "compressed_dims": max(16, feature_dims // 4),
                 "learning_rate": 0.001,
                 "optimizer": {
                     "type": "Adam",
@@ -6971,7 +7879,7 @@ class DatasetProcessor:
             return f"<unserializable object of type {type(obj).__name__}>"
 
     def _generate_dataset_conf(self, feature_dims: int) -> Dict:
-        """Generate dataset-specific configuration"""
+        """Generate dataset-specific configuration with heatmap support"""
         return {
             "filepath": os.path.join(self.dataset_dir, f"{self.dataset_name}.csv"),
             "column_names": [f"feature_{i}" for i in range(feature_dims)] + ["target"],
@@ -7011,7 +7919,17 @@ class DatasetProcessor:
                 "vectorization_warning_acknowledged": False,
                 "compute_device": "auto",
                 "use_interactive_kbd": False,
-                "class_preference": True
+                "class_preference": True,
+
+                # NEW: Heatmap training configuration
+                "generate_training_heatmaps": True,  # Enable training heatmaps
+                "heatmap_frequency": 10,  # Generate every 10 epochs
+                "max_training_heatmap_samples": 2,  # Samples per class
+                "reconstruction_samples": {  # Existing but ensure it's there
+                    "enabled": True,
+                    "samples_per_class": 2,
+                    "save_frequency": 5
+                }
             },
             "execution_flags": {
                 "train": True,
@@ -7019,7 +7937,13 @@ class DatasetProcessor:
                 "predict": True,
                 "fresh_start": False,
                 "use_previous_model": True,
-                "gen_samples": False
+                "gen_samples": False,
+
+                # NEW: Heatmap execution flags
+                "generate_heatmaps": True,  # Enable prediction heatmaps
+                "num_samples_per_class": None,  # None means all samples
+                "heatmap_backend": "Agg",  # Headless-safe backend
+                "heatmap_dpi": 150
             }
         }
 
@@ -7061,37 +7985,230 @@ class DatasetProcessor:
 
         return config
 
-    def _save_torchvision_images(self, dataset, output_dir, split_name):
-        """Save torchvision dataset images to directory structure - FIXED to use correct output_dir"""
-        logger.info(f"Processing {split_name} split...")
+    def _convert_torchvision_to_folder_structure(self, dataset_name: str, data_dir: str = "data"):
+        """Convert any torchvision dataset to folder structure using dynamic discovery"""
+        import torchvision.datasets as datasets
+        import torchvision.transforms as transforms
 
-        class_to_idx = getattr(dataset, 'class_to_idx', None)
-        if class_to_idx:
-            idx_to_class = {v: k for k, v in class_to_idx.items()}
-        elif hasattr(dataset, 'classes'):
-            # Create class mapping from dataset classes
-            idx_to_class = {i: str(cls) for i, cls in enumerate(dataset.classes)}
+        dataset_dir = os.path.join(data_dir, dataset_name.upper())  # UPPERCASE for consistency
+
+        # Check if already converted
+        if os.path.exists(dataset_dir):
+            logger.info(f"Dataset already converted to folder structure: {dataset_dir}")
+            return dataset_dir
+
+        logger.info(f"Converting torchvision dataset {dataset_name} to folder structure...")
+
+        # Create directory structure
+        train_dir = os.path.join(dataset_dir, 'train')
+        test_dir = os.path.join(dataset_dir, 'test')
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(test_dir, exist_ok=True)
+
+        # Basic transform for saving images
+        transform = transforms.ToTensor()
+
+        try:
+            # DYNAMIC DATASET DISCOVERY
+            dataset_class = None
+            possible_names = [
+                dataset_name.upper(),
+                dataset_name.title(),
+                dataset_name.capitalize()
+            ]
+
+            for name in possible_names:
+                if hasattr(datasets, name):
+                    dataset_class = getattr(datasets, name)
+                    logger.info(f"Found torchvision dataset: {name}")
+                    break
+
+            if dataset_class is None:
+                available_datasets = []
+                for name in dir(datasets):
+                    if not name.startswith('_') and name[0].isupper():
+                        obj = getattr(datasets, name)
+                        if isinstance(obj, type) and issubclass(obj, torch.utils.data.Dataset):
+                            available_datasets.append(name)
+
+                available_datasets.sort()
+                raise ValueError(f"Torchvision dataset '{dataset_name}' not found. "
+                               f"Available datasets: {', '.join(available_datasets)}")
+
+            # Download and process with dynamic parameter handling
+            try:
+                # Strategy 1: Standard train/test split
+                logger.info("Downloading and processing training data...")
+                train_dataset = dataset_class(root=data_dir, train=True, download=True, transform=transform)
+                logger.info("Downloading and processing test data...")
+                test_dataset = dataset_class(root=data_dir, train=False, download=True, transform=transform)
+            except TypeError:
+                try:
+                    # Strategy 2: Split parameter
+                    logger.info("Trying split-based loading...")
+                    train_dataset = dataset_class(root=data_dir, split='train', download=True, transform=transform)
+                    test_dataset = dataset_class(root=data_dir, split='test', download=True, transform=transform)
+                except TypeError:
+                    try:
+                        # Strategy 3: Different split names
+                        logger.info("Trying alternative split names...")
+                        train_dataset = dataset_class(root=data_dir, split='training', download=True, transform=transform)
+                        test_dataset = dataset_class(root=data_dir, split='validation', download=True, transform=transform)
+                    except TypeError:
+                        # Strategy 4: Single dataset - create artificial split
+                        logger.info("Creating artificial train/test split...")
+                        full_dataset = dataset_class(root=data_dir, download=True, transform=transform)
+                        train_size = int(0.8 * len(full_dataset))
+                        test_size = len(full_dataset) - train_size
+                        train_dataset, test_dataset = torch.utils.data.random_split(
+                            full_dataset, [train_size, test_size]
+                        )
+
+            # Save images using the updated dynamic method
+            self._save_torchvision_images(train_dataset, train_dir, 'train')
+            self._save_torchvision_images(test_dataset, test_dir, 'test')
+
+            logger.info(f"Successfully converted {dataset_name} to folder structure at {dataset_dir}")
+            return dataset_dir
+
+        except Exception as e:
+            logger.error(f"Failed to convert torchvision dataset {dataset_name}: {str(e)}")
+            raise
+
+    def _save_torchvision_images(self, dataset, output_dir: str, split: str):
+        """Save torchvision dataset images to folder structure with dynamic class handling"""
+        from PIL import Image
+
+        # Get class names dynamically - handle different dataset structures
+        if hasattr(dataset, 'classes'):
+            # Standard case: dataset has classes attribute
+            class_names = dataset.classes
+        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'classes'):
+            # Case: dataset is a Subset or similar wrapper
+            class_names = dataset.dataset.classes
         else:
-            # Fallback: use labels as class names
-            idx_to_class = {i: str(i) for i in range(10)}
+            # Fallback: create numeric class names
+            if hasattr(dataset, 'targets'):
+                num_classes = len(set(dataset.targets))
+            else:
+                # Estimate number of classes from labels
+                all_labels = []
+                for _, label in dataset:
+                    all_labels.append(label)
+                num_classes = len(set(all_labels))
+            class_names = [f"class_{i}" for i in range(num_classes)]
+            logger.warning(f"Using generated class names: {class_names}")
 
-        # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
+        # Create class subdirectories
+        for class_idx, class_name in enumerate(class_names):
+            # Ensure class name is string and safe for directory names
+            safe_class_name = str(class_name).replace('/', '_').replace('\\', '_')
+            class_dir = os.path.join(output_dir, safe_class_name)
+            os.makedirs(class_dir, exist_ok=True)
 
-        with tqdm(total=len(dataset), desc=f"Saving {split_name} images") as pbar:
-            for idx, (img, label) in enumerate(dataset):
-                class_name = idx_to_class[label] if label in idx_to_class else str(label)
-                class_dir = os.path.join(output_dir, class_name)
-                os.makedirs(class_dir, exist_ok=True)
+        # Save images with progress bar
+        for idx, (image_data, label) in enumerate(tqdm(dataset, desc=f"Saving {split} images")):
+            # Handle different label formats
+            if isinstance(label, torch.Tensor):
+                label_idx = label.item()
+            else:
+                label_idx = int(label)
 
-                if isinstance(img, torch.Tensor):
-                    img = transforms.ToPILImage()(img)
+            # Get class name safely
+            if label_idx < len(class_names):
+                class_name = class_names[label_idx]
+            else:
+                class_name = f"class_{label_idx}"
 
-                img_path = os.path.join(class_dir, f"{idx}.png")
-                img.save(img_path)
-                pbar.update(1)
+            safe_class_name = str(class_name).replace('/', '_').replace('\\', '_')
+            class_dir = os.path.join(output_dir, safe_class_name)
 
-        logger.info(f"Saved {len(dataset)} images to {output_dir}")
+            # Convert to PIL Image - handle different data formats
+            if isinstance(image_data, torch.Tensor):
+                # Denormalize if needed and convert to PIL
+                image_np = image_data.mul(255).byte().numpy()
+                if image_np.shape[0] == 3:  # CHW to HWC
+                    image_np = image_np.transpose(1, 2, 0)
+                elif image_np.shape[0] == 1:  # Grayscale
+                    image_np = image_np.squeeze(0)
+                image = Image.fromarray(image_np)
+            elif isinstance(image_data, Image.Image):
+                image = image_data
+            else:
+                # Try to handle as numpy array
+                try:
+                    image_np = np.array(image_data)
+                    if image_np.ndim == 3 and image_np.shape[2] == 3:
+                        image = Image.fromarray(image_np, 'RGB')
+                    elif image_np.ndim == 2:
+                        image = Image.fromarray(image_np, 'L')
+                    else:
+                        raise ValueError(f"Unsupported image format: {image_np.shape}")
+                except:
+                    logger.warning(f"Could not convert image {idx} to PIL, skipping")
+                    continue
+
+            # Save image
+            filename = f"{split}_{idx:06d}.png"
+            image_path = os.path.join(class_dir, filename)
+
+            try:
+                image.save(image_path, 'PNG')
+            except Exception as e:
+                logger.warning(f"Could not save image {image_path}: {e}")
+                continue
+
+    def get_data_loader(self, config: Dict, is_train: bool = True) -> DataLoader:
+        """Get data loader that handles both torchvision and custom datasets with dynamic discovery"""
+        dataset_name = config['dataset']['name'].lower()
+        data_type = config.get('data_type', 'custom')
+
+        if data_type == 'torchvision':
+            # Convert torchvision dataset to folder structure using dynamic discovery
+            dataset_dir = self._convert_torchvision_to_folder_structure(config['dataset']['name'])
+
+            # Update config to use folder structure from now on
+            config['data_type'] = 'custom'
+            config['dataset']['data_dir'] = dataset_dir
+
+            logger.info(f"Converted {config['dataset']['name']} to folder structure. Using as custom dataset.")
+
+        # Now proceed with custom dataset logic
+        return self._get_custom_data_loader(config, is_train)
+
+    def _get_custom_data_loader(self, config: Dict, is_train: bool = True) -> DataLoader:
+        """Get data loader for custom folder-based datasets"""
+        dataset_dir = config['dataset']['data_dir']
+        split = 'train' if is_train else 'test'
+        data_path = os.path.join(dataset_dir, split)
+
+        if not os.path.exists(data_path):
+            # If train/test split doesn't exist, use the main directory
+            logger.warning(f"{split} directory not found at {data_path}. Using main directory: {dataset_dir}")
+            data_path = dataset_dir
+
+        transform = self.get_transforms(config, is_train=is_train)
+
+        # Create dataset from folder structure
+        dataset = datasets.ImageFolder(root=data_path, transform=transform)
+
+        # Update config with actual class information
+        if is_train:  # Only update from training data to be consistent
+            config['dataset']['num_classes'] = len(dataset.classes)
+            config['dataset']['class_names'] = dataset.classes
+            logger.info(f"Dataset: {len(dataset.classes)} classes - {dataset.classes}")
+
+        batch_size = config['training']['batch_size'] if is_train else config['training'].get('test_batch_size', config['training']['batch_size'])
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=is_train,
+            num_workers=config['training']['num_workers'],
+            pin_memory=True
+        )
+
+        return dataloader
 
     def _process_torchvision(self) -> Tuple[str, str]:
         """Process torchvision dataset - download and organize in UPPERCASE location"""
@@ -7101,13 +8218,35 @@ class DatasetProcessor:
         logger.info(f"Processing torchvision dataset: {dataset_name}")
         logger.info(f"Output directory: {self.dataset_dir}")
 
-        # Validate that the dataset exists in torchvision
-        available_datasets = [name for name in dir(datasets)
-                            if not name.startswith('_') and hasattr(getattr(datasets, name), '__call__')]
+        # DYNAMIC DATASET DISCOVERY - Check if dataset exists in torchvision
+        available_datasets = []
+        dataset_class = None
 
-        if dataset_name not in available_datasets:
-            raise ValueError(f"Torchvision dataset {dataset_name} not found. "
-                           f"Available datasets: {', '.join(sorted(available_datasets))}")
+        # Try different naming conventions
+        possible_names = [
+            dataset_name.upper(),
+            dataset_name.title(),
+            dataset_name.capitalize()
+        ]
+
+        for name in possible_names:
+            if hasattr(datasets, name):
+                dataset_class = getattr(datasets, name)
+                logger.info(f"Found torchvision dataset: {name}")
+                break
+
+        if dataset_class is None:
+            # Log available datasets for debugging
+            available_datasets = []
+            for name in dir(datasets):
+                if not name.startswith('_') and name[0].isupper():
+                    obj = getattr(datasets, name)
+                    if isinstance(obj, type) and issubclass(obj, torch.utils.data.Dataset):
+                        available_datasets.append(name)
+
+            available_datasets.sort()
+            raise ValueError(f"Torchvision dataset '{dataset_name}' not found. "
+                           f"Available datasets: {', '.join(available_datasets)}")
 
         # Setup standard directory structure in Data/<dataset_name_uppercase>/
         train_dir = os.path.join(self.dataset_dir, "train")
@@ -7118,30 +8257,78 @@ class DatasetProcessor:
             os.makedirs(train_dir, exist_ok=True)
             os.makedirs(test_dir, exist_ok=True)
 
-            # Download and process datasets
+            # Download and process datasets with dynamic parameter handling
             transform = transforms.ToTensor()
 
-            logger.info(f"Downloading {dataset_name} training dataset...")
-            train_dataset = getattr(datasets, dataset_name)(
-                root='./data',  # Torchvision's default download location
-                train=True,
-                download=True,
-                transform=transform
-            )
+            # Try different loading strategies for different dataset interfaces
+            try:
+                logger.info(f"Downloading {dataset_name} training dataset...")
+                train_dataset = dataset_class(
+                    root='./data',  # Torchvision's default download location
+                    train=True,
+                    download=True,
+                    transform=transform
+                )
 
-            logger.info(f"Downloading {dataset_name} test dataset...")
-            test_dataset = getattr(datasets, dataset_name)(
-                root='./data',
-                train=False,
-                download=True,
-                transform=transform
-            )
+                logger.info(f"Downloading {dataset_name} test dataset...")
+                test_dataset = dataset_class(
+                    root='./data',
+                    train=False,
+                    download=True,
+                    transform=transform
+                )
+            except TypeError as e:
+                # Some datasets use different parameters (like split instead of train)
+                try:
+                    logger.info(f"Trying alternative parameters for {dataset_name}...")
+                    train_dataset = dataset_class(
+                        root='./data',
+                        split='train',
+                        download=True,
+                        transform=transform
+                    )
+                    test_dataset = dataset_class(
+                        root='./data',
+                        split='test',
+                        download=True,
+                        transform=transform
+                    )
+                except TypeError as e2:
+                    try:
+                        # Try with different split names
+                        train_dataset = dataset_class(
+                            root='./data',
+                            split='training',
+                            download=True,
+                            transform=transform
+                        )
+                        test_dataset = dataset_class(
+                            root='./data',
+                            split='validation',
+                            download=True,
+                            transform=transform
+                        )
+                    except TypeError as e3:
+                        # Single dataset - create artificial split
+                        logger.info(f"Creating train/test split for {dataset_name}...")
+                        full_dataset = dataset_class(
+                            root='./data',
+                            download=True,
+                            transform=transform
+                        )
+                        train_size = int(0.8 * len(full_dataset))
+                        test_size = len(full_dataset) - train_size
+                        train_dataset, test_dataset = torch.utils.data.random_split(
+                            full_dataset, [train_size, test_size]
+                        )
 
             # Save images with class directories in our standard structure
             self._save_torchvision_images(train_dataset, train_dir, "training")
             self._save_torchvision_images(test_dataset, test_dir, "test")
 
             logger.info(f"Successfully processed {dataset_name} dataset")
+            logger.info(f"Training samples: {len(train_dataset)}")
+            logger.info(f"Test samples: {len(test_dataset)}")
         else:
             logger.info(f"Using existing {dataset_name} dataset in {self.dataset_dir}")
 
@@ -7565,20 +8752,38 @@ def get_dataset(config: Dict, transform) -> Tuple[Dataset, Optional[Dataset]]:
         if not os.path.exists(train_dir):
             raise ValueError(f"Training directory not found: {train_dir}")
 
+        # NEW: Pass configuration to CustomImageDataset for reconstruction sampling
         train_dataset = CustomImageDataset(
             data_dir=train_dir,
-            transform=transform
+            transform=transform,
+            config=config,  # Pass full config for reconstruction sampling
+            data_name=dataset_config.get('name')  # Pass dataset name
         )
 
         test_dataset = None
         if test_dir and os.path.exists(test_dir):
             test_dataset = CustomImageDataset(
                 data_dir=test_dir,
-                transform=transform
+                transform=transform,
+                config=config,  # Pass config to test dataset too
+                data_name=dataset_config.get('name')
             )
 
+    # NEW: Log dataset information for reconstruction sampling
+    logger.info(f"Dataset loaded: {len(train_dataset)} training samples")
+    if test_dataset:
+        logger.info(f"Dataset loaded: {len(test_dataset)} test samples")
+
+    # Log expected reconstruction output directory
+    dataset_name = dataset_config.get('name', 'dataset').lower()
+    recon_dir = os.path.join('data', dataset_name, 'reconstruction_samples')
+    logger.info(f"Reconstruction samples will be saved to: {recon_dir}")
+
     if config['training'].get('merge_datasets', False) and test_dataset is not None:
-        return CombinedDataset(train_dataset, test_dataset), None
+        # NEW: Handle configuration for combined datasets
+        combined_dataset = CombinedDataset(train_dataset, test_dataset)
+        logger.info(f"Merged dataset: {len(combined_dataset)} total samples")
+        return combined_dataset, None
 
     return train_dataset, test_dataset
 
@@ -8541,129 +9746,6 @@ def main():
         return 1
 
 
-def handle_training_mode(args, logger):
-        """Handle training mode operations with proper path handling."""
-        #try:
-        # Validate arguments
-        if not hasattr(args, 'data_name') or not args.data_name:
-            raise ValueError("data_name argument is required")
-        if not hasattr(args, 'data_type') or not args.data_type:
-            raise ValueError("data_type argument is required")
-
-        # Setup paths - use UPPERCASE for directory names
-        data_name_upper = args.data_name.upper()
-        data_dir = os.path.join('Data', data_name_upper)
-        config_path = os.path.join(data_dir, f"{data_name_upper}.json")
-
-        logger.info(f"Processing dataset: {args.data_name} (type: {args.data_type})")
-
-        # Process dataset - handle torchvision vs custom differently
-        if args.data_type == 'torchvision':
-            logger.info(f"Using torchvision dataset: {data_name_upper}")
-
-            processor = DatasetProcessor(
-                datafile=data_name_upper,
-                datatype=args.data_type,
-                output_dir='Data',
-                data_name=data_name_upper  # UPPERCASE for directory structure
-            )
-        else:
-            # For custom datasets, use the provided input path
-            if not hasattr(args, 'input_path') or not args.input_path:
-                raise ValueError("input_path argument is required for custom datasets")
-
-            processor = DatasetProcessor(
-                datafile=args.input_path,
-                datatype=args.data_type,
-                output_dir='Data',
-                data_name=data_name_upper
-            )
-
-        train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
-
-        # Verify paths are correct
-        if args.data_type == 'torchvision' and not train_dir.startswith(f"Data/{data_name_upper}"):
-            logger.warning(f"Path mismatch for torchvision dataset. Expected Data/{data_name_upper}/..., got {train_dir}")
-
-        # Generate/verify configurations
-        logger.info("Generating/verifying configurations...")
-        config = processor.generate_default_config(train_dir)
-
-        # Configure enhancements
-        config = configure_image_processing(config, logger)
-
-        # Update configuration with command line arguments
-        config = update_config_with_args(config, args)
-
-        # Get feature dimensions from user
-        fd = config['model']['feature_dims']
-        feature_dims_input = input(f"Please specify the output feature dimensions[{fd}]: ").strip()
-        if feature_dims_input:
-            try:
-                feature_dims = int(feature_dims_input)
-                if feature_dims <= 0:
-                    logger.warning(f"Invalid feature dimensions {feature_dims}, using default {fd}")
-                    feature_dims = fd
-            except ValueError:
-                logger.warning(f"Invalid feature dimensions input, using default {fd}")
-                feature_dims = fd
-        else:
-            feature_dims = fd
-
-        config['model']['feature_dims'] = feature_dims
-        logger.info(f"Using feature dimensions: {feature_dims}")
-
-        # Save updated config
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        logger.info(f"Configuration saved to: {config_path}")
-
-        # Setup data loading
-        transform = processor.get_transforms(config)
-        train_dataset, test_dataset = get_dataset(config, transform)
-
-        if train_dataset is None:
-            raise ValueError("No training dataset available")
-
-        logger.info(f"Training dataset size: {len(train_dataset)}")
-        if test_dataset:
-            logger.info(f"Test dataset size: {len(test_dataset)}")
-
-        # Create data loaders
-        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
-        logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
-
-        # Initialize model and loss manager
-        model, loss_manager = initialize_model_components(config, logger)
-
-        # Log model information
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Model initialized with {total_params:,} parameters")
-        logger.info(f"Using device: {next(model.parameters()).device}")
-
-        # Get training confirmation
-        if not get_training_confirmation(logger):
-            logger.info("Training cancelled by user")
-            return 0
-
-        # Perform training and feature extraction
-        logger.info("Starting training process...")
-        features_dict = perform_training_and_extraction(
-            model, train_loader, test_loader, config, loss_manager, logger
-        )
-
-        # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name_upper, logger)
-
-        logger.info("Processing completed successfully!")
-        return 0
-
-    #except Exception as e:
-    #    logger.error(f"Error in training mode: {str(e)}")
-     #   raise
-
-
 def handle_prediction_mode(args, logger):
     """Handle prediction/reconstruction mode operations."""
     try:
@@ -8865,8 +9947,10 @@ def browse_local_folders(start_path="."):
     return None
 
 def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
-        """Handle training mode operations with torchvision support"""
-
+    """
+    Unified training mode handler that supports both standard and sliding window training
+    """
+    try:
         # Validate arguments
         if not args.data_name:
             raise ValueError("data_name argument is required")
@@ -8880,18 +9964,44 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
 
         logger.info(f"Processing dataset: {args.data_name} (type: {args.data_type})")
 
-        # Process dataset - handle torchvision vs custom differently
-        if args.data_type == 'torchvision':
+        # Check for sliding window mode
+        use_sliding_window = getattr(args, 'sliding_window', False)
+        large_image_paths = getattr(args, 'large_image_paths', [])
+
+        if use_sliding_window:
+            logger.info("SLIDING WINDOW MODE: Training with large images using sliding window approach")
+            if not large_image_paths:
+                raise ValueError("large_image_paths argument is required for sliding window mode")
+
+            # Verify large images exist
+            valid_paths = []
+            for path in large_image_paths:
+                if os.path.exists(path):
+                    valid_paths.append(path)
+                    logger.info(f"Found large image: {path}")
+                else:
+                    logger.warning(f"Large image path not found: {path}")
+
+            if not valid_paths:
+                raise ValueError("No valid large image paths found for sliding window training")
+
+            # Process dataset for sliding window
+            processor = DatasetProcessor(
+                datafile=valid_paths[0] if valid_paths else None,  # Use first path for config
+                datatype='sliding_window',
+                output_dir=getattr(args, 'output', 'data'),
+                data_name=data_name
+            )
+        elif args.data_type == 'torchvision':
             # For torchvision, use the dataset name in uppercase for torchvision lookup
-            # but lowercase for directory structure
             torchvision_dataset_name = str(args.data_name).upper()
             logger.info(f"Using torchvision dataset: {torchvision_dataset_name}")
 
             processor = DatasetProcessor(
-                datafile=torchvision_dataset_name,  # Uppercase for torchvision dataset name (e.g., "CIFAR10")
+                datafile=torchvision_dataset_name,
                 datatype=args.data_type,
                 output_dir=getattr(args, 'output', 'data'),
-                data_name=data_name  # Lowercase for directory structure (e.g., "cifar10")
+                data_name=data_name
             )
         else:
             # For custom datasets, use the provided input path
@@ -8905,8 +10015,13 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
                 data_name=data_name
             )
 
-        train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
+        # Process dataset (for non-sliding window modes)
+        if not use_sliding_window:
+            train_dir, test_dir = processor.process()
+            logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
+        else:
+            train_dir, test_dir = data_dir, data_dir  # Use data directory for sliding window
+            logger.info(f"Sliding window mode: using {len(valid_paths)} large images")
 
         # Generate/verify configurations
         logger.info("Generating/verifying configurations...")
@@ -8917,6 +10032,17 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
 
         # Update configuration with command line arguments
         config = update_config_with_args(config, args)
+
+        # Add sliding window configuration if enabled
+        if use_sliding_window:
+            config['training']['use_sliding_window'] = True
+            config['training']['large_image_paths'] = valid_paths
+            config['training']['window_size'] = getattr(args, 'window_size', 512)
+            config['training']['stride'] = getattr(args, 'stride', 256)
+            config['training']['window_batch_size'] = getattr(args, 'window_batch_size', 4)
+            config['training']['overlap'] = getattr(args, 'overlap', 0.5)
+            logger.info(f"Sliding window config: size={config['training']['window_size']}, "
+                       f"stride={config['training']['stride']}, batch_size={config['training']['window_batch_size']}")
 
         # Get feature dimensions from user
         fd = config['model']['feature_dims']
@@ -8941,45 +10067,78 @@ def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> in
             json.dump(config, f, indent=4)
         logger.info(f"Configuration saved to: {config_path}")
 
-        # Setup data loading
-        transform = processor.get_transforms(config)
-        train_dataset, test_dataset = get_dataset(config, transform)
+        # Initialize model and training based on mode
+        if use_sliding_window:
+            # SLIDING WINDOW TRAINING
+            logger.info("Initializing sliding window training...")
 
-        if train_dataset is None:
-            raise ValueError("No training dataset available")
+            # Create model optimized for sliding window
+            model = ModelFactory.create_model(config)
 
-        logger.info(f"Training dataset size: {len(train_dataset)}")
-        if test_dataset:
-            logger.info(f"Test dataset size: {len(test_dataset)}")
+            # Initialize loss manager
+            loss_manager = EnhancedLossManager(config)
 
-        # Create data loaders
-        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
-        logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
+            # Get training confirmation
+            if not get_training_confirmation(logger):
+                logger.info("Training cancelled by user")
+                return 0
 
-        # Initialize model and loss manager
-        model, loss_manager = initialize_model_components(config, logger)
+            # Perform sliding window training
+            logger.info("Starting sliding window training process...")
+            history = train_sliding_window_model(model, valid_paths, config)
 
-        # Log model information
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Model initialized with {total_params:,} parameters")
-        logger.info(f"Using device: {next(model.parameters()).device}")
+            # Extract features from trained model
+            logger.info("Extracting features from sliding window model...")
+            features_dict = extract_features_sliding_window(model, valid_paths, config, logger)
 
-        # Get training confirmation
-        if not get_training_confirmation(logger):
-            logger.info("Training cancelled by user")
-            return 0
+        else:
+            # STANDARD TRAINING
+            logger.info("Initializing standard training...")
 
-        # Perform training and feature extraction
-        logger.info("Starting training process...")
-        features_dict = perform_training_and_extraction(
-            model, train_loader, test_loader, config, loss_manager, logger
-        )
+            # Setup data loading
+            transform = processor.get_transforms(config)
+            train_dataset, test_dataset = get_dataset(config, transform)
+
+            if train_dataset is None:
+                raise ValueError("No training dataset available")
+
+            logger.info(f"Training dataset size: {len(train_dataset)}")
+            if test_dataset:
+                logger.info(f"Test dataset size: {len(test_dataset)}")
+
+            # Create data loaders
+            train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
+            logger.info(f"Created data loaders with batch size: {config['training']['batch_size']}")
+
+            # Initialize model and loss manager
+            model, loss_manager = initialize_model_components(config, logger)
+
+            # Log model information
+            total_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Model initialized with {total_params:,} parameters")
+            logger.info(f"Using device: {next(model.parameters()).device}")
+
+            # Get training confirmation
+            if not get_training_confirmation(logger):
+                logger.info("Training cancelled by user")
+                return 0
+
+            # Perform training and feature extraction
+            logger.info("Starting training process...")
+            features_dict = perform_training_and_extraction(
+                model, train_loader, test_loader, config, loss_manager, logger
+            )
 
         # Save results
         save_training_results(features_dict, model, config, data_dir, data_name, logger)
 
         logger.info("Processing completed successfully!")
         return 0
+
+    except Exception as e:
+        logger.error(f"Training mode failed: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return 1
 
 
 def interactive_input():
@@ -9060,12 +10219,15 @@ def interactive_input():
     return args
 
 def parse_arguments():
-    """Parse command line arguments with new interactive options and default heatmap generation."""
-    parser = argparse.ArgumentParser(description='CDBNN Image Processor')
+    """Parse command line arguments with automatic sliding window detection based on system memory."""
+    parser = argparse.ArgumentParser(description='CDBNN Image Processor with Automatic Sliding Window Detection')
+
+    # Core arguments
     parser.add_argument('--data_name', type=str, help='Dataset name (e.g., cifar100, galaxies)')
     parser.add_argument('--mode', type=str, choices=['train', 'reconstruct', 'predict', 'download', 'heatmaps'],
                        help='Operation mode')
-    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom'], help='Dataset type')
+    parser.add_argument('--data_type', type=str, choices=['torchvision', 'custom', 'sliding_window'],
+                       help='Dataset type')
     parser.add_argument('--data', type=str, help='Dataset path or torchvision dataset name')
     parser.add_argument('--input_path', type=str, help='Input path for prediction')
     parser.add_argument('--output_csv', type=str, help='Output CSV path for predictions')
@@ -9076,13 +10238,33 @@ def parse_arguments():
     parser.add_argument('--interactive', action='store_true', help='Use interactive mode')
     parser.add_argument('--download', action='store_true', help='Download datasets')
 
-    # UPDATED: Heatmap generation with proper default=True behavior
+    # Heatmap generation
     parser.add_argument('--generate_heatmaps', action='store_true', default=True,
                        help='Generate attention heatmaps for model interpretation (default: True)')
     parser.add_argument('--no_heatmaps', action='store_false', dest='generate_heatmaps',
                        help='Disable attention heatmap generation')
     parser.add_argument('--num_samples', type=int, default=None,
                        help='Number of samples per class for heatmap generation (default: None = all samples)')
+
+    # Sliding window arguments (now optional with auto-detection)
+    parser.add_argument('--sliding_window', action='store_true',
+                       help='Force enable sliding window mode for large images')
+    parser.add_argument('--no_sliding_window', action='store_false', dest='sliding_window',
+                       help='Force disable sliding window mode')
+    parser.add_argument('--large_image_paths', nargs='+',
+                       help='Paths to large images for sliding window mode')
+    parser.add_argument('--window_size', type=int, default=None,
+                       help='Window size for sliding window (auto-calculated if not specified)')
+    parser.add_argument('--stride', type=int, default=None,
+                       help='Stride for sliding window (auto-calculated if not specified)')
+    parser.add_argument('--window_batch_size', type=int, default=None,
+                       help='Batch size for window processing (auto-calculated if not specified)')
+    parser.add_argument('--overlap', type=float, default=0.5,
+                       help='Overlap ratio between windows (default: 0.5)')
+    parser.add_argument('--min_window_coverage', type=float, default=0.7,
+                       help='Minimum fraction of window that must contain image data (default: 0.7)')
+    parser.add_argument('--memory_threshold', type=float, default=0.7,
+                       help='Memory usage threshold for auto-enabling sliding window (default: 0.7 = 70%%)')
 
     args = parser.parse_args()
 
@@ -9096,6 +10278,214 @@ def parse_arguments():
         # This will trigger the interactive selection in main()
         pass
 
+    # Auto-detect sliding window requirements
+    args = _auto_detect_sliding_window(args)
+
+    return args
+
+
+def _auto_detect_sliding_window(args):
+    """Automatically detect if sliding window mode should be enabled based on system memory and image size."""
+
+    # If user explicitly set sliding_window, respect their choice
+    if args.sliding_window is not None:
+        if args.sliding_window and not args.large_image_paths and args.input_path:
+            args.large_image_paths = [args.input_path]
+        return args
+
+    # Only auto-detect for modes that process images
+    if args.mode not in ['train', 'predict', 'reconstruct']:
+        return args
+
+    # Check if we have images to analyze
+    image_paths = []
+    if args.large_image_paths:
+        image_paths = args.large_image_paths
+    elif args.input_path and os.path.exists(args.input_path):
+        if os.path.isfile(args.input_path) and args.input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
+            image_paths = [args.input_path]
+        elif os.path.isdir(args.input_path):
+            # Check directory for large images
+            for root, _, files in os.walk(args.input_path):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
+                        full_path = os.path.join(root, file)
+                        image_paths.append(full_path)
+                        # Check first few images to determine if sliding window is needed
+                        if len(image_paths) >= 3:
+                            break
+                if image_paths:
+                    break
+
+    if not image_paths:
+        return args
+
+    # Analyze images and system memory
+    try:
+        should_enable_sliding = _analyze_memory_requirements(image_paths, args.memory_threshold)
+
+        if should_enable_sliding:
+            args.sliding_window = True
+            if not args.large_image_paths:
+                args.large_image_paths = image_paths
+
+            # Auto-calculate optimal parameters
+            args = _calculate_optimal_window_params(args, image_paths)
+
+            logger.info("🔄 Auto-enabled sliding window mode based on system memory and image size analysis")
+
+        else:
+            args.sliding_window = False
+
+    except Exception as e:
+        logger.warning(f"Could not auto-detect sliding window requirements: {str(e)}")
+        args.sliding_window = False
+
+    return args
+
+
+def _analyze_memory_requirements(image_paths, memory_threshold=0.7):
+    """Analyze if images exceed available system memory."""
+    try:
+        import psutil
+        import PIL.Image
+
+        # Get system memory info
+        system_memory = psutil.virtual_memory()
+        available_memory_gb = system_memory.available / (1024 ** 3)  # Convert to GB
+        total_memory_gb = system_memory.total / (1024 ** 3)
+
+        logger.info(f"System memory: {available_memory_gb:.1f}GB available / {total_memory_gb:.1f}GB total")
+
+        # Estimate memory requirements from sample images
+        total_pixels = 0
+        sample_count = min(5, len(image_paths))  # Check first 5 images
+
+        for i in range(sample_count):
+            try:
+                with PIL.Image.open(image_paths[i]) as img:
+                    width, height = img.size
+                    pixels = width * height
+                    total_pixels += pixels
+
+                    logger.info(f"Image {i+1}: {width}x{height} = {pixels:,} pixels")
+
+                    # If any single image is huge, enable sliding window
+                    if pixels > 100000000:  # 100MP
+                        logger.info("🔄 Single image exceeds 100MP, enabling sliding window")
+                        return True
+
+            except Exception as e:
+                logger.warning(f"Could not analyze {image_paths[i]}: {str(e)}")
+                continue
+
+        if sample_count == 0:
+            return False
+
+        # Calculate average image size
+        avg_pixels = total_pixels / sample_count
+
+        # Estimate memory requirements (4 bytes per pixel for float32, 3 channels, plus model overhead)
+        estimated_memory_per_image_gb = (avg_pixels * 4 * 3 * 2) / (1024 ** 3)  # Conservative estimate with 2x overhead
+        batch_memory_gb = estimated_memory_per_image_gb * 4  # Assume batch size of 4
+
+        logger.info(f"Estimated memory per image: {estimated_memory_per_image_gb:.2f}GB")
+        logger.info(f"Estimated batch memory: {batch_memory_gb:.2f}GB")
+
+        # Check if estimated memory exceeds threshold
+        memory_ratio = batch_memory_gb / available_memory_gb
+
+        if memory_ratio > memory_threshold:
+            logger.info(f"🔄 Memory requirement ({memory_ratio:.1%}) exceeds threshold ({memory_threshold:.0%}), enabling sliding window")
+            return True
+        else:
+            logger.info(f"✓ Memory requirement ({memory_ratio:.1%}) within safe limits, using standard processing")
+            return False
+
+    except ImportError:
+        logger.warning("psutil not available, cannot auto-detect memory requirements")
+        return False
+    except Exception as e:
+        logger.warning(f"Memory analysis failed: {str(e)}")
+        return False
+
+
+def _calculate_optimal_window_params(args, image_paths):
+    """Calculate optimal window parameters based on image size and system memory."""
+    try:
+        import PIL.Image
+
+        # Analyze image sizes to determine optimal window size
+        max_width, max_height = 0, 0
+        for img_path in image_paths[:3]:  # Check first 3 images
+            try:
+                with PIL.Image.open(img_path) as img:
+                    width, height = img.size
+                    max_width = max(max_width, width)
+                    max_height = max(max_height, height)
+            except:
+                continue
+
+        if max_width == 0 or max_height == 0:
+            # Fallback to defaults
+            args.window_size = args.window_size or 512
+            args.stride = args.stride or 256
+            args.window_batch_size = args.window_batch_size or 4
+            return args
+
+        # Calculate optimal window size (aim for ~1MP windows for good performance)
+        target_window_pixels = 1024 * 1024  # 1MP
+        image_diagonal = (max_width ** 2 + max_height ** 2) ** 0.5
+
+        # Scale window size based on image size
+        if image_diagonal > 4000:  # Very large images
+            window_size = 1024
+        elif image_diagonal > 2000:  # Large images
+            window_size = 768
+        else:  # Medium images
+            window_size = 512
+
+        # Ensure window size is reasonable
+        window_size = min(window_size, min(max_width, max_height))
+        window_size = max(256, window_size)  # Minimum window size
+
+        # Calculate stride (75% overlap for good reconstruction)
+        stride = int(window_size * (1 - args.overlap))
+        stride = max(64, stride)  # Minimum stride
+
+        # Calculate batch size based on available memory
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+
+            # Estimate memory per window (conservative)
+            window_memory_gb = (window_size * window_size * 4 * 3 * 10) / (1024 ** 3)  # 10x overhead for model
+
+            # Calculate safe batch size
+            safe_batch_size = max(1, int((available_memory_gb * 0.3) / window_memory_gb))  # Use 30% of available memory
+            safe_batch_size = min(16, safe_batch_size)  # Maximum batch size
+
+        except:
+            safe_batch_size = 4  # Fallback
+
+        # Set calculated parameters if not explicitly provided
+        args.window_size = args.window_size or window_size
+        args.stride = args.stride or stride
+        args.window_batch_size = args.window_batch_size or safe_batch_size
+
+        logger.info(f"📐 Auto-calculated sliding window parameters:")
+        logger.info(f"   Window size: {args.window_size}px")
+        logger.info(f"   Stride: {args.stride}px")
+        logger.info(f"   Batch size: {args.window_batch_size}")
+        logger.info(f"   Overlap: {args.overlap:.0%}")
+
+    except Exception as e:
+        logger.warning(f"Could not calculate optimal window parameters: {str(e)}")
+        # Set sensible defaults
+        args.window_size = args.window_size or 512
+        args.stride = args.stride or 256
+        args.window_batch_size = args.window_batch_size or 4
+
     return args
 
 def setup_logging():
@@ -9105,63 +10495,6 @@ def setup_logging():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     return logging.getLogger(__name__)
-
-def handle_training_mode(args: argparse.Namespace, logger: logging.Logger) -> int:
-
-        # Setup paths
-        #data_name = os.path.splitext(os.path.basename(args.data))[0]
-        data_name=args.data_name
-        data_dir = os.path.join('data', data_name)
-        config_path = os.path.join(data_dir, f"{data_name}.json")
-
-        # Process dataset
-        processor = DatasetProcessor(args.input_path, args.data_type, getattr(args, 'output', 'data'),data_name=args.data_name)
-        train_dir, test_dir = processor.process()
-        logger.info(f"Dataset processed: train_dir={train_dir}, test_dir={test_dir}")
-
-        # Generate/verify configurations
-        logger.info("Generating/verifying configurations...")
-        config = processor.generate_default_config(train_dir)
-
-        # Configure enhancements
-        config = configure_image_processing(config, logger)
-
-        # Update configuration with command line arguments
-        config = update_config_with_args(config, args)
-
-        fd= config['model']['feature_dims']
-        feature_dims=int(input(f"Please specify the output feature dimensions[{ fd}]: ") or fd)
-        config['model']['feature_dims']=feature_dims
-        # Get model type
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        # Setup data loading
-        transform = processor.get_transforms(config)
-        train_dataset, test_dataset = get_dataset(config, transform)
-
-        if train_dataset is None:
-            raise ValueError("No training dataset available")
-
-        # Create data loaders
-        train_loader, test_loader = create_data_loaders(train_dataset, test_dataset, config)
-
-        # Initialize model and loss manager
-        model, loss_manager = initialize_model_components(config, logger)
-
-        # Get training confirmation
-        if not get_training_confirmation(logger):
-            return 0
-
-        # Perform training and feature extraction
-        features_dict = perform_training_and_extraction(
-            model, train_loader, test_loader, config, loss_manager, logger
-        )
-
-        # Save results
-        save_training_results(features_dict, model, config, data_dir, data_name, logger)
-
-        logger.info("Processing completed successfully!")
-        return 0
 
 
 def configure_image_processing(config: Dict, logger: logging.Logger) -> Dict:
@@ -9239,45 +10572,15 @@ def perform_training_and_extraction(
     logger: logging.Logger
 ) -> Dict:
     """Perform model training and feature extraction"""
-    # Training
+    # Training - FIXED: Added test_loader argument
     logger.info("Starting model training...")
-    # HERE: train_loader is passed but train_dataset isn't stored anywhere
-    history = train_model(model, train_loader, config, loss_manager)
+    history = train_model(model, train_loader, test_loader, config, loss_manager)  # ✅ Added test_loader
 
     # Feature extraction
     logger.info("Extracting features...")
-    # HERE: We need train_dataset but it's not accessible
     features_dict = extract_features_from_model(model, train_loader, test_loader)
     return features_dict
 
-def extract_features_from_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    test_loader: Optional[DataLoader]
-) -> Dict:
-    """Extract features from the model"""
-    if isinstance(model, (AstronomicalStructurePreservingAutoencoder,
-                         MedicalStructurePreservingAutoencoder,
-                         AgriculturalPatternAutoencoder)):
-        features_dict = model.extract_features_with_class_info(train_loader)
-
-        if test_loader:
-            test_features = model.extract_features_with_class_info(test_loader)
-            for key in features_dict:
-                if isinstance(features_dict[key], torch.Tensor):
-                    features_dict[key] = torch.cat([features_dict[key], test_features[key]])
-    else:
-        train_features, train_labels = model.extract_features(train_loader)
-        if test_loader:
-            test_features, test_labels = model.extract_features(test_loader)
-            features = torch.cat([train_features, test_features])
-            labels = torch.cat([train_labels, test_labels])
-        else:
-            features = train_features
-            labels = train_labels
-        features_dict = {'features': features, 'labels': labels}
-
-    return features_dict
 
 def perform_training_and_extraction(
     model: nn.Module,
@@ -9290,7 +10593,7 @@ def perform_training_and_extraction(
     """Perform model training and feature extraction"""
     # Training
     logger.info("Starting model training...")
-    history = train_model(model, train_loader, config, loss_manager)
+    history = train_model(model, train_loader, test_loader, config, loss_manager)
 
     # Feature extraction
     logger.info("Extracting features...")

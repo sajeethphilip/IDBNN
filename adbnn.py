@@ -6929,8 +6929,21 @@ class DBNN(GPUDBNN):
             # Use existing label encoder
             y_encoded = self.label_encoder.transform(y)
 
-            # Process features and initialize model components if needed
-            X_processed = self._preprocess_data(X, is_training=True)
+            # CRITICAL: Check if we have a pre-trained scaler before preprocessing
+            has_pretrained_scaler = (hasattr(self, 'scaler') and
+                                   self.scaler is not None and
+                                   hasattr(self.scaler, 'mean_') and
+                                   self.scaler.mean_ is not None)
+
+            if has_pretrained_scaler:
+                print(f"\033[K{Colors.GREEN}🎯 Using pre-trained scaler for consistent adaptive training{Colors.ENDC}")
+                # Use is_training=False to avoid re-fitting the scaler
+                X_processed = self._preprocess_data(X, is_training=False)
+            else:
+                print(f"\033[K{Colors.CYAN}🔄 Fitting new scaler for fresh adaptive training{Colors.ENDC}")
+                # Use is_training=True to fit new scaler
+                X_processed = self._preprocess_data(X, is_training=True)
+
             self.X_tensor = X_processed.clone().detach().to(self.device)
             self.y_tensor = torch.LongTensor(y_encoded).to(self.device)
 
@@ -7685,7 +7698,8 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
-        """Preprocess data with robust NaN handling, proper scaler fitting, and type safety."""
+        """Preprocess data with robust NaN handling, proper scaler usage, and type safety.
+        CRITICAL: Uses pre-trained scaler without re-fitting for model consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
         # Check if X is a DataFrame or a tensor
@@ -7718,8 +7732,19 @@ class DBNN(GPUDBNN):
             self.nan_mask = torch.isnan(X)  # For tensor input
             X = torch.where(self.nan_mask, torch.tensor(-99999, device=X.device), X)
 
+        # CRITICAL: Check if we have a pre-trained scaler from loaded model
+        has_pretrained_scaler = (hasattr(self, 'scaler') and
+                               self.scaler is not None and
+                               hasattr(self.scaler, 'mean_') and
+                               self.scaler.mean_ is not None)
+
+        if has_pretrained_scaler:
+            print(f"\033[K{Colors.GREEN}✅ Using pre-trained scaler for consistent feature scaling{Colors.ENDC}")
+            DEBUG.log("Pre-trained scaler detected - maintaining consistency")
+
         # Step 1: Handle feature selection and statistics computation
-        if is_training:
+        if is_training and not has_pretrained_scaler:
+            # Only do feature selection and scaler fitting for FRESH training
             # Store original columns before any filtering
             self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
 
@@ -7739,36 +7764,13 @@ class DBNN(GPUDBNN):
                 if self.high_cardinality_columns:
                     DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
 
-            # Convert to numpy for scaler fitting
-            if isinstance(X, pd.DataFrame):
-                X_numpy = X.values.astype(np.float64)
-            else:
-                X_numpy = X.cpu().numpy() if torch.is_tensor(X) else np.array(X, dtype=np.float64)
-
-            # CRITICAL: Fit scaler during training
-            print(f"\033[K{Colors.CYAN}[INFO] Fitting scaler on training data shape: {X_numpy.shape}{Colors.ENDC}")
-            self.scaler.fit(X_numpy)
-
-            # Verify scaler was fitted properly
-            if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
-                print(f"\033[K{Colors.RED}[ERROR] Scaler fitting failed - mean_ attribute not set!{Colors.ENDC}")
-                raise RuntimeError("Scaler failed to fit during training")
-
-            print(f"\033[K{Colors.GREEN}[SUCCESS] Scaler fitted - mean: {self.scaler.mean_.shape}, scale: {self.scaler.scale_.shape}{Colors.ENDC}")
-
-            # Compute statistics for backward compatibility
-            self.global_mean = X_numpy.mean(axis=0)
-            self.global_std = X_numpy.std(axis=0)
-            self.global_std[self.global_std == 0] = 1  # Avoid division by zero
-            self.global_stats_computed = True
-
         else:
-            # During prediction: enforce exact feature matching
-            if isinstance(X, pd.DataFrame):
+            # During prediction OR continued training: enforce exact feature matching
+            if isinstance(X, pd.DataFrame) and hasattr(self, 'feature_columns'):
                 missing = set(self.feature_columns) - set(X.columns)
                 if missing:
                     raise ValueError(
-                        f"Prediction data missing {len(missing)} required features: {sorted(missing)}\n"
+                        f"Data missing {len(missing)} required features: {sorted(missing)}\n"
                         f"Expected features: {self.feature_columns}\n"
                         f"Provided features: {X.columns.tolist()}"
                     )
@@ -7779,7 +7781,7 @@ class DBNN(GPUDBNN):
         DEBUG.log("Starting categorical encoding")
         try:
             if isinstance(X, pd.DataFrame):
-                X_encoded = self._encode_categorical_features(X, is_training)
+                X_encoded = self._encode_categorical_features(X, is_training and not has_pretrained_scaler)
             else:
                 X_encoded = X
             DEBUG.log(f"Shape after categorical encoding: {X_encoded.shape}")
@@ -7800,23 +7802,46 @@ class DBNN(GPUDBNN):
             DEBUG.log(f"Error converting to numpy: {str(e)}")
             raise
 
-        # Step 4: Apply scaling using the fitted scaler
+        # Step 4: Apply scaling - CRITICAL LOGIC FOR CONSISTENCY
         try:
-            if is_training:
-                # Use scaler.transform for training data (already fitted above)
+            if has_pretrained_scaler:
+                # ALWAYS use pre-trained scaler without re-fitting for consistency
                 X_scaled = self.scaler.transform(X_numpy)
-                DEBUG.log("Training data scaled using fitted scaler")
+                print(f"\033[K{Colors.GREEN}[INFO] Using pre-trained scaler (mean: {self.scaler.mean_.shape}){Colors.ENDC}")
+                DEBUG.log("Data scaled using pre-trained scaler for consistency")
+
+            elif is_training:
+                # Fresh training: fit new scaler
+                print(f"\033[K{Colors.CYAN}[INFO] Fitting new scaler on training data shape: {X_numpy.shape}{Colors.ENDC}")
+                self.scaler.fit(X_numpy)
+
+                # Verify scaler was fitted properly
+                if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+                    print(f"\033[K{Colors.RED}[ERROR] Scaler fitting failed - mean_ attribute not set!{Colors.ENDC}")
+                    raise RuntimeError("Scaler failed to fit during training")
+
+                X_scaled = self.scaler.transform(X_numpy)
+                print(f"\033[K{Colors.GREEN}[SUCCESS] New scaler fitted - mean: {self.scaler.mean_.shape}{Colors.ENDC}")
+
+                # Compute statistics for backward compatibility
+                self.global_mean = X_numpy.mean(axis=0)
+                self.global_std = X_numpy.std(axis=0)
+                self.global_std[self.global_std == 0] = 1  # Avoid division by zero
+                self.global_stats_computed = True
+
             else:
-                # Prediction mode: use existing fitted scaler
-                if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
-                    print(f"\033[K{Colors.GREEN}[INFO] Using fitted scaler for prediction data{Colors.ENDC}")
-                    X_scaled = self.scaler.transform(X_numpy)
-                    DEBUG.log("Prediction data scaled using fitted scaler")
-                else:
-                    # Fallback: use global stats if scaler isn't fitted
-                    print(f"\033[K{Colors.YELLOW}[WARNING] Using global stats for scaling (scaler not fitted){Colors.ENDC}")
+                # Prediction without pre-trained scaler: use global stats fallback
+                print(f"\033[K{Colors.YELLOW}[WARNING] Using global stats for scaling (no pre-trained scaler){Colors.ENDC}")
+                if hasattr(self, 'global_mean') and hasattr(self, 'global_std'):
                     X_scaled = (X_numpy - self.global_mean) / (self.global_std + 1e-8)
                     DEBUG.log("Used global stats fallback for scaling")
+                else:
+                    # Last resort: manual scaling
+                    DEBUG.log("No scaling parameters available, using manual scaling")
+                    means = np.nanmean(X_numpy, axis=0)
+                    stds = np.nanstd(X_numpy, axis=0)
+                    stds[stds == 0] = 1
+                    X_scaled = (X_numpy - means) / stds
 
             # Log scaling results
             print(f"\033[K{Colors.GREEN}[INFO] Data range after scaling: [{X_scaled.min():.3f}, {X_scaled.max():.3f}]{Colors.ENDC}")
@@ -7832,8 +7857,8 @@ class DBNN(GPUDBNN):
         # Step 5: Convert to tensor
         X_tensor = torch.tensor(X_scaled, dtype=torch.float64, device=self.device)
 
-        # Step 6: Compute feature pairs and bin edges (training only)
-        if is_training:
+        # Step 6: Compute feature pairs and bin edges (only for fresh training)
+        if is_training and not has_pretrained_scaler:
             remaining_feature_indices = list(range(len(self.feature_columns)))
             DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
 
