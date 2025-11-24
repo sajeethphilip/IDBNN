@@ -4590,42 +4590,33 @@ class BinWeightUpdater:
         # Get initial weight from config
         self.initial_weight = self._get_initial_weight_from_config()
 
-        # Initialize histogram_weights with configurable initial value
+        # LAZY INITIALIZATION: Initialize empty dictionaries - create weights only when needed
         self.histogram_weights = {}
-        for class_id in range(n_classes):
-            self.histogram_weights[class_id] = {}
-            for pair_idx in range(len(feature_pairs)):
-                # Initialize with configurable initial weight
-                self.histogram_weights[class_id][pair_idx] = torch.full(
-                    (n_bins_per_dim, n_bins_per_dim),
-                    self.initial_weight,
-                    dtype=torch.float64,
-                    device=self.device
-                ).contiguous()
-
-        # Initialize gaussian weights with same initial value
         self.gaussian_weights = {}
-        for class_id in range(n_classes):
-            self.gaussian_weights[class_id] = {}
-            for pair_idx in range(len(feature_pairs)):
-                self.gaussian_weights[class_id][pair_idx] = torch.tensor(
-                    self.initial_weight,
-                    dtype=torch.float64,
-                    device=self.device
-                ).contiguous()
 
-        # Unified weights tensor initialization
-        self.weights = torch.full(
-            (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
-            self.initial_weight,
-            dtype=torch.float64,
-            device=self.device
-        ).contiguous()
+        # LAZY INITIALIZATION for unified weights - only create if absolutely needed
+        self.weights_initialized = False
+        self.weights_shape = (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim)
 
-        # Pre-allocate update buffers
-        self.update_indices = torch.zeros((3, 1000), dtype=torch.long)
-        self.update_values = torch.zeros(1000, dtype=torch.float64)
+        # Use float32 for memory efficiency while maintaining sufficient precision
+        self.dtype = torch.float32
+
+        # Adaptive memory management for high-dimensional datasets
+        if len(feature_pairs) > 1000:  # High feature count scenario
+            self.n_bins_per_dim = 64  # Reduce bin count to save memory
+            self.weights_shape = (n_classes, len(feature_pairs), self.n_bins_per_dim, self.n_bins_per_dim)
+            print(f"{Colors.CYAN}[MEMORY] Reduced n_bins_per_dim to {self.n_bins_per_dim} for {len(feature_pairs)} feature pairs{Colors.ENDC}")
+
+        # Pre-allocate update buffers (small, fixed size - same as original)
+        self.update_indices = torch.zeros((3, 1000), dtype=torch.long, device=self.device)
+        self.update_values = torch.zeros(1000, dtype=self.dtype, device=self.device)
         self.update_count = 0
+
+        # Debug initialization - show potential memory savings
+        original_memory_mb = (n_classes * len(feature_pairs) * 128 * 128 * 8) / (1024 * 1024)  # Original float64
+        optimized_memory_mb = (n_classes * len(feature_pairs) * self.n_bins_per_dim * self.n_bins_per_dim * 4) / (1024 * 1024)  # Optimized float32
+        print(f"{Colors.GREEN}[MEMORY] BinWeightUpdater optimized: {original_memory_mb:.1f}MB -> {optimized_memory_mb:.1f}MB potential savings{Colors.ENDC}")
+        print(f"{Colors.GREEN}[MEMORY] Configuration: {n_classes} classes, {len(feature_pairs)} pairs, {self.n_bins_per_dim} bins{Colors.ENDC}")
 
         # Debug initialization
         # print("\033[K" + f"[DEBUG] Weight initialization complete with initial value: {self.initial_weight}")
@@ -4845,16 +4836,22 @@ class BinWeightUpdater:
             raise
 
     def get_gaussian_weights(self, class_id, pair_idx):
-        """Get Gaussian weights with proper type conversion and validation"""
+        """Get Gaussian weights with LAZY initialization and proper type conversion"""
         try:
-            # Convert tensor values to Python integers
+            # Convert tensor values to Python integers (same as original)
             class_id = int(class_id) if isinstance(class_id, torch.Tensor) else class_id
             pair_idx = int(pair_idx) if isinstance(pair_idx, torch.Tensor) else pair_idx
 
+            # LAZY INITIALIZATION: Create weights only when first accessed
             if class_id not in self.gaussian_weights:
-                raise KeyError(f"Invalid class_id: {class_id}")
+                self.gaussian_weights[class_id] = {}
+
             if pair_idx not in self.gaussian_weights[class_id]:
-                raise KeyError(f"Invalid pair_idx: {pair_idx}")
+                self.gaussian_weights[class_id][pair_idx] = torch.tensor(
+                    self.initial_weight,
+                    dtype=self.dtype,  # Use optimized dtype
+                    device=self.device
+                ).contiguous()
 
             weights = self.gaussian_weights[class_id][pair_idx]
             DEBUG.log(f" Retrieved Gaussian weights for class {class_id}, pair {pair_idx}, shape: {weights.shape}")
@@ -6151,49 +6148,52 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"✅ Prediction data preprocessed: {len(self.X_tensor)} samples")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Memory-optimized vectorized batch posterior computation with adaptive feature pair batching"""
+        """Memory-optimized vectorized batch posterior computation with LAZY weight loading"""
 
-        # CRITICAL: Ensure no gradient computation during inference
+        # CRITICAL: Ensure no gradient computation during inference (same as original)
         with torch.no_grad():
             features = features.to(self.device)
             batch_size, n_features = features.shape
             n_classes = len(self.likelihood_params['classes'])
             n_pairs = len(self.feature_pairs)
 
-            # Initialize log likelihoods
-            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+            # FIX: Use the weight_updater's dtype instead of self.dtype
+            dtype = self.weight_updater.dtype if hasattr(self.weight_updater, 'dtype') else torch.float32
+
+            # Initialize log likelihoods with optimized dtype
+            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=dtype)
 
             # Compute optimal feature batch size based on available memory
             feature_batch_size = self._compute_optimal_feature_batch_size(batch_size, n_classes, n_pairs)
 
-            # Process feature pairs in memory-managed batches
+            # Process feature pairs in memory-managed batches (same algorithm)
             for batch_start in range(0, n_pairs, feature_batch_size):
                 batch_end = min(batch_start + feature_batch_size, n_pairs)
                 batch_pairs = self.feature_pairs[batch_start:batch_end]
 
-                # Pre-allocate feature groups for this batch
+                # Pre-allocate feature groups for this batch (same as original)
                 feature_groups = torch.stack([
                     features[:, pair].contiguous()
                     for pair in batch_pairs
                 ])  # [batch_size_pairs, batch_size, 2]
 
                 # Vectorized binning for this feature batch
-                batch_log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
+                batch_log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=dtype)
 
                 for local_idx, pair in enumerate(batch_pairs):
                     global_pair_idx = batch_start + local_idx
 
-                    # Get bin edges and probabilities
+                    # Get bin edges and probabilities (same as original)
                     bin_edges = self.likelihood_params['bin_edges'][global_pair_idx]
                     bin_probs = self.likelihood_params['bin_probs'][global_pair_idx]
 
-                    # Get bin weights for all classes
+                    # LAZY WEIGHT LOADING: Get bin weights only for this specific pair
                     bin_weights = torch.stack([
-                        self.weight_updater.get_histogram_weights(c, global_pair_idx)
+                        self.weight_updater.get_histogram_weights(c, global_pair_idx)  # This triggers lazy initialization
                         for c in range(n_classes)
                     ])  # [n_classes, n_bins_per_dim, n_bins_per_dim]
 
-                    # Vectorized bucketize for both dimensions
+                    # Vectorized bucketize for both dimensions (same algorithm as original)
                     edges = torch.stack([edge.contiguous() for edge in bin_edges])
                     pair_features = feature_groups[local_idx]  # [batch_size, 2]
 
@@ -6202,38 +6202,38 @@ class DBNN(GPUDBNN):
                     indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
                     indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
 
-                    # Vectorized probability gathering
+                    # Vectorized probability gathering (same algorithm as original)
                     weighted_probs = bin_probs * bin_weights
                     probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
                     batch_log_likelihoods += torch.log(probs.t() + epsilon)
 
-                # Accumulate results from this feature batch
+                # Accumulate results from this feature batch (same as original)
                 log_likelihoods += batch_log_likelihoods
 
-                # Memory cleanup between feature batches
+                # Memory cleanup between feature batches (enhanced)
                 del feature_groups, batch_log_likelihoods, bin_weights, weighted_probs
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Vectorized softmax (unchanged)
+            # Vectorized softmax (EXACTLY same algorithm as original)
             max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
             posteriors = torch.exp(log_likelihoods - max_log_likelihood)
             posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-            # Return bin_indices as dictionary for compatibility
+            # Return bin_indices as dictionary for compatibility (same as original)
             bin_indices_dict = self._compute_bin_indices_dict(features, n_pairs, feature_batch_size)
 
             return posteriors, bin_indices_dict
 
     def _compute_optimal_feature_batch_size(self, batch_size, n_classes, n_pairs):
-        """Dynamically compute optimal feature batch size based on available memory"""
+        """Dynamically compute optimal feature batch size with LAZY weight memory considerations"""
 
         if not torch.cuda.is_available():
-            # CPU mode - use larger batches
+            # CPU mode - use larger batches (same as original)
             return min(256, n_pairs)
 
         try:
-            # Calculate available GPU memory
+            # Calculate available GPU memory (same logic as original)
             if hasattr(torch.cuda, 'memory_reserved'):
                 allocated = torch.cuda.memory_allocated()
                 reserved = torch.cuda.memory_reserved()
@@ -6243,43 +6243,49 @@ class DBNN(GPUDBNN):
                 # Fallback for older PyTorch
                 free_memory = 0.8 * torch.cuda.get_device_properties(0).total_memory
 
-            # Safety margin (use only 70% of available memory)
-            available_memory = free_memory * 0.7
+            # Conservative safety margin (use only 60% of available memory)
+            available_memory = free_memory * 0.6
 
-            # Memory estimation per feature pair
-            # Components:
-            # 1. Feature data: batch_size * 2 * 8 bytes (float64)
-            # 2. Bin weights: n_classes * n_bins_per_dim * n_bins_per_dim * 8 bytes
-            # 3. Probabilities: n_classes * batch_size * 8 bytes
-            # 4. Intermediate tensors: additional 20% overhead
+            # FIX: Get dtype from weight_updater or use default
+            dtype_size = 4  # Default to float32 (4 bytes)
+            n_bins = self.n_bins_per_dim
 
+            # If weight_updater exists and has dtype info, use it
+            if hasattr(self, 'weight_updater') and hasattr(self.weight_updater, 'dtype'):
+                if self.weight_updater.dtype == torch.float64:
+                    dtype_size = 8
+                if hasattr(self.weight_updater, 'n_bins_per_dim'):
+                    n_bins = self.weight_updater.n_bins_per_dim
+
+            # UPDATED Memory estimation per feature pair
             memory_per_pair = (
-                (batch_size * 2 * 8) +  # Feature data
-                (n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8) +  # Bin weights
-                (n_classes * batch_size * 8) +  # Probabilities
-                (0.2 * (batch_size * 2 * 8))  # Overhead
+                (batch_size * 2 * dtype_size) +  # Feature data
+                (n_classes * n_bins * n_bins * dtype_size) +  # Bin weights
+                (n_classes * batch_size * dtype_size) +  # Probabilities
+                (0.2 * (batch_size * 2 * dtype_size))  # Overhead
             )
 
-            # Calculate maximum possible batch size
+            # Calculate maximum possible batch size (same algorithm as original)
             max_batch_size = int(available_memory / memory_per_pair)
 
-            # Apply reasonable bounds
+            # Apply reasonable bounds (same as original)
             min_batch_size = 4   # Minimum for efficiency
             max_batch_size = min(max_batch_size, 512)  # Upper limit for stability
 
             optimal_batch_size = max(min_batch_size, min(max_batch_size, n_pairs))
 
-            # Print memory info (debug)
+            # Print memory info (enhanced debug)
             if hasattr(self, '_last_feature_batch_size') and self._last_feature_batch_size != optimal_batch_size:
                 print(f"{Colors.CYAN}[MEMORY] Feature batch size: {optimal_batch_size} "
                       f"(available: {available_memory/1024**3:.1f}GB, "
-                      f"per pair: {memory_per_pair/1024**2:.1f}MB){Colors.ENDC}")
+                      f"per pair: {memory_per_pair/1024**2:.1f}MB, "
+                      f"total pairs: {n_pairs}){Colors.ENDC}")
 
             self._last_feature_batch_size = optimal_batch_size
             return optimal_batch_size
 
         except Exception as e:
-            # Fallback to conservative default
+            # Fallback to conservative default (same as original)
             print(f"{Colors.YELLOW}[WARNING] Memory detection failed, using default feature batch size: {e}{Colors.ENDC}")
             return min(64, n_pairs)
 
@@ -11193,6 +11199,34 @@ class DBNN(GPUDBNN):
             self.initial_samples = 50
         if not hasattr(self, 'max_samples_per_round'):
             self.max_samples_per_round = 500
+
+    def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
+        """Get histogram weights with LAZY initialization - maintains original interface"""
+        class_id = int(class_id)
+        pair_idx = int(pair_idx)
+
+        # LAZY INITIALIZATION: Create weights only when first accessed
+        if class_id not in self.histogram_weights:
+            self.histogram_weights[class_id] = {}
+
+        if pair_idx not in self.histogram_weights[class_id]:
+            self.histogram_weights[class_id][pair_idx] = torch.full(
+                (self.n_bins_per_dim, self.n_bins_per_dim),
+                self.initial_weight,
+                dtype=self.dtype,  # Use optimized dtype
+                device=self.device
+            ).contiguous()
+
+        weights = self.histogram_weights[class_id][pair_idx]
+
+        # Validation (same as original logic)
+        if len(weights.shape) != 2:
+            raise ValueError(f"Invalid weight shape: {weights.shape}, expected 2D tensor")
+        if weights.shape[0] != self.n_bins_per_dim or weights.shape[1] != self.n_bins_per_dim:
+            raise ValueError(f"Invalid weight dimensions: {weights.shape}, expected ({self.n_bins_per_dim}, {self.n_bins_per_dim})")
+
+        return weights
+
 #----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
 
 
