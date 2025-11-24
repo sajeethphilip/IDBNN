@@ -352,81 +352,6 @@ class PredictionManager:
         except Exception as e:
             logger.error(f"Failed to update config column_names from CSV: {str(e)}")
 
-    def _load_model(self) -> nn.Module:
-        """Load model with invertible feature compression and proper dimension handling"""
-        model = ModelFactory.create_model(self.config)
-        model.to(self.device)
-
-        checkpoint_path = self.checkpoint_manager.checkpoint_path
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                logger.warning("CUDA not available. Falling back to CPU.")
-                checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-            else:
-                raise e
-
-        # Find the best state
-        state_key = None
-        for key in checkpoint['model_states']:
-            if 'phase2' in key and 'kld' in key and 'cls' in key:
-                state_key = key
-                break
-
-        if state_key is None:
-            # Fallback to any phase2 state
-            for key in checkpoint['model_states']:
-                if 'phase2' in key:
-                    state_key = key
-                    break
-
-        if state_key is None:
-            raise ValueError("No suitable checkpoint state found")
-
-        state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
-        model.load_state_dict(state_dict, strict=False)
-
-        # Load feature selection state
-        config_state = checkpoint['model_states'][state_key]['best']['config']
-        if 'feature_selection' in config_state:
-            fs_state = config_state['feature_selection']
-            model._selected_feature_indices = fs_state.get('selected_feature_indices')
-            model._feature_importance_scores = fs_state.get('feature_importance_scores')
-            model._feature_selection_metadata = fs_state.get('feature_selection_metadata', {})
-            model._is_feature_selection_frozen = True
-            logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices else 'None'} features")
-
-        # CRITICAL: Load and use actual feature dimensions from config
-        if 'compressed_dims' in config_state:
-            model.compressed_dims = config_state['compressed_dims']
-            # Update the prediction manager's actual feature dimensions
-            self.actual_feature_dims = model.compressed_dims
-            logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
-
-        # CRITICAL: Also check for actual_feature_dims in config
-        if 'actual_feature_dims' in config_state:
-            self.actual_feature_dims = config_state['actual_feature_dims']
-            logger.info(f"Using actual feature dimensions from config: {self.actual_feature_dims}")
-
-        # CRITICAL FIX: Ensure model's compressed_dims matches our actual_feature_dims
-        if hasattr(model, 'compressed_dims') and model.compressed_dims != self.actual_feature_dims:
-            logger.warning(f"Model compressed_dims ({model.compressed_dims}) doesn't match actual_feature_dims ({self.actual_feature_dims}). Updating model.")
-            model.compressed_dims = self.actual_feature_dims
-
-        # Final fallback: use compressed dimensions or default
-        if not hasattr(self, 'actual_feature_dims') or self.actual_feature_dims is None:
-            self.actual_feature_dims = getattr(model, 'compressed_dims', 32)
-            logger.info(f"Using fallback feature dimensions: {self.actual_feature_dims}")
-
-        model.set_training_phase(2)
-        model.eval()
-
-        logger.info(f"Model loaded successfully with {self.actual_feature_dims} feature dimensions for prediction")
-        return model
 
     def _get_image_files_with_labels(self, data_path: str) -> Tuple[List[str], List[str], List[str]]:
         """Get image files with class labels from folder structure, preserving exact case"""
@@ -796,7 +721,7 @@ class PredictionManager:
             else:
                 raise e
 
-        # Find the best state
+        # Find the best state - prioritize phase2 with both KLD and classification
         state_key = None
         for key in checkpoint['model_states']:
             if 'phase2' in key and 'kld' in key and 'cls' in key:
@@ -811,47 +736,86 @@ class PredictionManager:
                     break
 
         if state_key is None:
-            raise ValueError("No suitable checkpoint state found")
+            # Final fallback: use the first available state
+            state_key = list(checkpoint['model_states'].keys())[0]
+            logger.warning(f"No phase2 state found, using: {state_key}")
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
-        model.load_state_dict(state_dict, strict=False)
+
+        # FIX: Handle different return types of load_state_dict
+        try:
+            # Try the modern approach that returns NamedTuple
+            load_result = model.load_state_dict(state_dict, strict=False)
+            if hasattr(load_result, 'missing_keys') and load_result.missing_keys:
+                logger.warning(f"Missing keys during model loading: {load_result.missing_keys}")
+            if hasattr(load_result, 'unexpected_keys') and load_result.unexpected_keys:
+                logger.warning(f"Unexpected keys during model loading: {load_result.unexpected_keys}")
+        except TypeError:
+            # Fallback for older PyTorch versions that return None
+            model.load_state_dict(state_dict, strict=False)
+            logger.info("Model state dict loaded (legacy PyTorch version)")
 
         # Load feature selection state
         config_state = checkpoint['model_states'][state_key]['best']['config']
         if 'feature_selection' in config_state:
             fs_state = config_state['feature_selection']
-            model._selected_feature_indices = fs_state.get('selected_feature_indices')
-            model._feature_importance_scores = fs_state.get('feature_importance_scores')
+
+            # CRITICAL FIX: Ensure tensors are moved to correct device
+            selected_indices = fs_state.get('selected_feature_indices')
+            if selected_indices is not None:
+                if isinstance(selected_indices, torch.Tensor):
+                    model._selected_feature_indices = selected_indices.to(self.device)
+                else:
+                    model._selected_feature_indices = torch.tensor(selected_indices, device=self.device)
+
+            importance_scores = fs_state.get('feature_importance_scores')
+            if importance_scores is not None:
+                if isinstance(importance_scores, torch.Tensor):
+                    model._feature_importance_scores = importance_scores.to(self.device)
+                else:
+                    model._feature_importance_scores = torch.tensor(importance_scores, device=self.device)
+
             model._feature_selection_metadata = fs_state.get('feature_selection_metadata', {})
             model._is_feature_selection_frozen = True
-            logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices else 'None'} features")
 
-        # CRITICAL: Load and use actual feature dimensions from config
+            logger.info(f"Loaded frozen feature selection: {len(model._selected_feature_indices) if model._selected_feature_indices is not None else 'None'} features")
+
+        # CRITICAL: Load and synchronize feature dimensions - DO NOT MODIFY CONFIG
         if 'compressed_dims' in config_state:
             model.compressed_dims = config_state['compressed_dims']
-            # Update the prediction manager's actual feature dimensions
             self.actual_feature_dims = model.compressed_dims
             logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
 
-        # CRITICAL: Also check for actual_feature_dims in config
         if 'actual_feature_dims' in config_state:
             self.actual_feature_dims = config_state['actual_feature_dims']
             logger.info(f"Using actual feature dimensions from config: {self.actual_feature_dims}")
 
-        # CRITICAL FIX: Ensure model's compressed_dims matches our actual_feature_dims
+        # Ensure synchronization between model and prediction manager
         if hasattr(model, 'compressed_dims') and model.compressed_dims != self.actual_feature_dims:
-            logger.warning(f"Model compressed_dims ({model.compressed_dims}) doesn't match actual_feature_dims ({self.actual_feature_dims}). Updating model.")
+            logger.warning(f"Model compressed_dims ({model.compressed_dims}) doesn't match actual_feature_dims ({self.actual_feature_dims}). Synchronizing.")
+            # Prefer the actual_feature_dims from config as it's more reliable
             model.compressed_dims = self.actual_feature_dims
 
-        # Final fallback: use compressed dimensions or default
+        # Final validation
         if not hasattr(self, 'actual_feature_dims') or self.actual_feature_dims is None:
             self.actual_feature_dims = getattr(model, 'compressed_dims', 32)
             logger.info(f"Using fallback feature dimensions: {self.actual_feature_dims}")
 
-        model.set_training_phase(2)
+        # Set appropriate training phase
+        if 'phase2' in state_key:
+            model.set_training_phase(2)
+        else:
+            model.set_training_phase(1)
+
         model.eval()
 
-        logger.info(f"Model loaded successfully with {self.actual_feature_dims} feature dimensions for prediction")
+        # Final verification log
+        logger.info(f"Model loaded successfully:")
+        logger.info(f"  - Feature dimensions: {self.actual_feature_dims}")
+        logger.info(f"  - Training phase: {model.training_phase}")
+        logger.info(f"  - Frozen features: {model._selected_feature_indices is not None}")
+        logger.info(f"  - State key: {state_key}")
+
         return model
 
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = True):
