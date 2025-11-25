@@ -5523,6 +5523,15 @@ class DBNN(GPUDBNN):
         self._last_feature_batch_size = None
         self.epsilon = 1e-10  # Add epsilon as instance variable
 
+        # Enable PyTorch memory optimizations
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
+
+        # Initialize memory tracking
+        self._last_memory_check = 0
+        self._memory_check_interval = 100  # Check memory every 100 operations
+
     def _load_minimal_data_for_prediction(self):
         """Load only the raw data for prediction without any processing"""
         DEBUG.log(f"Loading minimal data for prediction: {self.dataset_name}")
@@ -8337,17 +8346,17 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized vectorized pairwise likelihood computation with serialization-safe bin tracking"""
-        DEBUG.log("Starting optimized _compute_pairwise_likelihood_parallel")
+        """Optimized vectorized pairwise likelihood computation with intelligent memory management"""
+        DEBUG.log("Starting optimized _compute_pairwise_likelihood_parallel with memory management")
 
-        # Initialize class-bin tracking structure - FIXED: No lambda
+        # Initialize class-bin tracking structure - PRESERVED: No lambda
         self.class_bins = defaultdict(dict)  # Use regular dict instead of defaultdict
 
-        # Ensure tensors are contiguous
+        # Ensure tensors are contiguous - PRESERVED
         dataset = dataset.contiguous()
         labels = labels.contiguous()
 
-        # Validate class consistency
+        # Validate class consistency - PRESERVED
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
         n_samples = len(dataset)
@@ -8355,26 +8364,27 @@ class DBNN(GPUDBNN):
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Get bin configuration
+        # Get bin configuration - PRESERVED
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
         self.n_bins_per_dim = n_bins
 
-        # Initialize weights
+        # Initialize weights - PRESERVED
         self._initialize_bin_weights()
 
         all_bin_counts = []
         all_bin_probs = []
 
-        # Process pairs in optimized batches
+        # INTELLIGENT BATCHING: Calculate optimal pair batch size based on memory
         n_pairs = len(self.feature_pairs)
-        pair_batch_size = min(20, n_pairs)
+        pair_batch_size = self._compute_pair_batch_size(n_samples, n_classes, n_pairs)
+        DEBUG.log(f"Using intelligent pair batch size: {pair_batch_size} for {n_pairs} pairs")
 
         with tqdm(total=n_pairs, desc="Pairwise likelihood", leave=False) as pbar:
             for batch_start in range(0, n_pairs, pair_batch_size):
                 batch_end = min(batch_start + pair_batch_size, n_pairs)
 
-                # Process batch of pairs with vectorized bin tracking
+                # Process batch of pairs with vectorized bin tracking - PRESERVED
                 batch_counts, batch_probs = self._process_pair_batch_vectorized(
                     dataset, labels, unique_classes, batch_start, batch_end, n_bins, n_classes
                 )
@@ -8383,10 +8393,13 @@ class DBNN(GPUDBNN):
                 all_bin_probs.extend(batch_probs)
                 pbar.update(batch_end - batch_start)
 
-                # Memory cleanup
+                # ENHANCED Memory cleanup with synchronization
+                del batch_counts, batch_probs
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()  # Ensure cleanup completes
 
+        # PRESERVED return structure exactly as original
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
@@ -8396,56 +8409,80 @@ class DBNN(GPUDBNN):
         }
 
     def _process_pair_batch_vectorized(self, dataset, labels, unique_classes, batch_start, batch_end, n_bins, n_classes):
-        """Vectorized batch processing with optimized bin tracking"""
+        """Vectorized batch processing with optimized bin tracking and memory management"""
         batch_counts = []
         batch_probs = []
+
+        # Calculate sample batch size for memory optimization
+        n_samples = len(dataset)
+        sample_batch_size = self._compute_sample_batch_size(n_samples, batch_end - batch_start, n_classes)
+
+        DEBUG.log(f"Processing pair batch {batch_start}-{batch_end} with sample batch size: {sample_batch_size}")
 
         for pair_idx in range(batch_start, batch_end):
             f1, f2 = self.feature_pairs[pair_idx]
             edges = self.bin_edges[pair_idx]
 
-            # Initialize counts for all classes
+            # Initialize counts for all classes - PRESERVED dtype and device
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
                                     dtype=torch.float64, device=self.device)
 
-            # Vectorized processing for all classes
-            for cls_idx, cls in enumerate(unique_classes):
-                cls_mask = (labels == cls)
-                if not torch.any(cls_mask):
-                    continue
+            # MEMORY-OPTIMIZED: Process samples in batches for this feature pair
+            for sample_start in range(0, n_samples, sample_batch_size):
+                sample_end = min(sample_start + sample_batch_size, n_samples)
+                batch_samples = dataset[sample_start:sample_end]
+                batch_labels = labels[sample_start:sample_end]
 
-                data = dataset[cls_mask][:, [f1, f2]].contiguous()
+                # Vectorized processing for all classes - PRESERVED algorithm
+                for cls_idx, cls in enumerate(unique_classes):
+                    cls_mask = (batch_labels == cls)
+                    if not torch.any(cls_mask):
+                        continue
 
-                # Get bin indices for this class - VECTORIZED
-                indices_0 = torch.bucketize(data[:, 0], edges[0]).clamp(0, n_bins-1)
-                indices_1 = torch.bucketize(data[:, 1], edges[1]).clamp(0, n_bins-1)
+                    data = batch_samples[cls_mask][:, [f1, f2]].contiguous()
 
-                # VECTORIZED bin tracking - no lambda, no individual iterations
-                unique_bins = torch.unique(torch.stack([indices_0, indices_1], dim=1), dim=0)
+                    # Get bin indices for this class - VECTORIZED (PRESERVED)
+                    indices_0 = torch.bucketize(data[:, 0], edges[0]).clamp(0, n_bins-1)
+                    indices_1 = torch.bucketize(data[:, 1], edges[1]).clamp(0, n_bins-1)
 
-                # Store bins using regular dict (serialization-safe)
-                cls_key = cls.item()
-                pair_key = pair_idx
-                if cls_key not in self.class_bins:
-                    self.class_bins[cls_key] = {}
-                if pair_key not in self.class_bins[cls_key]:
-                    self.class_bins[cls_key][pair_key] = set()
+                    # VECTORIZED bin tracking - no lambda, no individual iterations (PRESERVED)
+                    unique_bins = torch.unique(torch.stack([indices_0, indices_1], dim=1), dim=0)
 
-                # Convert to Python set in one go (minimal overhead)
-                bin_tuples = {tuple(bin_arr.tolist()) for bin_arr in unique_bins}
-                self.class_bins[cls_key][pair_key].update(bin_tuples)
+                    # Store bins using regular dict (serialization-safe) - PRESERVED
+                    cls_key = cls.item()
+                    pair_key = pair_idx
+                    if cls_key not in self.class_bins:
+                        self.class_bins[cls_key] = {}
+                    if pair_key not in self.class_bins[cls_key]:
+                        self.class_bins[cls_key][pair_key] = set()
 
-                # Vectorized counting (unchanged - optimal)
-                flat_indices = indices_0 * n_bins + indices_1
-                counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
-                pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
+                    # Convert to Python set in one go (minimal overhead) - PRESERVED
+                    bin_tuples = {tuple(bin_arr.tolist()) for bin_arr in unique_bins}
+                    self.class_bins[cls_key][pair_key].update(bin_tuples)
 
-            # Laplace smoothing and probability calculation
+                    # Vectorized counting (unchanged - optimal) - PRESERVED
+                    flat_indices = indices_0 * n_bins + indices_1
+                    counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
+
+                    # Accumulate counts across sample batches
+                    pair_counts[cls_idx] += counts.view(n_bins, n_bins).float()
+
+                # Cleanup sample batch data
+                del batch_samples, batch_labels, data
+                if torch.cuda.is_available() and sample_end < n_samples:
+                    torch.cuda.empty_cache()
+
+            # Laplace smoothing and probability calculation - PRESERVED exactly
             smoothed = pair_counts + 1.0
             probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
             batch_counts.append(smoothed)
             batch_probs.append(probs)
+
+            # Cleanup pair-specific data
+            del pair_counts, smoothed, probs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         return batch_counts, batch_probs
 
@@ -8907,7 +8944,6 @@ class DBNN(GPUDBNN):
 
         return bin_edges
 
-
 #---------------------------------------------------------Save Last data -------------------------
     def load_last_known_split(self):
         """Load the last known split using stored original indices"""
@@ -8960,7 +8996,86 @@ class DBNN(GPUDBNN):
         test_df.to_csv(f'data/{dataset_name}/Last_testing.csv', index=False)
 
         print(f"\033[KSaved split with {len(train_indices)} train, {len(test_indices)} test samples")
-#---------------Predcit New --------------------
+#---------------Memory Management --------------------
+
+    def _compute_pair_batch_size(self, n_samples: int, n_classes: int, n_pairs: int) -> int:
+        """Compute optimal pair batch size based on available memory while preserving algorithm"""
+
+        if not torch.cuda.is_available():
+            return min(20, n_pairs)  # PRESERVED original CPU batch size
+
+        try:
+            # Calculate available memory conservatively
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            allocated = torch.cuda.memory_allocated()
+            available_memory = total_memory - allocated
+            safe_memory = available_memory * 0.3  # Use only 30% for safety
+
+            # Memory calculation for one feature pair (PRESERVING original data types)
+            # Based on original algorithm's memory requirements:
+            memory_per_pair = (
+                n_samples * 2 * 8 +  # Feature data: float64 (PRESERVED original dtype)
+                n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8 +  # pair_counts: float64
+                n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8 +  # smoothed: float64
+                n_samples * 4 +  # Intermediate indices and masks
+                (0.2 * n_samples * 2 * 8)  # Overhead (20%)
+            )
+
+            max_batch_size = int(safe_memory / memory_per_pair)
+
+            # Apply reasonable bounds (similar to original but more conservative)
+            min_batch_size = 5   # Minimum for efficiency
+            max_batch_size = min(max_batch_size, 50, n_pairs)  # More conservative than original
+
+            optimal_batch_size = max(min_batch_size, max_batch_size)
+
+            DEBUG.log(f"Memory-aware pair batch: {optimal_batch_size} (available: {safe_memory/1024**3:.2f}GB)")
+            return optimal_batch_size
+
+        except Exception as e:
+            DEBUG.log(f"Memory detection failed, using conservative pair batch: {e}")
+            return min(10, n_pairs)  # More conservative fallback
+
+    def _compute_sample_batch_size(self, n_samples: int, n_pairs_in_batch: int, n_classes: int) -> int:
+        """Compute optimal sample batch size for memory-constrained processing"""
+
+        if not torch.cuda.is_available():
+            return min(1000, n_samples)  # Reasonable CPU batch size
+
+        try:
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            allocated = torch.cuda.memory_allocated()
+            available_memory = total_memory - allocated
+            safe_memory = available_memory * 0.4  # Use 40% for sample processing
+
+            # Memory for processing one sample across multiple pairs
+            memory_per_sample = (
+                n_pairs_in_batch * 2 * 8 +  # Feature data per pair: float64
+                n_pairs_in_batch * n_classes * 4 +  # Class masks and indices
+                n_pairs_in_batch * self.n_bins_per_dim * self.n_bins_per_dim * 8 / n_samples +  # Count accumulation
+                (0.3 * n_pairs_in_batch * 2 * 8)  # Overhead
+            )
+
+            max_batch_size = int(safe_memory / memory_per_sample)
+
+            # Apply bounds
+            min_batch_size = 100  # Minimum for efficiency
+            max_batch_size = min(max_batch_size, 5000, n_samples)
+
+            # Adjust based on number of pairs in current batch
+            if n_pairs_in_batch > 10:
+                max_batch_size = min(max_batch_size, 2000)
+            if n_pairs_in_batch > 20:
+                max_batch_size = min(max_batch_size, 1000)
+
+            optimal_batch_size = max(min_batch_size, max_batch_size)
+
+            DEBUG.log(f"Memory-aware sample batch: {optimal_batch_size} for {n_pairs_in_batch} pairs")
+            return optimal_batch_size
+
+        except Exception as e:
+            DEBUG.log(f"Sample batch memory detection failed: {e}")
+            return min(1000, n_samples)
 
 
 #-------------Predict New -----------------------

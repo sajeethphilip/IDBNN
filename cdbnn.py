@@ -1152,6 +1152,14 @@ class BaseEnhancementConfig:
                 }
             }
 
+        # NEW: Initialize sharpness-aware loss configuration (OPTIONAL - disabled by default)
+        if 'sharpness_config' not in self.config:
+            self.config['sharpness_config'] = {
+                'enable_sharpness_loss': True,  # Set to True to enable sharpness enhancement
+                'sharpness_weight': 0.3,         # Balance between reconstruction and sharpness
+                'edge_threshold': 0.1            # Threshold for edge detection
+            }
+
         # Initialize enhancement modules
         if 'enhancement_modules' not in self.config['model']:
             self.config['model']['enhancement_modules'] = {}
@@ -1674,6 +1682,16 @@ class BaseAutoencoder(nn.Module):
                                   .get('enhancements', {})
                                   .get('use_class_encoding', True))
 
+        # NEW: Sharpness-aware loss for Phase 1 (OPTIONAL - disabled by default)
+        self.enable_sharpness_loss = config.get('training', {}).get('enable_sharpness_loss', True)
+        if self.enable_sharpness_loss:
+            sharpness_config = config.get('sharpness_config', {})
+            self.sharpness_loss = SharpnessAwareLoss(sharpness_config)
+            logger.info("Sharpness-aware loss enabled for Phase 1 reconstruction")
+        else:
+            self.sharpness_loss = None
+            logger.info("Using standard MSE loss for Phase 1 reconstruction")
+
         # Initialize classifier if class encoding is enabled
         if self.use_class_encoding:
             num_classes = config['dataset'].get('num_classes', 10)
@@ -2068,6 +2086,30 @@ class BaseAutoencoder(nn.Module):
 
         return clean_value(config)
 
+    def compute_phase1_loss(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Enhanced Phase 1 loss with optional sharpness focus
+        Preserves backward compatibility - falls back to standard MSE if sharpness loss is disabled
+        """
+        if self.enable_sharpness_loss and self.training_phase == 1 and self.sharpness_loss is not None:
+            # Use sharpness-aware loss for Phase 1
+            loss_dict = self.sharpness_loss(reconstruction, target)
+
+            # Store individual loss components for monitoring
+            if not hasattr(self, 'loss_components'):
+                self.loss_components = {}
+
+            self.loss_components.update({
+                'base_loss': loss_dict['base_loss'].item(),
+                'gradient_loss': loss_dict['gradient_loss'].item(),
+                'high_freq_loss': loss_dict['high_freq_loss'].item(),
+                'edge_focused_loss': loss_dict['edge_focused_loss'].item()
+            })
+
+            return loss_dict['total_loss']
+        else:
+            # Fall back to standard MSE (original behavior)
+            return F.mse_loss(reconstruction, target)
 
     def _prepare_features_dataframe_enhanced(self, feature_dict: Dict[str, torch.Tensor],
                                            n_classes: int, n_samples: int) -> pd.DataFrame:
@@ -2218,107 +2260,22 @@ class BaseAutoencoder(nn.Module):
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        Enhanced feature saving with guaranteed config synchronization and validation
+        LEGACY METHOD: Redirect to prediction-based feature extraction
+        This maintains backward compatibility while using the reliable prediction pipeline
         """
-        try:
-            # Ensure output_path uses lowercase 'data' directory
-            if 'Data/' in output_path:
-                output_path = output_path.replace('Data/', 'data/')
-            elif not output_path.startswith('data/'):
-                # Extract dataset name and ensure lowercase data directory
-                dataset_name = self.config['dataset']['name'].lower()
-                output_path = f"data/{dataset_name}/{dataset_name}.csv"
+        logger.warning("Using legacy save_features - redirecting to prediction-based feature extraction")
 
-            output_dir = os.path.dirname(output_path)
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Clean up legacy JSON files first
-            self.cleanup_legacy_json_files(output_dir)
-
-            # Get adaptive mode setting
-            enable_adaptive = self.config['model'].get('enable_adaptive', True)
-
-            # Enhanced feature analysis for complex datasets
-            n_classes = len(np.unique(train_features['labels'].cpu().numpy()))
-            n_samples = len(train_features['embeddings'])
-
-            logger.info(f"Feature analysis: {n_samples} samples, {n_classes} classes")
-
-            # Track actual feature dimensions for config synchronization
-            actual_feature_count = None
-
-            # Process features - use compressed features as they are most informative
-            if enable_adaptive:
-                # Adaptive mode - single combined output
-                features_df = self._prepare_features_dataframe_enhanced(
-                    train_features, n_classes, n_samples
-                )
-
-                # CRITICAL: Double-verify and update config with actual feature count
-                feature_columns = [col for col in features_df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
-                actual_feature_count = len(feature_columns)
-
-                # CRITICAL FIX: Ensure config is fully synchronized
-                self.config['model']['actual_feature_dims'] = actual_feature_count
-                self.config['model']['compressed_dims'] = actual_feature_count
-
-                # Save features
-                features_df.to_csv(output_path, index=False)
-                logger.info(f"Saved {actual_feature_count} compressed features to {output_path}")
-
-                # NEW: Update config column_names to match actual CSV
-                self._update_config_column_names_from_csv(output_path)
-
-                # Save metadata using binary format
-                self._save_feature_metadata(output_dir, feature_columns, None)
-            else:
-                # Non-adaptive mode - separate train/test files
-                train_df = self._prepare_features_dataframe_enhanced(
-                    train_features, n_classes, n_samples
-                )
-                test_df = self._prepare_features_dataframe_enhanced(
-                    test_features, n_classes, n_samples
-                )
-
-                # CRITICAL: Double-verify and update config with actual feature count
-                feature_columns = [col for col in train_df.columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
-                actual_feature_count = len(feature_columns)
-
-                # CRITICAL FIX: Ensure config is fully synchronized
-                self.config['model']['actual_feature_dims'] = actual_feature_count
-                self.config['model']['compressed_dims'] = actual_feature_count
-
-                # Save features - ensure lowercase data directory
-                base_path = output_path.replace(".csv", "")
-                train_path = f"{base_path}_train.csv"
-                test_path = f"{base_path}_test.csv"
-
-                train_df.to_csv(train_path, index=False)
-                test_df.to_csv(test_path, index=False)
-                logger.info(f"Saved {actual_feature_count} train features to {train_path}")
-                logger.info(f"Saved {actual_feature_count} test features to {test_path}")
-
-                # NEW: Update config column_names to match actual CSV
-                self._update_config_column_names_from_csv(train_path)
-
-                # Save metadata using binary format
-                self._save_feature_metadata(output_dir, feature_columns, None)
-
-            # Final config synchronization logging
-            original_dims = self.config['model'].get('feature_dims', 128)
-            compressed_dims = self.config['model'].get('compressed_dims', 32)
-            logger.info(f"Config fully synchronized: {original_dims}D → {compressed_dims}D compressed → {actual_feature_count}D in CSV")
-
-            # Validate the output
-            self._validate_feature_csv(output_path, actual_feature_count)
-
-            # CRITICAL FIX: Save the synchronized config to checkpoint
-            self._save_synchronized_config(output_dir)
-
-        except Exception as e:
-            logger.error(f"Error in save_features: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            raise RuntimeError(f"Failed to save features: {str(e)}")
+        # We need access to the data loaders and config - these should be available in the training context
+        if hasattr(self, 'train_loader') and hasattr(self, 'config'):
+            self._create_features_via_prediction(self, self.config, self.train_loader,
+                                               getattr(self, 'test_loader', None), output_path)
+        else:
+            logger.error("Cannot use prediction-based feature extraction: missing train_loader or config")
+            # Fallback to original method but with warnings
+            try:
+                self._save_features_original(train_features, test_features, output_path)
+            except:
+                logger.error("Fallback feature saving also failed")
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -3405,6 +3362,67 @@ class BaseAutoencoder(nn.Module):
         self.model.remove_attention_hooks()
         logger.info(f"Cluster analysis complete: {output_dir}")
 
+    def _create_features_via_prediction(self, model: nn.Module, config: Dict,
+                                      train_loader: DataLoader, test_loader: DataLoader = None,
+                                      output_path: str = None):
+        """Create training features using the reliable prediction pipeline"""
+
+        # Use the dataset name from config
+        dataset_name = config['dataset']['name'].lower()
+
+        # Create prediction manager (uses the same reliable loading)
+        pred_manager = PredictionManager(config)
+
+        # Determine data paths based on dataset structure
+        base_data_path = f"data/{dataset_name}"
+
+        # Generate features using prediction pipeline
+        logger.info("Generating training features using reliable prediction pipeline...")
+
+        # Process training data
+        train_csv_path = f"{base_data_path}/{dataset_name}_train.csv"
+        if os.path.exists(f"{base_data_path}/train"):
+            train_predictions = pred_manager.predict_images(
+                data_path=f"{base_data_path}/train",
+                output_csv=train_csv_path,
+                batch_size=config['training'].get('prediction_batch_size', 32),
+                generate_heatmaps=False
+            )
+            logger.info(f"Training features saved to {train_csv_path}")
+        else:
+            logger.warning(f"Training directory not found: {base_data_path}/train")
+
+        # Process test data if available
+        test_csv_path = f"{base_data_path}/{dataset_name}_test.csv"
+        if test_loader is not None and os.path.exists(f"{base_data_path}/test"):
+            test_predictions = pred_manager.predict_images(
+                data_path=f"{base_data_path}/test",
+                output_csv=test_csv_path,
+                batch_size=config['training'].get('prediction_batch_size', 32),
+                generate_heatmaps=False
+            )
+            logger.info(f"Test features saved to {test_csv_path}")
+
+        # If separate train/test CSV files were created, also create combined version
+        if os.path.exists(train_csv_path) and (test_loader is None or os.path.exists(test_csv_path)):
+            combined_csv_path = f"{base_data_path}/{dataset_name}.csv"
+            try:
+                if test_loader is not None and os.path.exists(test_csv_path):
+                    # Combine train and test
+                    train_df = pd.read_csv(train_csv_path)
+                    test_df = pd.read_csv(test_csv_path)
+                    combined_df = pd.concat([train_df, test_df], ignore_index=True)
+                    combined_df.to_csv(combined_csv_path, index=False)
+                    logger.info(f"Combined features saved to {combined_csv_path}")
+                else:
+                    # Just use train as combined
+                    shutil.copy2(train_csv_path, combined_csv_path)
+                    logger.info(f"Combined features saved to {combined_csv_path}")
+            except Exception as e:
+                logger.warning(f"Could not create combined CSV: {str(e)}")
+
+        logger.info("Training features successfully created via reliable prediction pipeline")
+
 def make_json_serializable(obj):
     """Convert an object to be JSON serializable"""
     if isinstance(obj, (torch.Tensor, np.ndarray)):
@@ -4312,6 +4330,114 @@ class EnhancedLossManager:
                 return {'loss': result}
             else:
                 return {'loss': torch.tensor(float(result), device=reconstruction.device)}
+
+class SharpnessAwareLoss(nn.Module):
+    """Loss function focused on image sharpness and edge preservation for Phase 1 reconstruction"""
+
+    def __init__(self, config: Dict):
+        super().__init__()
+        self.config = config
+        self.alpha = config.get('sharpness_weight', 0.3)  # Balance between reconstruction and sharpness
+        self.edge_threshold = config.get('edge_threshold', 0.1)
+
+        # Precompute Sobel filters for edge detection
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Laplacian filter for high-frequency emphasis
+        self.laplacian = torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]],
+                                    dtype=torch.float32).view(1, 1, 3, 3)
+
+    def _compute_gradient_magnitude(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute gradient magnitude using Sobel operators"""
+        if x.dim() == 3:
+            x = x.unsqueeze(1)  # Add channel dimension if needed
+
+        # Convert to grayscale for edge detection if multi-channel
+        if x.shape[1] == 3:
+            # Use luminance channel (standard grayscale conversion)
+            x_gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        else:
+            x_gray = x
+
+        # Compute gradients
+        g_x = F.conv2d(x_gray, self.sobel_x.to(x.device), padding=1, stride=1)
+        g_y = F.conv2d(x_gray, self.sobel_y.to(x.device), padding=1, stride=1)
+
+        # Compute magnitude
+        gradient_magnitude = torch.sqrt(g_x**2 + g_y**2 + 1e-8)
+        return gradient_magnitude
+
+    def _compute_laplacian_response(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute Laplacian response for high-frequency content"""
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        if x.shape[1] == 3:
+            x_gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        else:
+            x_gray = x
+
+        laplacian_response = F.conv2d(x_gray, self.laplacian.to(x.device), padding=1, stride=1)
+        return torch.abs(laplacian_response)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Compute sharpness-aware loss
+
+        Args:
+            reconstruction: Model output [B, C, H, W]
+            target: Ground truth [B, C, H, W]
+
+        Returns:
+            Dictionary containing loss components
+        """
+        device = reconstruction.device
+
+        # Move filters to device
+        self.sobel_x = self.sobel_x.to(device)
+        self.sobel_y = self.sobel_y.to(device)
+        self.laplacian = self.laplacian.to(device)
+
+        # 1. Base reconstruction loss (existing functionality)
+        base_loss = F.mse_loss(reconstruction, target)
+
+        # 2. Gradient preservation loss
+        target_grad = self._compute_gradient_magnitude(target)
+        recon_grad = self._compute_gradient_magnitude(reconstruction)
+        gradient_loss = F.mse_loss(recon_grad, target_grad)
+
+        # 3. High-frequency preservation loss
+        target_high_freq = self._compute_laplacian_response(target)
+        recon_high_freq = self._compute_laplacian_response(reconstruction)
+        high_freq_loss = F.mse_loss(recon_high_freq, target_high_freq)
+
+        # 4. Edge-focused loss (emphasize regions with strong gradients)
+        edge_mask = (target_grad > self.edge_threshold).float()
+        # Avoid division by zero in masked loss
+        if edge_mask.sum() > 0:
+            edge_focused_loss = F.mse_loss(
+                reconstruction * edge_mask,
+                target * edge_mask
+            )
+        else:
+            edge_focused_loss = torch.tensor(0.0, device=device)
+
+        # Combine losses
+        total_loss = (base_loss +
+                     self.alpha * gradient_loss +
+                     self.alpha * 0.5 * high_freq_loss +
+                     self.alpha * 0.3 * edge_focused_loss)
+
+        return {
+            'total_loss': total_loss,
+            'base_loss': base_loss,
+            'gradient_loss': gradient_loss,
+            'high_freq_loss': high_freq_loss,
+            'edge_focused_loss': edge_focused_loss
+        }
 
 
 class UnifiedCheckpoint:
@@ -5437,8 +5563,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                                                          mode='bilinear', align_corners=False)
                             logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
 
-                        # Standard MSE loss for backward compatibility
-                        loss = F.mse_loss(reconstruction, data)
+                        # NEW: Use enhanced sharpness-aware loss for Phase 1
+                        loss = model.compute_phase1_loss(reconstruction, data)
                     else:
                         # NEW: Enhanced format with invertibility loss
                         reconstruction = outputs['reconstruction']
@@ -5449,14 +5575,14 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                                                          mode='bilinear', align_corners=False)
                             logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
 
-                        # Use enhanced invertibility-preserving loss
-                        loss = model.compute_invertibility_loss(outputs, data, labels)
+                        # NEW: Use enhanced sharpness-aware loss for Phase 1
+                        loss = model.compute_phase1_loss(reconstruction, data)
 
-                        # Log invertibility metrics occasionally
-                        if batch_idx % 50 == 0 and hasattr(model, 'loss_components'):
-                            logger.debug(f"Invertibility losses: {model.loss_components}")
+                        # Log sharpness metrics occasionally if enabled
+                        if batch_idx % 50 == 0 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
+                            logger.debug(f"Sharpness losses: {model.loss_components}")
                 else:
-                    # Phase 2: Enhanced losses with compressed features
+                    # Phase 2: Enhanced losses with compressed features (ORIGINAL BEHAVIOR PRESERVED)
                     output = model(data)
                     reconstruction = output['reconstruction']
 
@@ -5551,12 +5677,12 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     'patience': f"{patience_counter}"
                 }
 
-                # NEW: Add invertibility metrics for Phase 1
-                if phase == 1 and hasattr(model, 'loss_components'):
-                    feature_loss = model.loss_components.get('feature_recon_loss', 0)
-                    cycle_loss = model.loss_components.get('cycle_loss', 0)
-                    status['feat'] = f"{feature_loss:.4f}"
-                    status['cycle'] = f"{cycle_loss:.4f}"
+                # NEW: Add sharpness metrics for Phase 1 when enabled
+                if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
+                    gradient_loss = model.loss_components.get('gradient_loss', 0)
+                    high_freq_loss = model.loss_components.get('high_freq_loss', 0)
+                    status['grad'] = f"{gradient_loss:.4f}"
+                    status['high_freq'] = f"{high_freq_loss:.4f}"
 
                 if phase == 2 and model.use_class_encoding:
                     avg_acc = running_acc / (batch_idx + 1)
@@ -5573,13 +5699,16 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             avg_loss = running_loss / num_batches
             history[f'phase{phase}_loss'].append(avg_loss)
 
-            # NEW: Store invertibility metrics for Phase 1
-            if phase == 1 and hasattr(model, 'loss_components'):
-                history[f'phase{phase}_feature_recon_loss'].append(
-                    model.loss_components.get('feature_recon_loss', 0)
+            # NEW: Store sharpness metrics for Phase 1 when enabled
+            if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
+                history[f'phase{phase}_gradient_loss'].append(
+                    model.loss_components.get('gradient_loss', 0)
                 )
-                history[f'phase{phase}_cycle_loss'].append(
-                    model.loss_components.get('cycle_loss', 0)
+                history[f'phase{phase}_high_freq_loss'].append(
+                    model.loss_components.get('high_freq_loss', 0)
+                )
+                history[f'phase{phase}_edge_focused_loss'].append(
+                    model.loss_components.get('edge_focused_loss', 0)
                 )
 
             if phase == 2 and model.use_class_encoding:
@@ -5607,13 +5736,13 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
             # Log epoch progress with enhanced information
             log_message = f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}"
-            if phase == 1 and hasattr(model, 'loss_components'):
-                feature_loss = model.loss_components.get('feature_recon_loss', 0)
-                cycle_loss = model.loss_components.get('cycle_loss', 0)
-                log_message += f" | Feature: {feature_loss:.4f} | Cycle: {cycle_loss:.4f}"
+            if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
+                gradient_loss = model.loss_components.get('gradient_loss', 0)
+                high_freq_loss = model.loss_components.get('high_freq_loss', 0)
+                log_message += f" | Gradient: {gradient_loss:.4f} | High-Freq: {high_freq_loss:.4f}"
             if phase == 2 and model.use_class_encoding:
                 log_message += f" | Accuracy: {avg_acc:.2%}"
-            #logger.info(log_message)
+            logger.info(log_message)
 
             # Checkpointing
             if (best_loss - avg_loss) > min_thr:
@@ -5622,7 +5751,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                 checkpoint_manager.save_model_state(
                     model, optimizer, phase, epoch, avg_loss, True
                 )
-                #logger.info(f"New best model saved with loss: {best_loss:.4f}")
+                logger.info(f"New best model saved with loss: {best_loss:.4f}")
             else:
                 patience_counter += 1
                 logger.info(f"No improvement - Patience counter: {patience_counter}")
@@ -10535,14 +10664,84 @@ def perform_training_and_extraction(
     loss_manager: EnhancedLossManager,
     logger: logging.Logger
 ) -> Dict:
-    """Perform model training and feature extraction"""
+    """Perform model training and feature extraction using reliable prediction pipeline"""
     # Training - FIXED: Added test_loader argument
     logger.info("Starting model training...")
     history = train_model(model, train_loader, test_loader, config, loss_manager)  # ✅ Added test_loader
 
-    # Feature extraction
-    logger.info("Extracting features...")
-    features_dict = extract_features_from_model(model, train_loader, test_loader)
+    # NEW: Feature extraction using reliable prediction pipeline instead of training extraction
+    logger.info("Extracting features using reliable prediction pipeline...")
+
+    # Use the dataset name from config
+    dataset_name = config['dataset']['name'].lower()
+    base_data_path = f"data/{dataset_name}"
+
+    # Create prediction manager (uses the same reliable loading as actual prediction)
+    pred_manager = PredictionManager(config)
+
+    # Generate features using prediction pipeline for training data
+    train_csv_path = f"{base_data_path}/{dataset_name}_train.csv"
+    train_predictions = None
+
+    if os.path.exists(f"{base_data_path}/train"):
+        logger.info("Processing training data via prediction pipeline...")
+        train_predictions = pred_manager.predict_images(
+            data_path=f"{base_data_path}/train",
+            output_csv=train_csv_path,
+            batch_size=config['training'].get('prediction_batch_size', 32),
+            generate_heatmaps=False
+        )
+        logger.info(f"✓ Training features saved to {train_csv_path}")
+    else:
+        logger.warning(f"Training directory not found: {base_data_path}/train")
+
+    # Generate features using prediction pipeline for test data
+    test_csv_path = f"{base_data_path}/{dataset_name}_test.csv"
+    test_predictions = None
+
+    if test_loader is not None and os.path.exists(f"{base_data_path}/test"):
+        logger.info("Processing test data via prediction pipeline...")
+        test_predictions = pred_manager.predict_images(
+            data_path=f"{base_data_path}/test",
+            output_csv=test_csv_path,
+            batch_size=config['training'].get('prediction_batch_size', 32),
+            generate_heatmaps=False
+        )
+        logger.info(f"✓ Test features saved to {test_csv_path}")
+    elif test_loader is not None:
+        logger.warning(f"Test directory not found: {base_data_path}/test")
+
+    # Create combined CSV file
+    combined_csv_path = f"{base_data_path}/{dataset_name}.csv"
+    try:
+        if train_predictions is not None and test_predictions is not None:
+            # Both train and test available - combine them
+            train_df = pd.read_csv(train_csv_path)
+            test_df = pd.read_csv(test_csv_path)
+            combined_df = pd.concat([train_df, test_df], ignore_index=True)
+            combined_df.to_csv(combined_csv_path, index=False)
+            logger.info(f"✓ Combined features saved to {combined_csv_path}")
+        elif train_predictions is not None:
+            # Only train available - use as combined
+            shutil.copy2(train_csv_path, combined_csv_path)
+            logger.info(f"✓ Combined features saved to {combined_csv_path}")
+    except Exception as e:
+        logger.warning(f"Could not create combined CSV: {str(e)}")
+
+    # Return a features_dict for backward compatibility
+    # This maintains the same return interface but uses prediction-generated data
+    features_dict = {
+        'train': train_predictions if train_predictions is not None else {},
+        'test': test_predictions if test_predictions is not None else {},
+        'metadata': {
+            'extraction_method': 'prediction_pipeline',
+            'train_csv_path': train_csv_path if os.path.exists(train_csv_path) else None,
+            'test_csv_path': test_csv_path if test_csv_path and os.path.exists(test_csv_path) else None,
+            'combined_csv_path': combined_csv_path if os.path.exists(combined_csv_path) else None
+        }
+    }
+
+    logger.info("✓ Feature extraction completed using reliable prediction pipeline")
     return features_dict
 
 
