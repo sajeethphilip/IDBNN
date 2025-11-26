@@ -267,6 +267,515 @@ class DistanceCorrelationFeatureSelector:
 
         return final_indices
 
+class DynamicFeatureSelector:
+    """Intelligently selects feature selection method based on dataset characteristics"""
+
+    def __init__(self, max_features=32):
+        self.max_features = max_features
+        self.dc_selector = DistanceCorrelationFeatureSelector()
+
+    def calculate_dataset_complexity(self, features, labels):
+        """Compute multi-factor dataset complexity score"""
+        complexity_metrics = {}
+
+        # 1. Class Separability
+        complexity_metrics['class_separability'] = self._calculate_class_separability(features, labels)
+
+        # 2. Feature Correlation Structure
+        complexity_metrics['feature_correlation'] = self._calculate_feature_correlation(features)
+
+        # 3. Sample Adequacy
+        complexity_metrics['sample_adequacy'] = self._calculate_sample_adequacy(features, labels)
+
+        # 4. Dimensionality Ratio
+        complexity_metrics['dimensionality_ratio'] = features.shape[0] / max(1, features.shape[1])
+
+        # Combined complexity score (0-1, higher = more complex)
+        complexity_score = (
+            0.4 * complexity_metrics['class_separability'] +
+            0.3 * complexity_metrics['feature_correlation'] +
+            0.2 * complexity_metrics['sample_adequacy'] +
+            0.1 * min(1.0, complexity_metrics['dimensionality_ratio'] / 10)
+        )
+
+        return complexity_score, complexity_metrics
+
+    def _calculate_class_separability(self, features, labels):
+        """Measure how well classes are separated in feature space"""
+        unique_classes = np.unique(labels)
+        if len(unique_classes) < 2:
+            return 0.0
+
+        # Between-class variance / within-class variance
+        overall_mean = np.mean(features, axis=0)
+        between_var = 0
+        within_var = 0
+
+        for cls in unique_classes:
+            class_mask = (labels == cls)
+            class_features = features[class_mask]
+            class_mean = np.mean(class_features, axis=0)
+            class_size = len(class_features)
+
+            between_var += class_size * np.sum((class_mean - overall_mean) ** 2)
+            within_var += np.sum((class_features - class_mean) ** 2)
+
+        separability = between_var / (within_var + 1e-8)
+        return min(1.0, separability)
+
+    def _calculate_feature_correlation(self, features):
+        """Measure feature interdependence complexity"""
+        if features.shape[1] < 2:
+            return 0.0
+
+        # Calculate correlation matrix
+        corr_matrix = np.corrcoef(features.T)
+        np.fill_diagonal(corr_matrix, 0)  # Remove self-correlation
+
+        # Measure average absolute correlation
+        avg_correlation = np.mean(np.abs(corr_matrix))
+        return avg_correlation
+
+    def _calculate_sample_adequacy(self, features, labels):
+        """Determine if we have enough samples for reliable estimation"""
+        n_samples, n_features = features.shape
+        unique_classes, class_counts = np.unique(labels, return_counts=True)
+
+        # Minimum samples per class for reliable distribution estimation
+        min_samples_per_class = max(20, n_features // 2)
+
+        # Calculate adequacy ratio
+        adequate_classes = sum(count >= min_samples_per_class for count in class_counts)
+        adequacy_ratio = adequate_classes / len(unique_classes)
+
+        # Penalize if any class has very few samples
+        min_class_ratio = min(class_counts) / max(1, min_samples_per_class)
+
+        final_adequacy = 0.7 * adequacy_ratio + 0.3 * min(1.0, min_class_ratio)
+        return final_adequacy
+
+    def select_feature_method(self, features, labels):
+        """Dynamically select best feature selection method"""
+        complexity_score, metrics = self.calculate_dataset_complexity(features, labels)
+
+        # Decision rules based on complexity metrics
+        if complexity_score > 0.7 and metrics['sample_adequacy'] > 0.8:
+            method = "kl_divergence"
+            reason = "High complexity dataset with good sample coverage"
+
+        elif metrics['dimensionality_ratio'] < 5:
+            if metrics['feature_correlation'] > 0.6:
+                method = "distance_correlation"
+                reason = "High feature correlation, using correlation-based selection"
+            else:
+                method = "variance_based"
+                reason = "Low correlation, using variance-based selection"
+
+        elif metrics['class_separability'] < 0.3:
+            method = "variance_based"
+            reason = "Low class separability, using variance thresholding"
+
+        else:
+            method = "balanced_correlation"
+            reason = "Moderate complexity, using balanced correlation approach"
+
+        logger.info(f"Selected {method}: {reason} (complexity: {complexity_score:.3f})")
+        return method, reason, complexity_score
+
+    def kl_feature_selection(self, features, labels, target_dims=32):
+        """Select features using KL divergence"""
+        n_features = features.shape[1]
+        kl_scores = np.zeros(n_features)
+
+        for i in range(n_features):
+            feature_values = features[:, i]
+            kl_scores[i] = self._calculate_feature_kl(feature_values, labels)
+
+        # Select top-k features by KL divergence
+        selected_indices = np.argsort(kl_scores)[-target_dims:][::-1]
+        return selected_indices, kl_scores
+
+    def _calculate_feature_kl(self, feature_values, labels):
+        """Calculate KL divergence for a single feature across classes"""
+        unique_classes = np.unique(labels)
+
+        if len(unique_classes) < 2:
+            return 0.0
+
+        # Estimate probability distributions for each class
+        class_distributions = []
+        for cls in unique_classes:
+            cls_mask = (labels == cls)
+            cls_features = feature_values[cls_mask]
+
+            if len(cls_features) < 5:  # Need minimum samples
+                return 0.0
+
+            # Convert to probability distribution (histogram)
+            hist, _ = np.histogram(cls_features, bins=min(10, len(cls_features)//5), density=True)
+            class_distributions.append(hist + 1e-8)
+
+        # Calculate pairwise KL divergences
+        total_kl = 0.0
+        pair_count = 0
+
+        for i, j in combinations(range(len(class_distributions)), 2):
+            p = class_distributions[i]
+            q = class_distributions[j]
+
+            # Symmetric KL divergence
+            kl_pq = np.sum(p * np.log(p / q))
+            kl_qp = np.sum(q * np.log(q / p))
+
+            total_kl += (kl_pq + kl_qp) / 2
+            pair_count += 1
+
+        return total_kl / pair_count if pair_count > 0 else 0.0
+
+    def variance_based_selection(self, features, target_dims=32):
+        """Simple variance-based feature selection"""
+        variances = np.var(features, axis=0)
+        selected_indices = np.argsort(variances)[-target_dims:][::-1]
+        return selected_indices, variances
+
+    def balanced_correlation_selection(self, features, labels, target_dims=32):
+        """Use existing distance correlation with balanced parameters"""
+        # Reuse the existing DistanceCorrelationFeatureSelector
+        selector = DistanceCorrelationFeatureSelector(
+            upper_threshold=0.7,  # More balanced threshold
+            lower_threshold=0.05,
+            min_features=8,
+            max_features=target_dims
+        )
+        selected_indices, corr_values = selector.select_features(features, labels)
+        return selected_indices, corr_values
+
+    def dynamic_feature_selection(self, features, labels):
+        """Execute feature selection with dynamic method choice"""
+        if labels is None or len(np.unique(labels)) < 2:
+            # Fallback if no meaningful labels
+            return self.variance_based_selection(features, self.max_features), "variance_based"
+
+        # Select appropriate method
+        method, reason, complexity = self.select_feature_method(features, labels)
+
+        # Execute selected method
+        if method == "kl_divergence":
+            selected_indices, scores = self.kl_feature_selection(features, labels, self.max_features)
+        elif method == "distance_correlation":
+            selected_indices, scores = self.dc_selector.select_features(features, labels)
+            # Ensure we don't exceed max_features
+            if len(selected_indices) > self.max_features:
+                selected_indices = selected_indices[:self.max_features]
+        elif method == "variance_based":
+            selected_indices, scores = self.variance_based_selection(features, self.max_features)
+        elif method == "balanced_correlation":
+            selected_indices, scores = self.balanced_correlation_selection(features, labels, self.max_features)
+
+        return (selected_indices, scores), method
+
+class AdaptiveFeatureCompressor(nn.Module):
+    """Feature compressor that adapts to any input dimension"""
+
+    def __init__(self, input_dims, output_dims, hidden_scale=0.5):
+        super().__init__()
+        self.input_dims = input_dims
+        self.output_dims = output_dims
+
+        # Calculate hidden dimensions based on ratio
+        self.hidden_dims = int(max(output_dims, input_dims * hidden_scale))
+
+        # Adaptive compression layers
+        self.layers = nn.Sequential(
+            nn.Linear(input_dims, self.hidden_dims),
+            nn.BatchNorm1d(self.hidden_dims),
+            nn.LeakyReLU(0.2),
+            nn.Linear(self.hidden_dims, output_dims),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        # If input dimensions don't match, use adaptive projection
+        if x.shape[1] != self.input_dims:
+            return self._adaptive_forward(x)
+        return self.layers(x)
+
+    def _adaptive_forward(self, x):
+        """Handle variable input dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims == self.input_dims:
+            return self.layers(x)
+        elif current_dims < self.input_dims:
+            # Upsample: pad with zeros or interpolate
+            return self._upsample_forward(x)
+        else:
+            # Downsample: use projection
+            return self._downsample_forward(x)
+
+    def _upsample_forward(self, x):
+        """Upsample input to match expected dimensions"""
+        batch_size = x.shape[0]
+        current_dims = x.shape[1]
+
+        if current_dims == self.output_dims:
+            # Already at target size
+            return x
+
+        # Create upsampled tensor
+        if current_dims < self.input_dims:
+            # Pad with zeros
+            upsampled = torch.zeros(batch_size, self.input_dims, device=x.device)
+            upsampled[:, :current_dims] = x
+            return self.layers(upsampled)
+        else:
+            # Direct projection for close sizes
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+    def _downsample_forward(self, x):
+        """Downsample input to match expected dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims <= self.hidden_dims:
+            # Can go directly to hidden layer
+            hidden_proj = nn.Linear(current_dims, self.hidden_dims, device=x.device)
+            hidden_out = hidden_proj(x)
+            hidden_out = nn.LeakyReLU(0.2)(hidden_out)
+
+            output_proj = nn.Linear(self.hidden_dims, self.output_dims, device=x.device)
+            return nn.Tanh()(output_proj(hidden_out))
+        else:
+            # Multi-step downsampling
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+class AdaptiveFeatureDecompressor(nn.Module):
+    """Feature decompressor that adapts to any input dimension"""
+
+    def __init__(self, input_dims, output_dims, hidden_scale=0.5):
+        super().__init__()
+        self.input_dims = input_dims
+        self.output_dims = output_dims
+
+        # Calculate hidden dimensions based on ratio
+        self.hidden_dims = int(max(input_dims, output_dims * hidden_scale))
+
+        # Adaptive decompression layers
+        self.layers = nn.Sequential(
+            nn.Linear(input_dims, self.hidden_dims),
+            nn.BatchNorm1d(self.hidden_dims),
+            nn.LeakyReLU(0.2),
+            nn.Linear(self.hidden_dims, output_dims)
+        )
+
+    def forward(self, x):
+        # If input dimensions don't match, use adaptive projection
+        if x.shape[1] != self.input_dims:
+            return self._adaptive_forward(x)
+        return self.layers(x)
+
+    def _adaptive_forward(self, x):
+        """Handle variable input dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims == self.input_dims:
+            return self.layers(x)
+        elif current_dims < self.input_dims:
+            # Upsample to match compressor input
+            return self._upsample_forward(x)
+        else:
+            # Downsample to match compressor input
+            return self._downsample_forward(x)
+
+    def _upsample_forward(self, x):
+        """Upsample input to match expected dimensions"""
+        batch_size = x.shape[0]
+        current_dims = x.shape[1]
+
+        if current_dims == self.output_dims:
+            # Already at target size
+            return x
+
+        # Create upsampled tensor
+        if current_dims < self.input_dims:
+            # Pad with zeros then decompress
+            upsampled = torch.zeros(batch_size, self.input_dims, device=x.device)
+            upsampled[:, :current_dims] = x
+            return self.layers(upsampled)
+        else:
+            # Direct projection
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+    def _downsample_forward(self, x):
+        """Downsample input to match expected dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims <= self.hidden_dims:
+            # Direct to hidden layer
+            hidden_proj = nn.Linear(current_dims, self.hidden_dims, device=x.device)
+            hidden_out = hidden_proj(x)
+            hidden_out = nn.LeakyReLU(0.2)(hidden_out)
+
+            output_proj = nn.Linear(self.hidden_dims, self.output_dims, device=x.device)
+            return output_proj(hidden_out)
+        else:
+            # Multi-step downsampling
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+class AdaptiveFeatureCompressor(nn.Module):
+    """Feature compressor that adapts to any input dimension"""
+
+    def __init__(self, input_dims, output_dims, hidden_scale=0.5):
+        super().__init__()
+        self.input_dims = input_dims
+        self.output_dims = output_dims
+
+        # Calculate hidden dimensions based on ratio
+        self.hidden_dims = int(max(output_dims, input_dims * hidden_scale))
+
+        # Adaptive compression layers
+        self.layers = nn.Sequential(
+            nn.Linear(input_dims, self.hidden_dims),
+            nn.BatchNorm1d(self.hidden_dims),
+            nn.LeakyReLU(0.2),
+            nn.Linear(self.hidden_dims, output_dims),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        # If input dimensions don't match, use adaptive projection
+        if x.shape[1] != self.input_dims:
+            return self._adaptive_forward(x)
+        return self.layers(x)
+
+    def _adaptive_forward(self, x):
+        """Handle variable input dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims == self.input_dims:
+            return self.layers(x)
+        elif current_dims < self.input_dims:
+            # Upsample: pad with zeros or interpolate
+            return self._upsample_forward(x)
+        else:
+            # Downsample: use projection
+            return self._downsample_forward(x)
+
+    def _upsample_forward(self, x):
+        """Upsample input to match expected dimensions"""
+        batch_size = x.shape[0]
+        current_dims = x.shape[1]
+
+        if current_dims == self.output_dims:
+            # Already at target size
+            return x
+
+        # Create upsampled tensor
+        if current_dims < self.input_dims:
+            # Pad with zeros
+            upsampled = torch.zeros(batch_size, self.input_dims, device=x.device)
+            upsampled[:, :current_dims] = x
+            return self.layers(upsampled)
+        else:
+            # Direct projection for close sizes
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+    def _downsample_forward(self, x):
+        """Downsample input to match expected dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims <= self.hidden_dims:
+            # Can go directly to hidden layer
+            hidden_proj = nn.Linear(current_dims, self.hidden_dims, device=x.device)
+            hidden_out = hidden_proj(x)
+            hidden_out = nn.LeakyReLU(0.2)(hidden_out)
+
+            output_proj = nn.Linear(self.hidden_dims, self.output_dims, device=x.device)
+            return nn.Tanh()(output_proj(hidden_out))
+        else:
+            # Multi-step downsampling
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+class AdaptiveFeatureDecompressor(nn.Module):
+    """Feature decompressor that adapts to any input dimension"""
+
+    def __init__(self, input_dims, output_dims, hidden_scale=0.5):
+        super().__init__()
+        self.input_dims = input_dims
+        self.output_dims = output_dims
+
+        # Calculate hidden dimensions based on ratio
+        self.hidden_dims = int(max(input_dims, output_dims * hidden_scale))
+
+        # Adaptive decompression layers
+        self.layers = nn.Sequential(
+            nn.Linear(input_dims, self.hidden_dims),
+            nn.BatchNorm1d(self.hidden_dims),
+            nn.LeakyReLU(0.2),
+            nn.Linear(self.hidden_dims, output_dims)
+        )
+
+    def forward(self, x):
+        # If input dimensions don't match, use adaptive projection
+        if x.shape[1] != self.input_dims:
+            return self._adaptive_forward(x)
+        return self.layers(x)
+
+    def _adaptive_forward(self, x):
+        """Handle variable input dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims == self.input_dims:
+            return self.layers(x)
+        elif current_dims < self.input_dims:
+            # Upsample to match compressor input
+            return self._upsample_forward(x)
+        else:
+            # Downsample to match compressor input
+            return self._downsample_forward(x)
+
+    def _upsample_forward(self, x):
+        """Upsample input to match expected dimensions"""
+        batch_size = x.shape[0]
+        current_dims = x.shape[1]
+
+        if current_dims == self.output_dims:
+            # Already at target size
+            return x
+
+        # Create upsampled tensor
+        if current_dims < self.input_dims:
+            # Pad with zeros then decompress
+            upsampled = torch.zeros(batch_size, self.input_dims, device=x.device)
+            upsampled[:, :current_dims] = x
+            return self.layers(upsampled)
+        else:
+            # Direct projection
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
+    def _downsample_forward(self, x):
+        """Downsample input to match expected dimensions"""
+        current_dims = x.shape[1]
+
+        if current_dims <= self.hidden_dims:
+            # Direct to hidden layer
+            hidden_proj = nn.Linear(current_dims, self.hidden_dims, device=x.device)
+            hidden_out = hidden_proj(x)
+            hidden_out = nn.LeakyReLU(0.2)(hidden_out)
+
+            output_proj = nn.Linear(self.hidden_dims, self.output_dims, device=x.device)
+            return output_proj(hidden_out)
+        else:
+            # Multi-step downsampling
+            projection = nn.Linear(current_dims, self.input_dims, device=x.device)
+            return self.layers(projection(x))
+
 class PredictionManager:
     """Manages prediction using frozen feature selection with config synchronization"""
 
@@ -783,11 +1292,11 @@ class PredictionManager:
         # CRITICAL: Load and synchronize feature dimensions - DO NOT MODIFY CONFIG
         if 'compressed_dims' in config_state:
             model.compressed_dims = config_state['compressed_dims']
-            self.actual_feature_dims = model.compressed_dims
-            logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims}")
+            self.actual_feature_dims = min(32, model.compressed_dims)  # Cap at 32
+            logger.info(f"Loaded compressed feature dimensions: {model.compressed_dims} → {self.actual_feature_dims}")
 
         if 'actual_feature_dims' in config_state:
-            self.actual_feature_dims = config_state['actual_feature_dims']
+            self.actual_feature_dims = min(32, config_state['actual_feature_dims'])  # Cap at 32
             logger.info(f"Using actual feature dimensions from config: {self.actual_feature_dims}")
 
         # Ensure synchronization between model and prediction manager
@@ -976,7 +1485,6 @@ class PredictionManager:
         logger.info(f"Prediction completed for {len(image_files)} images")
         logger.info(f"Target labels: {len(known_labels)} known classes, {len(unknown_labels)} marked as 'unknown'")
         return all_predictions
-
 
 class SlidingWindowDataset(Dataset):
     """Dataset that processes large images using sliding windows"""
@@ -1655,21 +2163,8 @@ class BaseAutoencoder(nn.Module):
         self.compressed_dims = config['model'].get('compressed_dims',
                                                  max(8, feature_dims // 4))
 
-        # Feature space autoencoder for invertible compression
-        self.feature_compressor = nn.Sequential(
-            nn.Linear(feature_dims, feature_dims // 2),
-            nn.BatchNorm1d(feature_dims // 2),
-            nn.LeakyReLU(0.2),
-            nn.Linear(feature_dims // 2, self.compressed_dims),
-            nn.Tanh()  # Constrained output for stability
-        )
-
-        self.feature_decompressor = nn.Sequential(
-            nn.Linear(self.compressed_dims, feature_dims // 2),
-            nn.BatchNorm1d(feature_dims // 2),
-            nn.LeakyReLU(0.2),
-            nn.Linear(feature_dims // 2, feature_dims)
-        )
+        # Feature space autoencoder for invertible compression - ADAPTIVE
+        self._initialize_dynamic_compressors(feature_dims, self.compressed_dims)
 
         # Initialize enhancement components
         self.use_kl_divergence = (config['model']
@@ -1736,6 +2231,14 @@ class BaseAutoencoder(nn.Module):
         self._feature_selection_metadata = {}   # Additional metadata
         self._is_feature_selection_frozen = False  # Lock flag
 
+    def _initialize_dynamic_compressors(self, input_dims: int, output_dims: int):
+        """Initialize feature compressors that can handle any input size"""
+        # Use adaptive layers that can handle variable input sizes
+        self.feature_compressor = AdaptiveFeatureCompressor(input_dims, output_dims)
+        self.feature_decompressor = AdaptiveFeatureDecompressor(output_dims, input_dims)
+
+        logger.info(f"Initialized adaptive compressors: {input_dims}D ↔ {output_dims}D")
+
     def get_frozen_features(self, embeddings: torch.Tensor) -> torch.Tensor:
         """Extract only the frozen selected features from embeddings using tensor indexing"""
         if self._selected_feature_indices is None:
@@ -1766,8 +2269,8 @@ class BaseAutoencoder(nn.Module):
 
         return embedding
 
-    def forward(self, x: torch.Tensor) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass with invertible feature compression"""
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass with adaptive dimension handling"""
         # Standard encoding
         embedding = self.encode(x)
 
@@ -1776,42 +2279,49 @@ class BaseAutoencoder(nn.Module):
             logger.warning("Embedding is tuple in forward(), taking first element")
             embedding = embedding[0]
 
-        # NEW: Invertible feature compression
-        compressed_embedding = self.feature_compressor(embedding)
+        # Feature selection (optional - can be disabled in Phase 1)
+        if (self.training_phase == 2 and self.training and
+            labels is not None and embedding.shape[1] > 32):
+            # Use feature selection in Phase 2 training
+            selected_embedding, selected_indices, method = self.smart_feature_compression(
+                embedding, labels, max_dims=32
+            )
+        else:
+            # No feature selection - use all features
+            selected_embedding = embedding
+            selected_indices = None
+            method = "no_selection"
+
+        # Store selection metadata
+        self._current_feature_indices = selected_indices
+        self._current_selection_method = method
+
+        # Adaptive compression - handles any input dimension
+        compressed_embedding = self.feature_compressor(selected_embedding)
+
+        # Adaptive decompression - handles any input dimension
         reconstructed_embedding = self.feature_decompressor(compressed_embedding)
 
-        # Standard decoding using compressed features for efficiency
+        # Standard decoding
         reconstruction = self.decode(compressed_embedding)
 
-        if self.training_phase == 2:
-            output = {
-                'embedding': embedding,  # Original 128D
-                'compressed_embedding': compressed_embedding,  # Compressed 32D
-                'reconstructed_embedding': reconstructed_embedding,  # Reconstructed 128D
-                'reconstruction': reconstruction
-            }
+        # Return consistent output format
+        output = {
+            'embedding': embedding,
+            'selected_embedding': selected_embedding,
+            'compressed_embedding': compressed_embedding,
+            'reconstructed_embedding': reconstructed_embedding,
+            'reconstruction': reconstruction,
+            'selection_method': method
+        }
 
-            # Apply frozen feature selection if available
-            if self._is_feature_selection_frozen and self._selected_feature_indices is not None:
-                output['selected_embedding'] = self.get_frozen_features(embedding)
-                output['selected_feature_indices'] = self._selected_feature_indices
-                output['feature_importance_scores'] = self._feature_importance_scores
+        # Add classification outputs if in Phase 2
+        if self.training_phase == 2 and self.use_class_encoding:
+            # Use compressed features for organization (consistent dimension)
+            latent_info = self.organize_latent_space(compressed_embedding, labels)
+            output.update(latent_info)
 
-            if self.use_class_encoding and hasattr(self, 'classifier'):
-                # Use compressed features for classification (more efficient)
-                class_logits = self.classifier(compressed_embedding)
-                output['class_logits'] = class_logits
-                output['class_predictions'] = class_logits.argmax(dim=1)
-
-            if self.use_kl_divergence:
-                # Use compressed features for clustering (more efficient)
-                latent_info = self.organize_latent_space(compressed_embedding)
-                output.update(latent_info)
-
-            return output
-        else:
-            # Phase 1: Return both compressed and reconstructed
-            return compressed_embedding, reconstruction
+        return output
 
     def _calculate_spatial_progression(self):
         """Calculate spatial dimensions with exact reversal for decoder"""
@@ -1922,30 +2432,71 @@ class BaseAutoencoder(nn.Module):
 
         return torch.cat(confident_samples) if confident_samples else None
 
-    def _select_features_using_distance_correlation(self, features, labels, config):
-        """Enhanced feature selection with reliability checks"""
-        selector = DistanceCorrelationFeatureSelector(
-            upper_threshold=config.get('distance_correlation_upper', 0.7),  # Lower default
-            lower_threshold=config.get('distance_correlation_lower', 0.05),
-            min_features=config.get('min_features', 8),
-            max_features=config.get('max_features', 50)
-        )
+    def _select_features_using_dynamic_selection(self, features, labels, config):
+        """NEW: Dynamic feature selection with intelligent method choice"""
+        max_features = config.get('max_features', 32)
+        selector = DynamicFeatureSelector(max_features=max_features)
 
-        selected_indices, corr_values = selector.select_features(features, labels)
+        (selected_indices, scores), method = selector.dynamic_feature_selection(features, labels)
 
-        # NEW: Reliability check
+        # Reliability check (preserve existing logic)
         n_features = features.shape[1]
-        min_acceptable = max(config.get('min_features', 8), n_features // 4)  # At least 25%
+        min_acceptable = max(config.get('min_features', 8), n_features // 4)
 
         if len(selected_indices) < min_acceptable:
             logger.warning(f"Feature selection unreliable: {len(selected_indices)} features (< {min_acceptable} min)")
-            # Return empty to trigger fallback
-            return [], corr_values
+            # Fallback to variance-based selection
+            selected_indices, scores = selector.variance_based_selection(features, max_features)
+            method = "variance_based_fallback"
 
-        logger.info(f"Reliable feature selection: {len(selected_indices)} features "
-                   f"(correlation range: {min(corr_values[selected_indices]):.3f}-{max(corr_values[selected_indices]):.3f})")
+        logger.info(f"Dynamic feature selection ({method}): {len(selected_indices)} features "
+                   f"(score range: {min(scores[selected_indices]):.3f}-{max(scores[selected_indices]):.3f})")
 
-        return selected_indices, corr_values
+        # FIX: Ensure indices are properly formatted as a list or numpy array
+        if isinstance(selected_indices, torch.Tensor):
+            selected_indices = selected_indices.cpu().numpy()
+        elif not isinstance(selected_indices, (list, np.ndarray)):
+            selected_indices = list(selected_indices)
+
+        # FIX: Convert to numpy array with proper dtype
+        selected_indices = np.asarray(selected_indices, dtype=np.int64)
+
+        return selected_indices, scores
+
+    def smart_feature_compression(self, embeddings, labels, max_dims=32):
+        """Pure feature selection without compression - let adaptive layers handle dimension changes"""
+        n_features = embeddings.shape[1]
+
+        # If we're already at or below target dimensions, no selection needed
+        if n_features <= max_dims:
+            return embeddings, np.arange(n_features), "no_selection_needed"
+
+        # Use dynamic feature selection
+        with torch.no_grad():
+            config = {
+                'max_features': max_dims,
+                'min_features': max(8, max_dims // 4)
+            }
+
+            selected_indices, scores = self._select_features_using_dynamic_selection(
+                embeddings.detach().cpu().numpy(),
+                labels.detach().cpu().numpy(),
+                config
+            )
+
+        # Ensure we don't exceed max_dims
+        if len(selected_indices) > max_dims:
+            selected_indices = selected_indices[:max_dims]
+
+        # Convert to properly formatted numpy array
+        selected_indices = np.asarray(selected_indices, dtype=np.int64).copy()
+
+        # Select features - the adaptive compressor will handle the dimension change
+        compressed_embedding = embeddings[:, torch.from_numpy(selected_indices).to(embeddings.device)]
+
+        logger.info(f"Feature selection: {n_features} → {len(selected_indices)} features")
+
+        return compressed_embedding, selected_indices, "feature_selection"
 
     def _calculate_min_features_required(self, n_features, n_classes, n_samples):
         """Calculate minimum features needed based on dataset complexity"""
@@ -2120,27 +2671,68 @@ class BaseAutoencoder(nn.Module):
         total_features = embeddings.shape[1]
 
         # CRITICAL: Always use compressed features as they are most informative
-        feature_source = "compressed"
+      # Use dynamically selected features when available, otherwise compressed features
+        feature_source = "dynamic_selection"
         actual_feature_count = None
 
-        # Use compressed features by default (they are more informative than correlation selection)
-        if hasattr(self, 'feature_compressor'):
-            # Convert to tensor and compress to compressed_dims
+        # Prefer dynamically selected features when available
+        if hasattr(self, '_current_feature_indices') and self._current_feature_indices is not None:
+            # Use the features selected by dynamic selection
+            selected_indices = self._current_feature_indices
+            if isinstance(selected_indices, torch.Tensor):
+                selected_indices = selected_indices.cpu().numpy()
+
+            # Ensure we don't exceed available features
+            valid_indices = selected_indices[selected_indices < embeddings.shape[1]]
+            compressed_embeddings = embeddings[:, valid_indices]
+            actual_feature_count = len(valid_indices)
+            feature_source = f"dynamic_{getattr(self, '_current_selection_method', 'unknown')}"
+
+        elif hasattr(self, 'feature_compressor'):
+            # Fallback to learned compression
             embeddings_tensor = torch.tensor(embeddings).to(self.device)
             with torch.no_grad():
                 compressed_embeddings = self.feature_compressor(embeddings_tensor).cpu().numpy()
-
-            # Use compressed features - these are the most informative
             actual_feature_count = compressed_embeddings.shape[1]
+            # Use dynamically selected features when available, otherwise compressed features
+            feature_source = "dynamic_selection"
+            actual_feature_count = None
 
-            # CRITICAL FIX: Update config with the actual compressed dimensions
-            self.config['model']['actual_feature_dims'] = actual_feature_count
-            self.config['model']['compressed_dims'] = actual_feature_count
+            # Prefer dynamically selected features when available
+            if hasattr(self, '_current_feature_indices') and self._current_feature_indices is not None:
+                # Use the features selected by dynamic selection
+                selected_indices = self._current_feature_indices
+                if isinstance(selected_indices, torch.Tensor):
+                    selected_indices = selected_indices.cpu().numpy()
 
-            for i in range(actual_feature_count):
-                data[f'feature_{i}'] = compressed_embeddings[:, i]
+                # Ensure we don't exceed available features
+                valid_indices = selected_indices[selected_indices < embeddings.shape[1]]
+                compressed_embeddings = embeddings[:, valid_indices]
+                actual_feature_count = len(valid_indices)
+                feature_source = f"dynamic_{getattr(self, '_current_selection_method', 'unknown')}"
 
-            logger.info(f"Using compressed features: {actual_feature_count}D (most informative)")
+                for i in range(actual_feature_count):
+                    data[f'feature_{i}'] = compressed_embeddings[:, i]
+
+                logger.info(f"Using dynamically selected features: {actual_feature_count}D (method: {feature_source})")
+
+            elif hasattr(self, 'feature_compressor'):
+                # Fallback to learned compression
+                embeddings_tensor = torch.tensor(embeddings).to(self.device)
+                with torch.no_grad():
+                    compressed_embeddings = self.feature_compressor(embeddings_tensor).cpu().numpy()
+                actual_feature_count = compressed_embeddings.shape[1]
+                feature_source = "compressed"
+
+                for i in range(actual_feature_count):
+                    data[f'feature_{i}'] = compressed_embeddings[:, i]
+
+                logger.info(f"Using compressed features: {actual_feature_count}D (fallback)")
+
+            # CRITICAL FIX: Update config with the actual feature dimensions
+            if actual_feature_count is not None:
+                self.config['model']['actual_feature_dims'] = actual_feature_count
+                self.config['model']['compressed_dims'] = actual_feature_count
 
             # Optional: Log feature importance for verification
             if 'labels' in feature_dict:
@@ -3081,47 +3673,39 @@ class BaseAutoencoder(nn.Module):
         return enhancement_dict
 
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Organize latent space using compressed features"""
-        # Use compressed features if available and appropriate size
-        if hasattr(self, 'compressed_dims') and embeddings.shape[1] != self.compressed_dims:
-            # If we have full embeddings but need compressed, compress them
-            embeddings = self.feature_compressor(embeddings)
-
-        output = {'embeddings': embeddings}  # Keep on same device as input
+        """Organize latent space with adaptive dimension handling"""
+        output = {'embeddings': embeddings}
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
-            # Ensure cluster centers are on same device and correct dimension
+            # Adaptive cluster centers
             cluster_centers = self.cluster_centers.to(embeddings.device)
 
-            # If cluster centers dimension doesn't match embeddings, adjust
+            # Ensure dimensions match
             if cluster_centers.shape[1] != embeddings.shape[1]:
-                # Create properly dimensioned cluster centers
-                num_clusters = cluster_centers.shape[0]
-                if not hasattr(self, '_adjusted_cluster_centers'):
-                    self._adjusted_cluster_centers = nn.Parameter(
-                        torch.randn(num_clusters, embeddings.shape[1], device=embeddings.device)
-                    )
-                cluster_centers = self._adjusted_cluster_centers
+                # Adaptive projection for cluster centers
+                if not hasattr(self, '_cluster_projection'):
+                    self._cluster_projection = nn.Linear(embeddings.shape[1], cluster_centers.shape[1]).to(embeddings.device)
+                projected_embeddings = self._cluster_projection(embeddings)
+            else:
+                projected_embeddings = embeddings
 
             temperature = self.clustering_temperature
 
             # Calculate distances to cluster centers
-            distances = torch.cdist(embeddings, cluster_centers)
+            distances = torch.cdist(projected_embeddings, cluster_centers)
 
-            # Convert distances to probabilities (soft assignments)
+            # Convert distances to probabilities
             q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
             q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
 
             if labels is not None:
-                # Create target distribution if labels are provided
                 p_dist = torch.zeros_like(q_dist)
                 for i in range(cluster_centers.size(0)):
                     mask = (labels == i)
                     if mask.any():
                         p_dist[mask, i] = 1.0
             else:
-                # During prediction, use current distribution as target
-                p_dist = q_dist.detach()  # Stop gradient for target
+                p_dist = q_dist.detach()
 
             output.update({
                 'cluster_probabilities': q_dist,
@@ -3131,6 +3715,17 @@ class BaseAutoencoder(nn.Module):
             })
 
         if self.use_class_encoding and hasattr(self, 'classifier'):
+            # Adaptive classifier
+            if not hasattr(self, '_classifier_initialized') or self._classifier_initialized != embeddings.shape[1]:
+                # Reinitialize classifier for current dimension
+                self.classifier = nn.Sequential(
+                    nn.Linear(embeddings.shape[1], max(embeddings.shape[1] // 2, 16)),
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                    nn.Linear(max(embeddings.shape[1] // 2, 16), self.config['dataset'].get('num_classes', 10))
+                ).to(embeddings.device)
+                self._classifier_initialized = embeddings.shape[1]
+
             class_logits = self.classifier(embeddings)
             output.update({
                 'class_logits': class_logits,
@@ -3549,7 +4144,7 @@ class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Forward pass with enhanced feature preservation"""
         embedding = self.encode(x)  # Now returns only embedding
         reconstruction = self.decode(embedding)  # Uses cached features internally
@@ -3655,7 +4250,7 @@ class MedicalStructurePreservingAutoencoder(BaseAutoencoder):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Forward pass with enhanced feature preservation"""
         embedding = self.encode(x)  # Now returns only embedding
         reconstruction = self.decode(embedding)  # Uses cached features internally
@@ -3767,7 +4362,7 @@ class AgriculturalPatternAutoencoder(BaseAutoencoder):
 
         return x
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """Forward pass with enhanced pattern preservation"""
         embedding = self.encode(x)  # Now returns only embedding
         reconstruction = self.decode(embedding)  # Uses cached features internally
@@ -3932,7 +4527,6 @@ class SlidingWindowAutoencoder(BaseAutoencoder):
 
         return aggregated
 
-
 class AstronomicalStructureLoss(nn.Module):
     """Loss function specialized for astronomical imaging features"""
     def __init__(self):
@@ -4033,7 +4627,6 @@ class AstronomicalStructureLoss(nn.Module):
 
         return total_loss
 
-
 class MedicalStructureLoss(nn.Module):
     """Loss function specialized for medical imaging features"""
     def __init__(self):
@@ -4124,7 +4717,6 @@ class MedicalStructureLoss(nn.Module):
                      1.0 * contrast_loss)
 
         return total_loss
-
 
 class AgriculturalPatternLoss(nn.Module):
     """Loss function optimized for agricultural pest and disease detection"""
@@ -4439,7 +5031,6 @@ class SharpnessAwareLoss(nn.Module):
             'edge_focused_loss': edge_focused_loss
         }
 
-
 class UnifiedCheckpoint:
     """Manages a unified checkpoint file containing multiple model states with feature selection persistence"""
 
@@ -4661,8 +5252,6 @@ class UnifiedCheckpoint:
                       f"Loss: {state['best']['loss']:.4f}")
             print(f"  History - {len(state['history'])} entries")
 
-
-
 class ModelFactory:
     """Factory for creating appropriate model based on configuration"""
 
@@ -4699,7 +5288,6 @@ class ModelFactory:
 
         logger.info(f"Created model with {feature_dims}D → {config['model']['compressed_dims']}D invertible compression")
         return model
-
 
 class BaseFeatureSelector(ABC):
     """Abstract base class for all feature selectors"""
@@ -5302,7 +5890,6 @@ def process_very_large_image(model, image_path, output_path, config):
 
     return embedding
 
-
 def train_model(model: nn.Module, train_loader: DataLoader, test_loader: DataLoader,
                 config: Dict, loss_manager: EnhancedLossManager) -> Dict[str, List]:
     """Two-phase training implementation with folder-based dataset handling"""
@@ -5366,7 +5953,6 @@ def train_model(model: nn.Module, train_loader: DataLoader, test_loader: DataLoa
 
     logger.info("Training completed successfully")
     return cleaned_history
-
 
 def extract_features_from_model(
     model: nn.Module,
@@ -5549,8 +6135,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
 
                 # Forward pass
                 if phase == 1:
-                    # NEW: Phase 1 with invertible feature compression
-                    outputs = model(data)
+                    # Pass labels to forward method for dynamic feature selection
+                    outputs = model(data, labels=labels)
 
                     # Handle both return types for backward compatibility
                     if isinstance(outputs, tuple):
@@ -5583,7 +6169,8 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                             logger.debug(f"Sharpness losses: {model.loss_components}")
                 else:
                     # Phase 2: Enhanced losses with compressed features (ORIGINAL BEHAVIOR PRESERVED)
-                    output = model(data)
+                    output = model(data, labels=labels)
+
                     reconstruction = output['reconstruction']
 
                     # Use compressed features for efficiency in Phase 2
@@ -6208,7 +6795,6 @@ def _tensor_to_image(tensor: torch.Tensor, config: Dict) -> np.ndarray:
         # Return a blank image as fallback
         return np.ones((100, 100, 3)) * 0.5  # Gray fallback image
 
-
 class ReconstructionManager:
     """Manages model prediction with unified checkpoint loading"""
 
@@ -6600,7 +7186,6 @@ class EnhancedAutoEncoderLoss(nn.Module):
 
         return total_loss, cluster_assignments, classification_logits.argmax(dim=1)
 
-
 class DetailPreservingLoss(nn.Module):
     """Loss function that preserves fine details and enhances class differences.
 
@@ -6800,7 +7385,6 @@ class MorphologyLoss(nn.Module):
 
     def _vertical_symmetry(self, x):
         return F.mse_loss(x, torch.flip(x, [-2]))
-
 
 # Set sharing strategy at the start
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -8575,7 +9159,6 @@ class ConfigManager:
 
         return True
 
-
 class EnhancedConfigManager(ConfigManager):
     """Enhanced configuration manager with support for specialized imaging features"""
 
@@ -9046,7 +9629,6 @@ def list_and_download_datasets():
             print("Invalid selection. Please try again.")
 
     return selected_dataset
-
 
 def list_datasets_simple():
     """Simple function to just list available datasets without interaction."""
