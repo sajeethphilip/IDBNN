@@ -355,31 +355,38 @@ class DynamicFeatureSelector:
         return final_adequacy
 
     def select_feature_method(self, features, labels):
-        """Dynamically select best feature selection method"""
+        """Dynamically select best DISCRIMINATIVE feature selection method"""
         complexity_score, metrics = self.calculate_dataset_complexity(features, labels)
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(labels))
 
-        # Decision rules based on complexity metrics
-        if complexity_score > 0.7 and metrics['sample_adequacy'] > 0.8:
-            method = "kl_divergence"
-            reason = "High complexity dataset with good sample coverage"
+        # Decision rules based on dataset characteristics
+        if n_classes > 20:
+            # For many classes (like CIFAR-100), use mutual information or ANOVA
+            method = "mutual_info"
+            reason = f"Many classes ({n_classes}), using mutual information"
 
-        elif metrics['dimensionality_ratio'] < 5:
-            if metrics['feature_correlation'] > 0.6:
-                method = "distance_correlation"
-                reason = "High feature correlation, using correlation-based selection"
-            else:
-                method = "variance_based"
-                reason = "Low correlation, using variance-based selection"
+        elif n_features > n_samples:
+            # High-dimensional data
+            method = "mutual_info"
+            reason = f"High dimensionality ({n_features} > {n_samples}), using mutual information"
 
-        elif metrics['class_separability'] < 0.3:
-            method = "variance_based"
-            reason = "Low class separability, using variance thresholding"
+        elif n_classes <= 10 and n_samples > 1000:
+            # For few classes with sufficient data, use Random Forest
+            method = "random_forest"
+            reason = f"Few classes ({n_classes}) with large samples, using Random Forest"
+
+        elif complexity_score > 0.6 and metrics['sample_adequacy'] > 0.7:
+            # Complex but well-sampled data
+            method = "mutual_info"
+            reason = "Complex dataset with good samples, using mutual information"
 
         else:
-            method = "balanced_correlation"
-            reason = "Moderate complexity, using balanced correlation approach"
+            # Default to ANOVA for general cases
+            method = "anova"
+            reason = "General case, using ANOVA F-test"
 
-        logger.info(f"Selected {method}: {reason} (complexity: {complexity_score:.3f})")
+        logger.info(f"Selected {method}: {reason} (complexity: {complexity_score:.3f}, {n_classes} classes)")
         return method, reason, complexity_score
 
     def kl_feature_selection(self, features, labels, target_dims=32):
@@ -451,28 +458,174 @@ class DynamicFeatureSelector:
         return selected_indices, corr_values
 
     def dynamic_feature_selection(self, features, labels):
-        """Execute feature selection with dynamic method choice"""
+        """Execute feature selection while PRESERVING KL divergence compatibility"""
         if labels is None or len(np.unique(labels)) < 2:
             # Fallback if no meaningful labels
-            return self.variance_based_selection(features, self.max_features), "variance_based"
+            return self.mutual_info_selection(features, labels, self.max_features), "mutual_info"
 
-        # Select appropriate method
-        method, reason, complexity = self.select_feature_method(features, labels)
+        n_samples, n_features = features.shape
+        n_classes = len(np.unique(labels))
 
-        # Execute selected method
-        if method == "kl_divergence":
-            selected_indices, scores = self.kl_feature_selection(features, labels, self.max_features)
-        elif method == "distance_correlation":
-            selected_indices, scores = self.dc_selector.select_features(features, labels)
-            # Ensure we don't exceed max_features
-            if len(selected_indices) > self.max_features:
-                selected_indices = selected_indices[:self.max_features]
-        elif method == "variance_based":
-            selected_indices, scores = self.variance_based_selection(features, self.max_features)
-        elif method == "balanced_correlation":
-            selected_indices, scores = self.balanced_correlation_selection(features, labels, self.max_features)
+        # PRIORITIZE KL DIVERGENCE COMPATIBLE METHODS
+        # KL divergence works best with features that have good class separation
+        if n_classes > 20 and n_samples > n_classes * 10:
+            # For many classes with sufficient samples, use mutual info (good for KL)
+            method = "mutual_info"
+            selected_indices, scores = self.mutual_info_selection(features, labels, self.max_features)
+        elif n_features > 100 and n_classes >= 5:
+            # High-dimensional multi-class: use ANOVA (preserves class structure for KL)
+            method = "anova"
+            selected_indices, scores = self.anova_selection(features, labels, self.max_features)
+        elif hasattr(self, 'use_kl_divergence') and self.use_kl_divergence:
+            # EXPLICITLY OPTIMIZE FOR KL DIVERGENCE
+            method = "kl_optimized"
+            selected_indices, scores = self.kl_optimized_selection(features, labels, self.max_features)
+        elif n_classes <= 10 and n_samples > 1000:
+            # For few classes with sufficient data
+            method = "random_forest"
+            selected_indices, scores = self.random_forest_selection(features, labels, self.max_features)
+        else:
+            # Default: mutual information (generally good for KL divergence)
+            method = "mutual_info"
+            selected_indices, scores = self.mutual_info_selection(features, labels, self.max_features)
+
+        logger.info(f"Using {method} feature selection for KL divergence ({n_classes} classes, {n_features} features)")
 
         return (selected_indices, scores), method
+
+    def anova_selection(self, features, labels, target_dims):
+        """Select features using ANOVA F-value (good for multi-class)"""
+        from sklearn.feature_selection import f_classif
+
+        try:
+            # Calculate ANOVA F-values between each feature and labels
+            f_scores, p_values = f_classif(features, labels)
+
+            # Select top features by F-score
+            selected_indices = np.argsort(f_scores)[-target_dims:][::-1]
+
+            logger.info(f"ANOVA selection: F-score range {f_scores[selected_indices].min():.4f}-{f_scores[selected_indices].max():.4f}")
+            return selected_indices, f_scores
+
+        except Exception as e:
+            logger.warning(f"ANOVA selection failed: {e}, falling back to variance")
+            return self.variance_based_selection(features, target_dims)
+
+    def lda_based_selection(self, features, labels, target_dims):
+        """Select features using Linear Discriminant Analysis coefficients"""
+        from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+        try:
+            n_classes = len(np.unique(labels))
+            if n_classes > features.shape[0] or n_classes > features.shape[1]:
+                # LDA requires n_features >= n_classes and n_samples >= n_features
+                return self.anova_selection(features, labels, target_dims)
+
+            lda = LinearDiscriminantAnalysis()
+            lda.fit(features, labels)
+
+            # Use absolute coefficients as importance scores
+            if hasattr(lda, 'coef_'):
+                # For binary classification
+                if lda.coef_.shape[0] == 1:
+                    importance_scores = np.abs(lda.coef_[0])
+                else:
+                    # For multi-class, take mean absolute coefficients across classes
+                    importance_scores = np.mean(np.abs(lda.coef_), axis=0)
+            else:
+                importance_scores = np.var(features, axis=0)
+
+            selected_indices = np.argsort(importance_scores)[-target_dims:][::-1]
+
+            logger.info(f"LDA selection: importance range {importance_scores[selected_indices].min():.4f}-{importance_scores[selected_indices].max():.4f}")
+            return selected_indices, importance_scores
+
+        except Exception as e:
+            logger.warning(f"LDA selection failed: {e}, falling back to ANOVA")
+            return self.anova_selection(features, labels, target_dims)
+
+    def random_forest_selection(self, features, labels, target_dims):
+        """Select features using Random Forest importance (computationally expensive but very effective)"""
+        from sklearn.ensemble import RandomForestClassifier
+
+        try:
+            # Use a small random forest for feature importance
+            rf = RandomForestClassifier(
+                n_estimators=50,
+                max_depth=10,
+                random_state=42,
+                n_jobs=-1
+            )
+            rf.fit(features, labels)
+
+            importance_scores = rf.feature_importances_
+            selected_indices = np.argsort(importance_scores)[-target_dims:][::-1]
+
+            logger.info(f"Random Forest selection: importance range {importance_scores[selected_indices].min():.4f}-{importance_scores[selected_indices].max():.4f}")
+            return selected_indices, importance_scores
+
+        except Exception as e:
+            logger.warning(f"Random Forest selection failed: {e}, falling back to mutual info")
+            return self.mutual_info_selection(features, labels, target_dims)
+
+    def kl_optimized_selection(self, features, labels, target_dims):
+        """Select features that maximize KL divergence between classes"""
+        try:
+            n_classes = len(np.unique(labels))
+            n_features = features.shape[1]
+
+            # Calculate class-wise statistics for KL divergence optimization
+            class_means = []
+            class_vars = []
+            class_sizes = []
+
+            for cls in np.unique(labels):
+                class_mask = (labels == cls)
+                class_features = features[class_mask]
+                class_means.append(np.mean(class_features, axis=0))
+                class_vars.append(np.var(class_features, axis=0))
+                class_sizes.append(np.sum(class_mask))
+
+            class_means = np.array(class_means)
+            class_vars = np.array(class_vars)
+            class_sizes = np.array(class_sizes)
+
+            # Calculate KL divergence scores for each feature
+            kl_scores = np.zeros(n_features)
+
+            for i in range(n_features):
+                feature_kl = 0.0
+                pair_count = 0
+
+                # Calculate pairwise KL divergences between classes
+                for j in range(n_classes):
+                    for k in range(j + 1, n_classes):
+                        # KL divergence between two Gaussian distributions
+                        var_ratio = class_vars[j, i] / class_vars[k, i]
+                        mean_diff = class_means[j, i] - class_means[k, i]
+                        kl_jk = 0.5 * (var_ratio +
+                                     (mean_diff ** 2) / class_vars[k, i] -
+                                     1 - np.log(var_ratio))
+                        kl_kj = 0.5 * (1/var_ratio +
+                                     (mean_diff ** 2) / class_vars[j, i] -
+                                     1 - np.log(1/var_ratio))
+
+                        # Symmetric KL divergence
+                        feature_kl += (kl_jk + kl_kj) / 2
+                        pair_count += 1
+
+                if pair_count > 0:
+                    kl_scores[i] = feature_kl / pair_count
+
+            # Select features with highest KL divergence scores
+            selected_indices = np.argsort(kl_scores)[-target_dims:][::-1]
+
+            logger.info(f"KL-optimized selection: KL range {kl_scores[selected_indices].min():.4f}-{kl_scores[selected_indices].max():.4f}")
+            return selected_indices, kl_scores
+
+        except Exception as e:
+            logger.warning(f"KL-optimized selection failed: {e}, falling back to mutual info")
+            return self.mutual_info_selection(features, labels, target_dims)
 
 class AdaptiveFeatureCompressor(nn.Module):
     """Feature compressor that adapts to any input dimension"""
@@ -2279,18 +2432,26 @@ class BaseAutoencoder(nn.Module):
             logger.warning("Embedding is tuple in forward(), taking first element")
             embedding = embedding[0]
 
-        # Feature selection (optional - can be disabled in Phase 1)
+        # Feature selection - PRESERVE FEATURES FOR KL DIVERGENCE
         if (self.training_phase == 2 and self.training and
-            labels is not None and embedding.shape[1] > 32):
-            # Use feature selection in Phase 2 training
-            selected_embedding, selected_indices, method = self.smart_feature_compression(
-                embedding, labels, max_dims=32
-            )
+            labels is not None and embedding.shape[1] > 48 and  # More conservative
+            self.use_kl_divergence):  # ONLY if KL divergence is enabled
+            n_classes = len(torch.unique(labels))
+            if n_classes >= 3:  # KL divergence needs at least 3 classes to be meaningful
+                selected_embedding, selected_indices, method = self.smart_feature_compression(
+                    embedding, labels, max_dims=max(32, embedding.shape[1] // 2)  # Keep more dimensions for KL
+                )
+                logger.info(f"KL-aware feature selection: {embedding.shape[1]} -> {selected_embedding.shape[1]} features")
+            else:
+                selected_embedding = embedding
+                selected_indices = None
+                method = "no_selection_kl_insufficient_classes"
         else:
-            # No feature selection - use all features
+            # No feature selection - preserve all features for KL divergence
             selected_embedding = embedding
             selected_indices = None
-            method = "no_selection"
+            method = "no_selection_kl_preserved"
+
 
         # Store selection metadata
         self._current_feature_indices = selected_indices
@@ -3673,56 +3834,93 @@ class BaseAutoencoder(nn.Module):
         return enhancement_dict
 
     def organize_latent_space(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Organize latent space with adaptive dimension handling"""
+        """Organize latent space with enhanced KL divergence support"""
         output = {'embeddings': embeddings}
 
         if self.use_kl_divergence and hasattr(self, 'cluster_centers'):
-            # Adaptive cluster centers
+            # ENHANCED KL DIVERGENCE IMPLEMENTATION
             cluster_centers = self.cluster_centers.to(embeddings.device)
 
-            # Ensure dimensions match
+            # Ensure dimensions match for KL divergence
             if cluster_centers.shape[1] != embeddings.shape[1]:
-                # Adaptive projection for cluster centers
+                # Use adaptive projection that preserves KL divergence properties
                 if not hasattr(self, '_cluster_projection'):
                     self._cluster_projection = nn.Linear(embeddings.shape[1], cluster_centers.shape[1]).to(embeddings.device)
+                    # Initialize with identity-like transformation to preserve distances
+                    nn.init.orthogonal_(self._cluster_projection.weight)
                 projected_embeddings = self._cluster_projection(embeddings)
             else:
                 projected_embeddings = embeddings
 
             temperature = self.clustering_temperature
 
-            # Calculate distances to cluster centers
+            # Calculate distances to cluster centers - CRITICAL FOR KL DIVERGENCE
             distances = torch.cdist(projected_embeddings, cluster_centers)
 
-            # Convert distances to probabilities
-            q_dist = 1.0 / (1.0 + (distances / temperature) ** 2)
-            q_dist = q_dist / q_dist.sum(dim=1, keepdim=True)
+            # ENHANCED: Add regularization to prevent collapse
+            min_distance = distances.min(dim=1, keepdim=True)[0]
+            max_distance = distances.max(dim=1, keepdim=True)[0]
+
+            # Normalize distances to improve numerical stability for KL
+            normalized_distances = (distances - min_distance) / (max_distance - min_distance + 1e-8)
+
+            # Convert distances to probabilities using softmax with temperature
+            # This is the STUDENT'S T-DISTRIBUTION used in original t-SNE paper
+            q_dist = torch.pow(1.0 + normalized_distances / temperature, -(temperature + 1) / 2)
+            q_dist = q_dist / (q_dist.sum(dim=1, keepdim=True) + 1e-8)
 
             if labels is not None:
+                # ENHANCED TARGET DISTRIBUTION for KL divergence
                 p_dist = torch.zeros_like(q_dist)
-                for i in range(cluster_centers.size(0)):
-                    mask = (labels == i)
-                    if mask.any():
-                        p_dist[mask, i] = 1.0
-            else:
-                p_dist = q_dist.detach()
 
+                # Use confident assignments for target distribution
+                with torch.no_grad():
+                    # Get confident predictions (high probability assignments)
+                    max_probs, max_indices = q_dist.max(dim=1)
+                    confidence_mask = max_probs > 0.7  # Only use confident predictions
+
+                    for i in range(cluster_centers.size(0)):
+                        # Method 1: Use ground truth labels where available
+                        label_mask = (labels == i)
+                        # Method 2: Use confident predictions
+                        confident_mask = (max_indices == i) & confidence_mask
+
+                        # Combine both methods
+                        combined_mask = label_mask | confident_mask
+
+                        if combined_mask.any():
+                            p_dist[combined_mask, i] = 1.0
+
+                # Normalize target distribution
+                p_dist_sum = p_dist.sum(dim=1, keepdim=True)
+                p_dist = p_dist / (p_dist_sum + (p_dist_sum == 0).float())
+
+            else:
+                # During prediction, sharpen the current distribution
+                p_dist = torch.pow(q_dist, 2) / torch.sum(torch.pow(q_dist, 2), dim=1, keepdim=True)
+                p_dist = p_dist.detach()
+
+            # Store KL divergence components for monitoring
             output.update({
                 'cluster_probabilities': q_dist,
                 'target_distribution': p_dist,
                 'cluster_assignments': q_dist.argmax(dim=1),
-                'cluster_confidence': q_dist.max(dim=1)[0]
+                'cluster_confidence': q_dist.max(dim=1)[0],
+                'cluster_distances': distances,
+                'kl_temperature': temperature
             })
 
         if self.use_class_encoding and hasattr(self, 'classifier'):
-            # Adaptive classifier
+            # Adaptive classifier that works with KL divergence features
             if not hasattr(self, '_classifier_initialized') or self._classifier_initialized != embeddings.shape[1]:
                 # Reinitialize classifier for current dimension
+                hidden_size = max(embeddings.shape[1] // 2, 16, self.config['dataset'].get('num_classes', 10) * 2)
                 self.classifier = nn.Sequential(
-                    nn.Linear(embeddings.shape[1], max(embeddings.shape[1] // 2, 16)),
+                    nn.Linear(embeddings.shape[1], hidden_size),
+                    nn.BatchNorm1d(hidden_size),
                     nn.ReLU(),
                     nn.Dropout(0.3),
-                    nn.Linear(max(embeddings.shape[1] // 2, 16), self.config['dataset'].get('num_classes', 10))
+                    nn.Linear(hidden_size, self.config['dataset'].get('num_classes', 10))
                 ).to(embeddings.device)
                 self._classifier_initialized = embeddings.shape[1]
 
@@ -5017,11 +5215,11 @@ class SharpnessAwareLoss(nn.Module):
         else:
             edge_focused_loss = torch.tensor(0.0, device=device)
 
-        # Combine losses
+        # Combine losses with REDUCED weights for sharpness components
         total_loss = (base_loss +
-                     self.alpha * gradient_loss +
-                     self.alpha * 0.5 * high_freq_loss +
-                     self.alpha * 0.3 * edge_focused_loss)
+                     self.alpha * 0.1 * gradient_loss +  # REDUCED from 1.0 to 0.1
+                     self.alpha * 0.05 * high_freq_loss +  # REDUCED from 0.5 to 0.05
+                     self.alpha * 0.02 * edge_focused_loss)  # REDUCED from 0.3 to 0.02
 
         return {
             'total_loss': total_loss,
@@ -6168,7 +6366,7 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                         if batch_idx % 50 == 0 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
                             logger.debug(f"Sharpness losses: {model.loss_components}")
                 else:
-                    # Phase 2: Enhanced losses with compressed features (ORIGINAL BEHAVIOR PRESERVED)
+                    # Phase 2: Enhanced losses with KL divergence monitoring
                     output = model(data, labels=labels)
 
                     reconstruction = output['reconstruction']
@@ -6191,15 +6389,84 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     # Initialize total loss
                     total_loss = recon_loss
 
-                    # KL Divergence loss using compressed features
-                    if model.use_kl_divergence:
-                        latent_info = model.organize_latent_space(embedding, labels)
-                        kl_loss = F.kl_div(
-                            latent_info['cluster_probabilities'].log(),
-                            latent_info['target_distribution'],
-                            reduction='batchmean'
-                        )
+                    # ENHANCED KL DIVERGENCE with monitoring
+                    if model.use_kl_divergence and 'cluster_probabilities' in output and 'target_distribution' in output:
+                        q_dist = output['cluster_probabilities']
+                        p_dist = output['target_distribution']
+
+                        # Symmetric KL divergence for better optimization
+                        kl_loss1 = F.kl_div(q_dist.log(), p_dist, reduction='batchmean')
+                        kl_loss2 = F.kl_div(p_dist.log(), q_dist, reduction='batchmean')
+                        kl_loss = (kl_loss1 + kl_loss2) / 2
+
+                        # Monitor KL divergence quality
+                        cluster_confidence = output['cluster_confidence'].mean()
+                        cluster_assignments = output['cluster_assignments']
+                        unique_clusters = len(torch.unique(cluster_assignments))
+
+                        # Log KL divergence metrics occasionally
+                        if batch_idx % 100 == 0:
+                            logger.debug(f"KL Loss: {kl_loss.item():.4f}, "
+                                       f"Cluster Confidence: {cluster_confidence:.4f}, "
+                                       f"Unique Clusters: {unique_clusters}")
+
                         total_loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
+
+                        # Store KL metrics for history tracking
+                        if not hasattr(model, 'kl_metrics'):
+                            model.kl_metrics = {}
+                        model.kl_metrics = {
+                            'kl_loss': kl_loss.item(),
+                            'cluster_confidence': cluster_confidence.item(),
+                            'unique_clusters': int(unique_clusters)  # FIXED: Convert to int, not .item()
+                        }
+
+                    # Class-balanced classification loss using compressed features
+                    if model.use_class_encoding and hasattr(model, 'classifier'):
+                        # Use compressed features for classification
+                        if 'compressed_embedding' in output:
+                            class_logits = model.classifier(output['compressed_embedding'])
+                        else:
+                            class_logits = model.classifier(embedding)
+
+                        if use_classwise:  # Class-balanced loss calculation
+                            class_losses = []
+                            for cls in torch.unique(labels):
+                                mask = labels == cls
+                                if mask.sum() > 0:  # Handle empty classes
+                                    cls_loss = F.cross_entropy(
+                                        class_logits[mask],
+                                        labels[mask],
+                                        reduction='mean'
+                                    )
+                                    class_losses.append(cls_loss)
+
+                            if class_losses:  # Prevent empty list
+                                class_loss = torch.mean(torch.stack(class_losses))
+                            else:
+                                class_loss = torch.tensor(0.0, device=device)
+                        else:  # Standard loss
+                            class_loss = F.cross_entropy(class_logits, labels)
+
+                        total_loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * class_loss
+
+                        # Calculate accuracy (class-balanced or standard)
+                        with torch.no_grad():
+                            preds = torch.argmax(class_logits, dim=1)
+                            if use_classwise:
+                                class_acc = []
+                                for cls in torch.unique(labels):
+                                    mask = labels == cls
+                                    if mask.sum() > 0:
+                                        cls_acc = (preds[mask] == labels[mask]).float().mean()
+                                        class_acc.append(cls_acc)
+                                acc = torch.mean(torch.stack(class_acc)) if class_acc else 0.0
+                            else:
+                                acc = (preds == labels).float().mean()
+                            running_acc += acc.item()
+
+                    loss = total_loss
+
 
                     # Class-balanced classification loss using compressed features
                     if model.use_class_encoding and hasattr(model, 'classifier'):
@@ -6301,6 +6568,15 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             if phase == 2 and model.use_class_encoding:
                 avg_acc = running_acc / num_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
+
+            # NEW: Store KL divergence metrics for Phase 2
+            if phase == 2 and model.use_kl_divergence and hasattr(model, 'kl_metrics'):
+                history[f'phase{phase}_kl_loss'].append(model.kl_metrics.get('kl_loss', 0))
+                history[f'phase{phase}_cluster_confidence'].append(model.kl_metrics.get('cluster_confidence', 0))
+                history[f'phase{phase}_unique_clusters'].append(float(model.kl_metrics.get('unique_clusters', 0)))  # FIXED: Convert to float
+                logger.info(f"KL Metrics - Loss: {model.kl_metrics.get('kl_loss', 0):.4f}, "
+                          f"Confidence: {model.kl_metrics.get('cluster_confidence', 0):.4f}, "
+                          f"Clusters: {model.kl_metrics.get('unique_clusters', 0)}")
 
             # NEW: Save reconstruction samples periodically
             if sampler_enabled and (epoch % save_frequency == 0 or epoch == epochs - 1):
