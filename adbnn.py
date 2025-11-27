@@ -762,7 +762,7 @@ class DBNNVisualizer:
                     fig.add_trace(trace)
             else:
                 # No frames created - add demo content
-                self._add_demo_content(fig)
+                print("Data not available")
 
             # Update layout
             fig.update_layout(
@@ -4267,7 +4267,94 @@ class DatasetConfig:
                     print(f"   {Colors.CYAN}→ {param}{Colors.ENDC}")
                 setattr(DatasetConfig.load_config, f'_defaults_shown_{dataset_name}', True)
 
-            # Save the updated config back to file if any parameters were added
+            # ENHANCED PATH HANDLING WITH SMART FILE DISCOVERY AND PERSISTENT UPDATE
+            file_path = validated_config.get('file_path')
+            original_file_path = file_path  # Keep the original for reference
+
+            if file_path:
+                # Extract base name without extension (e.g., 'galaxies' from 'galaxies.csv')
+                file_dir = os.path.dirname(file_path)
+                file_base = os.path.splitext(os.path.basename(file_path))[0]  # 'galaxies'
+                file_ext = os.path.splitext(file_path)[1]  # '.csv'
+
+                # Check if the exact file exists first
+                if os.path.exists(file_path):
+                    print(f"{Colors.GREEN}✅ Using specified file: {file_path}{Colors.ENDC}")
+                else:
+                    print(f"{Colors.YELLOW}⚠️  Specified file not found: {file_path}{Colors.ENDC}")
+                    print(f"{Colors.CYAN}🔍 Looking for alternative files with base name: {file_base}{Colors.ENDC}")
+
+                    found_files = []
+                    if os.path.exists(file_dir):
+                        # Look for all CSV files with the same base name
+                        all_files = [f for f in os.listdir(file_dir) if f.endswith('.csv')]
+                        found_files = [f for f in all_files if f.startswith(file_base + '_') or f == file_base + '.csv']
+
+                        if found_files:
+                            print(f"{Colors.CYAN}📁 Found {len(found_files)} related files: {found_files}{Colors.ENDC}")
+
+                            # For adaptive learning, we'll combine all files later in _load_dataset
+                            # For now, just use the first train file we find, or any file if no train file
+                            train_files = [f for f in found_files if 'train' in f.lower()]
+                            if train_files:
+                                selected_file = train_files[0]
+                            else:
+                                selected_file = found_files[0]
+
+                            new_file_path = os.path.join(file_dir, selected_file)
+                            validated_config['file_path'] = new_file_path
+                            validated_config['related_files'] = found_files  # Store all related files for adaptive learning
+
+                            # CRITICAL: Update the config file permanently
+                            try:
+                                with open(config_path, 'w', encoding='utf-8') as f:
+                                    json.dump(validated_config, f, indent=2)
+                                print(f"{Colors.GREEN}💾 PERMANENTLY UPDATED config file with new path: {new_file_path}{Colors.ENDC}")
+                                config_updated = True  # Mark that we updated the config
+                            except Exception as e:
+                                print(f"{Colors.RED}❌ Failed to update config file: {str(e)}{Colors.ENDC}")
+
+                            print(f"{Colors.GREEN}✅ Using discovered file: {new_file_path}{Colors.ENDC}")
+                            print(f"{Colors.CYAN}📚 All related files for adaptive learning: {found_files}{Colors.ENDC}")
+                        else:
+                            print(f"{Colors.RED}❌ No related CSV files found for {file_base} in {file_dir}{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.RED}❌ Directory not found: {file_dir}{Colors.ENDC}")
+
+            # Store the original base name for adaptive learning
+            validated_config['dataset_base_name'] = file_base if 'file_base' in locals() else dataset_name
+
+            # Final check - if still no valid file path, try default locations
+            if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
+                # Try dataset-specific directory
+                dataset_dir = os.path.join('data', dataset_name)
+                if os.path.exists(dataset_dir):
+                    csv_files = [f for f in os.listdir(dataset_dir) if f.endswith('.csv')]
+                    if csv_files:
+                        # Prefer train files, then test files, then any CSV
+                        train_files = [f for f in csv_files if 'train' in f.lower()]
+                        test_files = [f for f in csv_files if 'test' in f.lower()]
+
+                        if train_files:
+                            selected_file = train_files[0]
+                        elif test_files:
+                            selected_file = test_files[0]
+                        else:
+                            selected_file = csv_files[0]
+
+                        validated_config['file_path'] = os.path.join(dataset_dir, selected_file)
+                        print(f"{Colors.GREEN}✅ Using dataset directory file: {validated_config['file_path']}{Colors.ENDC}")
+
+                        # Update the config file with the new path
+                        try:
+                            with open(config_path, 'w', encoding='utf-8') as f:
+                                json.dump(validated_config, f, indent=2)
+                            print(f"{Colors.GREEN}💾 PERMANENTLY UPDATED config file with discovered path{Colors.ENDC}")
+                            config_updated = True
+                        except Exception as e:
+                            print(f"{Colors.RED}❌ Failed to update config file: {str(e)}{Colors.ENDC}")
+
+            # Save the updated config back to file if any parameters were added (but not if we already updated it above)
             if config_updated and os.path.exists(config_path):
                 try:
                     with open(config_path, 'w', encoding='utf-8') as f:
@@ -4276,23 +4363,10 @@ class DatasetConfig:
                 except Exception as e:
                     print(f"❌ {Colors.RED}Failed to save updated config: {str(e)}{Colors.ENDC}")
 
-            # Path handling
-            if validated_config.get('file_path'):
-                if not os.path.exists(validated_config['file_path']):
-                    alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                    if os.path.exists(alt_path):
-                        validated_config['file_path'] = alt_path
-                        print("\033[K" + f"Using data file: {alt_path}")
-
-            if not validated_config.get('file_path'):
-                default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if os.path.exists(default_path):
-                    validated_config['file_path'] = default_path
-                    print("\033[K" + f"Using default data file: {default_path}")
-
-            # URL handling
-            if DatasetConfig.is_url(validated_config.get('file_path', '')):
-                url = validated_config['file_path']
+            # URL handling with proper None check
+            file_path = validated_config.get('file_path')
+            if file_path and DatasetConfig.is_url(file_path):
+                url = file_path
                 local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if not os.path.exists(local_path):
                     print("\033[K" + f"Downloading dataset from {url}")
@@ -4347,6 +4421,11 @@ class DatasetConfig:
                 pass  # Already correct
             else:
                 raise ValueError(f"Invalid target column type: {type(target_col)}")
+
+            # DEBUG: Show what file path we're actually returning
+            print(f"{Colors.CYAN}🔍 FINAL CONFIG FILE PATH: {validated_config.get('file_path')}{Colors.ENDC}")
+            print(f"{Colors.CYAN}🔍 FILE EXISTS: {os.path.exists(validated_config.get('file_path', ''))}{Colors.ENDC}")
+            print(f"{Colors.CYAN}🔍 RELATED FILES: {validated_config.get('related_files', [])}{Colors.ENDC}")
 
             # Final confirmation of visualization state
             final_viz = validated_config.get('training_params', {}).get('enable_visualization', False)
@@ -4668,25 +4747,33 @@ class BinWeightUpdater:
                 accumulate=True
             )
 
-
     def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
-        """Get weights ensuring proper dimensions"""
+        """Get weights ensuring proper dimensions - FIXED VERSION"""
         class_id = int(class_id)
         pair_idx = int(pair_idx)
 
+        # LAZY INITIALIZATION: Create weights if they don't exist
         if class_id not in self.histogram_weights:
-            raise KeyError(f"Invalid class_id: {class_id}")
+            self.histogram_weights[class_id] = {}
+
         if pair_idx not in self.histogram_weights[class_id]:
-            raise KeyError(f"Invalid pair_idx: {pair_idx}")
+            # Initialize with the initial weight value
+            self.histogram_weights[class_id][pair_idx] = torch.full(
+                (self.n_bins_per_dim, self.n_bins_per_dim),
+                self.initial_weight,
+                dtype=self.dtype,
+                device=self.device
+            ).contiguous()
 
         weights = self.histogram_weights[class_id][pair_idx]
+
+        # Validation (keep existing validation)
         if len(weights.shape) != 2:
             raise ValueError(f"Invalid weight shape: {weights.shape}, expected 2D tensor")
         if weights.shape[0] != self.n_bins_per_dim or weights.shape[1] != self.n_bins_per_dim:
             raise ValueError(f"Invalid weight dimensions: {weights.shape}, expected ({self.n_bins_per_dim}, {self.n_bins_per_dim})")
 
         return weights
-
 
     def _ensure_buffers(self, batch_size):
         """Ensure buffers exist and are the right size"""
@@ -4785,7 +4872,6 @@ class BinWeightUpdater:
                     values=adjs[mask],
                     accumulate=True
                 )
-
 
     def update_gaussian_weights(self, failed_case, true_class, pred_class,
                                component_responsibilities, posteriors, learning_rate):
@@ -5966,7 +6052,7 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Optimized dataset loader with GPU memory management - FIXED VERSION"""
+        """Enhanced dataset loader that uses the updated file path from config"""
         DEBUG.log(f"Loading dataset: {self.dataset_name}")
 
         try:
@@ -5974,23 +6060,132 @@ class DBNN(GPUDBNN):
             if not self.config:
                 raise ValueError(f"No config for dataset: {self.dataset_name}")
 
+            # USE THE UPDATED FILE PATH FROM CONFIG (this is the critical fix)
             file_path = self.config.get('file_path')
             if not file_path:
                 raise ValueError("No file path in config")
 
-            # Load data
-            if file_path.startswith(('http://', 'https://')):
-                df = pd.read_csv(StringIO(requests.get(file_path).text),
-                               sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
-            else:
-                df = pd.read_csv(file_path,
-                               sep=self.config.get('separator', ','),
-                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
+            print(f"{Colors.CYAN}📁 _load_dataset - USING FILE PATH: {file_path}{Colors.ENDC}")
+            print(f"{Colors.CYAN}📁 _load_dataset - FILE EXISTS: {os.path.exists(file_path)}{Colors.ENDC}")
 
+            # If the file doesn't exist, try to find alternatives
+            if not os.path.exists(file_path):
+                print(f"{Colors.YELLOW}⚠️  File not found: {file_path}{Colors.ENDC}")
+
+                # Try to find alternative files
+                file_dir = os.path.dirname(file_path)
+                file_base = os.path.splitext(os.path.basename(file_path))[0]
+
+                if os.path.exists(file_dir):
+                    # Look for all CSV files with the same base name
+                    all_files = [f for f in os.listdir(file_dir) if f.endswith('.csv')]
+                    found_files = [f for f in all_files if f.startswith(file_base + '_') or f == file_base + '.csv']
+
+                    if found_files:
+                        print(f"{Colors.CYAN}🔍 Found alternative files: {found_files}{Colors.ENDC}")
+
+                        # Use the first train file we find, or any file if no train file
+                        train_files = [f for f in found_files if 'train' in f.lower()]
+                        if train_files:
+                            selected_file = train_files[0]
+                        else:
+                            selected_file = found_files[0]
+
+                        new_file_path = os.path.join(file_dir, selected_file)
+                        print(f"{Colors.GREEN}✅ Using alternative file: {new_file_path}{Colors.ENDC}")
+                        file_path = new_file_path
+
+                        # Update the config with the new path for future use
+                        self.config['file_path'] = new_file_path
+                    else:
+                        raise FileNotFoundError(f"No data files found for {file_base} in {file_dir}")
+                else:
+                    raise FileNotFoundError(f"Directory not found: {file_dir}")
+
+            # Get all related files for adaptive learning
+            related_files = self.config.get('related_files', [])
+            dataset_base_name = self.config.get('dataset_base_name', self.dataset_name)
+
+            # If we have multiple related files and we're in adaptive mode, combine them
+            combined_df = None
             predict_mode = (self.mode == 'predict')
 
-            # CRITICAL FIX 1: Filter to ONLY configured columns BEFORE any processing
+            # Determine if we should combine files (adaptive learning scenario)
+            # Only combine if we have multiple files AND we're using a base dataset name (not _train/_test specific)
+            should_combine_files = (len(related_files) > 1 and
+                                   not any(dataset_base_name.endswith(suffix) for suffix in ['_train', '_test', '_training', '_testing']))
+
+            if should_combine_files:
+                DEBUG.log(f"Adaptive learning: Combining {len(related_files)} related files")
+                dfs = []
+
+                for data_file in related_files:
+                    # Use the directory from the main file path
+                    file_dir = os.path.dirname(file_path)
+                    full_path = os.path.join(file_dir, data_file)
+                    try:
+                        if full_path.startswith(('http://', 'https://')):
+                            df_part = pd.read_csv(StringIO(requests.get(full_path).text),
+                                               sep=self.config.get('separator', ','),
+                                               header=0 if self.config.get('has_header', True) else None,
+                                               low_memory=False)
+                        else:
+                            df_part = pd.read_csv(full_path,
+                                               sep=self.config.get('separator', ','),
+                                               header=0 if self.config.get('has_header', True) else None,
+                                               low_memory=False)
+
+                        # Filter to only configured columns that exist in this file
+                        if 'column_names' in self.config and self.config['column_names']:
+                            available_cols = [col for col in self.config['column_names']
+                                           if col in df_part.columns and not col.startswith('#')]
+                            if available_cols:
+                                df_part = df_part[available_cols]
+                                dfs.append(df_part)
+                                DEBUG.log(f"Loaded {len(df_part)} samples from {data_file} with columns: {available_cols}")
+                        else:
+                            dfs.append(df_part)
+                            DEBUG.log(f"Loaded {len(df_part)} samples from {data_file} with all columns")
+
+                    except Exception as e:
+                        DEBUG.log(f"Failed to load {data_file}: {str(e)}")
+                        continue
+
+                if dfs:
+                    combined_df = pd.concat(dfs, ignore_index=True)
+                    DEBUG.log(f"Combined {len(dfs)} files into {len(combined_df)} total samples for adaptive learning")
+                else:
+                    # Fallback to the main file path (which should exist)
+                    if file_path.startswith(('http://', 'https://')):
+                        combined_df = pd.read_csv(StringIO(requests.get(file_path).text),
+                                               sep=self.config.get('separator', ','),
+                                               header=0 if self.config.get('has_header', True) else None,
+                                               low_memory=False)
+                    else:
+                        combined_df = pd.read_csv(file_path,
+                                               sep=self.config.get('separator', ','),
+                                               header=0 if self.config.get('has_header', True) else None,
+                                               low_memory=False)
+            else:
+                # Single file mode - use the updated file path from config
+                if file_path.startswith(('http://', 'https://')):
+                    combined_df = pd.read_csv(StringIO(requests.get(file_path).text),
+                                           sep=self.config.get('separator', ','),
+                                           header=0 if self.config.get('has_header', True) else None,
+                                           low_memory=False)
+                else:
+                    combined_df = pd.read_csv(file_path,
+                                           sep=self.config.get('separator', ','),
+                                           header=0 if self.config.get('has_header', True) else None,
+                                           low_memory=False)
+
+            if combined_df is None or combined_df.empty:
+                raise ValueError(f"No data loaded for dataset: {self.dataset_name}")
+
+            df = combined_df
+
+            # Continue with existing processing logic...
+            # CRITICAL: Filter to ONLY configured columns BEFORE any processing
             if 'column_names' in self.config and self.config['column_names']:
                 # Filter to only include configured columns
                 valid_columns = [col for col in self.config['column_names']
@@ -6004,7 +6199,8 @@ class DBNN(GPUDBNN):
                     raise ValueError("No valid configured columns found in dataset")
 
                 df = df[valid_columns]
-                DEBUG.log(f"✅ Filtered to configured columns: {valid_columns}")
+                print(f"{Colors.GREEN}✅ Filtered to configured columns: {len(valid_columns)} features{Colors.ENDC}")
+                DEBUG.log(f"Filtered to configured columns: {valid_columns}")
 
             # Store original target data type for proper decoding
             if self.target_column in df.columns:
@@ -6017,7 +6213,6 @@ class DBNN(GPUDBNN):
             # Handle target column validation for prediction mode
             if predict_mode and self.target_column in df.columns:
                 DEBUG.log(f"Target column '{self.target_column}' found in prediction data - will use for evaluation if needed")
-                # Keep target column for potential evaluation, but don't use for encoding
 
             # Store original data (CPU only) - AFTER column filtering
             self.Original_data = df.copy()
@@ -6079,7 +6274,9 @@ class DBNN(GPUDBNN):
                 'shuffle_path': shuffle_path,
                 'original_target_dtype': str(self.original_target_dtype),
                 'prediction_mode': predict_mode,
-                'has_target_column': self.target_column in df.columns
+                'has_target_column': self.target_column in df.columns,
+                'is_combined_dataset': should_combine_files,
+                'combined_file_count': len(related_files) if should_combine_files else 1
             }
 
             # Convert target column to string for universal encoding ONLY if it exists
@@ -6087,9 +6284,11 @@ class DBNN(GPUDBNN):
                 df[self.target_column] = df[self.target_column].astype(str)
                 DEBUG.log(f"Converted target column to string for universal encoding")
 
+            print(f"{Colors.GREEN}✅ Successfully loaded dataset: {len(df)} samples, {len(df.columns)} columns{Colors.ENDC}")
             return df
 
         except Exception as e:
+            print(f"{Colors.RED}❌ Error loading dataset {self.dataset_name}: {str(e)}{Colors.ENDC}")
             DEBUG.log(f"Dataset load error: {str(e)}")
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
@@ -11315,32 +11514,6 @@ class DBNN(GPUDBNN):
         if not hasattr(self, 'max_samples_per_round'):
             self.max_samples_per_round = 500
 
-    def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
-        """Get histogram weights with LAZY initialization - maintains original interface"""
-        class_id = int(class_id)
-        pair_idx = int(pair_idx)
-
-        # LAZY INITIALIZATION: Create weights only when first accessed
-        if class_id not in self.histogram_weights:
-            self.histogram_weights[class_id] = {}
-
-        if pair_idx not in self.histogram_weights[class_id]:
-            self.histogram_weights[class_id][pair_idx] = torch.full(
-                (self.n_bins_per_dim, self.n_bins_per_dim),
-                self.initial_weight,
-                dtype=self.dtype,  # Use optimized dtype
-                device=self.device
-            ).contiguous()
-
-        weights = self.histogram_weights[class_id][pair_idx]
-
-        # Validation (same as original logic)
-        if len(weights.shape) != 2:
-            raise ValueError(f"Invalid weight shape: {weights.shape}, expected 2D tensor")
-        if weights.shape[0] != self.n_bins_per_dim or weights.shape[1] != self.n_bins_per_dim:
-            raise ValueError(f"Invalid weight dimensions: {weights.shape}, expected ({self.n_bins_per_dim}, {self.n_bins_per_dim})")
-
-        return weights
 
 #----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
 
@@ -12161,6 +12334,310 @@ class UnifiedDBNNVisualizer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    def create_feature_space_visualization(self, training_history, feature_names):
+        """Create feature space visualization"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not training_history:
+                return None
+
+            # Use the latest snapshot
+            latest_snapshot = training_history[-1]
+            features = latest_snapshot.get('features')
+            targets = latest_snapshot.get('targets')
+
+            if features is None or targets is None:
+                return None
+
+            # Create subplots
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=[
+                    'Feature Space - PCA Projection',
+                    'Feature Distributions',
+                    'Class Separation',
+                    'Feature Correlations'
+                ]
+            )
+
+            # Plot 1: PCA projection
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=2)
+            features_2d = pca.fit_transform(features)
+
+            unique_classes = np.unique(targets)
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+            for i, cls in enumerate(unique_classes):
+                class_mask = targets == cls
+                fig.add_trace(go.Scatter(
+                    x=features_2d[class_mask, 0],
+                    y=features_2d[class_mask, 1],
+                    mode='markers',
+                    marker=dict(color=colors[i % len(colors)], size=8),
+                    name=f'Class {cls}',
+                    showlegend=True
+                ), row=1, col=1)
+
+            # Plot 2: Feature distributions
+            n_features = min(4, features.shape[1])
+            for i in range(n_features):
+                fig.add_trace(go.Histogram(
+                    x=features[:, i],
+                    name=f'Feature {i+1}',
+                    opacity=0.7,
+                    showlegend=False
+                ), row=1, col=2)
+
+            # Plot 3: Class separation
+            class_means = []
+            for cls in unique_classes:
+                class_mask = targets == cls
+                class_means.append(np.mean(features[class_mask], axis=0))
+
+            class_means = np.array(class_means)
+            fig.add_trace(go.Heatmap(
+                z=class_means.T,
+                x=[f'Class {cls}' for cls in unique_classes],
+                y=[f'Feature {i+1}' for i in range(class_means.shape[1])],
+                colorscale='Viridis',
+                showscale=True
+            ), row=2, col=1)
+
+            # Plot 4: Feature correlations
+            corr_matrix = np.corrcoef(features.T)
+            fig.add_trace(go.Heatmap(
+                z=corr_matrix,
+                x=[f'F{i+1}' for i in range(features.shape[1])],
+                y=[f'F{i+1}' for i in range(features.shape[1])],
+                colorscale='RdBu',
+                zmid=0,
+                showscale=True
+            ), row=2, col=2)
+
+            fig.update_layout(
+                title='Feature Space Analysis',
+                height=800,
+                showlegend=True
+            )
+
+            return fig
+
+        except Exception as e:
+            print(f"Error creating feature space visualization: {e}")
+            return None
+
+    def create_performance_dashboard(self, training_history, round_stats):
+        """Create comprehensive performance dashboard"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not training_history:
+                return self._create_empty_visualization("Performance", "No training data available")
+
+            # Extract metrics from training history
+            rounds = [s.get('round', i) for i, s in enumerate(training_history)]
+            accuracies = [s.get('accuracy', 0) for s in training_history]
+            losses = [s.get('loss', 0) for s in training_history if 'loss' in s]
+
+            # Create dashboard
+            fig = make_subplots(
+                rows=2, cols=3,
+                specs=[
+                    [{"type": "xy", "colspan": 2}, None, {"type": "indicator"}],
+                    [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}]
+                ],
+                subplot_titles=[
+                    'Accuracy Progression',
+                    'Current Performance',
+                    'Loss Trend',
+                    'Training Metrics',
+                    'Convergence Analysis'
+                ]
+            )
+
+            # Plot 1: Accuracy progression
+            fig.add_trace(go.Scatter(
+                x=rounds, y=accuracies,
+                mode='lines+markers',
+                name='Accuracy',
+                line=dict(color='blue', width=3)
+            ), row=1, col=1)
+
+            # Plot 2: Performance indicator
+            current_acc = accuracies[-1] if accuracies else 0
+            fig.add_trace(go.Indicator(
+                mode="number+delta",
+                value=current_acc,
+                number={'suffix': "%", 'font': {'size': 40}},
+                delta={'reference': accuracies[0] if accuracies else 0},
+                title={"text": "Current Accuracy"},
+                domain={'row': 1, 'col': 3}
+            ), row=1, col=3)
+
+            # Plot 3: Loss trend (if available)
+            if losses:
+                fig.add_trace(go.Scatter(
+                    x=rounds[:len(losses)], y=losses,
+                    mode='lines',
+                    name='Loss',
+                    line=dict(color='red', width=2)
+                ), row=2, col=1)
+
+            # Plot 4: Training metrics
+            if round_stats and 'class_distribution' in round_stats:
+                class_dist = round_stats['class_distribution']
+                fig.add_trace(go.Bar(
+                    x=list(class_dist.keys()),
+                    y=list(class_dist.values()),
+                    name='Class Distribution'
+                ), row=2, col=2)
+
+            # Plot 5: Convergence analysis
+            if len(accuracies) > 10:
+                # Calculate moving average
+                window = min(5, len(accuracies) // 2)
+                moving_avg = np.convolve(accuracies, np.ones(window)/window, mode='valid')
+                fig.add_trace(go.Scatter(
+                    x=rounds[window-1:],
+                    y=moving_avg,
+                    mode='lines',
+                    name=f'Moving Avg (window={window})',
+                    line=dict(color='green', width=2)
+                ), row=2, col=3)
+
+            fig.update_layout(
+                title='DBNN Performance Dashboard',
+                height=600,
+                showlegend=True
+            )
+
+            return fig
+
+        except Exception as e:
+            print(f"Error creating performance dashboard: {e}")
+            return None
+
+    def create_orthogonality_analysis(self, training_history, round_stats):
+        """Create orthogonality analysis visualization"""
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import numpy as np
+
+            if not training_history:
+                return self._create_empty_visualization("Orthogonality", "No training data available")
+
+            # Extract orthogonality data from history
+            ortho_scores = []
+            cancellation_effs = []
+            vector_sums = []
+            rounds = []
+
+            for snapshot in training_history:
+                if 'orthogonality_score' in snapshot:
+                    ortho_scores.append(snapshot['orthogonality_score'])
+                    cancellation_effs.append(snapshot.get('cancellation_efficiency', 0))
+                    vector_sums.append(snapshot.get('vector_sum_magnitude', 0))
+                    rounds.append(snapshot.get('round', len(rounds)))
+
+            if not ortho_scores:
+                return self._create_empty_visualization("Orthogonality", "No orthogonality data available")
+
+            # Create orthogonality dashboard
+            fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=[
+                    'Orthogonality Score Evolution',
+                    'Cancellation Efficiency',
+                    'Vector Sum Magnitude',
+                    'Orthogonality Quality'
+                ]
+            )
+
+            # Plot 1: Orthogonality score
+            fig.add_trace(go.Scatter(
+                x=rounds, y=ortho_scores,
+                mode='lines+markers',
+                name='Orthogonality Score',
+                line=dict(color='blue', width=3)
+            ), row=1, col=1)
+
+            # Plot 2: Cancellation efficiency
+            fig.add_trace(go.Scatter(
+                x=rounds, y=cancellation_effs,
+                mode='lines+markers',
+                name='Cancellation Efficiency',
+                line=dict(color='green', width=3)
+            ), row=1, col=2)
+
+            # Plot 3: Vector sum magnitude (log scale)
+            vector_sums_np = np.array(vector_sums)
+            if np.any(vector_sums_np > 0):
+                fig.add_trace(go.Scatter(
+                    x=rounds, y=vector_sums_np,
+                    mode='lines+markers',
+                    name='Vector Sum Magnitude',
+                    line=dict(color='red', width=3)
+                ), row=2, col=1)
+
+            # Plot 4: Orthogonality quality indicator
+            current_ortho = ortho_scores[-1] if ortho_scores else 1.0
+            fig.add_trace(go.Indicator(
+                mode="number",
+                value=current_ortho,
+                number={'font': {'size': 30}},
+                title={"text": "Current Ortho Score"},
+                domain={'row': 2, 'col': 2},
+                gauge={
+                    'axis': {'range': [0, 1]},
+                    'bar': {'color': "green" if current_ortho < 0.1 else "yellow" if current_ortho < 0.3 else "red"},
+                    'steps': [
+                        {'range': [0, 0.1], 'color': "lightgreen"},
+                        {'range': [0.1, 0.3], 'color': "lightyellow"},
+                        {'range': [0.3, 1], 'color': "lightcoral"}
+                    ]
+                }
+            ), row=2, col=2)
+
+            fig.update_layout(
+                title='Tensor Orthogonality Analysis',
+                height=600,
+                showlegend=True
+            )
+
+            return fig
+
+        except Exception as e:
+            print(f"Error creating orthogonality analysis: {e}")
+            return None
+
+    def create_geometric_tensor_analysis(self):
+        """Advanced geometric analysis of DBNN tensors"""
+        print("📊 Creating geometric tensor analysis...")
+
+        try:
+            # Extract tensor information from DBNN
+            n_classes = len(self.dbnn.label_encoder.classes_)
+            n_pairs = len(self.dbnn.feature_pairs) if hasattr(self.dbnn, 'feature_pairs') else 0
+            n_bins = getattr(self.dbnn, 'n_bins_per_dim', 128)
+
+            if n_pairs == 0:
+                print("⚠️  No feature pairs available for geometric analysis")
+                return
+
+            # Create tensor evolution visualization
+            self._create_tensor_orthogonality_analysis(n_classes, n_pairs, n_bins)
+            self._create_class_separation_analysis()
+
+        except Exception as e:
+            print(f"⚠️  Geometric tensor analysis skipped: {str(e)}")
+
     def _get_cached_memory_info(self):
         """Get memory information with caching to avoid file descriptor exhaustion"""
         if not hasattr(self, '_cached_memory_info') or self._cached_memory_info is None:
@@ -12281,27 +12758,6 @@ class UnifiedDBNNVisualizer:
         fig.update_layout(height=800, title_text="Performance Analysis Dashboard",
                          showlegend=True)
         fig.write_html(self.subdirs['interactive'] / 'performance_dashboard.html')
-
-    def _create_geometric_tensor_analysis(self):
-        """Advanced geometric analysis of DBNN tensors"""
-        print("📊 Creating geometric tensor analysis...")
-
-        try:
-            # Extract tensor information from DBNN
-            n_classes = len(self.dbnn.label_encoder.classes_)
-            n_pairs = len(self.dbnn.feature_pairs) if hasattr(self.dbnn, 'feature_pairs') else 0
-            n_bins = getattr(self.dbnn, 'n_bins_per_dim', 128)
-
-            if n_pairs == 0:
-                print("⚠️  No feature pairs available for geometric analysis")
-                return
-
-            # Create tensor evolution visualization
-            self._create_tensor_orthogonality_analysis(n_classes, n_pairs, n_bins)
-            self._create_class_separation_analysis()
-
-        except Exception as e:
-            print(f"⚠️  Geometric tensor analysis skipped: {str(e)}")
 
     def _create_tensor_orthogonality_analysis(self, n_classes, n_pairs, n_bins):
         """Analyze tensor orthogonality evolution"""

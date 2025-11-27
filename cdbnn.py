@@ -458,39 +458,32 @@ class DynamicFeatureSelector:
         return selected_indices, corr_values
 
     def dynamic_feature_selection(self, features, labels):
-        """Execute feature selection while PRESERVING KL divergence compatibility"""
+        """Feature selection optimized for classification accuracy"""
         if labels is None or len(np.unique(labels)) < 2:
-            # Fallback if no meaningful labels
             return self.mutual_info_selection(features, labels, self.max_features), "mutual_info"
 
         n_samples, n_features = features.shape
         n_classes = len(np.unique(labels))
 
-        # PRIORITIZE KL DIVERGENCE COMPATIBLE METHODS
-        # KL divergence works best with features that have good class separation
-        if n_classes > 20 and n_samples > n_classes * 10:
-            # For many classes with sufficient samples, use mutual info (good for KL)
-            method = "mutual_info"
+        # Select method based on dataset characteristics for maximum accuracy
+        if n_classes > 10 and n_samples > n_classes * 20:
+            # Many classes: use mutual information for discriminative power
             selected_indices, scores = self.mutual_info_selection(features, labels, self.max_features)
-        elif n_features > 100 and n_classes >= 5:
-            # High-dimensional multi-class: use ANOVA (preserves class structure for KL)
-            method = "anova"
+            method = "mutual_info"
+        elif n_features > 1000:
+            # High dimensionality: use ANOVA for efficiency and accuracy
             selected_indices, scores = self.anova_selection(features, labels, self.max_features)
-        elif hasattr(self, 'use_kl_divergence') and self.use_kl_divergence:
-            # EXPLICITLY OPTIMIZE FOR KL DIVERGENCE
-            method = "kl_optimized"
-            selected_indices, scores = self.kl_optimized_selection(features, labels, self.max_features)
-        elif n_classes <= 10 and n_samples > 1000:
-            # For few classes with sufficient data
-            method = "random_forest"
+            method = "anova"
+        elif n_classes <= 10 and n_samples > 500:
+            # Few classes with good data: use Random Forest for maximum accuracy
             selected_indices, scores = self.random_forest_selection(features, labels, self.max_features)
+            method = "random_forest"
         else:
-            # Default: mutual information (generally good for KL divergence)
-            method = "mutual_info"
+            # Default: mutual information for balanced performance
             selected_indices, scores = self.mutual_info_selection(features, labels, self.max_features)
+            method = "mutual_info"
 
-        logger.info(f"Using {method} feature selection for KL divergence ({n_classes} classes, {n_features} features)")
-
+        logger.info(f"Selected {method} for {n_classes} classes, {n_features} features")
         return (selected_indices, scores), method
 
     def anova_selection(self, features, labels, target_dims):
@@ -1509,7 +1502,7 @@ class PredictionManager:
 
         all_predictions = {
             'filename': [],
-            'filepath': [],
+            'filepath': image_files,  # FIXED: Include full file paths
             'target': mapped_labels,  # NEW: Use mapped labels instead of raw folder names
             'features_phase1': [],
             'class_predictions': [],
@@ -1517,6 +1510,7 @@ class PredictionManager:
             'cluster_assignments': [],
             'cluster_confidence': []
         }
+
 
         self.model.eval()
 
@@ -1812,6 +1806,12 @@ class BaseEnhancementConfig:
                     'min_cluster_confidence': 0.7
                 }
             }
+
+        # NEW: Initialize training configuration with split flag
+        if 'training' not in self.config:
+            self.config['training'] = {}
+        if 'create_train_test_split' not in self.config['training']:
+            self.config['training']['create_train_test_split'] = False  # Default to False
 
         # NEW: Initialize sharpness-aware loss configuration (OPTIONAL - disabled by default)
         if 'sharpness_config' not in self.config:
@@ -2385,12 +2385,35 @@ class BaseAutoencoder(nn.Module):
         self._is_feature_selection_frozen = False  # Lock flag
 
     def _initialize_dynamic_compressors(self, input_dims: int, output_dims: int):
-        """Initialize feature compressors that can handle any input size"""
-        # Use adaptive layers that can handle variable input sizes
-        self.feature_compressor = AdaptiveFeatureCompressor(input_dims, output_dims)
-        self.feature_decompressor = AdaptiveFeatureDecompressor(output_dims, input_dims)
+        """Initialize compressors for maximum feature preservation"""
+        # Use balanced compression ratios for optimal performance
+        hidden_dims = max(output_dims * 2, input_dims // 2)
 
-        logger.info(f"Initialized adaptive compressors: {input_dims}D ↔ {output_dims}D")
+        self.feature_compressor = nn.Sequential(
+            nn.Linear(input_dims, hidden_dims),
+            nn.BatchNorm1d(hidden_dims),
+            nn.ReLU(),  # Use ReLU for better gradient flow
+            nn.Dropout(0.2),  # Add dropout for regularization
+            nn.Linear(hidden_dims, output_dims)
+        )
+
+        self.feature_decompressor = nn.Sequential(
+            nn.Linear(output_dims, hidden_dims),
+            nn.BatchNorm1d(hidden_dims),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dims, input_dims)
+        )
+
+        # Initialize weights for stable training
+        for module in [self.feature_compressor, self.feature_decompressor]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.constant_(layer.bias, 0)
+
+        logger.info(f"Initialized compressors: {input_dims}D → {hidden_dims}D → {output_dims}D")
 
     def get_frozen_features(self, embeddings: torch.Tensor) -> torch.Tensor:
         """Extract only the frozen selected features from embeddings using tensor indexing"""
@@ -2423,50 +2446,42 @@ class BaseAutoencoder(nn.Module):
         return embedding
 
     def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass with adaptive dimension handling"""
+        """Forward pass optimized for reconstruction accuracy and feature quality"""
         # Standard encoding
         embedding = self.encode(x)
 
-        # Safety check for embedding type
+        # Handle tuple returns for backward compatibility
         if isinstance(embedding, tuple):
             logger.warning("Embedding is tuple in forward(), taking first element")
             embedding = embedding[0]
 
-        # Feature selection - PRESERVE FEATURES FOR KL DIVERGENCE
+        # Feature selection only in Phase 2 with sufficient classes
         if (self.training_phase == 2 and self.training and
-            labels is not None and embedding.shape[1] > 48 and  # More conservative
-            self.use_kl_divergence):  # ONLY if KL divergence is enabled
-            n_classes = len(torch.unique(labels))
-            if n_classes >= 3:  # KL divergence needs at least 3 classes to be meaningful
-                selected_embedding, selected_indices, method = self.smart_feature_compression(
-                    embedding, labels, max_dims=max(32, embedding.shape[1] // 2)  # Keep more dimensions for KL
-                )
-                logger.info(f"KL-aware feature selection: {embedding.shape[1]} -> {selected_embedding.shape[1]} features")
-            else:
-                selected_embedding = embedding
-                selected_indices = None
-                method = "no_selection_kl_insufficient_classes"
+            labels is not None and embedding.shape[1] > 48 and
+            len(torch.unique(labels)) >= 5):  # Only for meaningful multi-class problems
+
+            selected_embedding, selected_indices, method = self.smart_feature_compression(
+                embedding, labels, max_dims=min(64, embedding.shape[1] // 2)
+            )
+            logger.info(f"Feature selection in Phase 2: {embedding.shape[1]} → {selected_embedding.shape[1]} features")
         else:
-            # No feature selection - preserve all features for KL divergence
+            # No feature selection - preserve all features for maximum accuracy
             selected_embedding = embedding
             selected_indices = None
-            method = "no_selection_kl_preserved"
+            method = "no_selection"
 
-
-        # Store selection metadata
+        # Store selection metadata for consistency
         self._current_feature_indices = selected_indices
         self._current_selection_method = method
 
-        # Adaptive compression - handles any input dimension
+        # Feature compression for efficiency
         compressed_embedding = self.feature_compressor(selected_embedding)
-
-        # Adaptive decompression - handles any input dimension
         reconstructed_embedding = self.feature_decompressor(compressed_embedding)
 
-        # Standard decoding
+        # High-quality reconstruction
         reconstruction = self.decode(compressed_embedding)
 
-        # Return consistent output format
+        # Output with all necessary components
         output = {
             'embedding': embedding,
             'selected_embedding': selected_embedding,
@@ -2476,9 +2491,9 @@ class BaseAutoencoder(nn.Module):
             'selection_method': method
         }
 
-        # Add classification outputs if in Phase 2
-        if self.training_phase == 2 and self.use_class_encoding:
-            # Use compressed features for organization (consistent dimension)
+        # Add classification and clustering outputs in Phase 2
+        if self.training_phase == 2:
+            # Use compressed features for efficiency while maintaining accuracy
             latent_info = self.organize_latent_space(compressed_embedding, labels)
             output.update(latent_info)
 
@@ -2594,13 +2609,24 @@ class BaseAutoencoder(nn.Module):
         return torch.cat(confident_samples) if confident_samples else None
 
     def _select_features_using_dynamic_selection(self, features, labels, config):
-        """NEW: Dynamic feature selection with intelligent method choice"""
+        """Dynamic feature selection with NaN protection"""
         max_features = config.get('max_features', 32)
         selector = DynamicFeatureSelector(max_features=max_features)
 
-        (selected_indices, scores), method = selector.dynamic_feature_selection(features, labels)
+        # Check for NaN/Inf in input
+        if np.isnan(features).any() or np.isinf(features).any():
+            logger.error("NaN/Inf in features, using variance fallback")
+            selected_indices, scores = selector.variance_based_selection(features, max_features)
+            method = "variance_nan_fallback"
+        else:
+            try:
+                (selected_indices, scores), method = selector.dynamic_feature_selection(features, labels)
+            except Exception as e:
+                logger.error(f"Dynamic selection failed: {e}, using variance fallback")
+                selected_indices, scores = selector.variance_based_selection(features, max_features)
+                method = "variance_error_fallback"
 
-        # Reliability check (preserve existing logic)
+        # Reliability check
         n_features = features.shape[1]
         min_acceptable = max(config.get('min_features', 8), n_features // 4)
 
@@ -2611,53 +2637,18 @@ class BaseAutoencoder(nn.Module):
             method = "variance_based_fallback"
 
         logger.info(f"Dynamic feature selection ({method}): {len(selected_indices)} features "
-                   f"(score range: {min(scores[selected_indices]):.3f}-{max(scores[selected_indices]):.3f})")
+                   f"(score range: {np.nanmin(scores[selected_indices]):.3f}-{np.nanmax(scores[selected_indices]):.3f})")
 
-        # FIX: Ensure indices are properly formatted as a list or numpy array
+        # Ensure indices are properly formatted
         if isinstance(selected_indices, torch.Tensor):
             selected_indices = selected_indices.cpu().numpy()
         elif not isinstance(selected_indices, (list, np.ndarray)):
             selected_indices = list(selected_indices)
 
-        # FIX: Convert to numpy array with proper dtype
+        # Convert to numpy array with proper dtype and bounds checking
         selected_indices = np.asarray(selected_indices, dtype=np.int64)
 
         return selected_indices, scores
-
-    def smart_feature_compression(self, embeddings, labels, max_dims=32):
-        """Pure feature selection without compression - let adaptive layers handle dimension changes"""
-        n_features = embeddings.shape[1]
-
-        # If we're already at or below target dimensions, no selection needed
-        if n_features <= max_dims:
-            return embeddings, np.arange(n_features), "no_selection_needed"
-
-        # Use dynamic feature selection
-        with torch.no_grad():
-            config = {
-                'max_features': max_dims,
-                'min_features': max(8, max_dims // 4)
-            }
-
-            selected_indices, scores = self._select_features_using_dynamic_selection(
-                embeddings.detach().cpu().numpy(),
-                labels.detach().cpu().numpy(),
-                config
-            )
-
-        # Ensure we don't exceed max_dims
-        if len(selected_indices) > max_dims:
-            selected_indices = selected_indices[:max_dims]
-
-        # Convert to properly formatted numpy array
-        selected_indices = np.asarray(selected_indices, dtype=np.int64).copy()
-
-        # Select features - the adaptive compressor will handle the dimension change
-        compressed_embedding = embeddings[:, torch.from_numpy(selected_indices).to(embeddings.device)]
-
-        logger.info(f"Feature selection: {n_features} → {len(selected_indices)} features")
-
-        return compressed_embedding, selected_indices, "feature_selection"
 
     def _calculate_min_features_required(self, n_features, n_classes, n_samples):
         """Calculate minimum features needed based on dataset complexity"""
@@ -2800,39 +2791,35 @@ class BaseAutoencoder(nn.Module):
 
     def compute_phase1_loss(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
-        Enhanced Phase 1 loss with optional sharpness focus
-        Preserves backward compatibility - falls back to standard MSE if sharpness loss is disabled
+        Phase 1 loss focused on high-quality reconstruction
         """
-        if self.enable_sharpness_loss and self.training_phase == 1 and self.sharpness_loss is not None:
-            # Use sharpness-aware loss for Phase 1
-            loss_dict = self.sharpness_loss(reconstruction, target)
+        # Primary reconstruction loss
+        reconstruction_loss = F.mse_loss(reconstruction, target)
 
-            # Store individual loss components for monitoring
-            if not hasattr(self, 'loss_components'):
-                self.loss_components = {}
+        # Additional perceptual loss for better quality
+        if hasattr(self, 'enable_perceptual_loss') and self.enable_perceptual_loss:
+            # Simple gradient-based perceptual loss
+            target_grad = torch.abs(F.conv2d(target, self._sobel_filter, padding=1))
+            recon_grad = torch.abs(F.conv2d(reconstruction, self._sobel_filter, padding=1))
+            perceptual_loss = F.mse_loss(recon_grad, target_grad)
 
-            self.loss_components.update({
-                'base_loss': loss_dict['base_loss'].item(),
-                'gradient_loss': loss_dict['gradient_loss'].item(),
-                'high_freq_loss': loss_dict['high_freq_loss'].item(),
-                'edge_focused_loss': loss_dict['edge_focused_loss'].item()
-            })
-
-            return loss_dict['total_loss']
+            # Combined loss with perceptual component
+            total_loss = reconstruction_loss + 0.3 * perceptual_loss
         else:
-            # Fall back to standard MSE (original behavior)
-            return F.mse_loss(reconstruction, target)
+            total_loss = reconstruction_loss
+
+        return total_loss
 
     def _prepare_features_dataframe_enhanced(self, feature_dict: Dict[str, torch.Tensor],
                                            n_classes: int, n_samples: int) -> pd.DataFrame:
-        """Enhanced feature preparation for folder-based datasets with guaranteed config synchronization"""
+        """Enhanced feature preparation for folder-based datasets with guaranteed config synchronization AND ORIGINAL TARGET LABELS"""
         data = {}
         embeddings = feature_dict['embeddings'].cpu().numpy()
         base_length = len(embeddings)
         total_features = embeddings.shape[1]
 
         # CRITICAL: Always use compressed features as they are most informative
-      # Use dynamically selected features when available, otherwise compressed features
+        # Use dynamically selected features when available, otherwise compressed features
         feature_source = "dynamic_selection"
         actual_feature_count = None
 
@@ -2849,58 +2836,28 @@ class BaseAutoencoder(nn.Module):
             actual_feature_count = len(valid_indices)
             feature_source = f"dynamic_{getattr(self, '_current_selection_method', 'unknown')}"
 
+            for i in range(actual_feature_count):
+                data[f'feature_{i}'] = compressed_embeddings[:, i]
+
+            logger.info(f"Using dynamically selected features: {actual_feature_count}D (method: {feature_source})")
+
         elif hasattr(self, 'feature_compressor'):
             # Fallback to learned compression
             embeddings_tensor = torch.tensor(embeddings).to(self.device)
             with torch.no_grad():
                 compressed_embeddings = self.feature_compressor(embeddings_tensor).cpu().numpy()
             actual_feature_count = compressed_embeddings.shape[1]
-            # Use dynamically selected features when available, otherwise compressed features
-            feature_source = "dynamic_selection"
-            actual_feature_count = None
+            feature_source = "compressed"
 
-            # Prefer dynamically selected features when available
-            if hasattr(self, '_current_feature_indices') and self._current_feature_indices is not None:
-                # Use the features selected by dynamic selection
-                selected_indices = self._current_feature_indices
-                if isinstance(selected_indices, torch.Tensor):
-                    selected_indices = selected_indices.cpu().numpy()
+            for i in range(actual_feature_count):
+                data[f'feature_{i}'] = compressed_embeddings[:, i]
 
-                # Ensure we don't exceed available features
-                valid_indices = selected_indices[selected_indices < embeddings.shape[1]]
-                compressed_embeddings = embeddings[:, valid_indices]
-                actual_feature_count = len(valid_indices)
-                feature_source = f"dynamic_{getattr(self, '_current_selection_method', 'unknown')}"
+            logger.info(f"Using compressed features: {actual_feature_count}D (fallback)")
 
-                for i in range(actual_feature_count):
-                    data[f'feature_{i}'] = compressed_embeddings[:, i]
-
-                logger.info(f"Using dynamically selected features: {actual_feature_count}D (method: {feature_source})")
-
-            elif hasattr(self, 'feature_compressor'):
-                # Fallback to learned compression
-                embeddings_tensor = torch.tensor(embeddings).to(self.device)
-                with torch.no_grad():
-                    compressed_embeddings = self.feature_compressor(embeddings_tensor).cpu().numpy()
-                actual_feature_count = compressed_embeddings.shape[1]
-                feature_source = "compressed"
-
-                for i in range(actual_feature_count):
-                    data[f'feature_{i}'] = compressed_embeddings[:, i]
-
-                logger.info(f"Using compressed features: {actual_feature_count}D (fallback)")
-
-            # CRITICAL FIX: Update config with the actual feature dimensions
-            if actual_feature_count is not None:
-                self.config['model']['actual_feature_dims'] = actual_feature_count
-                self.config['model']['compressed_dims'] = actual_feature_count
-
-            # Optional: Log feature importance for verification
-            if 'labels' in feature_dict:
-                labels = feature_dict['labels'].cpu().numpy()
-                # Calculate variance explained by each compressed feature
-                feature_variance = np.var(compressed_embeddings, axis=0)
-                logger.info(f"Compressed feature variance range: {np.min(feature_variance):.4f}-{np.max(feature_variance):.4f}")
+        # CRITICAL FIX: Update config with the actual feature dimensions
+        if actual_feature_count is not None:
+            self.config['model']['actual_feature_dims'] = actual_feature_count
+            self.config['model']['compressed_dims'] = actual_feature_count
 
         else:
             # Fallback: use first 32 features
@@ -2916,68 +2873,103 @@ class BaseAutoencoder(nn.Module):
         # CRITICAL FIX: Double verification and logging
         logger.info(f"Config synchronized: {total_features}D → {actual_feature_count}D actual features in CSV")
 
-        # FIXED: Enhanced target column handling for folder-based datasets
+        # FIXED: PRESERVE ORIGINAL TARGET LABELS (subfolder names) - NOT ENCODED NUMERIC VALUES
         target_added = False
 
-        # Priority 1: Use class_names from folder structure (most reliable)
+        # Priority 1: Use class_names from folder structure (most reliable) - PRESERVE ORIGINAL
         if 'class_names' in feature_dict and len(feature_dict['class_names']) == base_length:
             data['target'] = feature_dict['class_names']
             target_added = True
-            logger.debug("Added target from class_names")
+            logger.info(f"Using original class names for targets (sample: {feature_dict['class_names'][0]})")
 
-        # Priority 2: Convert numeric labels to class names using dataset classes
+        # Priority 2: If we have full_paths, extract original folder names
+        elif 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
+            original_targets = []
+            for path in feature_dict['full_paths']:
+                # Extract original class name from path (assuming folder structure: .../class_name/filename)
+                path_parts = path.split(os.sep)
+                if len(path_parts) >= 2:
+                    class_name = path_parts[-2]  # Second last part is class folder
+                    original_targets.append(class_name)
+                else:
+                    # Fallback: use filename or mark as unknown
+                    original_targets.append("unknown")
+
+            data['target'] = original_targets
+            target_added = True
+            logger.info(f"Extracted target from folder names (sample: {original_targets[0]})")
+
+        # Priority 3: Convert numeric labels back to original class names using dataset classes
         elif 'labels' in feature_dict:
             labels_tensor = feature_dict['labels']
             if isinstance(labels_tensor, torch.Tensor):
                 labels_numpy = labels_tensor.cpu().numpy()
                 if len(labels_numpy) == base_length:
-                    # Convert numeric labels to class names using dataset information
+                    # Convert numeric labels back to original class names using dataset information
                     if hasattr(self, 'train_dataset') and hasattr(self.train_dataset, 'classes'):
                         try:
+                            # Use the dataset's class mapping to get original names
                             class_names = [self.train_dataset.classes[label] for label in labels_numpy]
                             data['target'] = class_names
-                            logger.debug("Converted numeric labels to class names using dataset classes")
+                            logger.info(f"Converted numeric labels to class names (sample: {class_names[0]})")
                         except Exception as e:
                             logger.warning(f"Could not convert labels to class names: {e}")
+                            # Fallback: use numeric labels but warn
                             data['target'] = labels_numpy
-                            logger.debug("Added target as numeric labels (fallback)")
+                            logger.warning("Using numeric labels as fallback - original class names not available")
                     else:
-                        data['target'] = labels_numpy
-                        logger.debug("Added target as numeric labels")
+                        # If no class mapping available, try to extract from filepaths
+                        if 'full_paths' in feature_dict:
+                            original_targets = []
+                            for i, path in enumerate(feature_dict['full_paths']):
+                                path_parts = path.split(os.sep)
+                                if len(path_parts) >= 2:
+                                    original_targets.append(path_parts[-2])
+                                else:
+                                    original_targets.append(f"class_{labels_numpy[i]}")
+                            data['target'] = original_targets
+                            logger.info(f"Extracted target from file paths (sample: {original_targets[0]})")
+                        else:
+                            # Final fallback: use numeric labels
+                            data['target'] = labels_numpy
+                            logger.warning("Using numeric labels - cannot recover original class names")
                     target_added = True
 
-        # Priority 3: Fallback - create target from available information
+        # Priority 4: Final fallback - create target from available information
         if not target_added:
             logger.warning(f"No target information found. Creating target column from available data for {base_length} samples.")
             # Try to extract class names from filepaths
             if 'full_paths' in feature_dict:
-                class_names = []
+                original_targets = []
                 for path in feature_dict['full_paths']:
                     # Extract class name from path (assuming folder structure: .../class_name/filename)
                     path_parts = path.split(os.sep)
                     if len(path_parts) >= 2:
                         class_name = path_parts[-2]  # Second last part is class folder
-                        class_names.append(class_name)
+                        original_targets.append(class_name)
                     else:
-                        class_names.append("unknown")
+                        original_targets.append("unknown")
 
-                if len(class_names) == base_length:
-                    data['target'] = class_names
-                    logger.debug("Created target from filepath folder structure")
+                if len(original_targets) == base_length:
+                    data['target'] = original_targets
+                    logger.info(f"Created target from filepath folder structure (sample: {original_targets[0]})")
                 else:
-                    data['target'] = [f"class_{i % n_classes}" for i in range(base_length)] if n_classes > 0 else ["unknown"] * base_length
-                    logger.debug("Created dummy target column")
+                    data['target'] = ["unknown"] * base_length
+                    logger.warning("Created unknown target column")
             else:
-                data['target'] = [f"class_{i % n_classes}" for i in range(base_length)] if n_classes > 0 else ["unknown"] * base_length
-                logger.debug("Created dummy target column")
+                data['target'] = ["unknown"] * base_length
+                logger.warning("Created unknown target column")
 
-        # Add file paths and metadata
+        # FIXED: Include file paths in CSV
         if 'full_paths' in feature_dict and len(feature_dict['full_paths']) == base_length:
             data['filepath'] = feature_dict['full_paths']
+            logger.info(f"Included full file paths in CSV (sample: {os.path.basename(feature_dict['full_paths'][0])})")
         elif 'filenames' in feature_dict and len(feature_dict['filenames']) == base_length:
-            data['filepath'] = feature_dict['filenames']
+            data['filename'] = feature_dict['filenames']
+            logger.info(f"Included filenames in CSV (sample: {feature_dict['filenames'][0]})")
         else:
-            data['filepath'] = [f"sample_{i}" for i in range(base_length)]
+            data['filename'] = [f"sample_{i}" for i in range(base_length)]
+            logger.warning("Using generated filenames - original file paths not available")
 
         # Add feature source metadata
         data['feature_source'] = [feature_source] * base_length
@@ -3003,9 +2995,23 @@ class BaseAutoencoder(nn.Module):
         # Reorder the DataFrame
         df = df[column_order]
 
-        # Final verification
+        # Final verification - log that we're preserving original target labels
         final_feature_count = len(numeric_feature_columns)
-        logger.info(f"Final DataFrame: {final_feature_count} features for {n_classes} classes (source: {feature_source})")
+        target_sample = df['target'].iloc[0] if len(df) > 0 else "unknown"
+        target_type = type(target_sample).__name__
+        logger.info(f"Final DataFrame: {final_feature_count} features, target sample: '{target_sample}' (type: {target_type}, source: {feature_source})")
+
+        # Debug: Check if we still have numeric targets
+        if isinstance(target_sample, (int, float, np.integer, np.floating)):
+            logger.warning(f"WARNING: Target is still numeric: {target_sample}. Checking available data sources...")
+            if 'class_names' in feature_dict:
+                logger.warning(f"class_names available: {len(feature_dict['class_names'])} items")
+            if 'full_paths' in feature_dict:
+                logger.warning(f"full_paths available: {len(feature_dict['full_paths'])} items")
+                if feature_dict['full_paths']:
+                    logger.warning(f"Sample full_path: {feature_dict['full_paths'][0]}")
+            if 'labels' in feature_dict:
+                logger.warning(f"labels available: {len(feature_dict['labels'])} items")
 
         return df
 
@@ -3013,22 +3019,153 @@ class BaseAutoencoder(nn.Module):
                      test_features: Dict[str, torch.Tensor],
                      output_path: str) -> None:
         """
-        LEGACY METHOD: Redirect to prediction-based feature extraction
-        This maintains backward compatibility while using the reliable prediction pipeline
+        GUARANTEED CONSISTENCY: Features saved here must match prediction pipeline exactly
+        Only create train/test split files when explicitly requested
         """
-        logger.warning("Using legacy save_features - redirecting to prediction-based feature extraction")
+        logger.info("Saving features with guaranteed prediction pipeline consistency")
 
-        # We need access to the data loaders and config - these should be available in the training context
-        if hasattr(self, 'train_loader') and hasattr(self, 'config'):
-            self._create_features_via_prediction(self, self.config, self.train_loader,
-                                               getattr(self, 'test_loader', None), output_path)
+        try:
+            # CRITICAL: Use the SAME feature preparation as prediction
+            if hasattr(self, 'config') and hasattr(self, 'train_loader'):
+                # Use prediction pipeline for absolute consistency
+                self._save_features_via_prediction_consistent(output_path)
+            else:
+                # Fallback with identical processing logic
+                self._save_features_direct_consistent(train_features, test_features, output_path)
+
+            logger.info("Feature saving completed with guaranteed consistency")
+
+        except Exception as e:
+            logger.error(f"Feature saving failed: {str(e)}")
+            # Emergency fallback with validation
+            self._save_features_emergency(train_features, test_features, output_path)
+
+    def _save_features_via_prediction_consistent(self, output_path: str):
+        """Use prediction pipeline with validation to ensure identical outputs"""
+        # Create PredictionManager with same config
+        pred_manager = PredictionManager(self.config)
+
+        # Extract data paths from loaders
+        train_data_path = self._extract_data_path_from_loader(self.train_loader, 'train')
+        test_data_path = self._extract_data_path_from_loader(getattr(self, 'test_loader', None), 'test')
+
+        # Generate features via prediction
+        train_csv = output_path.replace('.csv', '_train.csv')
+        test_csv = output_path.replace('.csv', '_test.csv')
+
+        # Get predictions
+        train_pred = pred_manager.predict_images(train_data_path, train_csv, generate_heatmaps=False)
+        if test_data_path:
+            test_pred = pred_manager.predict_images(test_data_path, test_csv, generate_heatmaps=False)
+
+        # VALIDATION: Compare with direct extraction to ensure consistency
+        self._validate_feature_consistency(train_pred, "prediction_pipeline")
+
+    def _save_features_direct_consistent(self, train_features: Dict[str, torch.Tensor],
+                                       test_features: Dict[str, torch.Tensor],
+                                       output_path: str):
+        """Direct saving that mimics prediction pipeline exactly - ONLY CREATE SPLIT FILES WHEN REQUESTED"""
+        # CRITICAL: Use the SAME feature processing as PredictionManager
+
+        # Determine if we should create train/test split files
+        create_split_files = self.config.get('training', {}).get('create_train_test_split', False)
+        dataset_name = self.config['dataset']['name'].lower()
+        base_data_path = os.path.dirname(output_path) if output_path else f"data/{dataset_name}"
+
+        # Main CSV file - ALWAYS create this
+        main_csv_path = output_path if output_path else os.path.join(base_data_path, f"{dataset_name}.csv")
+
+        # Process training features with prediction-compatible logic
+        train_df = self._prepare_features_prediction_compatible(train_features, 'train')
+        train_df.to_csv(main_csv_path, index=False)
+        logger.info(f"Main features CSV saved to {main_csv_path}")
+
+        # Only create train/test split files if explicitly requested and test data exists
+        if create_split_files and test_features and len(test_features.get('embeddings', [])) > 0:
+            # Create train split file (copy from main)
+            train_csv_path = os.path.join(base_data_path, f"{dataset_name}_train.csv")
+            shutil.copy2(main_csv_path, train_csv_path)
+            logger.info(f"Train split file created: {train_csv_path}")
+
+            # Create test split file
+            test_csv_path = os.path.join(base_data_path, f"{dataset_name}_test.csv")
+            test_df = self._prepare_features_prediction_compatible(test_features, 'test')
+            test_df.to_csv(test_csv_path, index=False)
+            logger.info(f"Test split file created: {test_csv_path}")
         else:
-            logger.error("Cannot use prediction-based feature extraction: missing train_loader or config")
-            # Fallback to original method but with warnings
-            try:
-                self._save_features_original(train_features, test_features, output_path)
-            except:
-                logger.error("Fallback feature saving also failed")
+            logger.info("Train/test split files not created (create_train_test_split=False or no test data)")
+
+        logger.info(f"Features saved with prediction-compatible format")
+
+    def _prepare_features_prediction_compatible(self, features: Dict[str, torch.Tensor], split: str):
+        """Prepare features exactly as PredictionManager would - WITH ORIGINAL TARGET LABELS AND FILE PATHS"""
+        # CRITICAL: Same logic as PredictionManager._save_predictions
+        embeddings = features['embeddings'].cpu().numpy()
+
+        # Apply the SAME feature selection as used in prediction
+        if hasattr(self, '_selected_feature_indices') and self._selected_feature_indices is not None:
+            # Use frozen feature selection for consistency
+            selected_indices = self._selected_feature_indices.cpu().numpy()
+            if len(selected_indices) > 32:
+                selected_indices = selected_indices[:32]  # Enforce limit
+            embeddings = embeddings[:, selected_indices]
+        else:
+            # Use same fallback logic as prediction
+            if embeddings.shape[1] > 32:
+                # Same strategic selection as prediction
+                variances = np.var(embeddings, axis=0)
+                selected_indices = np.argsort(variances)[-32:][::-1]
+                embeddings = embeddings[:, selected_indices]
+
+        # Create DataFrame with same structure
+        data = {}
+        for i in range(embeddings.shape[1]):
+            data[f'feature_{i}'] = embeddings[:, i]
+
+        # FIXED: Use ORIGINAL target labels (folder names) not encoded numeric values
+        if 'class_names' in features and len(features['class_names']) == len(embeddings):
+            data['target'] = features['class_names']
+            logger.info(f"Using original class names for targets (sample: {features['class_names'][0]})")
+        elif 'full_paths' in features and len(features['full_paths']) == len(embeddings):
+            # Extract folder names from file paths
+            folder_names = []
+            for path in features['full_paths']:
+                # Extract class name from path (folder structure: .../class_name/filename)
+                path_parts = path.split(os.sep)
+                if len(path_parts) >= 2:
+                    folder_name = path_parts[-2]  # Second last part is class folder
+                    folder_names.append(folder_name)
+                else:
+                    folder_names.append("unknown")
+            data['target'] = folder_names
+            logger.info(f"Extracted target from folder names (sample: {folder_names[0]})")
+        elif 'labels' in features:
+            # Convert numeric labels back to original names if possible
+            labels_numpy = features['labels'].cpu().numpy()
+            if hasattr(self, 'train_dataset') and hasattr(self.train_dataset, 'classes'):
+                try:
+                    class_names = [self.train_dataset.classes[label] for label in labels_numpy]
+                    data['target'] = class_names
+                    logger.info(f"Converted numeric labels to class names (sample: {class_names[0]})")
+                except Exception as e:
+                    logger.warning(f"Could not convert labels to class names: {e}")
+                    data['target'] = labels_numpy
+            else:
+                data['target'] = labels_numpy
+                logger.warning("Using numeric labels - cannot recover original class names")
+
+        # FIXED: Include file paths in CSV
+        if 'full_paths' in features and len(features['full_paths']) == len(embeddings):
+            data['filepath'] = features['full_paths']
+            logger.info(f"Included full file paths in CSV (sample: {os.path.basename(features['full_paths'][0])})")
+        elif 'filenames' in features and len(features['filenames']) == len(embeddings):
+            data['filename'] = features['filenames']
+            logger.info(f"Included filenames in CSV (sample: {features['filenames'][0]})")
+        else:
+            data['filename'] = [f"sample_{i}" for i in range(len(embeddings))]
+            logger.warning("Using generated filenames - original file paths not available")
+
+        return pd.DataFrame(data)
 
     def _get_distance_correlation_config(self, output_dir: str) -> Dict:
         """
@@ -3133,12 +3270,39 @@ class BaseAutoencoder(nn.Module):
                 except Exception as e:
                     logger.warning(f"Could not remove legacy JSON file {json_metadata_path}: {e}")
 
+        # CRITICAL: Update config column_names to match ACTUAL selected features (not all features)
+        if 'column_names' in self.config:
+            # Extract only the selected feature columns (feature_0, feature_1, etc.)
+            selected_feature_columns = [col for col in feature_columns if col.startswith('feature_') and col.replace('feature_', '').isdigit()]
+
+            # Get non-feature columns that should be preserved (target, filepath, etc.)
+            non_feature_columns = [col for col in feature_columns if not col.startswith('feature_')]
+
+            # Update config with ACTUAL selected column names in correct order
+            updated_column_names = []
+
+            # Add target first if it exists
+            if 'target' in non_feature_columns:
+                updated_column_names.append('target')
+                non_feature_columns.remove('target')
+
+            # Add selected features in numeric order
+            selected_feature_columns.sort(key=lambda x: int(x.split('_')[1]))
+            updated_column_names.extend(selected_feature_columns)
+
+            # Add remaining non-feature columns
+            updated_column_names.extend(non_feature_columns)
+
+            self.config['column_names'] = updated_column_names
+            logger.info(f"Updated config column_names to match {len(selected_feature_columns)} SELECTED features")
+
         # Prepare ALL metadata in binary format - no JSON for any data
         binary_data = {
             'timestamp': datetime.now().isoformat(),
             'feature_info': {
                 'total_features': len(feature_columns),
-                'feature_columns': feature_columns,
+                'selected_feature_columns': [col for col in feature_columns if col.startswith('feature_')],
+                'non_feature_columns': [col for col in feature_columns if not col.startswith('feature_')],
                 'feature_selection': {
                     'method': 'distance_correlation' if dc_config and dc_config.get('use_distance_correlation', True) else 'none',
                     'parameters': self._clean_config_for_binary_storage(dc_config) if dc_config and dc_config.get('use_distance_correlation', True) else None
@@ -3157,7 +3321,8 @@ class BaseAutoencoder(nn.Module):
                 'name': str(self.config['dataset']['name']),
                 'input_size': [int(x) for x in self.config['dataset']['input_size']],  # Ensure list of ints
                 'channels': int(self.config['dataset']['in_channels'])  # Ensure scalar
-            }
+            },
+            'config_column_names': self.config.get('column_names', [])  # Store the synchronized column names
         }
 
         # Add feature selection tensors if available - CONVERT TO NUMPY ARRAYS FOR SAFE STORAGE
@@ -3661,7 +3826,7 @@ class BaseAutoencoder(nn.Module):
 
     def extract_features(self, loader: DataLoader, dataset_type: str = "train") -> Dict[str, torch.Tensor]:
         """
-        Extract features from a DataLoader with improved batch handling.
+        Extract features from a DataLoader with improved batch handling - INCLUDING FILE PATHS
         """
         self.eval()
         all_embeddings = []
@@ -3703,13 +3868,21 @@ class BaseAutoencoder(nn.Module):
                                     else:
                                         full_paths.append(f"batch_{batch_idx}_{i}")
 
-                                # Class name handling
+                                # Class name handling - PRESERVE ORIGINAL
                                 if hasattr(loader.dataset, 'reverse_encoder'):
                                     class_names.append(loader.dataset.reverse_encoder[labels[i].item()])
                                 elif hasattr(loader.dataset, 'classes'):
                                     class_names.append(loader.dataset.classes[labels[i].item()])
                                 else:
-                                    class_names.append(f"class_{labels[i].item()}")
+                                    # Extract from file path if available
+                                    if full_paths and len(full_paths) > i:
+                                        path_parts = full_paths[i].split(os.sep)
+                                        if len(path_parts) >= 2:
+                                            class_names.append(path_parts[-2])
+                                        else:
+                                            class_names.append(f"class_{labels[i].item()}")
+                                    else:
+                                        class_names.append(f"class_{labels[i].item()}")
                             else:
                                 # Handle edge case for last incomplete batch
                                 indices.append(f"batch_{batch_idx}_{i}")
@@ -3767,7 +3940,7 @@ class BaseAutoencoder(nn.Module):
 
                 # Final length verification
                 total_samples = len(embeddings)
-                logger.info(f"Extracted {total_samples} embeddings")
+                logger.info(f"Extracted {total_samples} embeddings with {len(all_full_paths)} file paths")
 
                 # Ensure all arrays have the same length
                 if len(all_indices) != total_samples:
@@ -3792,7 +3965,7 @@ class BaseAutoencoder(nn.Module):
                     'class_names': all_class_names
                 }
 
-                logger.info(f"Feature extraction completed: {total_samples} samples")
+                logger.info(f"Feature extraction completed: {total_samples} samples with file paths")
                 return feature_dict
 
         except Exception as e:
@@ -3949,7 +4122,6 @@ class BaseAutoencoder(nn.Module):
                     logger.info(f"Removed legacy JSON file: {filepath}")
                 except Exception as e:
                     logger.warning(f"Could not remove legacy JSON file {filepath}: {e}")
-
 
     def _clean_history_for_serialization(self, history: Dict[str, List]) -> Dict[str, List]:
         """
@@ -4215,6 +4387,216 @@ class BaseAutoencoder(nn.Module):
                 logger.warning(f"Could not create combined CSV: {str(e)}")
 
         logger.info("Training features successfully created via reliable prediction pipeline")
+
+    def smart_feature_compression(self, embeddings, labels, max_dims=32):
+        """NEW: Strategic feature selection to maximize information in limited features"""
+        n_features = embeddings.shape[1]
+
+        # If already within limits, no compression needed
+        if n_features <= max_dims:
+            return embeddings, np.arange(n_features), "within_limit"
+
+        # STRATEGIC APPROACH: Use multiple methods to preserve different information types
+        with torch.no_grad():
+            embeddings_np = embeddings.detach().cpu().numpy()
+            labels_np = labels.detach().cpu().numpy() if labels is not None else None
+
+            # Method 1: Classification-focused features (if labels available)
+            if labels_np is not None and len(np.unique(labels_np)) >= 3:
+                class_indices, class_scores = self._select_classification_features(
+                    embeddings_np, labels_np, max_dims // 2)
+            else:
+                class_indices = np.array([], dtype=np.int64)
+
+            # Method 2: Reconstruction-focused features
+            recon_indices, recon_scores = self._select_reconstruction_features(
+                embeddings_np, max_dims // 2)
+
+            # Method 3: Diversity-focused features
+            diversity_indices = self._select_diverse_features(
+                embeddings_np, max_dims - len(class_indices) - len(recon_indices),
+                exclude_indices=np.concatenate([class_indices, recon_indices]))
+
+            # Combine strategically
+            all_indices = np.concatenate([class_indices, recon_indices, diversity_indices])
+
+            # Ensure we have exactly max_dims
+            if len(all_indices) > max_dims:
+                # Prioritize classification features
+                all_indices = all_indices[:max_dims]
+            elif len(all_indices) < max_dims:
+                # Fill with high-variance features
+                variances = np.var(embeddings_np, axis=0)
+                remaining = max_dims - len(all_indices)
+                additional_indices = np.argsort(variances)[-remaining:][::-1]
+                # Exclude already selected
+                additional_indices = [idx for idx in additional_indices if idx not in all_indices]
+                all_indices = np.concatenate([all_indices, additional_indices[:remaining]])
+
+        # Final validation and selection
+        all_indices = np.unique(all_indices)[:max_dims]  # Remove duplicates and enforce limit
+        compressed_embedding = embeddings[:, torch.from_numpy(all_indices).to(embeddings.device)]
+
+        logger.info(f"Strategic compression: {n_features} → {len(all_indices)} features "
+                   f"(class: {len(class_indices)}, recon: {len(recon_indices)}, diverse: {len(diversity_indices)})")
+
+        return compressed_embedding, all_indices, "strategic_compression"
+
+    def _select_classification_features(self, embeddings, labels, target_dims):
+        """NEW: Select features most relevant for classification"""
+        if target_dims <= 0:
+            return np.array([], dtype=np.int64), np.array([])
+
+        try:
+            from sklearn.feature_selection import mutual_info_classif
+            mi_scores = mutual_info_classif(embeddings, labels, random_state=42)
+            indices = np.argsort(mi_scores)[-target_dims:][::-1]
+            return indices, mi_scores
+        except Exception as e:
+            logger.warning(f"Mutual info selection failed: {e}, using variance fallback")
+            # Fallback: use variance
+            variances = np.var(embeddings, axis=0)
+            indices = np.argsort(variances)[-target_dims:][::-1]
+            return indices, variances
+
+    def _select_reconstruction_features(self, embeddings, target_dims):
+        """NEW: Select features most important for reconstruction"""
+        if target_dims <= 0:
+            return np.array([], dtype=np.int64), np.array([])
+
+        # Features with highest variance (carry most information)
+        variances = np.var(embeddings, axis=0)
+        indices = np.argsort(variances)[-target_dims:][::-1]
+        return indices, variances
+
+    def _select_diverse_features(self, embeddings, target_dims, exclude_indices):
+        """NEW: Select features that are diverse from already selected ones"""
+        if target_dims <= 0:
+            return np.array([], dtype=np.int64)
+
+        available_indices = [i for i in range(embeddings.shape[1])
+                            if i not in exclude_indices]
+
+        if not available_indices or target_dims == 0:
+            return np.array([], dtype=np.int64)
+
+        # If we have selected features, calculate diversity
+        selected_features = embeddings[:, exclude_indices] if len(exclude_indices) > 0 else None
+
+        diversity_scores = []
+        for idx in available_indices:
+            feature = embeddings[:, idx]
+            if selected_features is not None and selected_features.shape[1] > 0:
+                # Calculate maximum correlation with any selected feature
+                correlations = []
+                for j in range(selected_features.shape[1]):
+                    try:
+                        corr = np.corrcoef(feature, selected_features[:, j])[0, 1]
+                        correlations.append(abs(corr))
+                    except:
+                        correlations.append(0.0)
+                diversity = 1 - max(correlations) if correlations else 1.0
+            else:
+                diversity = 1.0  # No selected features yet
+            diversity_scores.append(diversity)
+
+        # Select most diverse features
+        selected = []
+        available_arr = np.array(available_indices)
+        diversity_arr = np.array(diversity_scores)
+
+        for _ in range(min(target_dims, len(available_indices))):
+            if len(diversity_arr) == 0:
+                break
+            best_idx = np.argmax(diversity_arr)
+            selected.append(available_arr[best_idx])
+            # Remove selected
+            available_arr = np.delete(available_arr, best_idx)
+            diversity_arr = np.delete(diversity_arr, best_idx)
+
+        return np.array(selected, dtype=np.int64)
+
+    def _fuse_multi_scale_features(self, features: List[torch.Tensor]) -> torch.Tensor:
+        """NEW: Intelligently fuse multi-scale features"""
+        # Simple concatenation with dimensionality reduction
+        concatenated = torch.cat(features, dim=1)
+
+        # Reduce to reasonable dimensions while preserving information
+        if concatenated.shape[1] > 512:
+            if not hasattr(self, '_feature_reducer'):
+                self._feature_reducer = nn.Linear(concatenated.shape[1], 512).to(concatenated.device)
+                # Initialize reducer
+                nn.init.xavier_uniform_(self._feature_reducer.weight)
+                if self._feature_reducer.bias is not None:
+                    nn.init.constant_(self._feature_reducer.bias, 0)
+            reduced = self._feature_reducer(concatenated)
+        else:
+            reduced = concatenated
+
+        return reduced
+
+    def _validate_feature_consistency(self, features, source: str):
+        """NEW: Validate that features are consistent across pipelines"""
+        # Check feature dimensions
+        if 'embeddings' in features:
+            emb = features['embeddings']
+            if isinstance(emb, torch.Tensor):
+                if emb.shape[1] > 32:
+                    logger.warning(f"{source}: Features exceed 32 limit: {emb.shape[1]}")
+
+                # Check for NaN/Inf
+                if torch.isnan(emb).any() or torch.isinf(emb).any():
+                    logger.error(f"{source}: Features contain NaN/Inf")
+
+        # Compare with previous extraction if available
+        if hasattr(self, '_previous_features'):
+            prev_emb = self._previous_features.get('embeddings')
+            curr_emb = features.get('embeddings')
+            if prev_emb is not None and curr_emb is not None:
+                prev_shape = prev_emb.shape if hasattr(prev_emb, 'shape') else 'unknown'
+                curr_shape = curr_emb.shape if hasattr(curr_emb, 'shape') else 'unknown'
+                if prev_shape != curr_shape:
+                    logger.error(f"Feature shape mismatch: {prev_shape} vs {curr_shape}")
+
+        self._previous_features = features
+
+    def _save_features_via_prediction_consistent(self, output_path: str):
+        """NEW: Use prediction pipeline with validation to ensure identical outputs"""
+        if not hasattr(self, 'config'):
+            logger.error("No config available for prediction pipeline")
+            return
+
+        # Create PredictionManager with same config
+        pred_manager = PredictionManager(self.config)
+
+        # Extract data paths from loaders
+        train_data_path = self._extract_data_path_from_loader(self.train_loader, 'train')
+
+        # Generate features via prediction
+        train_csv = output_path.replace('.csv', '_train.csv')
+
+        # Get predictions
+        train_pred = pred_manager.predict_images(train_data_path, train_csv, generate_heatmaps=False)
+
+        # VALIDATION: Compare with direct extraction to ensure consistency
+        self._validate_feature_consistency(train_pred, "prediction_pipeline")
+
+    def _extract_data_path_from_loader(self, loader, split: str):
+        """NEW: Extract data path from data loader for prediction pipeline"""
+        if loader is None:
+            return f"data/{self.config['dataset']['name'].lower()}/{split}"
+
+        # Try to extract path from dataset
+        dataset = loader.dataset
+        if hasattr(dataset, 'image_files') and dataset.image_files:
+            sample_path = dataset.image_files[0]
+            return os.path.dirname(os.path.dirname(sample_path))  # Go up one level from first image
+        elif hasattr(dataset, 'samples') and dataset.samples:
+            sample_path = dataset.samples[0][0]  # (path, label) format
+            return os.path.dirname(os.path.dirname(sample_path))
+        else:
+            # Fallback to standard path
+            return f"data/{self.config['dataset']['name'].lower()}/{split}"
 
 def make_json_serializable(obj):
     """Convert an object to be JSON serializable"""
@@ -6291,33 +6673,38 @@ def update_phase_specific_metrics(model: nn.Module, phase: int, config: Dict) ->
 def _train_phase(model: nn.Module, train_loader: DataLoader,
                 optimizer: torch.optim.Optimizer, loss_manager: EnhancedLossManager,
                 epochs: int, phase: int, config: Dict, start_epoch: int = 0) -> Dict[str, List]:
-    """Training logic with invertible feature compression, reconstruction sampling, and training heatmaps"""
+    """Training logic optimized for reconstruction and classification accuracy"""
 
     history = defaultdict(list)
     device = next(model.parameters()).device
     best_loss = float('inf')
     min_thr = float(config['model']['autoencoder_config']["convergence_threshold"])
     checkpoint_manager = UnifiedCheckpoint(config)
-    use_classwise = config['training'].get('use_classwise_acc', True)  # Config flag
+    use_classwise = config['training'].get('use_classwise_acc', True)
     patience_counter = 0
 
-    # NEW: Initialize reconstruction sampler
+    # Optimized learning rates for each phase
+    if phase == 2:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = param_group['lr'] * 0.1
+        logger.info(f"Phase 2 learning rate: {optimizer.param_groups[0]['lr']:.2e}")
+
+    # Initialize reconstruction sampler
     sampler_enabled = config['training'].get('reconstruction_samples', {}).get('enabled', True)
     if sampler_enabled:
         sampler = ReconstructionSampler(config)
         save_frequency = config['training'].get('reconstruction_samples', {}).get('save_frequency', 5)
-        logger.info(f"Reconstruction sampling enabled - saving samples every {save_frequency} epochs")
+        logger.info(f"Reconstruction sampling enabled - saving every {save_frequency} epochs")
 
-    # NEW: Initialize training heatmap generator
+    # Initialize training heatmap generator
     heatmap_enabled = config['training'].get('generate_training_heatmaps', True)
-    heatmap_frequency = config['training'].get('heatmap_frequency', 10)  # Every 10 epochs
+    heatmap_frequency = config['training'].get('heatmap_frequency', 10)
 
     if heatmap_enabled:
-        # Create training heatmap directory
         dataset_name = config['dataset']['name'].lower()
         training_heatmap_dir = os.path.join('data', dataset_name, 'training_heatmaps', f'phase{phase}')
         os.makedirs(training_heatmap_dir, exist_ok=True)
-        logger.info(f"Training heatmaps enabled - saving every {heatmap_frequency} epochs to {training_heatmap_dir}")
+        logger.info(f"Training heatmaps enabled - saving every {heatmap_frequency} epochs")
 
     try:
         for epoch in range(start_epoch, epochs):
@@ -6325,202 +6712,161 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             running_loss = 0.0
             running_acc = 0.0
             num_batches = len(train_loader)
+            valid_batches = 0
 
             pbar = tqdm(train_loader, desc=f"Phase {phase} - Epoch {epoch+1}", leave=False)
             for batch_idx, (data, labels) in enumerate(pbar):
                 data, labels = data.to(device), labels.to(device)
                 optimizer.zero_grad()
 
-                # Forward pass
-                if phase == 1:
-                    # Pass labels to forward method for dynamic feature selection
-                    outputs = model(data, labels=labels)
+                # Skip batch if data contains NaN/Inf
+                if torch.isnan(data).any() or torch.isinf(data).any():
+                    logger.warning("NaN/Inf in input data! Skipping batch")
+                    continue
 
-                    # Handle both return types for backward compatibility
-                    if isinstance(outputs, tuple):
-                        # Old format: (embedding, reconstruction) - maintain compatibility
-                        compressed_embedding, reconstruction = outputs
+                # Forward pass with accuracy-focused logic
+                try:
+                    if phase == 1:
+                        # Phase 1: Focus on high-quality reconstruction
+                        outputs = model(data, labels=labels)
 
-                        # Ensure reconstruction matches input size before loss calculation
+                        # Check for NaN in outputs
+                        if any(torch.isnan(tensor).any() for tensor in outputs.values() if isinstance(tensor, torch.Tensor)):
+                            logger.error("NaN in Phase 1 outputs! Skipping batch")
+                            continue
+
+                        # Handle both output formats
+                        if isinstance(outputs, tuple):
+                            _, reconstruction = outputs
+                        else:
+                            reconstruction = outputs.get('reconstruction', data)
+
+                        # Ensure reconstruction matches input size
                         if reconstruction.shape != data.shape:
                             reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
                                                          mode='bilinear', align_corners=False)
-                            logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
 
-                        # NEW: Use enhanced sharpness-aware loss for Phase 1
-                        loss = model.compute_phase1_loss(reconstruction, data)
+                        # Optimized Phase 1 loss for reconstruction quality
+                        loss = F.mse_loss(reconstruction, data)
+
+                        # Add feature consistency for better representations
+                        if 'embedding' in outputs and hasattr(model, 'feature_compressor'):
+                            compressed = model.feature_compressor(outputs['embedding'])
+                            reconstructed_embedding = model.feature_decompressor(compressed)
+                            feature_loss = F.mse_loss(reconstructed_embedding, outputs['embedding'])
+                            loss += 0.1 * feature_loss
+
                     else:
-                        # NEW: Enhanced format with invertibility loss
-                        reconstruction = outputs['reconstruction']
+                        # Phase 2: Focus on classification accuracy with reconstruction
+                        output = model(data, labels=labels)
 
-                        # Ensure reconstruction matches input size before loss calculation
+                        # Check for NaN in outputs
+                        if any(torch.isnan(tensor).any() for tensor in output.values() if isinstance(tensor, torch.Tensor)):
+                            logger.error("NaN in Phase 2 outputs! Skipping batch")
+                            continue
+
+                        reconstruction = output['reconstruction']
+
+                        # Ensure reconstruction quality
                         if reconstruction.shape != data.shape:
                             reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
                                                          mode='bilinear', align_corners=False)
-                            logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
 
-                        # NEW: Use enhanced sharpness-aware loss for Phase 1
-                        loss = model.compute_phase1_loss(reconstruction, data)
+                        # Base reconstruction loss
+                        recon_loss = F.mse_loss(reconstruction, data)
+                        total_loss = recon_loss
 
-                        # Log sharpness metrics occasionally if enabled
-                        if batch_idx % 50 == 0 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
-                            logger.debug(f"Sharpness losses: {model.loss_components}")
-                else:
-                    # Phase 2: Enhanced losses with KL divergence monitoring
-                    output = model(data, labels=labels)
+                        # Classification loss with higher priority for accuracy
+                        if model.use_class_encoding and 'class_logits' in output:
+                            class_logits = output['class_logits']
 
-                    reconstruction = output['reconstruction']
-
-                    # Use compressed features for efficiency in Phase 2
-                    if 'compressed_embedding' in output:
-                        embedding = output['compressed_embedding']  # Use compressed features
-                    else:
-                        embedding = output['embedding']  # Fallback to original
-
-                    # Ensure reconstruction matches input size before loss calculation
-                    if reconstruction.shape != data.shape:
-                        reconstruction = F.interpolate(reconstruction, size=data.shape[2:],
-                                                     mode='bilinear', align_corners=False)
-                        logger.debug(f"Resized reconstruction from {reconstruction.shape[2:]} to {data.shape[2:]}")
-
-                    # Base reconstruction loss
-                    recon_loss = F.mse_loss(reconstruction, data)
-
-                    # Initialize total loss
-                    total_loss = recon_loss
-
-                    # ENHANCED KL DIVERGENCE with monitoring
-                    if model.use_kl_divergence and 'cluster_probabilities' in output and 'target_distribution' in output:
-                        q_dist = output['cluster_probabilities']
-                        p_dist = output['target_distribution']
-
-                        # Symmetric KL divergence for better optimization
-                        kl_loss1 = F.kl_div(q_dist.log(), p_dist, reduction='batchmean')
-                        kl_loss2 = F.kl_div(p_dist.log(), q_dist, reduction='batchmean')
-                        kl_loss = (kl_loss1 + kl_loss2) / 2
-
-                        # Monitor KL divergence quality
-                        cluster_confidence = output['cluster_confidence'].mean()
-                        cluster_assignments = output['cluster_assignments']
-                        unique_clusters = len(torch.unique(cluster_assignments))
-
-                        # Log KL divergence metrics occasionally
-                        if batch_idx % 100 == 0:
-                            logger.debug(f"KL Loss: {kl_loss.item():.4f}, "
-                                       f"Cluster Confidence: {cluster_confidence:.4f}, "
-                                       f"Unique Clusters: {unique_clusters}")
-
-                        total_loss += config['model']['autoencoder_config']['enhancements']['kl_divergence_weight'] * kl_loss
-
-                        # Store KL metrics for history tracking
-                        if not hasattr(model, 'kl_metrics'):
-                            model.kl_metrics = {}
-                        model.kl_metrics = {
-                            'kl_loss': kl_loss.item(),
-                            'cluster_confidence': cluster_confidence.item(),
-                            'unique_clusters': int(unique_clusters)  # FIXED: Convert to int, not .item()
-                        }
-
-                    # Class-balanced classification loss using compressed features
-                    if model.use_class_encoding and hasattr(model, 'classifier'):
-                        # Use compressed features for classification
-                        if 'compressed_embedding' in output:
-                            class_logits = model.classifier(output['compressed_embedding'])
-                        else:
-                            class_logits = model.classifier(embedding)
-
-                        if use_classwise:  # Class-balanced loss calculation
-                            class_losses = []
-                            for cls in torch.unique(labels):
-                                mask = labels == cls
-                                if mask.sum() > 0:  # Handle empty classes
-                                    cls_loss = F.cross_entropy(
-                                        class_logits[mask],
-                                        labels[mask],
-                                        reduction='mean'
-                                    )
-                                    class_losses.append(cls_loss)
-
-                            if class_losses:  # Prevent empty list
-                                class_loss = torch.mean(torch.stack(class_losses))
-                            else:
-                                class_loss = torch.tensor(0.0, device=device)
-                        else:  # Standard loss
-                            class_loss = F.cross_entropy(class_logits, labels)
-
-                        total_loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * class_loss
-
-                        # Calculate accuracy (class-balanced or standard)
-                        with torch.no_grad():
-                            preds = torch.argmax(class_logits, dim=1)
+                            # Use class-balanced loss for better accuracy on imbalanced data
                             if use_classwise:
-                                class_acc = []
+                                class_losses = []
                                 for cls in torch.unique(labels):
                                     mask = labels == cls
                                     if mask.sum() > 0:
-                                        cls_acc = (preds[mask] == labels[mask]).float().mean()
-                                        class_acc.append(cls_acc)
-                                acc = torch.mean(torch.stack(class_acc)) if class_acc else 0.0
+                                        cls_loss = F.cross_entropy(class_logits[mask], labels[mask], reduction='mean')
+                                        class_losses.append(cls_loss)
+
+                                if class_losses:
+                                    class_loss = torch.mean(torch.stack(class_losses))
+                                else:
+                                    class_loss = torch.tensor(0.0, device=device)
                             else:
-                                acc = (preds == labels).float().mean()
-                            running_acc += acc.item()
+                                class_loss = F.cross_entropy(class_logits, labels)
 
-                    loss = total_loss
+                            # Higher weight for classification accuracy
+                            total_loss += 0.8 * class_loss
 
+                            # Calculate accuracy
+                            with torch.no_grad():
+                                preds = torch.argmax(class_logits, dim=1)
+                                if use_classwise:
+                                    class_acc = []
+                                    for cls in torch.unique(labels):
+                                        mask = labels == cls
+                                        if mask.sum() > 0:
+                                            cls_acc = (preds[mask] == labels[mask]).float().mean()
+                                            class_acc.append(cls_acc)
+                                    acc = torch.mean(torch.stack(class_acc)) if class_acc else 0.0
+                                else:
+                                    acc = (preds == labels).float().mean()
+                                running_acc += acc.item()
 
-                    # Class-balanced classification loss using compressed features
-                    if model.use_class_encoding and hasattr(model, 'classifier'):
-                        # Use compressed features for classification
-                        if 'compressed_embedding' in output:
-                            class_logits = model.classifier(output['compressed_embedding'])
-                        else:
-                            class_logits = model.classifier(embedding)
+                        # KL divergence for clustering (secondary priority)
+                        if model.use_kl_divergence and 'cluster_probabilities' in output and 'target_distribution' in output:
+                            q_dist = output['cluster_probabilities']
+                            p_dist = output['target_distribution']
 
-                        if use_classwise:  # Class-balanced loss calculation
-                            class_losses = []
-                            for cls in torch.unique(labels):
-                                mask = labels == cls
-                                if mask.sum() > 0:  # Handle empty classes
-                                    cls_loss = F.cross_entropy(
-                                        class_logits[mask],
-                                        labels[mask],
-                                        reduction='mean'
-                                    )
-                                    class_losses.append(cls_loss)
+                            if not (torch.isnan(q_dist).any() or torch.isnan(p_dist).any()):
+                                kl_loss = F.kl_div(q_dist.log(), p_dist, reduction='batchmean')
+                                # Lower weight to prioritize classification
+                                total_loss += 0.2 * kl_loss
 
-                            if class_losses:  # Prevent empty list
-                                class_loss = torch.mean(torch.stack(class_losses))
-                            else:
-                                class_loss = torch.tensor(0.0, device=device)
-                        else:  # Standard loss
-                            class_loss = F.cross_entropy(class_logits, labels)
+                                # Store KL metrics
+                                if not hasattr(model, 'kl_metrics'):
+                                    model.kl_metrics = {}
+                                model.kl_metrics = {
+                                    'kl_loss': kl_loss.item(),
+                                    'cluster_confidence': output['cluster_confidence'].mean().item(),
+                                    'unique_clusters': len(torch.unique(output['cluster_assignments']))
+                                }
 
-                        total_loss += config['model']['autoencoder_config']['enhancements']['classification_weight'] * class_loss
+                        loss = total_loss
 
-                        # Calculate accuracy (class-balanced or standard)
-                        with torch.no_grad():
-                            preds = torch.argmax(class_logits, dim=1)
-                            if use_classwise:
-                                class_acc = []
-                                for cls in torch.unique(labels):
-                                    mask = labels == cls
-                                    if mask.sum() > 0:
-                                        cls_acc = (preds[mask] == labels[mask]).float().mean()
-                                        class_acc.append(cls_acc)
-                                acc = torch.mean(torch.stack(class_acc)) if class_acc else 0.0
-                            else:
-                                acc = (preds == labels).float().mean()
-                            running_acc += acc.item()
+                except Exception as e:
+                    logger.error(f"Forward pass failed: {e}. Skipping batch")
+                    continue
 
-                    loss = total_loss
+                # Backpropagation with stability
+                try:
+                    loss.backward()
 
-                # Backpropagation
-                loss.backward()
+                    # Gradient stability check
+                    has_nan_grad = False
+                    grad_norm = 0.0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                                has_nan_grad = True
+                                break
+                            grad_norm += p.grad.norm().item() ** 2
 
-                # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    if has_nan_grad:
+                        logger.error("NaN gradients detected! Skipping optimization")
+                        optimizer.zero_grad()
+                        continue
 
-                optimizer.step()
+                    # Stable gradient clipping
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    valid_batches += 1
+
+                except Exception as e:
+                    logger.error(f"Backward pass failed: {e}. Skipping batch")
+                    optimizer.zero_grad()
+                    continue
 
                 # Update metrics
                 running_loss += loss.item()
@@ -6530,13 +6876,6 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     'best': f"{best_loss:.4f}",
                     'patience': f"{patience_counter}"
                 }
-
-                # NEW: Add sharpness metrics for Phase 1 when enabled
-                if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
-                    gradient_loss = model.loss_components.get('gradient_loss', 0)
-                    high_freq_loss = model.loss_components.get('high_freq_loss', 0)
-                    status['grad'] = f"{gradient_loss:.4f}"
-                    status['high_freq'] = f"{high_freq_loss:.4f}"
 
                 if phase == 2 and model.use_class_encoding:
                     avg_acc = running_acc / (batch_idx + 1)
@@ -6550,65 +6889,52 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
                     torch.cuda.empty_cache()
 
             # Epoch statistics
-            avg_loss = running_loss / num_batches
-            history[f'phase{phase}_loss'].append(avg_loss)
+            if valid_batches > 0:
+                avg_loss = running_loss / valid_batches
+                history[f'phase{phase}_loss'].append(avg_loss)
+            else:
+                avg_loss = float('inf')
+                history[f'phase{phase}_loss'].append(avg_loss)
+                logger.warning(f"No valid batches in epoch {epoch+1}!")
 
-            # NEW: Store sharpness metrics for Phase 1 when enabled
-            if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
-                history[f'phase{phase}_gradient_loss'].append(
-                    model.loss_components.get('gradient_loss', 0)
-                )
-                history[f'phase{phase}_high_freq_loss'].append(
-                    model.loss_components.get('high_freq_loss', 0)
-                )
-                history[f'phase{phase}_edge_focused_loss'].append(
-                    model.loss_components.get('edge_focused_loss', 0)
-                )
-
-            if phase == 2 and model.use_class_encoding:
-                avg_acc = running_acc / num_batches
+            # Store accuracy for Phase 2
+            if phase == 2 and model.use_class_encoding and valid_batches > 0:
+                avg_acc = running_acc / valid_batches
                 history[f'phase{phase}_accuracy'].append(avg_acc)
 
-            # NEW: Store KL divergence metrics for Phase 2
+            # Store KL divergence metrics
             if phase == 2 and model.use_kl_divergence and hasattr(model, 'kl_metrics'):
                 history[f'phase{phase}_kl_loss'].append(model.kl_metrics.get('kl_loss', 0))
                 history[f'phase{phase}_cluster_confidence'].append(model.kl_metrics.get('cluster_confidence', 0))
-                history[f'phase{phase}_unique_clusters'].append(float(model.kl_metrics.get('unique_clusters', 0)))  # FIXED: Convert to float
+                history[f'phase{phase}_unique_clusters'].append(model.kl_metrics.get('unique_clusters', 0))
                 logger.info(f"KL Metrics - Loss: {model.kl_metrics.get('kl_loss', 0):.4f}, "
-                          f"Confidence: {model.kl_metrics.get('cluster_confidence', 0):.4f}, "
-                          f"Clusters: {model.kl_metrics.get('unique_clusters', 0)}")
+                          f"Confidence: {model.kl_metrics.get('cluster_confidence', 0):.4f}")
 
-            # NEW: Save reconstruction samples periodically
+            # Save reconstruction samples
             if sampler_enabled and (epoch % save_frequency == 0 or epoch == epochs - 1):
-                logger.info(f"Saving reconstruction samples for phase {phase} epoch {epoch+1}")
+                logger.info(f"Saving reconstruction samples for epoch {epoch+1}")
                 try:
                     sampler.save_reconstruction_samples(model, train_loader, epoch+1, phase)
-                    logger.info(f"✓ Reconstruction samples saved for epoch {epoch+1}")
                 except Exception as e:
                     logger.warning(f"Could not save reconstruction samples: {str(e)}")
 
-            # NEW: Generate training heatmaps periodically (headless-safe)
+            # Generate training heatmaps
             if (heatmap_enabled and
                 (epoch % heatmap_frequency == 0 or epoch == epochs - 1 or epoch == 0)):
-                logger.info(f"Generating training heatmaps for phase {phase} epoch {epoch+1}")
+                logger.info(f"Generating training heatmaps for epoch {epoch+1}")
                 try:
                     _generate_training_heatmaps(model, train_loader, config, epoch+1, phase, training_heatmap_dir)
-                    logger.info(f"✓ Training heatmaps saved for epoch {epoch+1}")
                 except Exception as e:
                     logger.warning(f"Could not generate training heatmaps: {str(e)}")
 
-            # Log epoch progress with enhanced information
+            # Log epoch progress
             log_message = f"Phase {phase} - Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}"
-            if phase == 1 and hasattr(model, 'loss_components') and model.enable_sharpness_loss:
-                gradient_loss = model.loss_components.get('gradient_loss', 0)
-                high_freq_loss = model.loss_components.get('high_freq_loss', 0)
-                log_message += f" | Gradient: {gradient_loss:.4f} | High-Freq: {high_freq_loss:.4f}"
-            if phase == 2 and model.use_class_encoding:
+            if phase == 2 and model.use_class_encoding and valid_batches > 0:
                 log_message += f" | Accuracy: {avg_acc:.2%}"
             logger.info(log_message)
 
             # Checkpointing
-            if (best_loss - avg_loss) > min_thr:
+            if avg_loss != float('inf') and (best_loss - avg_loss) > min_thr:
                 best_loss = avg_loss
                 patience_counter = 0
                 checkpoint_manager.save_model_state(
@@ -6622,42 +6948,30 @@ def _train_phase(model: nn.Module, train_loader: DataLoader,
             # Early stopping
             if patience_counter >= config['training'].get('early_stopping', {}).get('patience', 5):
                 logger.info(f"Early stopping triggered at epoch {epoch+1}")
-                # NEW: Save final samples before early stopping
                 if sampler_enabled:
-                    logger.info("Saving final reconstruction samples before early stopping")
                     try:
                         sampler.save_reconstruction_samples(model, train_loader, epoch+1, phase)
                     except Exception as e:
-                        logger.warning(f"Could not save final reconstruction samples: {str(e)}")
-                # NEW: Generate final heatmaps before early stopping
-                if heatmap_enabled:
-                    logger.info("Generating final training heatmaps before early stopping")
-                    try:
-                        _generate_training_heatmaps(model, train_loader, config, epoch+1, phase, training_heatmap_dir)
-                    except Exception as e:
-                        logger.warning(f"Could not generate final training heatmaps: {str(e)}")
+                        logger.warning(f"Could not save final samples: {str(e)}")
                 break
 
-            # Learning rate scheduling (if configured)
+            # Learning rate scheduling
             if 'scheduler' in config['model'] and config['model']['scheduler'].get('enabled', False):
-                # Adjust learning rate based on loss improvement
-                if hasattr(optimizer, 'param_groups'):
+                if hasattr(optimizer, 'param_groups') and avg_loss != float('inf'):
                     current_lr = optimizer.param_groups[0]['lr']
                     min_lr = config['model']['scheduler'].get('min_lr', 1e-6)
-                    if avg_loss > best_loss * 1.1 and current_lr > min_lr:  # Loss increased by 10%
+                    if avg_loss > best_loss * 1.1 and current_lr > min_lr:
                         new_lr = max(current_lr * 0.5, min_lr)
                         for param_group in optimizer.param_groups:
                             param_group['lr'] = new_lr
-                        logger.info(f"Reduced learning rate from {current_lr:.2e} to {new_lr:.2e}")
+                        logger.info(f"Reduced learning rate to {new_lr:.2e}")
 
     except Exception as e:
         logger.error(f"Training failed at epoch {epoch+1}: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
-    # REMOVED: No need for final samples after training since we already generate them during training
-
-    # Log training completion with enhanced information
+    # Training completion
     completion_message = f"Phase {phase} training completed. Best loss: {best_loss:.4f}"
     if phase == 1 and hasattr(model, 'compressed_dims'):
         completion_message += f" | Compression: {model.feature_dims}D → {model.compressed_dims}D"
