@@ -762,7 +762,7 @@ class DBNNVisualizer:
                     fig.add_trace(trace)
             else:
                 # No frames created - add demo content
-                print("Data not available")
+                self._add_demo_content(fig)
 
             # Update layout
             fig.update_layout(
@@ -4267,94 +4267,7 @@ class DatasetConfig:
                     print(f"   {Colors.CYAN}→ {param}{Colors.ENDC}")
                 setattr(DatasetConfig.load_config, f'_defaults_shown_{dataset_name}', True)
 
-            # ENHANCED PATH HANDLING WITH SMART FILE DISCOVERY AND PERSISTENT UPDATE
-            file_path = validated_config.get('file_path')
-            original_file_path = file_path  # Keep the original for reference
-
-            if file_path:
-                # Extract base name without extension (e.g., 'galaxies' from 'galaxies.csv')
-                file_dir = os.path.dirname(file_path)
-                file_base = os.path.splitext(os.path.basename(file_path))[0]  # 'galaxies'
-                file_ext = os.path.splitext(file_path)[1]  # '.csv'
-
-                # Check if the exact file exists first
-                if os.path.exists(file_path):
-                    print(f"{Colors.GREEN}✅ Using specified file: {file_path}{Colors.ENDC}")
-                else:
-                    print(f"{Colors.YELLOW}⚠️  Specified file not found: {file_path}{Colors.ENDC}")
-                    print(f"{Colors.CYAN}🔍 Looking for alternative files with base name: {file_base}{Colors.ENDC}")
-
-                    found_files = []
-                    if os.path.exists(file_dir):
-                        # Look for all CSV files with the same base name
-                        all_files = [f for f in os.listdir(file_dir) if f.endswith('.csv')]
-                        found_files = [f for f in all_files if f.startswith(file_base + '_') or f == file_base + '.csv']
-
-                        if found_files:
-                            print(f"{Colors.CYAN}📁 Found {len(found_files)} related files: {found_files}{Colors.ENDC}")
-
-                            # For adaptive learning, we'll combine all files later in _load_dataset
-                            # For now, just use the first train file we find, or any file if no train file
-                            train_files = [f for f in found_files if 'train' in f.lower()]
-                            if train_files:
-                                selected_file = train_files[0]
-                            else:
-                                selected_file = found_files[0]
-
-                            new_file_path = os.path.join(file_dir, selected_file)
-                            validated_config['file_path'] = new_file_path
-                            validated_config['related_files'] = found_files  # Store all related files for adaptive learning
-
-                            # CRITICAL: Update the config file permanently
-                            try:
-                                with open(config_path, 'w', encoding='utf-8') as f:
-                                    json.dump(validated_config, f, indent=2)
-                                print(f"{Colors.GREEN}💾 PERMANENTLY UPDATED config file with new path: {new_file_path}{Colors.ENDC}")
-                                config_updated = True  # Mark that we updated the config
-                            except Exception as e:
-                                print(f"{Colors.RED}❌ Failed to update config file: {str(e)}{Colors.ENDC}")
-
-                            print(f"{Colors.GREEN}✅ Using discovered file: {new_file_path}{Colors.ENDC}")
-                            print(f"{Colors.CYAN}📚 All related files for adaptive learning: {found_files}{Colors.ENDC}")
-                        else:
-                            print(f"{Colors.RED}❌ No related CSV files found for {file_base} in {file_dir}{Colors.ENDC}")
-                    else:
-                        print(f"{Colors.RED}❌ Directory not found: {file_dir}{Colors.ENDC}")
-
-            # Store the original base name for adaptive learning
-            validated_config['dataset_base_name'] = file_base if 'file_base' in locals() else dataset_name
-
-            # Final check - if still no valid file path, try default locations
-            if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
-                # Try dataset-specific directory
-                dataset_dir = os.path.join('data', dataset_name)
-                if os.path.exists(dataset_dir):
-                    csv_files = [f for f in os.listdir(dataset_dir) if f.endswith('.csv')]
-                    if csv_files:
-                        # Prefer train files, then test files, then any CSV
-                        train_files = [f for f in csv_files if 'train' in f.lower()]
-                        test_files = [f for f in csv_files if 'test' in f.lower()]
-
-                        if train_files:
-                            selected_file = train_files[0]
-                        elif test_files:
-                            selected_file = test_files[0]
-                        else:
-                            selected_file = csv_files[0]
-
-                        validated_config['file_path'] = os.path.join(dataset_dir, selected_file)
-                        print(f"{Colors.GREEN}✅ Using dataset directory file: {validated_config['file_path']}{Colors.ENDC}")
-
-                        # Update the config file with the new path
-                        try:
-                            with open(config_path, 'w', encoding='utf-8') as f:
-                                json.dump(validated_config, f, indent=2)
-                            print(f"{Colors.GREEN}💾 PERMANENTLY UPDATED config file with discovered path{Colors.ENDC}")
-                            config_updated = True
-                        except Exception as e:
-                            print(f"{Colors.RED}❌ Failed to update config file: {str(e)}{Colors.ENDC}")
-
-            # Save the updated config back to file if any parameters were added (but not if we already updated it above)
+            # Save the updated config back to file if any parameters were added
             if config_updated and os.path.exists(config_path):
                 try:
                     with open(config_path, 'w', encoding='utf-8') as f:
@@ -4363,10 +4276,23 @@ class DatasetConfig:
                 except Exception as e:
                     print(f"❌ {Colors.RED}Failed to save updated config: {str(e)}{Colors.ENDC}")
 
-            # URL handling with proper None check
-            file_path = validated_config.get('file_path')
-            if file_path and DatasetConfig.is_url(file_path):
-                url = file_path
+            # Path handling
+            if validated_config.get('file_path'):
+                if not os.path.exists(validated_config['file_path']):
+                    alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+                    if os.path.exists(alt_path):
+                        validated_config['file_path'] = alt_path
+                        print("\033[K" + f"Using data file: {alt_path}")
+
+            if not validated_config.get('file_path'):
+                default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+                if os.path.exists(default_path):
+                    validated_config['file_path'] = default_path
+                    print("\033[K" + f"Using default data file: {default_path}")
+
+            # URL handling
+            if DatasetConfig.is_url(validated_config.get('file_path', '')):
+                url = validated_config['file_path']
                 local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
                 if not os.path.exists(local_path):
                     print("\033[K" + f"Downloading dataset from {url}")
@@ -4421,11 +4347,6 @@ class DatasetConfig:
                 pass  # Already correct
             else:
                 raise ValueError(f"Invalid target column type: {type(target_col)}")
-
-            # DEBUG: Show what file path we're actually returning
-            print(f"{Colors.CYAN}🔍 FINAL CONFIG FILE PATH: {validated_config.get('file_path')}{Colors.ENDC}")
-            print(f"{Colors.CYAN}🔍 FILE EXISTS: {os.path.exists(validated_config.get('file_path', ''))}{Colors.ENDC}")
-            print(f"{Colors.CYAN}🔍 RELATED FILES: {validated_config.get('related_files', [])}{Colors.ENDC}")
 
             # Final confirmation of visualization state
             final_viz = validated_config.get('training_params', {}).get('enable_visualization', False)
@@ -4669,33 +4590,42 @@ class BinWeightUpdater:
         # Get initial weight from config
         self.initial_weight = self._get_initial_weight_from_config()
 
-        # LAZY INITIALIZATION: Initialize empty dictionaries - create weights only when needed
+        # Initialize histogram_weights with configurable initial value
         self.histogram_weights = {}
+        for class_id in range(n_classes):
+            self.histogram_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                # Initialize with configurable initial weight
+                self.histogram_weights[class_id][pair_idx] = torch.full(
+                    (n_bins_per_dim, n_bins_per_dim),
+                    self.initial_weight,
+                    dtype=torch.float64,
+                    device=self.device
+                ).contiguous()
+
+        # Initialize gaussian weights with same initial value
         self.gaussian_weights = {}
+        for class_id in range(n_classes):
+            self.gaussian_weights[class_id] = {}
+            for pair_idx in range(len(feature_pairs)):
+                self.gaussian_weights[class_id][pair_idx] = torch.tensor(
+                    self.initial_weight,
+                    dtype=torch.float64,
+                    device=self.device
+                ).contiguous()
 
-        # LAZY INITIALIZATION for unified weights - only create if absolutely needed
-        self.weights_initialized = False
-        self.weights_shape = (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim)
+        # Unified weights tensor initialization
+        self.weights = torch.full(
+            (n_classes, len(feature_pairs), n_bins_per_dim, n_bins_per_dim),
+            self.initial_weight,
+            dtype=torch.float64,
+            device=self.device
+        ).contiguous()
 
-        # Use float32 for memory efficiency while maintaining sufficient precision
-        self.dtype = torch.float32
-
-        # Adaptive memory management for high-dimensional datasets
-        if len(feature_pairs) > 1000:  # High feature count scenario
-            self.n_bins_per_dim = 64  # Reduce bin count to save memory
-            self.weights_shape = (n_classes, len(feature_pairs), self.n_bins_per_dim, self.n_bins_per_dim)
-            print(f"{Colors.CYAN}[MEMORY] Reduced n_bins_per_dim to {self.n_bins_per_dim} for {len(feature_pairs)} feature pairs{Colors.ENDC}")
-
-        # Pre-allocate update buffers (small, fixed size - same as original)
-        self.update_indices = torch.zeros((3, 1000), dtype=torch.long, device=self.device)
-        self.update_values = torch.zeros(1000, dtype=self.dtype, device=self.device)
+        # Pre-allocate update buffers
+        self.update_indices = torch.zeros((3, 1000), dtype=torch.long)
+        self.update_values = torch.zeros(1000, dtype=torch.float64)
         self.update_count = 0
-
-        # Debug initialization - show potential memory savings
-        original_memory_mb = (n_classes * len(feature_pairs) * 128 * 128 * 8) / (1024 * 1024)  # Original float64
-        optimized_memory_mb = (n_classes * len(feature_pairs) * self.n_bins_per_dim * self.n_bins_per_dim * 4) / (1024 * 1024)  # Optimized float32
-        print(f"{Colors.GREEN}[MEMORY] BinWeightUpdater optimized: {original_memory_mb:.1f}MB -> {optimized_memory_mb:.1f}MB potential savings{Colors.ENDC}")
-        print(f"{Colors.GREEN}[MEMORY] Configuration: {n_classes} classes, {len(feature_pairs)} pairs, {self.n_bins_per_dim} bins{Colors.ENDC}")
 
         # Debug initialization
         # print("\033[K" + f"[DEBUG] Weight initialization complete with initial value: {self.initial_weight}")
@@ -4747,33 +4677,25 @@ class BinWeightUpdater:
                 accumulate=True
             )
 
+
     def get_histogram_weights(self, class_id: int, pair_idx: int) -> torch.Tensor:
-        """Get weights ensuring proper dimensions - FIXED VERSION"""
+        """Get weights ensuring proper dimensions"""
         class_id = int(class_id)
         pair_idx = int(pair_idx)
 
-        # LAZY INITIALIZATION: Create weights if they don't exist
         if class_id not in self.histogram_weights:
-            self.histogram_weights[class_id] = {}
-
+            raise KeyError(f"Invalid class_id: {class_id}")
         if pair_idx not in self.histogram_weights[class_id]:
-            # Initialize with the initial weight value
-            self.histogram_weights[class_id][pair_idx] = torch.full(
-                (self.n_bins_per_dim, self.n_bins_per_dim),
-                self.initial_weight,
-                dtype=self.dtype,
-                device=self.device
-            ).contiguous()
+            raise KeyError(f"Invalid pair_idx: {pair_idx}")
 
         weights = self.histogram_weights[class_id][pair_idx]
-
-        # Validation (keep existing validation)
         if len(weights.shape) != 2:
             raise ValueError(f"Invalid weight shape: {weights.shape}, expected 2D tensor")
         if weights.shape[0] != self.n_bins_per_dim or weights.shape[1] != self.n_bins_per_dim:
             raise ValueError(f"Invalid weight dimensions: {weights.shape}, expected ({self.n_bins_per_dim}, {self.n_bins_per_dim})")
 
         return weights
+
 
     def _ensure_buffers(self, batch_size):
         """Ensure buffers exist and are the right size"""
@@ -4873,6 +4795,7 @@ class BinWeightUpdater:
                     accumulate=True
                 )
 
+
     def update_gaussian_weights(self, failed_case, true_class, pred_class,
                                component_responsibilities, posteriors, learning_rate):
         """Update weights for Gaussian components with improved efficiency"""
@@ -4922,22 +4845,16 @@ class BinWeightUpdater:
             raise
 
     def get_gaussian_weights(self, class_id, pair_idx):
-        """Get Gaussian weights with LAZY initialization and proper type conversion"""
+        """Get Gaussian weights with proper type conversion and validation"""
         try:
-            # Convert tensor values to Python integers (same as original)
+            # Convert tensor values to Python integers
             class_id = int(class_id) if isinstance(class_id, torch.Tensor) else class_id
             pair_idx = int(pair_idx) if isinstance(pair_idx, torch.Tensor) else pair_idx
 
-            # LAZY INITIALIZATION: Create weights only when first accessed
             if class_id not in self.gaussian_weights:
-                self.gaussian_weights[class_id] = {}
-
+                raise KeyError(f"Invalid class_id: {class_id}")
             if pair_idx not in self.gaussian_weights[class_id]:
-                self.gaussian_weights[class_id][pair_idx] = torch.tensor(
-                    self.initial_weight,
-                    dtype=self.dtype,  # Use optimized dtype
-                    device=self.device
-                ).contiguous()
+                raise KeyError(f"Invalid pair_idx: {pair_idx}")
 
             weights = self.gaussian_weights[class_id][pair_idx]
             DEBUG.log(f" Retrieved Gaussian weights for class {class_id}, pair {pair_idx}, shape: {weights.shape}")
@@ -5609,15 +5526,6 @@ class DBNN(GPUDBNN):
         self._last_feature_batch_size = None
         self.epsilon = 1e-10  # Add epsilon as instance variable
 
-        # Enable PyTorch memory optimizations
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
-            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
-
-        # Initialize memory tracking
-        self._last_memory_check = 0
-        self._memory_check_interval = 100  # Check memory every 100 operations
-
     def _load_minimal_data_for_prediction(self):
         """Load only the raw data for prediction without any processing"""
         DEBUG.log(f"Loading minimal data for prediction: {self.dataset_name}")
@@ -6052,7 +5960,7 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Enhanced dataset loader that uses the updated file path from config"""
+        """Optimized dataset loader with GPU memory management - FIXED VERSION"""
         DEBUG.log(f"Loading dataset: {self.dataset_name}")
 
         try:
@@ -6060,132 +5968,23 @@ class DBNN(GPUDBNN):
             if not self.config:
                 raise ValueError(f"No config for dataset: {self.dataset_name}")
 
-            # USE THE UPDATED FILE PATH FROM CONFIG (this is the critical fix)
             file_path = self.config.get('file_path')
             if not file_path:
                 raise ValueError("No file path in config")
 
-            print(f"{Colors.CYAN}📁 _load_dataset - USING FILE PATH: {file_path}{Colors.ENDC}")
-            print(f"{Colors.CYAN}📁 _load_dataset - FILE EXISTS: {os.path.exists(file_path)}{Colors.ENDC}")
+            # Load data
+            if file_path.startswith(('http://', 'https://')):
+                df = pd.read_csv(StringIO(requests.get(file_path).text),
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
+            else:
+                df = pd.read_csv(file_path,
+                               sep=self.config.get('separator', ','),
+                               header=0 if self.config.get('has_header', True) else None,  low_memory=False)
 
-            # If the file doesn't exist, try to find alternatives
-            if not os.path.exists(file_path):
-                print(f"{Colors.YELLOW}⚠️  File not found: {file_path}{Colors.ENDC}")
-
-                # Try to find alternative files
-                file_dir = os.path.dirname(file_path)
-                file_base = os.path.splitext(os.path.basename(file_path))[0]
-
-                if os.path.exists(file_dir):
-                    # Look for all CSV files with the same base name
-                    all_files = [f for f in os.listdir(file_dir) if f.endswith('.csv')]
-                    found_files = [f for f in all_files if f.startswith(file_base + '_') or f == file_base + '.csv']
-
-                    if found_files:
-                        print(f"{Colors.CYAN}🔍 Found alternative files: {found_files}{Colors.ENDC}")
-
-                        # Use the first train file we find, or any file if no train file
-                        train_files = [f for f in found_files if 'train' in f.lower()]
-                        if train_files:
-                            selected_file = train_files[0]
-                        else:
-                            selected_file = found_files[0]
-
-                        new_file_path = os.path.join(file_dir, selected_file)
-                        print(f"{Colors.GREEN}✅ Using alternative file: {new_file_path}{Colors.ENDC}")
-                        file_path = new_file_path
-
-                        # Update the config with the new path for future use
-                        self.config['file_path'] = new_file_path
-                    else:
-                        raise FileNotFoundError(f"No data files found for {file_base} in {file_dir}")
-                else:
-                    raise FileNotFoundError(f"Directory not found: {file_dir}")
-
-            # Get all related files for adaptive learning
-            related_files = self.config.get('related_files', [])
-            dataset_base_name = self.config.get('dataset_base_name', self.dataset_name)
-
-            # If we have multiple related files and we're in adaptive mode, combine them
-            combined_df = None
             predict_mode = (self.mode == 'predict')
 
-            # Determine if we should combine files (adaptive learning scenario)
-            # Only combine if we have multiple files AND we're using a base dataset name (not _train/_test specific)
-            should_combine_files = (len(related_files) > 1 and
-                                   not any(dataset_base_name.endswith(suffix) for suffix in ['_train', '_test', '_training', '_testing']))
-
-            if should_combine_files:
-                DEBUG.log(f"Adaptive learning: Combining {len(related_files)} related files")
-                dfs = []
-
-                for data_file in related_files:
-                    # Use the directory from the main file path
-                    file_dir = os.path.dirname(file_path)
-                    full_path = os.path.join(file_dir, data_file)
-                    try:
-                        if full_path.startswith(('http://', 'https://')):
-                            df_part = pd.read_csv(StringIO(requests.get(full_path).text),
-                                               sep=self.config.get('separator', ','),
-                                               header=0 if self.config.get('has_header', True) else None,
-                                               low_memory=False)
-                        else:
-                            df_part = pd.read_csv(full_path,
-                                               sep=self.config.get('separator', ','),
-                                               header=0 if self.config.get('has_header', True) else None,
-                                               low_memory=False)
-
-                        # Filter to only configured columns that exist in this file
-                        if 'column_names' in self.config and self.config['column_names']:
-                            available_cols = [col for col in self.config['column_names']
-                                           if col in df_part.columns and not col.startswith('#')]
-                            if available_cols:
-                                df_part = df_part[available_cols]
-                                dfs.append(df_part)
-                                DEBUG.log(f"Loaded {len(df_part)} samples from {data_file} with columns: {available_cols}")
-                        else:
-                            dfs.append(df_part)
-                            DEBUG.log(f"Loaded {len(df_part)} samples from {data_file} with all columns")
-
-                    except Exception as e:
-                        DEBUG.log(f"Failed to load {data_file}: {str(e)}")
-                        continue
-
-                if dfs:
-                    combined_df = pd.concat(dfs, ignore_index=True)
-                    DEBUG.log(f"Combined {len(dfs)} files into {len(combined_df)} total samples for adaptive learning")
-                else:
-                    # Fallback to the main file path (which should exist)
-                    if file_path.startswith(('http://', 'https://')):
-                        combined_df = pd.read_csv(StringIO(requests.get(file_path).text),
-                                               sep=self.config.get('separator', ','),
-                                               header=0 if self.config.get('has_header', True) else None,
-                                               low_memory=False)
-                    else:
-                        combined_df = pd.read_csv(file_path,
-                                               sep=self.config.get('separator', ','),
-                                               header=0 if self.config.get('has_header', True) else None,
-                                               low_memory=False)
-            else:
-                # Single file mode - use the updated file path from config
-                if file_path.startswith(('http://', 'https://')):
-                    combined_df = pd.read_csv(StringIO(requests.get(file_path).text),
-                                           sep=self.config.get('separator', ','),
-                                           header=0 if self.config.get('has_header', True) else None,
-                                           low_memory=False)
-                else:
-                    combined_df = pd.read_csv(file_path,
-                                           sep=self.config.get('separator', ','),
-                                           header=0 if self.config.get('has_header', True) else None,
-                                           low_memory=False)
-
-            if combined_df is None or combined_df.empty:
-                raise ValueError(f"No data loaded for dataset: {self.dataset_name}")
-
-            df = combined_df
-
-            # Continue with existing processing logic...
-            # CRITICAL: Filter to ONLY configured columns BEFORE any processing
+            # CRITICAL FIX 1: Filter to ONLY configured columns BEFORE any processing
             if 'column_names' in self.config and self.config['column_names']:
                 # Filter to only include configured columns
                 valid_columns = [col for col in self.config['column_names']
@@ -6199,8 +5998,7 @@ class DBNN(GPUDBNN):
                     raise ValueError("No valid configured columns found in dataset")
 
                 df = df[valid_columns]
-                print(f"{Colors.GREEN}✅ Filtered to configured columns: {len(valid_columns)} features{Colors.ENDC}")
-                DEBUG.log(f"Filtered to configured columns: {valid_columns}")
+                DEBUG.log(f"✅ Filtered to configured columns: {valid_columns}")
 
             # Store original target data type for proper decoding
             if self.target_column in df.columns:
@@ -6213,6 +6011,7 @@ class DBNN(GPUDBNN):
             # Handle target column validation for prediction mode
             if predict_mode and self.target_column in df.columns:
                 DEBUG.log(f"Target column '{self.target_column}' found in prediction data - will use for evaluation if needed")
+                # Keep target column for potential evaluation, but don't use for encoding
 
             # Store original data (CPU only) - AFTER column filtering
             self.Original_data = df.copy()
@@ -6274,9 +6073,7 @@ class DBNN(GPUDBNN):
                 'shuffle_path': shuffle_path,
                 'original_target_dtype': str(self.original_target_dtype),
                 'prediction_mode': predict_mode,
-                'has_target_column': self.target_column in df.columns,
-                'is_combined_dataset': should_combine_files,
-                'combined_file_count': len(related_files) if should_combine_files else 1
+                'has_target_column': self.target_column in df.columns
             }
 
             # Convert target column to string for universal encoding ONLY if it exists
@@ -6284,11 +6081,9 @@ class DBNN(GPUDBNN):
                 df[self.target_column] = df[self.target_column].astype(str)
                 DEBUG.log(f"Converted target column to string for universal encoding")
 
-            print(f"{Colors.GREEN}✅ Successfully loaded dataset: {len(df)} samples, {len(df.columns)} columns{Colors.ENDC}")
             return df
 
         except Exception as e:
-            print(f"{Colors.RED}❌ Error loading dataset {self.dataset_name}: {str(e)}{Colors.ENDC}")
             DEBUG.log(f"Dataset load error: {str(e)}")
             raise RuntimeError(f"Failed to load {self.dataset_name}: {str(e)}")
 
@@ -6356,52 +6151,49 @@ class DBNN(GPUDBNN):
         DEBUG.log(f"✅ Prediction data preprocessed: {len(self.X_tensor)} samples")
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
-        """Memory-optimized vectorized batch posterior computation with LAZY weight loading"""
+        """Memory-optimized vectorized batch posterior computation with adaptive feature pair batching"""
 
-        # CRITICAL: Ensure no gradient computation during inference (same as original)
+        # CRITICAL: Ensure no gradient computation during inference
         with torch.no_grad():
             features = features.to(self.device)
             batch_size, n_features = features.shape
             n_classes = len(self.likelihood_params['classes'])
             n_pairs = len(self.feature_pairs)
 
-            # FIX: Use the weight_updater's dtype instead of self.dtype
-            dtype = self.weight_updater.dtype if hasattr(self.weight_updater, 'dtype') else torch.float32
-
-            # Initialize log likelihoods with optimized dtype
-            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=dtype)
+            # Initialize log likelihoods
+            log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
             # Compute optimal feature batch size based on available memory
             feature_batch_size = self._compute_optimal_feature_batch_size(batch_size, n_classes, n_pairs)
 
-            # Process feature pairs in memory-managed batches (same algorithm)
+            # Process feature pairs in memory-managed batches
             for batch_start in range(0, n_pairs, feature_batch_size):
                 batch_end = min(batch_start + feature_batch_size, n_pairs)
                 batch_pairs = self.feature_pairs[batch_start:batch_end]
 
-                # Pre-allocate feature groups for this batch (same as original)
+                # Pre-allocate feature groups for this batch
                 feature_groups = torch.stack([
                     features[:, pair].contiguous()
                     for pair in batch_pairs
                 ])  # [batch_size_pairs, batch_size, 2]
 
                 # Vectorized binning for this feature batch
-                batch_log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device, dtype=dtype)
+                batch_log_likelihoods = torch.zeros((batch_size, n_classes), device=self.device)
 
                 for local_idx, pair in enumerate(batch_pairs):
                     global_pair_idx = batch_start + local_idx
 
-                    # Get bin edges and probabilities (same as original)
+                    # Get bin edges and probabilities
                     bin_edges = self.likelihood_params['bin_edges'][global_pair_idx]
                     bin_probs = self.likelihood_params['bin_probs'][global_pair_idx]
 
-                    # LAZY WEIGHT LOADING: Get bin weights only for this specific pair
+                    # Get bin weights for all classes
                     bin_weights = torch.stack([
-                        self.weight_updater.get_histogram_weights(c, global_pair_idx)  # This triggers lazy initialization
+                        self.weight_updater.get_histogram_weights(c, global_pair_idx)
                         for c in range(n_classes)
                     ])  # [n_classes, n_bins_per_dim, n_bins_per_dim]
 
-                    # Vectorized bucketize for both dimensions (same algorithm as original)
+                    # Vectorized bucketize for both dimensions
                     edges = torch.stack([edge.contiguous() for edge in bin_edges])
                     pair_features = feature_groups[local_idx]  # [batch_size, 2]
 
@@ -6410,38 +6202,38 @@ class DBNN(GPUDBNN):
                     indices_0 = indices_0.clamp(0, self.n_bins_per_dim - 1)
                     indices_1 = indices_1.clamp(0, self.n_bins_per_dim - 1)
 
-                    # Vectorized probability gathering (same algorithm as original)
+                    # Vectorized probability gathering
                     weighted_probs = bin_probs * bin_weights
                     probs = weighted_probs[:, indices_0, indices_1]  # [n_classes, batch_size]
                     batch_log_likelihoods += torch.log(probs.t() + epsilon)
 
-                # Accumulate results from this feature batch (same as original)
+                # Accumulate results from this feature batch
                 log_likelihoods += batch_log_likelihoods
 
-                # Memory cleanup between feature batches (enhanced)
+                # Memory cleanup between feature batches
                 del feature_groups, batch_log_likelihoods, bin_weights, weighted_probs
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Vectorized softmax (EXACTLY same algorithm as original)
+            # Vectorized softmax (unchanged)
             max_log_likelihood = log_likelihoods.max(dim=1, keepdim=True)[0]
             posteriors = torch.exp(log_likelihoods - max_log_likelihood)
             posteriors /= posteriors.sum(dim=1, keepdim=True) + epsilon
 
-            # Return bin_indices as dictionary for compatibility (same as original)
+            # Return bin_indices as dictionary for compatibility
             bin_indices_dict = self._compute_bin_indices_dict(features, n_pairs, feature_batch_size)
 
             return posteriors, bin_indices_dict
 
     def _compute_optimal_feature_batch_size(self, batch_size, n_classes, n_pairs):
-        """Dynamically compute optimal feature batch size with LAZY weight memory considerations"""
+        """Dynamically compute optimal feature batch size based on available memory"""
 
         if not torch.cuda.is_available():
-            # CPU mode - use larger batches (same as original)
+            # CPU mode - use larger batches
             return min(256, n_pairs)
 
         try:
-            # Calculate available GPU memory (same logic as original)
+            # Calculate available GPU memory
             if hasattr(torch.cuda, 'memory_reserved'):
                 allocated = torch.cuda.memory_allocated()
                 reserved = torch.cuda.memory_reserved()
@@ -6451,49 +6243,43 @@ class DBNN(GPUDBNN):
                 # Fallback for older PyTorch
                 free_memory = 0.8 * torch.cuda.get_device_properties(0).total_memory
 
-            # Conservative safety margin (use only 60% of available memory)
-            available_memory = free_memory * 0.6
+            # Safety margin (use only 70% of available memory)
+            available_memory = free_memory * 0.7
 
-            # FIX: Get dtype from weight_updater or use default
-            dtype_size = 4  # Default to float32 (4 bytes)
-            n_bins = self.n_bins_per_dim
+            # Memory estimation per feature pair
+            # Components:
+            # 1. Feature data: batch_size * 2 * 8 bytes (float64)
+            # 2. Bin weights: n_classes * n_bins_per_dim * n_bins_per_dim * 8 bytes
+            # 3. Probabilities: n_classes * batch_size * 8 bytes
+            # 4. Intermediate tensors: additional 20% overhead
 
-            # If weight_updater exists and has dtype info, use it
-            if hasattr(self, 'weight_updater') and hasattr(self.weight_updater, 'dtype'):
-                if self.weight_updater.dtype == torch.float64:
-                    dtype_size = 8
-                if hasattr(self.weight_updater, 'n_bins_per_dim'):
-                    n_bins = self.weight_updater.n_bins_per_dim
-
-            # UPDATED Memory estimation per feature pair
             memory_per_pair = (
-                (batch_size * 2 * dtype_size) +  # Feature data
-                (n_classes * n_bins * n_bins * dtype_size) +  # Bin weights
-                (n_classes * batch_size * dtype_size) +  # Probabilities
-                (0.2 * (batch_size * 2 * dtype_size))  # Overhead
+                (batch_size * 2 * 8) +  # Feature data
+                (n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8) +  # Bin weights
+                (n_classes * batch_size * 8) +  # Probabilities
+                (0.2 * (batch_size * 2 * 8))  # Overhead
             )
 
-            # Calculate maximum possible batch size (same algorithm as original)
+            # Calculate maximum possible batch size
             max_batch_size = int(available_memory / memory_per_pair)
 
-            # Apply reasonable bounds (same as original)
+            # Apply reasonable bounds
             min_batch_size = 4   # Minimum for efficiency
             max_batch_size = min(max_batch_size, 512)  # Upper limit for stability
 
             optimal_batch_size = max(min_batch_size, min(max_batch_size, n_pairs))
 
-            # Print memory info (enhanced debug)
+            # Print memory info (debug)
             if hasattr(self, '_last_feature_batch_size') and self._last_feature_batch_size != optimal_batch_size:
                 print(f"{Colors.CYAN}[MEMORY] Feature batch size: {optimal_batch_size} "
                       f"(available: {available_memory/1024**3:.1f}GB, "
-                      f"per pair: {memory_per_pair/1024**2:.1f}MB, "
-                      f"total pairs: {n_pairs}){Colors.ENDC}")
+                      f"per pair: {memory_per_pair/1024**2:.1f}MB){Colors.ENDC}")
 
             self._last_feature_batch_size = optimal_batch_size
             return optimal_batch_size
 
         except Exception as e:
-            # Fallback to conservative default (same as original)
+            # Fallback to conservative default
             print(f"{Colors.YELLOW}[WARNING] Memory detection failed, using default feature batch size: {e}{Colors.ENDC}")
             return min(64, n_pairs)
 
@@ -8545,17 +8331,17 @@ class DBNN(GPUDBNN):
 #-----------------------------------------------------------------------------Bin model ---------------------------
 
     def _compute_pairwise_likelihood_parallel(self, dataset: torch.Tensor, labels: torch.Tensor, feature_dims: int):
-        """Optimized vectorized pairwise likelihood computation with intelligent memory management"""
-        DEBUG.log("Starting optimized _compute_pairwise_likelihood_parallel with memory management")
+        """Optimized vectorized pairwise likelihood computation with serialization-safe bin tracking"""
+        DEBUG.log("Starting optimized _compute_pairwise_likelihood_parallel")
 
-        # Initialize class-bin tracking structure - PRESERVED: No lambda
+        # Initialize class-bin tracking structure - FIXED: No lambda
         self.class_bins = defaultdict(dict)  # Use regular dict instead of defaultdict
 
-        # Ensure tensors are contiguous - PRESERVED
+        # Ensure tensors are contiguous
         dataset = dataset.contiguous()
         labels = labels.contiguous()
 
-        # Validate class consistency - PRESERVED
+        # Validate class consistency
         unique_classes, class_counts = torch.unique(labels, return_counts=True)
         n_classes = len(unique_classes)
         n_samples = len(dataset)
@@ -8563,27 +8349,26 @@ class DBNN(GPUDBNN):
         if n_classes != len(self.label_encoder.classes_):
             raise ValueError("Class count mismatch between data and label encoder")
 
-        # Get bin configuration - PRESERVED
+        # Get bin configuration
         bin_sizes = self.config.get('likelihood_config', {}).get('bin_sizes', [128])
         n_bins = bin_sizes[0] if len(bin_sizes) == 1 else max(bin_sizes)
         self.n_bins_per_dim = n_bins
 
-        # Initialize weights - PRESERVED
+        # Initialize weights
         self._initialize_bin_weights()
 
         all_bin_counts = []
         all_bin_probs = []
 
-        # INTELLIGENT BATCHING: Calculate optimal pair batch size based on memory
+        # Process pairs in optimized batches
         n_pairs = len(self.feature_pairs)
-        pair_batch_size = self._compute_pair_batch_size(n_samples, n_classes, n_pairs)
-        DEBUG.log(f"Using intelligent pair batch size: {pair_batch_size} for {n_pairs} pairs")
+        pair_batch_size = min(20, n_pairs)
 
         with tqdm(total=n_pairs, desc="Pairwise likelihood", leave=False) as pbar:
             for batch_start in range(0, n_pairs, pair_batch_size):
                 batch_end = min(batch_start + pair_batch_size, n_pairs)
 
-                # Process batch of pairs with vectorized bin tracking - PRESERVED
+                # Process batch of pairs with vectorized bin tracking
                 batch_counts, batch_probs = self._process_pair_batch_vectorized(
                     dataset, labels, unique_classes, batch_start, batch_end, n_bins, n_classes
                 )
@@ -8592,13 +8377,10 @@ class DBNN(GPUDBNN):
                 all_bin_probs.extend(batch_probs)
                 pbar.update(batch_end - batch_start)
 
-                # ENHANCED Memory cleanup with synchronization
-                del batch_counts, batch_probs
+                # Memory cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    torch.cuda.synchronize()  # Ensure cleanup completes
 
-        # PRESERVED return structure exactly as original
         return {
             'bin_counts': all_bin_counts,
             'bin_probs': all_bin_probs,
@@ -8608,80 +8390,56 @@ class DBNN(GPUDBNN):
         }
 
     def _process_pair_batch_vectorized(self, dataset, labels, unique_classes, batch_start, batch_end, n_bins, n_classes):
-        """Vectorized batch processing with optimized bin tracking and memory management"""
+        """Vectorized batch processing with optimized bin tracking"""
         batch_counts = []
         batch_probs = []
-
-        # Calculate sample batch size for memory optimization
-        n_samples = len(dataset)
-        sample_batch_size = self._compute_sample_batch_size(n_samples, batch_end - batch_start, n_classes)
-
-        DEBUG.log(f"Processing pair batch {batch_start}-{batch_end} with sample batch size: {sample_batch_size}")
 
         for pair_idx in range(batch_start, batch_end):
             f1, f2 = self.feature_pairs[pair_idx]
             edges = self.bin_edges[pair_idx]
 
-            # Initialize counts for all classes - PRESERVED dtype and device
+            # Initialize counts for all classes
             pair_counts = torch.zeros((n_classes, n_bins, n_bins),
                                     dtype=torch.float64, device=self.device)
 
-            # MEMORY-OPTIMIZED: Process samples in batches for this feature pair
-            for sample_start in range(0, n_samples, sample_batch_size):
-                sample_end = min(sample_start + sample_batch_size, n_samples)
-                batch_samples = dataset[sample_start:sample_end]
-                batch_labels = labels[sample_start:sample_end]
+            # Vectorized processing for all classes
+            for cls_idx, cls in enumerate(unique_classes):
+                cls_mask = (labels == cls)
+                if not torch.any(cls_mask):
+                    continue
 
-                # Vectorized processing for all classes - PRESERVED algorithm
-                for cls_idx, cls in enumerate(unique_classes):
-                    cls_mask = (batch_labels == cls)
-                    if not torch.any(cls_mask):
-                        continue
+                data = dataset[cls_mask][:, [f1, f2]].contiguous()
 
-                    data = batch_samples[cls_mask][:, [f1, f2]].contiguous()
+                # Get bin indices for this class - VECTORIZED
+                indices_0 = torch.bucketize(data[:, 0], edges[0]).clamp(0, n_bins-1)
+                indices_1 = torch.bucketize(data[:, 1], edges[1]).clamp(0, n_bins-1)
 
-                    # Get bin indices for this class - VECTORIZED (PRESERVED)
-                    indices_0 = torch.bucketize(data[:, 0], edges[0]).clamp(0, n_bins-1)
-                    indices_1 = torch.bucketize(data[:, 1], edges[1]).clamp(0, n_bins-1)
+                # VECTORIZED bin tracking - no lambda, no individual iterations
+                unique_bins = torch.unique(torch.stack([indices_0, indices_1], dim=1), dim=0)
 
-                    # VECTORIZED bin tracking - no lambda, no individual iterations (PRESERVED)
-                    unique_bins = torch.unique(torch.stack([indices_0, indices_1], dim=1), dim=0)
+                # Store bins using regular dict (serialization-safe)
+                cls_key = cls.item()
+                pair_key = pair_idx
+                if cls_key not in self.class_bins:
+                    self.class_bins[cls_key] = {}
+                if pair_key not in self.class_bins[cls_key]:
+                    self.class_bins[cls_key][pair_key] = set()
 
-                    # Store bins using regular dict (serialization-safe) - PRESERVED
-                    cls_key = cls.item()
-                    pair_key = pair_idx
-                    if cls_key not in self.class_bins:
-                        self.class_bins[cls_key] = {}
-                    if pair_key not in self.class_bins[cls_key]:
-                        self.class_bins[cls_key][pair_key] = set()
+                # Convert to Python set in one go (minimal overhead)
+                bin_tuples = {tuple(bin_arr.tolist()) for bin_arr in unique_bins}
+                self.class_bins[cls_key][pair_key].update(bin_tuples)
 
-                    # Convert to Python set in one go (minimal overhead) - PRESERVED
-                    bin_tuples = {tuple(bin_arr.tolist()) for bin_arr in unique_bins}
-                    self.class_bins[cls_key][pair_key].update(bin_tuples)
+                # Vectorized counting (unchanged - optimal)
+                flat_indices = indices_0 * n_bins + indices_1
+                counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
+                pair_counts[cls_idx] = counts.view(n_bins, n_bins).float()
 
-                    # Vectorized counting (unchanged - optimal) - PRESERVED
-                    flat_indices = indices_0 * n_bins + indices_1
-                    counts = torch.bincount(flat_indices, minlength=n_bins*n_bins)
-
-                    # Accumulate counts across sample batches
-                    pair_counts[cls_idx] += counts.view(n_bins, n_bins).float()
-
-                # Cleanup sample batch data
-                del batch_samples, batch_labels, data
-                if torch.cuda.is_available() and sample_end < n_samples:
-                    torch.cuda.empty_cache()
-
-            # Laplace smoothing and probability calculation - PRESERVED exactly
+            # Laplace smoothing and probability calculation
             smoothed = pair_counts + 1.0
             probs = smoothed / (smoothed.sum(dim=(1,2), keepdim=True) + 1e-8)
 
             batch_counts.append(smoothed)
             batch_probs.append(probs)
-
-            # Cleanup pair-specific data
-            del pair_counts, smoothed, probs
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
         return batch_counts, batch_probs
 
@@ -9143,6 +8901,7 @@ class DBNN(GPUDBNN):
 
         return bin_edges
 
+
 #---------------------------------------------------------Save Last data -------------------------
     def load_last_known_split(self):
         """Load the last known split using stored original indices"""
@@ -9195,86 +8954,7 @@ class DBNN(GPUDBNN):
         test_df.to_csv(f'data/{dataset_name}/Last_testing.csv', index=False)
 
         print(f"\033[KSaved split with {len(train_indices)} train, {len(test_indices)} test samples")
-#---------------Memory Management --------------------
-
-    def _compute_pair_batch_size(self, n_samples: int, n_classes: int, n_pairs: int) -> int:
-        """Compute optimal pair batch size based on available memory while preserving algorithm"""
-
-        if not torch.cuda.is_available():
-            return min(20, n_pairs)  # PRESERVED original CPU batch size
-
-        try:
-            # Calculate available memory conservatively
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            allocated = torch.cuda.memory_allocated()
-            available_memory = total_memory - allocated
-            safe_memory = available_memory * 0.3  # Use only 30% for safety
-
-            # Memory calculation for one feature pair (PRESERVING original data types)
-            # Based on original algorithm's memory requirements:
-            memory_per_pair = (
-                n_samples * 2 * 8 +  # Feature data: float64 (PRESERVED original dtype)
-                n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8 +  # pair_counts: float64
-                n_classes * self.n_bins_per_dim * self.n_bins_per_dim * 8 +  # smoothed: float64
-                n_samples * 4 +  # Intermediate indices and masks
-                (0.2 * n_samples * 2 * 8)  # Overhead (20%)
-            )
-
-            max_batch_size = int(safe_memory / memory_per_pair)
-
-            # Apply reasonable bounds (similar to original but more conservative)
-            min_batch_size = 5   # Minimum for efficiency
-            max_batch_size = min(max_batch_size, 50, n_pairs)  # More conservative than original
-
-            optimal_batch_size = max(min_batch_size, max_batch_size)
-
-            DEBUG.log(f"Memory-aware pair batch: {optimal_batch_size} (available: {safe_memory/1024**3:.2f}GB)")
-            return optimal_batch_size
-
-        except Exception as e:
-            DEBUG.log(f"Memory detection failed, using conservative pair batch: {e}")
-            return min(10, n_pairs)  # More conservative fallback
-
-    def _compute_sample_batch_size(self, n_samples: int, n_pairs_in_batch: int, n_classes: int) -> int:
-        """Compute optimal sample batch size for memory-constrained processing"""
-
-        if not torch.cuda.is_available():
-            return min(1000, n_samples)  # Reasonable CPU batch size
-
-        try:
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            allocated = torch.cuda.memory_allocated()
-            available_memory = total_memory - allocated
-            safe_memory = available_memory * 0.4  # Use 40% for sample processing
-
-            # Memory for processing one sample across multiple pairs
-            memory_per_sample = (
-                n_pairs_in_batch * 2 * 8 +  # Feature data per pair: float64
-                n_pairs_in_batch * n_classes * 4 +  # Class masks and indices
-                n_pairs_in_batch * self.n_bins_per_dim * self.n_bins_per_dim * 8 / n_samples +  # Count accumulation
-                (0.3 * n_pairs_in_batch * 2 * 8)  # Overhead
-            )
-
-            max_batch_size = int(safe_memory / memory_per_sample)
-
-            # Apply bounds
-            min_batch_size = 100  # Minimum for efficiency
-            max_batch_size = min(max_batch_size, 5000, n_samples)
-
-            # Adjust based on number of pairs in current batch
-            if n_pairs_in_batch > 10:
-                max_batch_size = min(max_batch_size, 2000)
-            if n_pairs_in_batch > 20:
-                max_batch_size = min(max_batch_size, 1000)
-
-            optimal_batch_size = max(min_batch_size, max_batch_size)
-
-            DEBUG.log(f"Memory-aware sample batch: {optimal_batch_size} for {n_pairs_in_batch} pairs")
-            return optimal_batch_size
-
-        except Exception as e:
-            DEBUG.log(f"Sample batch memory detection failed: {e}")
-            return min(1000, n_samples)
+#---------------Predcit New --------------------
 
 
 #-------------Predict New -----------------------
@@ -11513,8 +11193,6 @@ class DBNN(GPUDBNN):
             self.initial_samples = 50
         if not hasattr(self, 'max_samples_per_round'):
             self.max_samples_per_round = 500
-
-
 #----------DBNN Prediction Functions  Ends-----New Tensor Visualisation Starts--------------
 
 
@@ -12334,310 +12012,6 @@ class UnifiedDBNNVisualizer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def create_feature_space_visualization(self, training_history, feature_names):
-        """Create feature space visualization"""
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            import numpy as np
-
-            if not training_history:
-                return None
-
-            # Use the latest snapshot
-            latest_snapshot = training_history[-1]
-            features = latest_snapshot.get('features')
-            targets = latest_snapshot.get('targets')
-
-            if features is None or targets is None:
-                return None
-
-            # Create subplots
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=[
-                    'Feature Space - PCA Projection',
-                    'Feature Distributions',
-                    'Class Separation',
-                    'Feature Correlations'
-                ]
-            )
-
-            # Plot 1: PCA projection
-            from sklearn.decomposition import PCA
-            pca = PCA(n_components=2)
-            features_2d = pca.fit_transform(features)
-
-            unique_classes = np.unique(targets)
-            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-
-            for i, cls in enumerate(unique_classes):
-                class_mask = targets == cls
-                fig.add_trace(go.Scatter(
-                    x=features_2d[class_mask, 0],
-                    y=features_2d[class_mask, 1],
-                    mode='markers',
-                    marker=dict(color=colors[i % len(colors)], size=8),
-                    name=f'Class {cls}',
-                    showlegend=True
-                ), row=1, col=1)
-
-            # Plot 2: Feature distributions
-            n_features = min(4, features.shape[1])
-            for i in range(n_features):
-                fig.add_trace(go.Histogram(
-                    x=features[:, i],
-                    name=f'Feature {i+1}',
-                    opacity=0.7,
-                    showlegend=False
-                ), row=1, col=2)
-
-            # Plot 3: Class separation
-            class_means = []
-            for cls in unique_classes:
-                class_mask = targets == cls
-                class_means.append(np.mean(features[class_mask], axis=0))
-
-            class_means = np.array(class_means)
-            fig.add_trace(go.Heatmap(
-                z=class_means.T,
-                x=[f'Class {cls}' for cls in unique_classes],
-                y=[f'Feature {i+1}' for i in range(class_means.shape[1])],
-                colorscale='Viridis',
-                showscale=True
-            ), row=2, col=1)
-
-            # Plot 4: Feature correlations
-            corr_matrix = np.corrcoef(features.T)
-            fig.add_trace(go.Heatmap(
-                z=corr_matrix,
-                x=[f'F{i+1}' for i in range(features.shape[1])],
-                y=[f'F{i+1}' for i in range(features.shape[1])],
-                colorscale='RdBu',
-                zmid=0,
-                showscale=True
-            ), row=2, col=2)
-
-            fig.update_layout(
-                title='Feature Space Analysis',
-                height=800,
-                showlegend=True
-            )
-
-            return fig
-
-        except Exception as e:
-            print(f"Error creating feature space visualization: {e}")
-            return None
-
-    def create_performance_dashboard(self, training_history, round_stats):
-        """Create comprehensive performance dashboard"""
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            import numpy as np
-
-            if not training_history:
-                return self._create_empty_visualization("Performance", "No training data available")
-
-            # Extract metrics from training history
-            rounds = [s.get('round', i) for i, s in enumerate(training_history)]
-            accuracies = [s.get('accuracy', 0) for s in training_history]
-            losses = [s.get('loss', 0) for s in training_history if 'loss' in s]
-
-            # Create dashboard
-            fig = make_subplots(
-                rows=2, cols=3,
-                specs=[
-                    [{"type": "xy", "colspan": 2}, None, {"type": "indicator"}],
-                    [{"type": "xy"}, {"type": "xy"}, {"type": "xy"}]
-                ],
-                subplot_titles=[
-                    'Accuracy Progression',
-                    'Current Performance',
-                    'Loss Trend',
-                    'Training Metrics',
-                    'Convergence Analysis'
-                ]
-            )
-
-            # Plot 1: Accuracy progression
-            fig.add_trace(go.Scatter(
-                x=rounds, y=accuracies,
-                mode='lines+markers',
-                name='Accuracy',
-                line=dict(color='blue', width=3)
-            ), row=1, col=1)
-
-            # Plot 2: Performance indicator
-            current_acc = accuracies[-1] if accuracies else 0
-            fig.add_trace(go.Indicator(
-                mode="number+delta",
-                value=current_acc,
-                number={'suffix': "%", 'font': {'size': 40}},
-                delta={'reference': accuracies[0] if accuracies else 0},
-                title={"text": "Current Accuracy"},
-                domain={'row': 1, 'col': 3}
-            ), row=1, col=3)
-
-            # Plot 3: Loss trend (if available)
-            if losses:
-                fig.add_trace(go.Scatter(
-                    x=rounds[:len(losses)], y=losses,
-                    mode='lines',
-                    name='Loss',
-                    line=dict(color='red', width=2)
-                ), row=2, col=1)
-
-            # Plot 4: Training metrics
-            if round_stats and 'class_distribution' in round_stats:
-                class_dist = round_stats['class_distribution']
-                fig.add_trace(go.Bar(
-                    x=list(class_dist.keys()),
-                    y=list(class_dist.values()),
-                    name='Class Distribution'
-                ), row=2, col=2)
-
-            # Plot 5: Convergence analysis
-            if len(accuracies) > 10:
-                # Calculate moving average
-                window = min(5, len(accuracies) // 2)
-                moving_avg = np.convolve(accuracies, np.ones(window)/window, mode='valid')
-                fig.add_trace(go.Scatter(
-                    x=rounds[window-1:],
-                    y=moving_avg,
-                    mode='lines',
-                    name=f'Moving Avg (window={window})',
-                    line=dict(color='green', width=2)
-                ), row=2, col=3)
-
-            fig.update_layout(
-                title='DBNN Performance Dashboard',
-                height=600,
-                showlegend=True
-            )
-
-            return fig
-
-        except Exception as e:
-            print(f"Error creating performance dashboard: {e}")
-            return None
-
-    def create_orthogonality_analysis(self, training_history, round_stats):
-        """Create orthogonality analysis visualization"""
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-            import numpy as np
-
-            if not training_history:
-                return self._create_empty_visualization("Orthogonality", "No training data available")
-
-            # Extract orthogonality data from history
-            ortho_scores = []
-            cancellation_effs = []
-            vector_sums = []
-            rounds = []
-
-            for snapshot in training_history:
-                if 'orthogonality_score' in snapshot:
-                    ortho_scores.append(snapshot['orthogonality_score'])
-                    cancellation_effs.append(snapshot.get('cancellation_efficiency', 0))
-                    vector_sums.append(snapshot.get('vector_sum_magnitude', 0))
-                    rounds.append(snapshot.get('round', len(rounds)))
-
-            if not ortho_scores:
-                return self._create_empty_visualization("Orthogonality", "No orthogonality data available")
-
-            # Create orthogonality dashboard
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=[
-                    'Orthogonality Score Evolution',
-                    'Cancellation Efficiency',
-                    'Vector Sum Magnitude',
-                    'Orthogonality Quality'
-                ]
-            )
-
-            # Plot 1: Orthogonality score
-            fig.add_trace(go.Scatter(
-                x=rounds, y=ortho_scores,
-                mode='lines+markers',
-                name='Orthogonality Score',
-                line=dict(color='blue', width=3)
-            ), row=1, col=1)
-
-            # Plot 2: Cancellation efficiency
-            fig.add_trace(go.Scatter(
-                x=rounds, y=cancellation_effs,
-                mode='lines+markers',
-                name='Cancellation Efficiency',
-                line=dict(color='green', width=3)
-            ), row=1, col=2)
-
-            # Plot 3: Vector sum magnitude (log scale)
-            vector_sums_np = np.array(vector_sums)
-            if np.any(vector_sums_np > 0):
-                fig.add_trace(go.Scatter(
-                    x=rounds, y=vector_sums_np,
-                    mode='lines+markers',
-                    name='Vector Sum Magnitude',
-                    line=dict(color='red', width=3)
-                ), row=2, col=1)
-
-            # Plot 4: Orthogonality quality indicator
-            current_ortho = ortho_scores[-1] if ortho_scores else 1.0
-            fig.add_trace(go.Indicator(
-                mode="number",
-                value=current_ortho,
-                number={'font': {'size': 30}},
-                title={"text": "Current Ortho Score"},
-                domain={'row': 2, 'col': 2},
-                gauge={
-                    'axis': {'range': [0, 1]},
-                    'bar': {'color': "green" if current_ortho < 0.1 else "yellow" if current_ortho < 0.3 else "red"},
-                    'steps': [
-                        {'range': [0, 0.1], 'color': "lightgreen"},
-                        {'range': [0.1, 0.3], 'color': "lightyellow"},
-                        {'range': [0.3, 1], 'color': "lightcoral"}
-                    ]
-                }
-            ), row=2, col=2)
-
-            fig.update_layout(
-                title='Tensor Orthogonality Analysis',
-                height=600,
-                showlegend=True
-            )
-
-            return fig
-
-        except Exception as e:
-            print(f"Error creating orthogonality analysis: {e}")
-            return None
-
-    def create_geometric_tensor_analysis(self):
-        """Advanced geometric analysis of DBNN tensors"""
-        print("📊 Creating geometric tensor analysis...")
-
-        try:
-            # Extract tensor information from DBNN
-            n_classes = len(self.dbnn.label_encoder.classes_)
-            n_pairs = len(self.dbnn.feature_pairs) if hasattr(self.dbnn, 'feature_pairs') else 0
-            n_bins = getattr(self.dbnn, 'n_bins_per_dim', 128)
-
-            if n_pairs == 0:
-                print("⚠️  No feature pairs available for geometric analysis")
-                return
-
-            # Create tensor evolution visualization
-            self._create_tensor_orthogonality_analysis(n_classes, n_pairs, n_bins)
-            self._create_class_separation_analysis()
-
-        except Exception as e:
-            print(f"⚠️  Geometric tensor analysis skipped: {str(e)}")
-
     def _get_cached_memory_info(self):
         """Get memory information with caching to avoid file descriptor exhaustion"""
         if not hasattr(self, '_cached_memory_info') or self._cached_memory_info is None:
@@ -12758,6 +12132,27 @@ class UnifiedDBNNVisualizer:
         fig.update_layout(height=800, title_text="Performance Analysis Dashboard",
                          showlegend=True)
         fig.write_html(self.subdirs['interactive'] / 'performance_dashboard.html')
+
+    def _create_geometric_tensor_analysis(self):
+        """Advanced geometric analysis of DBNN tensors"""
+        print("📊 Creating geometric tensor analysis...")
+
+        try:
+            # Extract tensor information from DBNN
+            n_classes = len(self.dbnn.label_encoder.classes_)
+            n_pairs = len(self.dbnn.feature_pairs) if hasattr(self.dbnn, 'feature_pairs') else 0
+            n_bins = getattr(self.dbnn, 'n_bins_per_dim', 128)
+
+            if n_pairs == 0:
+                print("⚠️  No feature pairs available for geometric analysis")
+                return
+
+            # Create tensor evolution visualization
+            self._create_tensor_orthogonality_analysis(n_classes, n_pairs, n_bins)
+            self._create_class_separation_analysis()
+
+        except Exception as e:
+            print(f"⚠️  Geometric tensor analysis skipped: {str(e)}")
 
     def _create_tensor_orthogonality_analysis(self, n_classes, n_pairs, n_bins):
         """Analyze tensor orthogonality evolution"""
