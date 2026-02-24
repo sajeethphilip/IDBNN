@@ -24,7 +24,7 @@ To train/predict using adbnn  (For Difference Boosting Neural Network
                         required=False, help="Mode to run the network: train, train_predict, predict, or invertDBNN.")
 '--interactive', action='store_true', help="Enable interactive mode to modify settings.")
 
-
+ python cdbnn.py --mode train --data_name Galaxies --data_type custom --input_path Data/Galaxies/
 
 ```
 ```mermaid
