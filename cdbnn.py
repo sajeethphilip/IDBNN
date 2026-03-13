@@ -1,4 +1,4 @@
-
+# updated March 13 2026
 # Fully functional updated version as of Nov 22 2025
 #Working, fully functional with predcition 30/March/2025
 #Revisions on Mar30 2025 Stable version 8:56 AM
@@ -1213,7 +1213,51 @@ class PredictionManager:
 
     def _generate_batch_heatmaps(self, batch_tensor: torch.Tensor, batch_labels: torch.Tensor,
                                batch_filenames: List[str], output: Dict[str, torch.Tensor]):
-        """Generate heatmaps for a batch of images"""
+        """Generate heatmaps for a batch of images - only used during training where labels exist"""
+        try:
+            if not hasattr(self.model, 'attention_maps') or not self.model.attention_maps:
+                return
+
+            # Create heatmap directory
+            dataset_name = self.config['dataset']['name'].lower()
+            heatmap_dir = os.path.join('data', dataset_name, 'training_heatmaps')
+            os.makedirs(heatmap_dir, exist_ok=True)
+
+            for i in range(len(batch_tensor)):
+                try:
+                    # Get attention maps for this sample
+                    attention_key = list(self.model.attention_maps.keys())[0]
+                    attention_map = self.model.attention_maps[attention_key][i].mean(dim=0).cpu()
+
+                    # Convert to numpy and resize to match input
+                    attention_np = attention_map.numpy()
+                    if attention_np.shape != batch_tensor[i].shape[1:]:
+                        import cv2
+                        attention_np = cv2.resize(attention_np, batch_tensor[i].shape[1:][::-1])
+
+                    # Normalize and create heatmap
+                    attention_np = (attention_np - attention_np.min()) / (attention_np.max() - attention_np.min() + 1e-8)
+
+                    # Save heatmap
+                    filename = batch_filenames[i].replace('.', '_')
+                    heatmap_path = os.path.join(heatmap_dir, f"{filename}_heatmap.png")
+
+                    import matplotlib.pyplot as plt
+                    plt.figure(figsize=(8, 6))
+                    plt.imshow(attention_np, cmap='hot')
+                    plt.colorbar()
+                    plt.title(f"Attention Heatmap: {batch_filenames[i]}")
+                    plt.savefig(heatmap_path, bbox_inches='tight', dpi=150)
+                    plt.close()
+
+                except Exception as e:
+                    logger.warning(f"Could not generate heatmap for {batch_filenames[i]}: {str(e)}")
+
+        except Exception as e:
+            logger.warning(f"Batch heatmap generation failed: {str(e)}")
+
+    def _generate_prediction_heatmaps(self, batch_tensor: torch.Tensor, batch_filenames: List[str], output: Dict[str, torch.Tensor]):
+        """Generate heatmaps for a batch of images during prediction (without labels)"""
         try:
             if not hasattr(self.model, 'attention_maps') or not self.model.attention_maps:
                 return
@@ -1397,7 +1441,14 @@ class PredictionManager:
 
         state_dict = checkpoint['model_states'][state_key]['best']['state_dict']
 
-        # FIX: Handle different return types of load_state_dict
+        # FIX: Handle classifier state dict separately to avoid architecture mismatches
+        if 'classifier_state' in state_dict:
+            # Save classifier state for later loading
+            classifier_state = state_dict.pop('classifier_state')
+        else:
+            classifier_state = None
+
+        # Load main model state with strict=False to ignore missing/unexpected keys
         try:
             # Try the modern approach that returns NamedTuple
             load_result = model.load_state_dict(state_dict, strict=False)
@@ -1409,6 +1460,17 @@ class PredictionManager:
             # Fallback for older PyTorch versions that return None
             model.load_state_dict(state_dict, strict=False)
             logger.info("Model state dict loaded (legacy PyTorch version)")
+
+        # Load classifier state if it exists and the model has a classifier
+        if classifier_state is not None and hasattr(model, 'classifier'):
+            try:
+                # Try to load classifier state
+                model.classifier.load_state_dict(classifier_state, strict=False)
+                logger.info("Loaded classifier state dict")
+            except Exception as e:
+                logger.warning(f"Could not load classifier state dict: {str(e)}. Using randomly initialized classifier.")
+        elif hasattr(model, 'classifier'):
+            logger.info("No classifier state found in checkpoint, using randomly initialized classifier")
 
         # Load feature selection state
         config_state = checkpoint['model_states'][state_key]['best']['config']
@@ -1472,7 +1534,6 @@ class PredictionManager:
         logger.info(f"  - State key: {state_key}")
 
         return model
-
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = True):
         """Predict using frozen feature selection with automatic target label preservation"""
         # Get image files with full paths and class labels from subfolders
@@ -1511,7 +1572,6 @@ class PredictionManager:
             'cluster_confidence': []
         }
 
-
         self.model.eval()
 
         # Register attention hooks if heatmaps are requested
@@ -1521,10 +1581,11 @@ class PredictionManager:
 
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Predicting")):
-                # CRITICAL: Handle different dataset return types (from original)
+                # CRITICAL: Handle different dataset return types
                 if isinstance(batch_data, (list, tuple)):
                     batch_tensor = batch_data[0]
-                    batch_labels = batch_data[1] if len(batch_data) > 1 else None
+                    # For SimpleImageDataset, there are no labels
+                    batch_labels = None
                 elif isinstance(batch_data, dict):
                     batch_tensor = batch_data.get('window', batch_data.get('image'))
                     batch_labels = batch_data.get('labels', None)
@@ -1544,13 +1605,12 @@ class PredictionManager:
                 else:
                     embedding = output.get('embedding', output[0] if isinstance(output, tuple) else output)
 
-                # CRITICAL: Always use frozen features for consistency (from original)
+                # CRITICAL: Always use frozen features for consistency
                 if hasattr(self.model, '_is_feature_selection_frozen') and self.model._is_feature_selection_frozen:
                     features = self.model.get_frozen_features(embedding).detach().cpu().numpy()
                     logger.debug("Using frozen feature selection for prediction")
                 else:
                     features = embedding.detach().cpu().numpy()
-                    #logger.warning("No frozen feature selection available, using all features")
 
                 # CRITICAL: Validate feature dimensions match expected
                 if features.shape[1] != self.actual_feature_dims:
@@ -1566,7 +1626,7 @@ class PredictionManager:
                         features = padded_features
                         logger.info(f"Padded features to {self.actual_feature_dims} dimensions")
 
-                # CRITICAL: Store predictions with proper batch indexing (from original)
+                # CRITICAL: Store predictions with proper batch indexing
                 batch_size_actual = features.shape[0]
                 start_idx = batch_idx * batch_size
 
@@ -1586,7 +1646,7 @@ class PredictionManager:
                 all_predictions['filepath'].extend(batch_full_paths)
                 all_predictions['features_phase1'].extend(features)
 
-                # CRITICAL: Store additional outputs if available (from original)
+                # CRITICAL: Store additional outputs if available
                 if 'class_predictions' in output:
                     all_predictions['class_predictions'].extend(output['class_predictions'].cpu().numpy())
 
@@ -1599,19 +1659,9 @@ class PredictionManager:
                 if 'cluster_confidence' in output:
                     all_predictions['cluster_confidence'].extend(output['cluster_confidence'].cpu().numpy())
 
-                # NEW: Generate batch-level heatmaps if requested
-                if generate_heatmaps and batch_labels is not None:
-                    self._generate_batch_heatmaps(batch_tensor, batch_labels, batch_filenames, output)
-
-        # NEW: Generate comprehensive classwise heatmaps if requested
-        if generate_heatmaps:
-            logger.info("Generating comprehensive attention heatmaps...")
-            try:
-                self.generate_classwise_attention_heatmaps(data_path)
-                logger.info("Attention heatmaps generated successfully")
-            except Exception as e:
-                logger.error(f"Failed to generate heatmaps: {str(e)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
+                # FIXED: Generate batch-level heatmaps using prediction-specific method
+                if generate_heatmaps:
+                    self._generate_prediction_heatmaps(batch_tensor, batch_filenames, output)
 
         # NEW: Remove attention hooks if they were registered
         if generate_heatmaps and hasattr(self.model, 'remove_attention_hooks'):
@@ -1621,7 +1671,7 @@ class PredictionManager:
         if output_csv:
             self._save_predictions(all_predictions, output_csv)
 
-            # CRITICAL: Verify consistency if training files exist (from original)
+            # CRITICAL: Verify consistency if training files exist
             dataset_name = self.config['dataset']['name'].lower()
             train_csv = f"data/{dataset_name}/{dataset_name}_train.csv"
             test_csv = f"data/{dataset_name}/{dataset_name}_test.csv"
@@ -3594,7 +3644,13 @@ class BaseAutoencoder(nn.Module):
         # Load main model state
         missing_keys, unexpected_keys = super().load_state_dict(state_dict, strict=False)
 
-        # Load clustering parameters
+        # Log missing/unexpected keys for debugging
+        if missing_keys:
+            logger.debug(f"Missing keys during model loading: {missing_keys}")
+        if unexpected_keys:
+            logger.debug(f"Unexpected keys during model loading: {unexpected_keys}")
+
+        # Load clustering parameters if they exist in state_dict
         if 'cluster_centers' in state_dict:
             if not hasattr(self, 'cluster_centers'):
                 self.register_buffer('cluster_centers', state_dict['cluster_centers'])
@@ -3605,22 +3661,29 @@ class BaseAutoencoder(nn.Module):
         if 'clustering_temperature' in state_dict:
             temp = state_dict['clustering_temperature']
             if not isinstance(temp, torch.Tensor):
-                temp = torch.tensor([float(temp)], dtype=torch.float32,device=self.device)
+                temp = torch.tensor([float(temp)], dtype=torch.float32, device=self.device)
 
             if not hasattr(self, 'clustering_temperature'):
                 self.register_buffer('clustering_temperature', temp)
             else:
                 self.clustering_temperature.data.copy_(temp)
 
-        # Load classifier if it exists
-        if 'classifier_state' in state_dict and hasattr(self, 'classifier'):
-            self.classifier.load_state_dict(state_dict['classifier_state'])
+        # Load classifier if it exists and the state dict has classifier_state
+        if hasattr(self, 'classifier') and hasattr(state_dict, 'get'):
+            classifier_state = state_dict.get('classifier_state')
+            if classifier_state is not None:
+                try:
+                    self.classifier.load_state_dict(classifier_state, strict=False)
+                    logger.info("Loaded classifier state dict")
+                except Exception as e:
+                    logger.warning(f"Could not load classifier state dict: {str(e)}. Using randomly initialized classifier.")
 
         if strict:
             if missing_keys:
                 raise RuntimeError(f"Missing keys: {missing_keys}")
             if unexpected_keys:
                 raise RuntimeError(f"Unexpected keys: {unexpected_keys}")
+
 #--------------------------
     def set_dataset(self, dataset: Dataset):
         """Store dataset reference"""
