@@ -1342,30 +1342,82 @@ class PredictionManager:
         try:
             df_data = {}
 
+            # Determine the number of samples from features_phase1 if available
+            n_samples = 0
+            if 'features_phase1' in predictions and predictions['features_phase1']:
+                feature_arrays = np.array(predictions['features_phase1'])
+                n_samples = feature_arrays.shape[0]
+
+            if n_samples == 0:
+                # Try to get from other fields
+                for key, values in predictions.items():
+                    if values and isinstance(values, list):
+                        n_samples = len(values)
+                        if n_samples > 0:
+                            break
+
+            if n_samples == 0:
+                logger.warning("No samples to save to CSV")
+                return
+
             # Handle different prediction types
             for key, values in predictions.items():
+                if not values:
+                    continue
+
                 if key == 'features_phase1':
                     # Flatten feature arrays
                     feature_arrays = np.array(values)
-                    for i in range(feature_arrays.shape[1]):
-                        df_data[f'feature_{i}'] = feature_arrays[:, i]
+                    if feature_arrays.shape[0] == n_samples:
+                        for i in range(feature_arrays.shape[1]):
+                            df_data[f'feature_{i}'] = feature_arrays[:, i]
+                    else:
+                        logger.warning(f"features_phase1 has {feature_arrays.shape[0]} samples, expected {n_samples}. Skipping.")
+
                 elif key in ['class_probabilities', 'cluster_confidence']:
                     # Handle probability arrays
                     if values and hasattr(values[0], '__len__'):
                         prob_arrays = np.array(values)
-                        for i in range(prob_arrays.shape[1]):
-                            df_data[f'{key}_{i}'] = prob_arrays[:, i]
+                        if prob_arrays.shape[0] == n_samples:
+                            for i in range(prob_arrays.shape[1]):
+                                df_data[f'{key}_{i}'] = prob_arrays[:, i]
+                        else:
+                            logger.warning(f"{key} has {prob_arrays.shape[0]} samples, expected {n_samples}. Skipping.")
                     else:
-                        df_data[key] = values
+                        # Single value per sample
+                        if len(values) == n_samples:
+                            df_data[key] = values
+                        else:
+                            logger.warning(f"{key} has {len(values)} samples, expected {n_samples}. Skipping.")
                 else:
-                    df_data[key] = values
+                    # Simple list values
+                    if isinstance(values, list) and len(values) == n_samples:
+                        df_data[key] = values
+                    elif isinstance(values, np.ndarray) and values.shape[0] == n_samples:
+                        df_data[key] = values
+                    else:
+                        logger.warning(f"{key} has unexpected format or length, skipping.")
 
-            df = pd.DataFrame(df_data)
-            df.to_csv(output_csv, index=False)
-            logger.info(f"Predictions CSV saved to {output_csv}")
+            # Ensure filepath and target are included if available
+            if 'filepath' in predictions and len(predictions['filepath']) == n_samples:
+                df_data['filepath'] = predictions['filepath']
+
+            if 'target' in predictions and len(predictions['target']) == n_samples:
+                df_data['target'] = predictions['target']
+
+            if 'filename' in predictions and len(predictions['filename']) == n_samples:
+                df_data['filename'] = predictions['filename']
+
+            if df_data:
+                df = pd.DataFrame(df_data)
+                df.to_csv(output_csv, index=False)
+                logger.info(f"Predictions CSV saved to {output_csv} with {len(df)} rows")
+            else:
+                logger.warning("No valid data to save to CSV")
 
         except Exception as e:
             logger.error(f"Error saving predictions CSV to {output_csv}: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def verify_feature_consistency(self, train_csv: str, test_csv: str, pred_csv: str) -> bool:
         """Use the base autoencoder's comprehensive feature consistency verification"""
@@ -1524,7 +1576,9 @@ class PredictionManager:
         else:
             model.set_training_phase(1)
 
+        # CRITICAL: Ensure model is in evaluation mode
         model.eval()
+        logger.info("Model set to evaluation mode after loading")
 
         # Final verification log
         logger.info(f"Model loaded successfully:")
@@ -1534,6 +1588,7 @@ class PredictionManager:
         logger.info(f"  - State key: {state_key}")
 
         return model
+
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128, generate_heatmaps: bool = True):
         """Predict using frozen feature selection with automatic target label preservation"""
         # Get image files with full paths and class labels from subfolders
@@ -1572,7 +1627,22 @@ class PredictionManager:
             'cluster_confidence': []
         }
 
+        # CRITICAL FIX: Force model and ALL submodules to evaluation mode
         self.model.eval()
+
+        # Explicitly set classifier to eval mode if it exists
+        if hasattr(self.model, 'classifier') and self.model.classifier is not None:
+            self.model.classifier.eval()
+            logger.info("Classifier set to evaluation mode")
+
+        # Ensure all BatchNorm layers are in eval mode
+        for module in self.model.modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+                module.eval()
+                module.track_running_stats = True  # Ensure running stats are used
+                logger.debug(f"Set {module.__class__.__name__} to eval mode")
+
+        logger.info("Model and all submodules set to evaluation mode")
 
         # Register attention hooks if heatmaps are requested
         if generate_heatmaps and hasattr(self.model, 'register_attention_hooks'):
@@ -4159,6 +4229,10 @@ class BaseAutoencoder(nn.Module):
                     nn.Linear(hidden_size, self.config['dataset'].get('num_classes', 10))
                 ).to(embeddings.device)
                 self._classifier_initialized = embeddings.shape[1]
+
+                # CRITICAL: Set classifier to eval mode if the main model is in eval mode
+                if not self.training:
+                    self.classifier.eval()
 
             class_logits = self.classifier(embeddings)
             output.update({
@@ -7697,17 +7771,96 @@ class ReconstructionManager:
         pred_path = os.path.join(output_dir, 'predictions.csv')
         pred_dict = {}
 
-        # Add all numeric predictions to CSV
+        # Get the number of samples from the first array that has data
+        n_samples = 0
         for key, value in predictions.items():
-            if isinstance(value, np.ndarray) and value.ndim <= 2:
+            if isinstance(value, np.ndarray) and value.size > 0:
                 if value.ndim == 1:
-                    pred_dict[key] = value
-                else:
-                    for i in range(value.shape[1]):
-                        pred_dict[f'{key}_{i}'] = value[:, i]
+                    n_samples = len(value)
+                elif value.ndim >= 2:
+                    n_samples = value.shape[0]
+                if n_samples > 0:
+                    break
+
+        if n_samples == 0:
+            logger.warning("No valid predictions to save to CSV")
+            return
+
+        # Add all numeric predictions to CSV, ensuring consistent length
+        for key, value in predictions.items():
+            if isinstance(value, np.ndarray) and value.size > 0:
+                if value.ndim == 1:
+                    # Ensure the array has the correct length
+                    if len(value) == n_samples:
+                        pred_dict[key] = value
+                    else:
+                        logger.warning(f"Array {key} has length {len(value)}, expected {n_samples}. Truncating/padding.")
+                        if len(value) > n_samples:
+                            pred_dict[key] = value[:n_samples]
+                        else:
+                            # Pad with NaN or zeros
+                            padded = np.full(n_samples, np.nan)
+                            padded[:len(value)] = value
+                            pred_dict[key] = padded
+                elif value.ndim == 2:
+                    # For 2D arrays, create separate columns for each feature
+                    if value.shape[0] == n_samples:
+                        for i in range(value.shape[1]):
+                            col_name = f'{key}_{i}'
+                            pred_dict[col_name] = value[:, i]
+                    else:
+                        logger.warning(f"2D array {key} has {value.shape[0]} rows, expected {n_samples}. Skipping.")
+                elif value.ndim > 2:
+                    logger.warning(f"Skipping high-dimensional array {key} with shape {value.shape}")
+
+        # Add file paths and targets if they exist in the original predictions
+        if 'filepath' in predictions and len(predictions['filepath']) == n_samples:
+            pred_dict['filepath'] = predictions['filepath']
+
+        if 'target' in predictions and len(predictions['target']) == n_samples:
+            pred_dict['target'] = predictions['target']
+
+        if 'filename' in predictions and len(predictions['filename']) == n_samples:
+            pred_dict['filename'] = predictions['filename']
 
         if pred_dict:
-            pd.DataFrame(pred_dict).to_csv(pred_path, index=False)
+            # Verify all arrays have the same length before creating DataFrame
+            lengths = {}
+            for key, value in pred_dict.items():
+                if isinstance(value, np.ndarray):
+                    lengths[key] = len(value)
+                elif isinstance(value, list):
+                    lengths[key] = len(value)
+
+            if lengths:
+                unique_lengths = set(lengths.values())
+                if len(unique_lengths) > 1:
+                    logger.warning(f"Inconsistent array lengths: {lengths}")
+                    # Find the most common length
+                    from collections import Counter
+                    length_counts = Counter(lengths.values())
+                    target_length = length_counts.most_common(1)[0][0]
+
+                    # Truncate all arrays to the target length
+                    for key in list(pred_dict.keys()):
+                        current_len = len(pred_dict[key]) if isinstance(pred_dict[key], (np.ndarray, list)) else 0
+                        if current_len != target_length:
+                            if current_len > target_length:
+                                if isinstance(pred_dict[key], np.ndarray):
+                                    pred_dict[key] = pred_dict[key][:target_length]
+                                elif isinstance(pred_dict[key], list):
+                                    pred_dict[key] = pred_dict[key][:target_length]
+                            else:
+                                logger.warning(f"Cannot expand array {key} from {current_len} to {target_length}")
+                                # Remove this key as it can't be expanded
+                                del pred_dict[key]
+
+            # Create DataFrame
+            df = pd.DataFrame(pred_dict)
+            df.to_csv(pred_path, index=False)
+            logger.info(f"Predictions saved to {pred_path} with {len(df)} rows")
+        else:
+            logger.warning("No valid predictions to save to CSV")
 
         logger.info(f"Predictions saved to {output_dir}")
 
