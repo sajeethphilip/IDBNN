@@ -11224,22 +11224,34 @@ def main():
             return 0  # User chose to exit
 
         # Set the arguments based on selected dataset
-        if not hasattr(args, 'data_name'):
+        if not hasattr(args, 'data_name') or not args.data_name:
             # Use the exact dataset name without uppercase conversion for custom datasets
             if 'is_local' in dataset_info and dataset_info['is_local']:
                 args.data_name = dataset_info['dataset_name']  # Keep original case
             else:
                 args.data_name = dataset_info['dataset_name_upper']  # Use uppercase for torchvision
-        if not hasattr(args, 'input_path'):
+
+        if not hasattr(args, 'input_path') or not args.input_path:
             args.input_path = dataset_info['input_path']
-        if not hasattr(args, 'data_type'):
+
+        if not hasattr(args, 'data_type') or not args.data_type:
             args.data_type = 'torchvision' if 'is_local' not in dataset_info else 'custom'
+
+        # CRITICAL FIX: Ask for mode if not already set
+        if not hasattr(args, 'mode') or not args.mode:
+            while True:
+                mode = input("\nEnter mode (train/reconstruct/predict) [train]: ").strip().lower() or 'train'
+                if mode in ['train', 'reconstruct', 'predict']:
+                    args.mode = mode
+                    break
+                print("Invalid mode. Please enter 'train', 'reconstruct', or 'predict'")
 
         print(f"\nUsing dataset: {args.data_name}")
         print(f"Data path: {args.input_path}")
+        print(f"Mode: {args.mode}")
 
     # Handle the specific case where data_name is provided but might be invalid
-    if hasattr(args, 'data_name') and args.data_name:
+    elif hasattr(args, 'data_name') and args.data_name:
         # Check if it's a valid torchvision dataset name
         available_datasets = []
         for name in dir(datasets):
@@ -11265,6 +11277,15 @@ def main():
                     args.data_name = dataset_info['dataset_name_upper']  # Use uppercase for torchvision
                 args.input_path = dataset_info['input_path']
                 args.data_type = 'torchvision' if 'is_local' not in dataset_info else 'custom'
+
+                # CRITICAL FIX: Ask for mode if not set
+                if not hasattr(args, 'mode') or not args.mode:
+                    while True:
+                        mode = input("\nEnter mode (train/reconstruct/predict) [train]: ").strip().lower() or 'train'
+                        if mode in ['train', 'reconstruct', 'predict']:
+                            args.mode = mode
+                            break
+                        print("Invalid mode. Please enter 'train', 'reconstruct', or 'predict'")
             else:
                 return 1
 
@@ -11284,165 +11305,175 @@ def main():
             logger.error(f"Failed to download torchvision dataset {args.data_name}: {str(e)}")
             logger.info("Falling back to standard torchvision processing...")
 
+    # CRITICAL FIX: Validate that we have all required arguments before proceeding
+    if not hasattr(args, 'mode') or not args.mode:
+        logger.error("No mode specified")
+        return 1
+
+    if not hasattr(args, 'data_name') or not args.data_name:
+        logger.error("No dataset name specified")
+        return 1
+
+    if not hasattr(args, 'input_path') or not args.input_path:
+        if args.mode in ['train', 'predict']:
+            logger.error(f"Input path required for {args.mode} mode")
+            return 1
+
     # Process based on mode
-    if hasattr(args, 'mode'):
-        if args.mode == 'predict':
-            # Prediction mode - load model and predict on new images
-            logger.info("Starting prediction mode...")
-            if not hasattr(args, 'input_path') or not args.input_path:
-                logger.error("Input path required for prediction mode")
-                return 1
+    if args.mode == 'predict':
+        # Prediction mode - load model and predict on new images
+        logger.info("Starting prediction mode...")
+        if not hasattr(args, 'input_path') or not args.input_path:
+            logger.error("Input path required for prediction mode")
+            return 1
 
-            # Load configuration - use Data/ (uppercase) directory
-            config_path = args.config if hasattr(args, 'config') and args.config else None
-            if not config_path and hasattr(args, 'data_name') and args.data_name:
-                # Use 'data/' directory (lowercase) and exact data_name for JSON
-                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
+        # Load configuration - use data/ (lowercase) directory
+        config_path = args.config if hasattr(args, 'config') and args.config else None
+        if not config_path and hasattr(args, 'data_name') and args.data_name:
+            # Use 'data/' directory (lowercase) and exact data_name for JSON
+            config_path = os.path.join('data', args.data_name.lower(), f"{args.data_name.lower()}.json")
 
-            if not config_path or not os.path.exists(config_path):
-                logger.error(f"Configuration file not found: {config_path}")
-                return 1
+        if not config_path or not os.path.exists(config_path):
+            logger.error(f"Configuration file not found: {config_path}")
+            return 1
 
-            with open(config_path, 'r') as f:
-                config = json.load(f)
+        with open(config_path, 'r') as f:
+            config = json.load(f)
 
-            # Initialize prediction manager
-            prediction_manager = PredictionManager(config)
+        # Initialize prediction manager
+        prediction_manager = PredictionManager(config)
 
-            # Run prediction - use optimized version if requested
-            output_csv = getattr(args, 'output_csv', None)
-            if not output_csv and hasattr(args, 'data_name') and args.data_name:
-                dataset_name_lower = args.data_name.lower()
-                output_csv = os.path.join('data', dataset_name_lower, f"{dataset_name_lower}.csv")
+        # Run prediction - use optimized version if requested
+        output_csv = getattr(args, 'output_csv', None)
+        if not output_csv and hasattr(args, 'data_name') and args.data_name:
+            dataset_name_lower = args.data_name.lower()
+            output_csv = os.path.join('data', dataset_name_lower, f"{dataset_name_lower}.csv")
 
-            batch_size = getattr(args, 'batch_size', 128)
+        batch_size = getattr(args, 'batch_size', 128)
 
-            # UPDATED: Check for optimized mode
-            generate_heatmaps = getattr(args, 'generate_heatmaps', True)
+        # Check for optimized mode
+        generate_heatmaps = getattr(args, 'generate_heatmaps', True)
 
-            if getattr(args, 'optimized', False):
-                # Use optimized prediction
-                logger.info(f"Using OPTIMIZED prediction mode (level: {args.optimize_level})")
+        if getattr(args, 'optimized', False):
+            # Use optimized prediction
+            logger.info(f"Using OPTIMIZED prediction mode (level: {args.optimize_level})")
 
-                # Override heatmaps if optimized
-                if args.optimize_level in ['faster', 'fastest']:
-                    generate_heatmaps = False
-                    logger.info("Heatmaps disabled for optimization level")
+            # Override heatmaps if optimized
+            if args.optimize_level in ['faster', 'fastest']:
+                generate_heatmaps = False
+                logger.info("Heatmaps disabled for optimization level")
 
-                # Update config with optimization settings
-                if args.max_features:
-                    config['model']['max_output_features'] = args.max_features
+            # Update config with optimization settings
+            if args.max_features:
+                config['model']['max_output_features'] = args.max_features
 
-                # Call optimized prediction
-                prediction_manager.predict_images_optimized(
-                    args.input_path,
-                    output_csv,
-                    batch_size,
-                    optimize_level=args.optimize_level
-                )
-            else:
-                # Use standard prediction
-                logger.info("Using standard prediction mode")
-                prediction_manager.predict_images(
-                    args.input_path,
-                    output_csv,
-                    batch_size,
-                    generate_heatmaps=generate_heatmaps
-                )
-
-            # UPDATED: Heatmap location info
-            if generate_heatmaps and not getattr(args, 'optimized', False):
-                dataset_name_lower = args.data_name.lower()
-                heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
-                logger.info(f"Attention heatmaps saved to: {heatmap_dir}")
-                logger.info("To disable heatmaps, use --no_heatmaps flag")
-
-            logger.info(f"Prediction completed successfully! Output: {output_csv}")
-            return 0
-
-        elif args.mode == 'train':
-            return handle_training_mode(args, logger)
-
-        elif args.mode == 'reconstruct':
-            # Reconstruction mode - generate images from features
-            logger.info("Starting reconstruction mode...")
-            if not hasattr(args, 'input_csv') or not args.input_csv:
-                logger.error("Input CSV path required for reconstruction mode")
-                return 1
-
-            # Load configuration - use Data/ (uppercase) directory
-            config_path = args.config if hasattr(args, 'config') and args.config else None
-            if not config_path and hasattr(args, 'data_name') and args.data_name:
-                # Use 'data/' directory (lowercase) and exact data_name for JSON
-                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json")
-
-            if not config_path or not os.path.exists(config_path):
-                logger.error(f"Configuration file not found: {config_path}")
-                return 1
-
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Initialize reconstruction manager
-            reconstruction_manager = ReconstructionManager(config)
-
-            # Run reconstruction - use 'data/' directory (lowercase) for output
-            output_dir = getattr(args, 'output_dir', None)
-            if not output_dir and hasattr(args, 'data_name') and args.data_name:
-                # Use 'data/' directory (lowercase) for output
-                dataset_name_lower = args.data_name.lower()
-                output_dir = os.path.join('data', dataset_name_lower, 'reconstructions')
-
-            reconstruction_manager.predict_from_csv(args.input_csv, output_dir)
-            logger.info("Reconstruction completed successfully!")
-            return 0
-
-        # UPDATED: Heatmap-only mode for existing models
-        elif args.mode == 'heatmaps':
-            logger.info("Starting heatmap generation mode...")
-            if not hasattr(args, 'input_path') or not args.input_path:
-                logger.error("Input path required for heatmap generation mode")
-                return 1
-
-            # Load configuration
-            config_path = args.config if hasattr(args, 'config') and args.config else None
-            if not config_path and hasattr(args, 'data_name') and args.data_name:
-                config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
-
-            if not config_path or not os.path.exists(config_path):
-                logger.error(f"Configuration file not found: {config_path}")
-                return 1
-
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Initialize prediction manager
-            prediction_manager = PredictionManager(config)
-
-            # UPDATED: Default to all samples
-            num_samples = getattr(args, 'num_samples', None)  # None means all samples by default
-
-            if num_samples is None:
-                logger.info("Generating heatmaps for ALL samples (default)")
-            else:
-                logger.info(f"Generating heatmaps for {num_samples} samples per class")
-
-            # Generate heatmaps only
-            prediction_manager.generate_classwise_attention_heatmaps(
+            # Call optimized prediction
+            prediction_manager.predict_images_optimized(
                 args.input_path,
-                num_samples_per_class=num_samples
+                output_csv,
+                batch_size,
+                optimize_level=args.optimize_level
+            )
+        else:
+            # Use standard prediction
+            logger.info("Using standard prediction mode")
+            prediction_manager.predict_images(
+                args.input_path,
+                output_csv,
+                batch_size,
+                generate_heatmaps=generate_heatmaps
             )
 
-            dataset_name_lower = args.data_name.lower() if hasattr(args, 'data_name') else 'dataset'
+        # Heatmap location info
+        if generate_heatmaps and not getattr(args, 'optimized', False):
+            dataset_name_lower = args.data_name.lower()
             heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
-            logger.info(f"Heatmap generation completed! Visualizations saved to: {heatmap_dir}")
-            return 0
+            logger.info(f"Attention heatmaps saved to: {heatmap_dir}")
+            logger.info("To disable heatmaps, use --no_heatmaps flag")
 
-        else:
-            logger.error(f"Invalid mode: {args.mode}")
+        logger.info(f"Prediction completed successfully! Output: {output_csv}")
+        return 0
+
+    elif args.mode == 'train':
+        return handle_training_mode(args, logger)
+
+    elif args.mode == 'reconstruct':
+        # Reconstruction mode - generate images from features
+        logger.info("Starting reconstruction mode...")
+        if not hasattr(args, 'input_csv') or not args.input_csv:
+            logger.error("Input CSV path required for reconstruction mode")
             return 1
+
+        # Load configuration - use data/ (lowercase) directory
+        config_path = args.config if hasattr(args, 'config') and args.config else None
+        if not config_path and hasattr(args, 'data_name') and args.data_name:
+            # Use 'data/' directory (lowercase) and exact data_name for JSON
+            config_path = os.path.join('data', args.data_name.lower(), f"{args.data_name.lower()}.json")
+
+        if not config_path or not os.path.exists(config_path):
+            logger.error(f"Configuration file not found: {config_path}")
+            return 1
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Initialize reconstruction manager
+        reconstruction_manager = ReconstructionManager(config)
+
+        # Run reconstruction - use 'data/' directory (lowercase) for output
+        output_dir = getattr(args, 'output_dir', None)
+        if not output_dir and hasattr(args, 'data_name') and args.data_name:
+            # Use 'data/' directory (lowercase) for output
+            dataset_name_lower = args.data_name.lower()
+            output_dir = os.path.join('data', dataset_name_lower, 'reconstructions')
+
+        reconstruction_manager.predict_from_csv(args.input_csv, output_dir)
+        logger.info("Reconstruction completed successfully!")
+        return 0
+
+    # Heatmap-only mode for existing models
+    elif args.mode == 'heatmaps':
+        logger.info("Starting heatmap generation mode...")
+        if not hasattr(args, 'input_path') or not args.input_path:
+            logger.error("Input path required for heatmap generation mode")
+            return 1
+
+        # Load configuration
+        config_path = args.config if hasattr(args, 'config') and args.config else None
+        if not config_path and hasattr(args, 'data_name') and args.data_name:
+            config_path = os.path.join('data', args.data_name.lower(), f"{args.data_name.lower()}.json")
+
+        if not config_path or not os.path.exists(config_path):
+            logger.error(f"Configuration file not found: {config_path}")
+            return 1
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Initialize prediction manager
+        prediction_manager = PredictionManager(config)
+
+        # Default to all samples
+        num_samples = getattr(args, 'num_samples', None)  # None means all samples by default
+
+        if num_samples is None:
+            logger.info("Generating heatmaps for ALL samples (default)")
+        else:
+            logger.info(f"Generating heatmaps for {num_samples} samples per class")
+
+        # Generate heatmaps only
+        prediction_manager.generate_classwise_attention_heatmaps(
+            args.input_path,
+            num_samples_per_class=num_samples
+        )
+
+        dataset_name_lower = args.data_name.lower() if hasattr(args, 'data_name') else 'dataset'
+        heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
+        logger.info(f"Heatmap generation completed! Visualizations saved to: {heatmap_dir}")
+        return 0
+
     else:
-        logger.error("No mode specified")
+        logger.error(f"Invalid mode: {args.mode}")
         return 1
 
 
