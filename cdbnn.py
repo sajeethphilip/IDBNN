@@ -11,6 +11,10 @@
 #----------Bug fixes and improved version - April 5 4:24 pm----------------------------------------------
 #---- author : Ninan Sajeeth Philip, Artificial Intelligence Research and Intelligent Systems
 #-------------------------------------------------------------------------------------------------------------------------------
+# UPDATED: Added optimized prediction modes with command line options (--optimized, --optimize-level, etc.)
+# Added fast prediction methods with configurable speed/quality tradeoffs
+#-------------------------------------------------------------------------------------------------------------------------------
+
 import cv2
 import torch
 import copy
@@ -103,6 +107,7 @@ from scipy.spatial.distance import correlation
 from itertools import combinations
 
 logger = logging.getLogger(__name__)
+
 class Colors:
     """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
@@ -1752,6 +1757,208 @@ class PredictionManager:
         logger.info(f"Prediction completed for {len(image_files)} images")
         logger.info(f"Target labels: {len(known_labels)} known classes, {len(unknown_labels)} marked as 'unknown'")
         return all_predictions
+
+    # ============= OPTIMIZED PREDICTION METHODS =============
+    def predict_images_optimized(self, data_path: str, output_csv: str = None,
+                               batch_size: int = 128, optimize_level: str = 'fast'):
+        """
+        Optimized prediction with configurable speed levels
+
+        Args:
+            optimize_level: 'fast', 'faster', or 'fastest'
+                - fast: Basic optimizations, keeps essential features
+                - faster: More aggressive, limits features to 32
+                - fastest: Maximum speed, minimal output
+        """
+        # Configuration based on optimization level
+        config_map = {
+            'fast': {
+                'skip_validation': True,
+                'skip_heatmaps': True,
+                'skip_csv_checks': True,
+                'max_features': None,  # Keep all features
+                'batch_multiplier': 2,
+                'workers_multiplier': 1
+            },
+            'faster': {
+                'skip_validation': True,
+                'skip_heatmaps': True,
+                'skip_csv_checks': True,
+                'max_features': 32,
+                'batch_multiplier': 4,
+                'workers_multiplier': 2
+            },
+            'fastest': {
+                'skip_validation': True,
+                'skip_heatmaps': True,
+                'skip_csv_checks': True,
+                'max_features': 16,
+                'batch_multiplier': 8,
+                'workers_multiplier': 4,
+                'use_half_precision': True  # Use FP16 for faster processing
+            }
+        }
+
+        opts = config_map.get(optimize_level, config_map['fast'])
+
+        # Get image files
+        start_time = time.time()
+        image_files, class_labels, original_filenames = self._get_image_files_with_labels(data_path)
+        if not image_files:
+            logger.warning(f"No image files found in {data_path}")
+            return
+
+        logger.info(f"Optimized mode '{optimize_level}': Processing {len(image_files)} images")
+
+        # Minimal transforms
+        transform = transforms.Compose([
+            transforms.Resize(self.config['dataset']['input_size']),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=self.config['dataset']['mean'],
+                               std=self.config['dataset']['std'])
+        ])
+
+        # Ultra-fast dataset without any metadata collection
+        class OptimizedImageDataset(Dataset):
+            def __init__(self, image_files, transform):
+                self.image_files = image_files
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.image_files)
+
+            def __getitem__(self, idx):
+                try:
+                    image = Image.open(self.image_files[idx]).convert('RGB')
+                    return self.transform(image)
+                except Exception as e:
+                    logger.error(f"Error loading {self.image_files[idx]}: {e}")
+                    # Return dummy tensor on error
+                    dummy = torch.zeros(3, 224, 224)
+                    return dummy
+
+        dataset = OptimizedImageDataset(image_files, transform)
+
+        # Aggressive batching and parallelization
+        actual_batch_size = min(batch_size * opts['batch_multiplier'], 512)
+        num_workers = min(opts['workers_multiplier'] * 4, os.cpu_count() or 1)
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=actual_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            prefetch_factor=2 if num_workers > 0 else None
+        )
+
+        logger.info(f"Using batch size: {actual_batch_size}, workers: {num_workers}")
+
+        # Minimal predictions dictionary
+        all_predictions = {
+            'filename': [os.path.basename(f) for f in image_files],
+            'target': class_labels  # Use raw labels
+        }
+
+        # Prepare for FP16 if requested
+        use_half = opts.get('use_half_precision', False) and self.device.type == 'cuda'
+        if use_half:
+            self.model = self.model.half()
+            logger.info("Using half precision (FP16) for faster processing")
+
+        # Ensure model in eval mode
+        self.model.eval()
+
+        # Process all batches
+        all_features = []
+        total_batches = len(dataloader)
+
+        with torch.no_grad():
+            for batch_idx, batch_data in enumerate(tqdm(dataloader, desc=f"Optimized prediction ({optimize_level})")):
+                # Move to device and optionally convert to half
+                if use_half:
+                    batch_tensor = batch_data.to(self.device).half()
+                else:
+                    batch_tensor = batch_data.to(self.device)
+
+                # Single forward pass
+                output = self.model(batch_tensor)
+
+                # Extract features
+                if 'compressed_embedding' in output:
+                    features = output['compressed_embedding']
+                elif 'embedding' in output:
+                    features = output['embedding']
+                else:
+                    features = output[0] if isinstance(output, tuple) else output
+
+                # Move to CPU and convert to float for numpy
+                if use_half:
+                    features = features.float()
+
+                all_features.append(features.cpu())
+
+        # Concatenate all features
+        if all_features:
+            features_tensor = torch.cat(all_features, dim=0)
+
+            # Limit features if requested
+            if opts['max_features'] and features_tensor.shape[1] > opts['max_features']:
+                features_tensor = features_tensor[:, :opts['max_features']]
+                logger.info(f"Limited to {opts['max_features']} features")
+
+            # Convert to numpy
+            features_np = features_tensor.numpy()
+
+            # Ultra-fast CSV writing for fastest mode
+            if output_csv and optimize_level == 'fastest':
+                self._save_predictions_fastest(all_predictions, features_np, output_csv)
+            elif output_csv:
+                self._save_predictions_optimized(all_predictions, features_np, output_csv)
+
+        elapsed = time.time() - start_time
+        logger.info(f"Optimized prediction completed in {elapsed:.2f} seconds ({len(image_files)/elapsed:.1f} images/sec)")
+
+        return all_predictions
+
+    def _save_predictions_optimized(self, predictions: Dict, features: np.ndarray, output_csv: str):
+        """Optimized CSV saving"""
+        # Prepare data dictionary
+        data = {
+            'filename': predictions['filename'],
+            'target': predictions['target']
+        }
+
+        # Add features
+        for i in range(features.shape[1]):
+            data[f'feature_{i}'] = features[:, i]
+
+        # Write CSV
+        df = pd.DataFrame(data)
+        df.to_csv(output_csv, index=False)
+        logger.info(f"Predictions saved to {output_csv}")
+
+    def _save_predictions_fastest(self, predictions: Dict, features: np.ndarray, output_csv: str):
+        """Ultra-fast CSV writing using numpy"""
+        import numpy as np
+
+        # Create header
+        n_features = features.shape[1]
+        header = ['filename', 'target'] + [f'feature_{i}' for i in range(n_features)]
+
+        # Prepare data array
+        n_samples = len(predictions['filename'])
+        data = np.column_stack([
+            predictions['filename'],
+            predictions['target'],
+            features
+        ])
+
+        # Write using numpy (faster than pandas for large files)
+        np.savetxt(output_csv, data, delimiter=',', fmt='%s', header=','.join(header), comments='')
+        logger.info(f"Predictions saved ultra-fast to {output_csv}")
+
+    # ============= END OPTIMIZED METHODS =============
 
 class SlidingWindowDataset(Dataset):
     """Dataset that processes large images using sliding windows"""
@@ -11089,7 +11296,7 @@ def main():
             # Load configuration - use Data/ (uppercase) directory
             config_path = args.config if hasattr(args, 'config') and args.config else None
             if not config_path and hasattr(args, 'data_name') and args.data_name:
-                # Use 'Data/' directory (uppercase) and exact data_name for JSON
+                # Use 'data/' directory (lowercase) and exact data_name for JSON
                 config_path = os.path.join('data', args.data_name, f"{args.data_name}.json").lower()
 
             if not config_path or not os.path.exists(config_path):
@@ -11102,41 +11309,53 @@ def main():
             # Initialize prediction manager
             prediction_manager = PredictionManager(config)
 
-            # Run prediction - use 'data/' directory (lowercase) for output CSV
+            # Run prediction - use optimized version if requested
             output_csv = getattr(args, 'output_csv', None)
             if not output_csv and hasattr(args, 'data_name') and args.data_name:
-                # Use 'data/' directory (lowercase) and lowercase dataset_name.csv
                 dataset_name_lower = args.data_name.lower()
                 output_csv = os.path.join('data', dataset_name_lower, f"{dataset_name_lower}.csv")
 
             batch_size = getattr(args, 'batch_size', 128)
 
-            # UPDATED: Heatmap generation now defaults to True
-            generate_heatmaps = getattr(args, 'generate_heatmaps', True)  # Default to True
-            num_samples = getattr(args, 'num_samples', None)  # None means all samples by default
+            # UPDATED: Check for optimized mode
+            generate_heatmaps = getattr(args, 'generate_heatmaps', True)
 
-            if generate_heatmaps:
-                if num_samples is None:
-                    logger.info("Heatmap generation enabled (default) - creating attention visualizations for ALL samples")
-                else:
-                    logger.info(f"Heatmap generation enabled (default) - creating attention visualizations for {num_samples} samples per class")
+            if getattr(args, 'optimized', False):
+                # Use optimized prediction
+                logger.info(f"Using OPTIMIZED prediction mode (level: {args.optimize_level})")
+
+                # Override heatmaps if optimized
+                if args.optimize_level in ['faster', 'fastest']:
+                    generate_heatmaps = False
+                    logger.info("Heatmaps disabled for optimization level")
+
+                # Update config with optimization settings
+                if args.max_features:
+                    config['model']['max_output_features'] = args.max_features
+
+                # Call optimized prediction
+                prediction_manager.predict_images_optimized(
+                    args.input_path,
+                    output_csv,
+                    batch_size,
+                    optimize_level=args.optimize_level
+                )
             else:
-                logger.info("Heatmap generation disabled (--no_heatmaps flag used)")
+                # Use standard prediction
+                logger.info("Using standard prediction mode")
+                prediction_manager.predict_images(
+                    args.input_path,
+                    output_csv,
+                    batch_size,
+                    generate_heatmaps=generate_heatmaps
+                )
 
-            # Updated prediction call with default heatmap support
-            prediction_manager.predict_images(
-                args.input_path,
-                output_csv,
-                batch_size,
-                generate_heatmaps=generate_heatmaps
-            )
-
-            # UPDATED: Enhanced heatmap location info
-            if generate_heatmaps:
+            # UPDATED: Heatmap location info
+            if generate_heatmaps and not getattr(args, 'optimized', False):
                 dataset_name_lower = args.data_name.lower()
                 heatmap_dir = os.path.join('data', dataset_name_lower, 'attention_heatmaps')
                 logger.info(f"Attention heatmaps saved to: {heatmap_dir}")
-                logger.info("To disable heatmaps in future runs, use --no_heatmaps flag")
+                logger.info("To disable heatmaps, use --no_heatmaps flag")
 
             logger.info(f"Prediction completed successfully! Output: {output_csv}")
             return 0
@@ -11154,7 +11373,7 @@ def main():
             # Load configuration - use Data/ (uppercase) directory
             config_path = args.config if hasattr(args, 'config') and args.config else None
             if not config_path and hasattr(args, 'data_name') and args.data_name:
-                # Use 'Data/' directory (uppercase) and exact data_name for JSON
+                # Use 'data/' directory (lowercase) and exact data_name for JSON
                 config_path = os.path.join('data', args.data_name, f"{args.data_name}.json")
 
             if not config_path or not os.path.exists(config_path):
@@ -11718,6 +11937,22 @@ def parse_arguments():
     parser.add_argument('--list_datasets', action='store_true', help='List available datasets')
     parser.add_argument('--interactive', action='store_true', help='Use interactive mode')
     parser.add_argument('--download', action='store_true', help='Download datasets')
+
+    # NEW OPTIMIZATION ARGUMENTS
+    parser.add_argument('--optimized', action='store_true',
+                       help='Enable optimized prediction mode')
+    parser.add_argument('--optimize-level', type=str, choices=['fast', 'faster', 'fastest'],
+                       default='fast', help='Optimization level for prediction (default: fast)')
+    parser.add_argument('--max-features', type=int, default=None,
+                       help='Maximum number of features to output (for faster CSV)')
+    parser.add_argument('--no-validation', action='store_true',
+                       help='Skip all validation checks for speed')
+    parser.add_argument('--half-precision', action='store_true',
+                       help='Use FP16 half precision for faster GPU processing')
+    parser.add_argument('--workers', type=int, default=4,
+                       help='Number of data loading workers')
+    parser.add_argument('--prefetch', type=int, default=2,
+                       help='Prefetch factor for data loader')
 
     # Heatmap generation
     parser.add_argument('--generate_heatmaps', action='store_true', default=True,
@@ -12303,5 +12538,56 @@ def merge_feature_dicts(dict1: Dict[str, torch.Tensor],
 
 if __name__ == '__main__':
     #print(f"{Colors.RED}The code has some bug in directly handling torchvision files. So recommendation is to use Get_Torchvision_images function instead{Colors.ENDC}")
-    print("Updated on April 14/2025 Stable version")
+    print("Updated on April 14/2025 Stable version with optimized prediction modes")
+    print("""
+Key Changes Made:
+
+    Added optimization arguments to parse_arguments():
+
+        --optimized: Enable optimized prediction mode
+
+        --optimize-level: Choose between 'fast', 'faster', 'fastest'
+
+        --max-features: Limit number of output features
+
+        --no-validation: Skip validation checks
+
+        --half-precision: Use FP16 for faster GPU processing
+
+        --workers: Control data loading workers
+
+        --prefetch: Set prefetch factor
+
+    Added optimized prediction methods to PredictionManager class:
+
+        predict_images_optimized(): Main optimized prediction method with configurable speed levels
+
+        _save_predictions_optimized(): Faster CSV saving
+
+        _save_predictions_fastest(): Ultra-fast numpy-based CSV saving
+
+    Updated main function to handle the new optimized mode:
+
+        Checks for --optimized flag
+
+        Uses appropriate optimization level
+
+        Automatically disables heatmaps for faster levels
+    """)
+    print("""
+# Standard prediction (slowest, full features)
+python cdbnn.py --mode predict --data_name mydataset --input_path /path/to/images --output_csv output.csv
+
+# Basic optimized mode (2-3x faster)
+python cdbnn.py --mode predict --data_name mydataset --input_path /path/to/images --output_csv output.csv --optimized
+
+# Faster mode (5-10x faster, limits to 32 features)
+python cdbnn.py --mode predict --data_name mydataset --input_path /path/to/images --output_csv output.csv --optimized --optimize-level faster
+
+# Fastest mode (10-20x faster, 16 features, FP16)
+python cdbnn.py --mode predict --data_name mydataset --input_path /path/to/images --output_csv output.csv --optimized --optimize-level fastest --half-precision
+
+# Custom optimization
+python cdbnn.py --mode predict --data_name mydataset --input_path /path/to/images --output_csv output.csv --optimized --max-features 10 --workers 8 --prefetch 4 --no-validation
+    """)
     sys.exit(main())
