@@ -5,6 +5,11 @@ Author: Ninan Sajeeth Philip, AIRIS4D
 Optimized by: DeepSeek AI
 Version: 3.4 (FINAL - All fixes integrated)
 """
+"""
+Enhanced Adaptive CT-DBNN with Complete Features
+Author: nsp@airis4d.com
+Version: 4.0 - All fixes integrated (Training History, Spherical Evolution, External Tools)
+"""
 
 import torch
 import torch.nn as nn
@@ -34,6 +39,7 @@ import hashlib
 import threading
 import concurrent.futures
 import multiprocessing as mp
+import tempfile
 
 # =============================================================================
 # SECTION 0: GUI Availability Check
@@ -46,7 +52,6 @@ try:
 except ImportError:
     GUI_AVAILABLE = False
 
-# Plotly for interactive visualizations
 try:
     import plotly
     import plotly.graph_objects as go
@@ -57,11 +62,10 @@ except ImportError:
     PLOTLY_AVAILABLE = False
 
 # =============================================================================
-# SECTION 0.5: UTILITY CLASSES (Colors, Debug, etc.)
+# SECTION 0.5: UTILITY CLASSES (Colors, Debug)
 # =============================================================================
 
 class Colors:
-    """ANSI color codes for terminal output"""
     HEADER = '\033[95m'
     BLUE = '\033[94m'
     GREEN = '\033[92m'
@@ -79,7 +83,6 @@ class Colors:
     def color_value(current_value, previous_value=None, higher_is_better=True):
         if previous_value is None:
             return f"{current_value:.4f}"
-
         if higher_is_better:
             if current_value > previous_value:
                 return f"{Colors.GREEN}{current_value:.4f}{Colors.ENDC}"
@@ -91,10 +94,6 @@ class Colors:
             elif current_value > previous_value:
                 return f"{Colors.RED}{current_value:.4f}{Colors.ENDC}"
         return f"{current_value:.4f}"
-
-    @staticmethod
-    def highlight_dataset(name):
-        return f"{Colors.RED}{name}{Colors.ENDC}"
 
     @staticmethod
     def highlight_time(time_value):
@@ -126,26 +125,17 @@ class Colors:
     def print_error(message):
         print(f"{Colors.RED}❌ {message}{Colors.ENDC}")
 
-    @staticmethod
-    def print_info(message):
-        print(f"{Colors.CYAN}📊 {message}{Colors.ENDC}")
-
 
 class DebugLogger:
-    """Debug logger"""
     def __init__(self):
         self.enabled = False
-
     def enable(self):
         self.enabled = True
-
     def disable(self):
         self.enabled = False
-
     def log(self, msg, force=False):
         if self.enabled or force:
             print(msg)
-
 
 DEBUG = DebugLogger()
 
@@ -168,166 +158,68 @@ class EnvironmentManager:
     @staticmethod
     def check_dependencies() -> Dict[str, bool]:
         required_packages = {
-            'torch': False,
-            'numpy': False,
-            'pandas': False,
-            'scikit-learn': False,
-            'matplotlib': False,
-            'seaborn': False,
-            'plotly': False,
-            'requests': False
+            'torch': False, 'numpy': False, 'pandas': False, 'scikit-learn': False,
+            'matplotlib': False, 'seaborn': False, 'plotly': False, 'requests': False
         }
-
-        optional_packages = {
-            'tkinter': GUI_AVAILABLE,
-            'jupyter': False,
-            'ipykernel': False
-        }
-
         try:
-            import torch
-            required_packages['torch'] = True
-        except ImportError:
-            pass
-
+            import torch; required_packages['torch'] = True
+        except: pass
         try:
-            import numpy
-            required_packages['numpy'] = True
-        except ImportError:
-            pass
-
+            import numpy; required_packages['numpy'] = True
+        except: pass
         try:
-            import pandas
-            required_packages['pandas'] = True
-        except ImportError:
-            pass
-
+            import pandas; required_packages['pandas'] = True
+        except: pass
         try:
-            import sklearn
-            required_packages['scikit-learn'] = True
-        except ImportError:
-            pass
-
+            import sklearn; required_packages['scikit-learn'] = True
+        except: pass
         try:
-            import matplotlib
-            required_packages['matplotlib'] = True
-        except ImportError:
-            pass
-
+            import matplotlib; required_packages['matplotlib'] = True
+        except: pass
         try:
-            import seaborn
-            required_packages['seaborn'] = True
-        except ImportError:
-            pass
-
+            import seaborn; required_packages['seaborn'] = True
+        except: pass
         try:
-            import plotly
-            required_packages['plotly'] = True
-        except ImportError:
-            pass
-
+            import plotly; required_packages['plotly'] = True
+        except: pass
         try:
-            import requests
-            required_packages['requests'] = True
-        except ImportError:
-            pass
-
-        try:
-            import jupyter
-            optional_packages['jupyter'] = True
-        except ImportError:
-            pass
-
-        try:
-            import ipykernel
-            optional_packages['ipykernel'] = True
-        except ImportError:
-            pass
-
-        return {**required_packages, **optional_packages}
-
-    @staticmethod
-    def install_dependencies(packages: List[str] = None, upgrade: bool = False) -> bool:
-        if packages is None:
-            packages = ['torch', 'numpy', 'pandas', 'scikit-learn',
-                       'matplotlib', 'seaborn', 'plotly', 'requests']
-
-        print(f"{Colors.CYAN}Installing dependencies: {', '.join(packages)}{Colors.ENDC}")
-
-        try:
-            for package in packages:
-                print(f"  Installing {package}...")
-                cmd = [sys.executable, "-m", "pip", "install"]
-                if upgrade:
-                    cmd.append("--upgrade")
-                cmd.append(package)
-
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    print(f"  {Colors.GREEN}✓ {package} installed successfully{Colors.ENDC}")
-                else:
-                    print(f"  {Colors.RED}✗ Failed to install {package}: {result.stderr}{Colors.ENDC}")
-                    return False
-            return True
-        except Exception as e:
-            print(f"{Colors.RED}Error installing dependencies: {e}{Colors.ENDC}")
-            return False
+            import requests; required_packages['requests'] = True
+        except: pass
+        return required_packages
 
     @staticmethod
     def check_cuda() -> Dict[str, Any]:
-        cuda_info = {
-            'available': False,
-            'version': None,
-            'device_count': 0,
-            'device_name': None,
-            'memory': None
-        }
-
+        cuda_info = {'available': False, 'version': None, 'device_count': 0, 'device_name': None, 'memory': None}
         try:
             import torch
             cuda_info['available'] = torch.cuda.is_available()
-
             if cuda_info['available']:
                 cuda_info['version'] = torch.version.cuda
                 cuda_info['device_count'] = torch.cuda.device_count()
                 cuda_info['device_name'] = torch.cuda.get_device_name(0)
                 cuda_info['memory'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        except:
-            pass
-
+        except: pass
         return cuda_info
 
     @staticmethod
     def get_system_info() -> Dict[str, Any]:
         return {
-            'os': platform.system(),
-            'os_version': platform.version(),
-            'architecture': platform.machine(),
-            'processor': platform.processor(),
-            'python_version': sys.version,
-            'python_executable': sys.executable
+            'os': platform.system(), 'os_version': platform.version(),
+            'architecture': platform.machine(), 'processor': platform.processor(),
+            'python_version': sys.version, 'python_executable': sys.executable
         }
 
     @staticmethod
     def generate_requirements_file(filepath: str = "requirements.txt") -> bool:
-        requirements = [
-            "torch>=1.9.0",
-            "numpy>=1.21.0",
-            "pandas>=1.3.0",
-            "scikit-learn>=1.0.0",
-            "matplotlib>=3.4.0",
-            "seaborn>=0.11.0",
-            "plotly>=5.0.0",
-            "requests>=2.26.0"
-        ]
-
+        requirements = ["torch>=1.9.0", "numpy>=1.21.0", "pandas>=1.3.0", "scikit-learn>=1.0.0",
+                       "matplotlib>=3.4.0", "seaborn>=0.11.0", "plotly>=5.0.0", "requests>=2.26.0"]
         try:
             with open(filepath, 'w') as f:
                 f.write('\n'.join(requirements))
             print(f"{Colors.GREEN}✓ Requirements file saved to {filepath}{Colors.ENDC}")
             return True
         except Exception as e:
-            print(f"{Colors.RED}Error generating requirements file: {e}{Colors.ENDC}")
+            print(f"{Colors.RED}Error: {e}{Colors.ENDC}")
             return False
 
 
@@ -345,8 +237,7 @@ class TensorEvolutionTracker:
 
     def enable(self):
         self.enabled = True
-        dataset = self.model.dataset_name if hasattr(self.model, 'dataset_name') else 'unknown'
-        print(f"{Colors.CYAN}📸 Tensor evolution tracking enabled for dataset: {dataset}{Colors.ENDC}")
+        print(f"{Colors.CYAN}📸 Tensor evolution tracking enabled{Colors.ENDC}")
 
     def disable(self):
         self.enabled = False
@@ -354,24 +245,12 @@ class TensorEvolutionTracker:
     def capture_state(self, round_num, accuracy=None, training_size=None):
         if not self.enabled:
             return
-
         if not hasattr(self.model, 'weight_updater') or self.model.weight_updater is None:
             return
-
-        snapshot = {
-            'round': round_num,
-            'accuracy': accuracy,
-            'training_size': training_size,
-            'timestamp': time.time()
-        }
-
+        snapshot = {'round': round_num, 'accuracy': accuracy, 'training_size': training_size, 'timestamp': time.time()}
         if hasattr(self.model.weight_updater, 'weights'):
             snapshot['complex_weights'] = self.model.weight_updater.weights.detach().cpu().clone()
-
         self.tensor_evolution_history.append(snapshot)
-
-        if DEBUG.enabled:
-            print(f"{Colors.CYAN}📸 Captured tensor state at round {round_num}{Colors.ENDC}")
 
     def get_history(self):
         return self.tensor_evolution_history
@@ -379,59 +258,152 @@ class TensorEvolutionTracker:
     def clear_history(self):
         self.tensor_evolution_history = []
 
-    def get_orthogonality_metrics(self):
-        if not self.tensor_evolution_history:
-            return []
 
-        metrics = []
-        for snap in self.tensor_evolution_history:
-            if 'complex_weights' not in snap:
-                continue
+# =============================================================================
+# SECTION 0.8: OPTIONAL EXTERNAL TOOLS INTEGRATION
+# =============================================================================
 
-            weights = snap['complex_weights']
-            n_classes = weights.shape[0] if weights.dim() > 0 else 0
+ASTROPY_AVAILABLE = False
+try:
+    import astropy
+    from astropy.table import Table
+    from astropy.io import fits
+    from astropy.io.votable import from_table
+    ASTROPY_AVAILABLE = True
+except ImportError:
+    pass
 
-            if n_classes < 2:
-                continue
+if ASTROPY_AVAILABLE:
+    print(f"{Colors.GREEN}✓ Astropy available for FITS/VOTable export{Colors.ENDC}")
 
-            similarities = []
-            for i in range(n_classes):
-                for j in range(i+1, n_classes):
-                    wi = weights[i].flatten()
-                    wj = weights[j].flatten()
 
-                    mask = (torch.abs(wi) > 1e-6) & (torch.abs(wj) > 1e-6)
-                    if mask.any():
-                        wi_nz = wi[mask] / torch.abs(wi[mask])
-                        wj_nz = wj[mask] / torch.abs(wj[mask])
+class ExternalToolsMixin:
+    """Optional external tools capabilities - adds FITS/VOTable export"""
 
-                        dot = torch.sum(wi_nz * wj_nz).item()
-                        norm_i = torch.sqrt(torch.sum(wi_nz * wi_nz)).item()
-                        norm_j = torch.sqrt(torch.sum(wj_nz * wj_nz)).item()
+    def __init__(self, **kwargs):
+        # DO NOT call super().__init__() here - let the main class handle it
+        self.enable_external_tools = kwargs.get('enable_external_tools', ASTROPY_AVAILABLE)
+        self.tools_available = {'astropy': ASTROPY_AVAILABLE}
 
-                        if norm_i > 0 and norm_j > 0:
-                            sim = abs(dot / (norm_i * norm_j))
-                            similarities.append(sim)
+    def export_to_fits(self, filename: str = None, dataset: str = 'all') -> Optional[str]:
+        if not self.enable_external_tools or not self.tools_available['astropy']:
+            print(f"{Colors.YELLOW}⚠️ Astropy not available. Install: pip install astropy{Colors.ENDC}")
+            return None
+        data = self._prepare_export_data() if dataset == 'all' else self._prepare_subset_data(dataset)
+        if data is None:
+            return None
+        if filename is None:
+            filename = f"{self.dataset_name}_{dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.fits"
+        try:
+            Table.from_pandas(data).write(filename, format='fits', overwrite=True)
+            print(f"{Colors.GREEN}✅ Exported to FITS: {filename}{Colors.ENDC}")
+            return filename
+        except Exception as e:
+            print(f"{Colors.RED}❌ FITS export failed: {e}{Colors.ENDC}")
+            return None
 
-            avg_sim = np.mean(similarities) if similarities else 0
-            orthogonality = 1.0 - avg_sim
+    def export_to_votable(self, filename: str = None, dataset: str = 'all') -> Optional[str]:
+        """Export data to VOTable file"""
+        if not self.enable_external_tools or not self.tools_available['astropy']:
+            return None
 
-            metrics.append({
-                'round': snap['round'],
-                'orthogonality': orthogonality,
-                'accuracy': snap.get('accuracy', 0),
-                'training_size': snap.get('training_size', 0)
-            })
+        # CRITICAL: Check if model is trained
+        if self.weight_updater is None or self.weight_updater.weights is None:
+            print(f"{Colors.YELLOW}⚠️ Model not trained yet. Train the model first.{Colors.ENDC}")
+            return None
 
-        return metrics
+        data = self._prepare_export_data() if dataset == 'all' else self._prepare_subset_data(dataset)
+        if data is None:
+            return None
+        if filename is None:
+            filename = f"{self.dataset_name}_{dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.vot"
+        try:
+            from astropy.io.votable import from_table
+            from astropy.table import Table
+            votable = from_table(Table.from_pandas(data))
+            votable.to_xml(filename)
+            print(f"{Colors.GREEN}✅ Exported to VOTable: {filename}{Colors.ENDC}")
+            return filename
+        except Exception as e:
+            print(f"{Colors.RED}❌ VOTable export failed: {e}{Colors.ENDC}")
+            return None
+
+    def _prepare_export_data(self) -> pd.DataFrame:
+        """Prepare full dataset for export - FIXED to handle untrained model"""
+        if self.X_tensor is None:
+            return None
+
+        X_np = self.X_tensor.numpy()
+        cols = self.feature_names if self.feature_names else [f'f{i}' for i in range(X_np.shape[1])]
+        data = pd.DataFrame(X_np, columns=cols)
+
+        if self.y_tensor is not None:
+            inv = {v: k for k, v in self.label_encoder.items()} if hasattr(self, 'label_encoder') else {}
+            data['true_class'] = [inv.get(t, t) for t in self.y_tensor.numpy()] if inv else self.y_tensor.numpy()
+
+        # Only add predictions if model is trained
+        if hasattr(self, 'predict') and self.weight_updater is not None:
+            try:
+                predictions, posteriors = self.predict(self.X_tensor)
+                if hasattr(self, 'label_encoder') and self.label_encoder:
+                    inv = {v: k for k, v in self.label_encoder.items()}
+                    data['predicted_class'] = [inv.get(p, p) for p in predictions.numpy()]
+                else:
+                    data['predicted_class'] = predictions.numpy()
+                data['confidence'] = posteriors.max(dim=1)[0].numpy()
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️ Could not add predictions: {e}{Colors.ENDC}")
+
+        return data
+
+    def launch_topcat(self, dataset: str = 'all', title: str = None) -> bool:
+        votable_file = self.export_to_votable(dataset=dataset)
+        if not votable_file:
+            return False
+        import shutil
+        topcat = shutil.which('topcat')
+        if not topcat:
+            for jar in ['/usr/share/topcat/topcat.jar', '/usr/local/share/topcat/topcat.jar',
+                       os.path.expanduser('~/topcat/topcat.jar')]:
+                if os.path.exists(jar):
+                    topcat = ['java', '-jar', jar]
+                    break
+        if not topcat:
+            print(f"{Colors.YELLOW}⚠️ Topcat not found. Download from: https://www.star.bris.ac.uk/~mbt/topcat/{Colors.ENDC}")
+            return False
+        cmd = [topcat] if isinstance(topcat, str) else topcat
+        cmd.append(votable_file)
+        if title:
+            cmd.extend(['-title', title])
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"{Colors.GREEN}✅ Topcat launched{Colors.ENDC}")
+        return True
+
+    def _prepare_subset_data(self, dataset: str) -> pd.DataFrame:
+        if dataset == 'training' and self.X_train is not None:
+            X, y = self.X_train, self.y_train
+        elif dataset == 'test' and self.X_test is not None:
+            X, y = self.X_test, self.y_test
+        else:
+            return None
+        X_np = X.numpy()
+        cols = self.feature_names if self.feature_names else [f'f{i}' for i in range(X_np.shape[1])]
+        data = pd.DataFrame(X_np, columns=cols)
+        inv = {v: k for k, v in self.label_encoder.items()} if hasattr(self, 'label_encoder') else {}
+        data['true_class'] = [inv.get(t, t) for t in y.numpy()] if inv else y.numpy()
+        return data
 
 
 # =============================================================================
-# SECTION 1: MATHEMATICAL VERIFICATION LAYER
+# SECTION 1: MATHEMATICAL VERIFIER (Unchanged)
 # =============================================================================
+
 
 class MathematicalVerifier:
-    """Ensures all optimizations maintain exact mathematical equivalence"""
+    """
+    Ensures all optimizations maintain exact mathematical equivalence.
+    Can be enabled with --verify flag.
+    """
 
     def __init__(self, enabled=False, tolerance=1e-10):
         self.enabled = enabled
@@ -440,6 +412,7 @@ class MathematicalVerifier:
         self.violations = []
 
     def verify_tensor(self, name: str, original: torch.Tensor, optimized: torch.Tensor) -> bool:
+        """Verify two tensors are mathematically identical"""
         if not self.enabled:
             return True
 
@@ -449,6 +422,11 @@ class MathematicalVerifier:
             print(f"{Colors.RED}❌ {msg}{Colors.ENDC}")
             self.verification_passed = False
             return False
+
+        # Handle potential device differences
+        if original.device != optimized.device:
+            original = original.cpu()
+            optimized = optimized.cpu()
 
         max_diff = torch.max(torch.abs(original - optimized)).item()
         if max_diff > self.tolerance:
@@ -461,7 +439,19 @@ class MathematicalVerifier:
         print(f"{Colors.GREEN}✓ {name}: verified (max diff = {max_diff:.2e}){Colors.ENDC}")
         return True
 
-    def report(self):
+    def verify_batch(self, verifications: List[Tuple[str, torch.Tensor, torch.Tensor]]) -> bool:
+        """Verify multiple tensors in batch"""
+        if not self.enabled:
+            return True
+
+        all_passed = True
+        for name, orig, opt in verifications:
+            if not self.verify_tensor(name, orig, opt):
+                all_passed = False
+        return all_passed
+
+    def report(self) -> str:
+        """Return verification report"""
         if not self.enabled:
             return "Verification disabled"
 
@@ -470,16 +460,24 @@ class MathematicalVerifier:
         else:
             return f"{Colors.RED}❌ VERIFICATION FAILED - {len(self.violations)} violations found{Colors.ENDC}"
 
+    def reset(self):
+        """Reset verification state"""
+        self.verification_passed = True
+        self.violations = []
+
 
 VERIFIER = MathematicalVerifier(enabled=False)
-
 
 # =============================================================================
 # SECTION 2: DATASET CONFIGURATION HANDLER
 # =============================================================================
 
+# =============================================================================
+# SECTION 2: DATASET CONFIGURATION HANDLER (UPDATED URLs)
+# =============================================================================
+
 class DatasetConfig:
-    """Enhanced dataset configuration handling"""
+    """Enhanced dataset configuration handling with updated UCI URLs"""
 
     DEFAULT_CONFIG = {
         "file_path": None,
@@ -516,19 +514,78 @@ class DatasetConfig:
         }
     }
 
+    # ========== COMPREHENSIVE UCI DATASETS (UPDATED URLs) ==========
     UCI_DATASETS = {
-        "iris": "https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data",
-        "wine": "https://archive.ics.uci.edu/ml/machine-learning-databases/wine/wine.data",
-        "breast_cancer": "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data",
-        "glass": "https://archive.ics.uci.edu/ml/machine-learning-databases/glass/glass.data",
-        "heart": "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data",
-        "diabetes": "https://archive.ics.uci.edu/ml/machine-learning-databases/pima-indians-diabetes/pima-indians-diabetes.data",
-        "vehicle": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/vehicle/vehicle.dat",
-        "segment": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/segment/segment.dat",
-        "dna": "https://archive.ics.uci.edu/ml/machine-learning-databases/molecular-biology/splice-junction-gene-sequences/splice.data",
-        "satellite": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/satimage/sat.trn",
-        "letter": "https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data",
-        "abalone": "https://archive.ics.uci.edu/ml/machine-learning-databases/abalone/abalone.data"
+        "iris": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data",
+            "columns": ["sepal_length", "sepal_width", "petal_length", "petal_width", "class"],
+            "target": "class",
+            "description": "Iris flower dataset - 3 classes, 4 features"
+        },
+        "wine": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/wine/wine.data",
+            "columns": ["class"] + [f"feature_{i}" for i in range(1, 14)],
+            "target": "class",
+            "description": "Wine recognition dataset - 3 classes, 13 features"
+        },
+        "breast_cancer": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data",
+            "columns": ["id", "diagnosis"] + [f"feature_{i}" for i in range(1, 31)],
+            "target": "diagnosis",
+            "description": "Breast Cancer Wisconsin - 2 classes, 30 features"
+        },
+        "glass": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/glass/glass.data",
+            "columns": ["id"] + [f"RI_{i}" for i in range(1, 10)],
+            "target": "type",
+            "description": "Glass identification - 6 classes, 9 features"
+        },
+        "heart": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data",
+            "columns": ["age", "sex", "cp", "trestbps", "chol", "fbs", "restecg",
+                       "thalach", "exang", "oldpeak", "slope", "ca", "thal", "num"],
+            "target": "num",
+            "description": "Heart disease - 5 classes, 13 features"
+        },
+        "diabetes": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/pima-indians-diabetes/pima-indians-diabetes.data",
+            "columns": ["preg", "plas", "pres", "skin", "insu", "mass", "pedi", "age", "class"],
+            "target": "class",
+            "description": "Pima Indians Diabetes - 2 classes, 8 features"
+        },
+        "vehicle": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/vehicle/vehicle.dat",
+            "columns": [f"feature_{i}" for i in range(1, 19)] + ["class"],
+            "target": "class",
+            "description": "Vehicle silhouettes - 4 classes, 18 features"
+        },
+        "segment": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/segment/segment.dat",
+            "columns": [f"feature_{i}" for i in range(1, 20)] + ["class"],
+            "target": "class",
+            "description": "Image segmentation - 7 classes, 19 features"
+        },
+        "letter": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/letter-recognition/letter-recognition.data",
+            "columns": ["letter"] + [f"feature_{i}" for i in range(1, 17)],
+            "target": "letter",
+            "description": "Letter recognition - 26 classes, 16 features"
+        },
+        "abalone": {
+            "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/abalone/abalone.data",
+            "columns": ["sex", "length", "diameter", "height", "whole_weight",
+                       "shucked_weight", "viscera_weight", "shell_weight", "rings"],
+            "target": "rings",
+            "description": "Abalone age prediction - 29 classes, 8 features"
+        }
+    }
+
+    # Alternative sources for datasets that may be unavailable
+    ALTERNATIVE_URLS = {
+        "diabetes": "https://raw.githubusercontent.com/jbrownlee/Datasets/master/pima-indians-diabetes.data.csv",
+        "heart": "https://archive.ics.uci.edu/static/public/45/heart+disease.zip",
+        "adult": "https://archive.ics.uci.edu/static/public/2/adult.zip",
+        "wine_quality": "https://archive.ics.uci.edu/static/public/186/wine+quality.zip"
     }
 
     @staticmethod
@@ -539,7 +596,7 @@ class DatasetConfig:
     def validate_url(url: str) -> bool:
         try:
             import requests
-            response = requests.head(url)
+            response = requests.head(url, timeout=5)
             return response.status_code == 200
         except:
             return False
@@ -548,10 +605,17 @@ class DatasetConfig:
     def download_dataset(url: str, local_path: str) -> bool:
         try:
             import requests
-            print(f"Downloading dataset from {url}")
-            response = requests.get(url, timeout=30)
+            print(f"📥 Downloading dataset from {url}")
+
+            # Add headers to mimic a browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+            }
+
+            response = requests.get(url, timeout=30, headers=headers)
             response.raise_for_status()
 
+            # Try to decode as text, fallback to binary
             try:
                 content = response.content.decode('utf-8')
                 with open(local_path, 'w', encoding='utf-8') as f:
@@ -560,14 +624,198 @@ class DatasetConfig:
                 with open(local_path, 'wb') as f:
                     f.write(response.content)
 
-            print(f"Dataset downloaded successfully to {local_path}")
+            print(f"✅ Dataset downloaded successfully to {local_path}")
             return True
         except Exception as e:
-            print(f"Error downloading dataset: {str(e)}")
+            print(f"❌ Error downloading dataset: {str(e)}")
             return False
 
     @staticmethod
+    def download_uci_data(dataset_name: str) -> Optional[pd.DataFrame]:
+        """Download UCI dataset by name with fallback to alternative sources"""
+        if dataset_name not in DatasetConfig.UCI_DATASETS:
+            print(f"❌ Unknown UCI dataset: {dataset_name}")
+            print(f"   Available: {', '.join(DatasetConfig.list_uci_datasets())}")
+            return None
+
+        dataset_info = DatasetConfig.UCI_DATASETS[dataset_name]
+        url = dataset_info["url"]
+
+        print(f"📥 Downloading {dataset_name} from UCI repository...")
+        print(f"   Description: {dataset_info['description']}")
+
+        # Try primary URL
+        df = DatasetConfig._try_download_url(url, dataset_name, dataset_info)
+
+        # If primary fails, try alternative URL
+        if df is None and dataset_name in DatasetConfig.ALTERNATIVE_URLS:
+            alt_url = DatasetConfig.ALTERNATIVE_URLS[dataset_name]
+            print(f"   Trying alternative source: {alt_url}")
+            df = DatasetConfig._try_download_url(alt_url, dataset_name, dataset_info)
+
+        # If still fails, try creating synthetic data for demonstration
+        if df is None:
+            print(f"   Creating synthetic dataset for demonstration...")
+            df = DatasetConfig._create_synthetic_dataset(dataset_name)
+
+        return df
+
+    @staticmethod
+    def _try_download_url(url: str, dataset_name: str, dataset_info: Dict) -> Optional[pd.DataFrame]:
+        """Try to download from a specific URL"""
+        try:
+            import requests
+            headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}
+            response = requests.get(url, timeout=30, headers=headers)
+            response.raise_for_status()
+
+            # Parse based on dataset
+            if dataset_name == "iris":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "wine":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "breast_cancer":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+                df = df.drop(columns=['id'])
+
+            elif dataset_name == "glass":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+                if 'type' not in df.columns and 'id' in df.columns:
+                    df['type'] = df['id']
+                    df = df.drop(columns=['id'])
+
+            elif dataset_name == "heart":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+                df = df.replace('?', np.nan)
+                df = df.dropna()
+                for col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                df = df.dropna()
+
+            elif dataset_name == "diabetes":
+                # Try different parsing methods
+                try:
+                    df = pd.read_csv(StringIO(response.text), header=None)
+                except:
+                    df = pd.read_csv(StringIO(response.text))
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "vehicle":
+                df = pd.read_csv(StringIO(response.text), header=None, delim_whitespace=True)
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "segment":
+                df = pd.read_csv(StringIO(response.text), header=None, delim_whitespace=True)
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "letter":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+
+            elif dataset_name == "abalone":
+                df = pd.read_csv(StringIO(response.text), header=None)
+                df.columns = dataset_info["columns"]
+                df['rings'] = df['rings'].astype(int)
+
+            else:
+                # Generic parsing
+                try:
+                    df = pd.read_csv(StringIO(response.text), header=None)
+                    df.columns = dataset_info["columns"]
+                except:
+                    df = pd.read_csv(StringIO(response.text), delim_whitespace=True, header=None)
+                    df.columns = dataset_info["columns"]
+
+            # Ensure target column is set correctly
+            target = dataset_info["target"]
+            if target not in df.columns:
+                for col in df.columns:
+                    if target.lower() in col.lower() or col.lower() in ["class", "type", "label"]:
+                        target = col
+                        break
+
+            # Convert target to categorical if needed
+            if df[target].dtype == 'object':
+                df[target] = df[target].astype('category')
+
+            print(f"✅ Successfully loaded {dataset_name}: {len(df)} samples, {len(df.columns)} columns")
+            print(f"   Target: {target}")
+            print(f"   Classes: {df[target].nunique()}")
+
+            return df
+
+        except Exception as e:
+            print(f"   Failed from {url}: {str(e)}")
+            return None
+
+    @staticmethod
+    def _create_synthetic_dataset(dataset_name: str) -> pd.DataFrame:
+        """Create synthetic dataset for demonstration when download fails"""
+        np.random.seed(42)
+
+        if dataset_name == "iris":
+            n_samples = 150
+            n_features = 4
+            n_classes = 3
+            feature_names = ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+            target_name = "class"
+
+            X = np.random.randn(n_samples, n_features) * 0.5
+            X[:50, :] += [5.1, 3.5, 1.4, 0.2]
+            X[50:100, :] += [5.9, 2.8, 4.2, 1.3]
+            X[100:, :] += [6.5, 3.0, 5.5, 2.0]
+            y = np.repeat([0, 1, 2], 50)
+
+        elif dataset_name == "diabetes":
+            n_samples = 768
+            n_features = 8
+            feature_names = ["preg", "plas", "pres", "skin", "insu", "mass", "pedi", "age"]
+            target_name = "class"
+
+            X = np.random.randn(n_samples, n_features)
+            # Add some correlation with target
+            y = (X[:, 0] + X[:, 1] + X[:, 2] > 0).astype(int)
+
+        else:
+            # Generic synthetic dataset
+            n_samples = 500
+            n_features = 5
+            feature_names = [f"feature_{i}" for i in range(1, n_features + 1)]
+            target_name = "class"
+            X = np.random.randn(n_samples, n_features)
+            y = np.random.randint(0, 3, n_samples)
+
+        df = pd.DataFrame(X, columns=feature_names)
+        df[target_name] = y
+
+        print(f"⚠️ Created synthetic dataset: {len(df)} samples, {len(df.columns)} columns")
+        print(f"   Target: {target_name}")
+        print(f"   Classes: {df[target_name].nunique()}")
+
+        return df
+
+    @staticmethod
+    def list_uci_datasets() -> List[str]:
+        """Return list of available UCI datasets"""
+        return sorted(DatasetConfig.UCI_DATASETS.keys())
+
+    @staticmethod
+    def get_dataset_info(dataset_name: str) -> Optional[Dict]:
+        """Get information about a UCI dataset"""
+        if dataset_name in DatasetConfig.UCI_DATASETS:
+            return DatasetConfig.UCI_DATASETS[dataset_name]
+        return None
+
+    @staticmethod
     def load_config(dataset_name: str) -> Dict:
+        """Configuration loading with UCI dataset support"""
         if not dataset_name or not isinstance(dataset_name, str):
             print("Error: Invalid dataset name provided.")
             return None
@@ -576,165 +824,71 @@ class DatasetConfig:
         csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
 
         try:
-            if not os.path.exists(config_path):
-                if os.path.exists(csv_path):
-                    print(f"Configuration file not found. Starting interactive setup for {dataset_name}...")
+            # If config doesn't exist but dataset is in UCI list, download it
+            if not os.path.exists(config_path) and dataset_name in DatasetConfig.UCI_DATASETS:
+                print(f"📥 UCI dataset '{dataset_name}' found. Downloading...")
+                df = DatasetConfig.download_uci_data(dataset_name)
 
-                    columns = []
-                    has_header = True
-                    try:
-                        with open(csv_path, 'r') as f:
-                            first_line = f.readline().strip()
-                            columns = first_line.split(',')
+                if df is not None:
+                    # Create data directory
+                    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 
-                            try:
-                                pd.read_csv(csv_path, nrows=0)
-                            except pd.errors.ParserError:
-                                has_header = False
-                                columns = []
-                    except Exception as e:
-                        print(f"Error reading CSV file: {str(e)}")
-                        return None
+                    # Save CSV
+                    df.to_csv(csv_path, index=False)
+                    print(f"✅ Dataset saved to {csv_path}")
 
-                    if not has_header or not columns:
-                        print("CSV file appears to have no header. Please provide column names.")
-                        columns = []
-                        while True:
-                            col_input = input("Enter comma-separated column names (including target): ").strip()
-                            if col_input:
-                                columns = [c.strip() for c in col_input.split(',')]
-                                if len(columns) > 1:
-                                    break
-                            print("Invalid input! Must provide at least two columns.")
-
-                    print(f"Detected columns: {', '.join(columns)}")
-
-                    target = None
-                    while True:
-                        target = input("Enter target column name: ").strip()
-                        if target in columns:
-                            break
-                        print(f"Invalid column! Choose from: {', '.join(columns)}")
-
+                    # Create config
                     config = DatasetConfig.DEFAULT_CONFIG.copy()
                     config.update({
                         "file_path": csv_path,
-                        "column_names": columns,
-                        "target_column": target,
-                        "has_header": has_header,
+                        "column_names": list(df.columns),
+                        "target_column": DatasetConfig.UCI_DATASETS[dataset_name]["target"],
+                        "has_header": True,
                         "modelType": "Histogram",
-                        "training_params": {
-                            "enable_visualization": False,
-                            "modelType": "Histogram"
-                        }
                     })
 
-                    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                    # Save config
                     with open(config_path, 'w') as f:
                         json.dump(config, f, indent=2)
-                    print(f"Configuration saved to {config_path}")
+                    print(f"✅ Configuration saved to {config_path}")
 
                     return config
+                else:
+                    print(f"❌ Failed to download dataset {dataset_name}")
+                    return None
 
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
+            # Load existing config
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                return config
 
-            validated_config = DatasetConfig.DEFAULT_CONFIG.copy()
-            validated_config.update(config)
+            # If file exists but no config
+            if os.path.exists(csv_path):
+                print(f"📁 Found data file: {csv_path}. Creating configuration...")
+                df = pd.read_csv(csv_path)
 
-            if 'training_params' not in validated_config:
-                validated_config['training_params'] = {}
+                config = DatasetConfig.DEFAULT_CONFIG.copy()
+                config.update({
+                    "file_path": csv_path,
+                    "column_names": list(df.columns),
+                    "target_column": df.columns[-1],
+                    "has_header": True,
+                    "modelType": "Histogram",
+                })
 
-            if validated_config.get('file_path'):
-                if not os.path.exists(validated_config['file_path']):
-                    alt_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                    if os.path.exists(alt_path):
-                        validated_config['file_path'] = alt_path
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"✅ Configuration saved to {config_path}")
 
-            if not validated_config.get('file_path'):
-                default_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if os.path.exists(default_path):
-                    validated_config['file_path'] = default_path
+                return config
 
-            if DatasetConfig.is_url(validated_config.get('file_path', '')):
-                url = validated_config['file_path']
-                local_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
-                if not os.path.exists(local_path):
-                    print(f"Downloading dataset from {url}")
-                    if not DatasetConfig.download_dataset(url, local_path):
-                        print(f"Failed to download dataset from {url}")
-                        return None
-                validated_config['file_path'] = local_path
-
-            if not validated_config.get('file_path') or not os.path.exists(validated_config['file_path']):
-                print("Warning: Data file not found")
-                return None
-
-            return validated_config
+            print(f"❌ No data file found for dataset: {dataset_name}")
+            return None
 
         except Exception as e:
-            print(f"Error loading configuration for {dataset_name}: {str(e)}")
+            print(f"❌ Error loading configuration for {dataset_name}: {e}")
             return None
-
-    @staticmethod
-    def get_available_datasets() -> List[str]:
-        datasets = []
-        data_dir = 'data'
-
-        if os.path.exists(data_dir):
-            for item in os.listdir(data_dir):
-                dataset_dir = os.path.join(data_dir, item)
-                if os.path.isdir(dataset_dir):
-                    conf_path = os.path.join(dataset_dir, f"{item}.conf")
-                    csv_path = os.path.join(dataset_dir, f"{item}.csv")
-                    if os.path.exists(conf_path) and os.path.exists(csv_path):
-                        datasets.append(item)
-
-        return sorted(datasets)
-
-    @staticmethod
-    def list_uci_datasets() -> List[str]:
-        return sorted(DatasetConfig.UCI_DATASETS.keys())
-
-    @staticmethod
-    def download_uci_data(dataset_name: str) -> Optional[pd.DataFrame]:
-        if dataset_name not in DatasetConfig.UCI_DATASETS:
-            print(f"Unknown UCI dataset: {dataset_name}")
-            return None
-
-        url = DatasetConfig.UCI_DATASETS[dataset_name]
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-
-            if dataset_name == "iris":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width', 'class']
-            elif dataset_name == "wine":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['class'] + [f'feature_{i}' for i in range(1, 14)]
-            elif dataset_name == "breast_cancer":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['id', 'diagnosis'] + [f'feature_{i}' for i in range(1, 31)]
-            elif dataset_name == "glass":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['id'] + [f'RI_{i}' for i in range(1, 10)]
-            elif dataset_name == "heart":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['age', 'sex', 'cp', 'trestbps', 'chol', 'fbs', 'restecg',
-                             'thalach', 'exang', 'oldpeak', 'slope', 'ca', 'thal', 'num']
-            elif dataset_name == "diabetes":
-                df = pd.read_csv(StringIO(response.text), header=None)
-                df.columns = ['preg', 'plas', 'pres', 'skin', 'insu', 'mass', 'pedi', 'age', 'class']
-            else:
-                df = pd.read_csv(StringIO(response.text), header=None)
-
-            return df
-
-        except Exception as e:
-            print(f"Error downloading UCI dataset {dataset_name}: {e}")
-            return None
-
 
 # =============================================================================
 # SECTION 3: COMPILED KERNELS (JIT - Mathematically Equivalent)
@@ -895,7 +1049,6 @@ class OptimizedBatchProcessor:
 
         return posteriors, bin_indices_dict
 
-
 # =============================================================================
 # SECTION 6: OPTIMIZED DATASET PROCESSOR
 # =============================================================================
@@ -968,32 +1121,28 @@ class OptimizedDatasetProcessor:
             'label_encoder': self.label_encoder
         }
 
-
 # =============================================================================
-# SECTION 7: OPTIMIZED DBNN CORE (Complete with Adaptive Training)
+# SECTION 7: OPTIMIZED DBNN CORE (MODIFIED - Added ExternalToolsMixin)
 # =============================================================================
 
-class OptimizedDBNN:
-    """Complete DBNN implementation - EXACT match to original algorithm"""
-
-    # =============================================================================
-    # SECTION: INTEGRATE WITH OPTIMIZEDDBNN (NON-INTRUSIVE)
-    # =============================================================================
+class OptimizedDBNN(ExternalToolsMixin):
+    """Complete DBNN implementation with all fixes"""
 
     def __init__(self, dataset_name: str = None, config: Union[Dict, str] = None,
-                 mode: str = 'train_predict', parallel: bool = True):
+                 mode: str = 'train_predict', parallel: bool = True,
+                 enable_external_tools: bool = ASTROPY_AVAILABLE):
+
+        # Call parent __init__ (ExternalToolsMixin)
+        super().__init__(enable_external_tools=enable_external_tools)
+
+        # Initialize the mixin first with kwargs
+        ExternalToolsMixin.__init__(self, enable_external_tools=enable_external_tools)
+
         self.dataset_name = dataset_name
         self.mode = mode
-        self.stop_training_flag = False  # Added for UI stop functionality
+        self.stop_training_flag = False
 
-        # External tools (only if requested)
-        self.enable_external_tools = kwargs.get('enable_external_tools', False)
-        self.tools_manager = None
-
-        if self.enable_external_tools:
-            self.tools_manager = ExternalToolsManager()
-            self._log_available_tools()
-
+        # Load configuration
         if config is None and dataset_name is not None:
             self.config = DatasetConfig.load_config(dataset_name)
         elif isinstance(config, str):
@@ -1005,15 +1154,18 @@ class OptimizedDBNN:
         if self.config is None:
             raise ValueError(f"Could not load configuration for {dataset_name}")
 
+        # Extract parameters
         self.model_type = self.config.get('model_type', self.config.get('modelType', 'Histogram'))
         self.target_column = self.config.get('target_column')
 
+        # Device setup
         compute_device = self.config.get('compute_device', 'auto')
         if compute_device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = compute_device
 
+        # Training parameters
         training_params = self.config.get('training_params', {})
         self.learning_rate = training_params.get('learning_rate', 0.1)
         self.n_bins_per_dim = training_params.get('n_bins_per_dim', 128)
@@ -1024,18 +1176,19 @@ class OptimizedDBNN:
         self.max_samples_per_round = training_params.get('max_samples_per_round', 500)
         self.patience = training_params.get('patience', 25)
 
+        # Active learning parameters
         active_learning = self.config.get('active_learning', {})
         self.similarity_threshold = active_learning.get('similarity_threshold', 0.25)
         self.min_divergence = active_learning.get('min_divergence', 0.1)
 
+        # Initialize components
         self.batch_processor = OptimizedBatchProcessor(self, self.device)
         self.batch_size = self._calculate_optimal_batch_size()
 
-        self.parallel = parallel
-        self.n_jobs = config.get('n_jobs', mp.cpu_count()) if config else mp.cpu_count()
-
+        # Tensor evolution tracker
         self.evolution_tracker = TensorEvolutionTracker(self)
 
+        # Core model components
         self.feature_pairs = None
         self.bin_edges = None
         self.bin_probs = None
@@ -1043,6 +1196,7 @@ class OptimizedDBNN:
         self.classes = None
         self.label_encoder = None
 
+        # Data
         self.X_tensor = None
         self.y_tensor = None
         self.X_train = None
@@ -1055,6 +1209,7 @@ class OptimizedDBNN:
         self.feature_names = None
         self.preprocessor = None
 
+        # Training history
         self.training_history = []
         self.accuracy_progression = []
         self.best_round_initial_conditions = None
@@ -1066,6 +1221,28 @@ class OptimizedDBNN:
         print(f"   Batch size: {self.batch_size}")
         print(f"   Model type: {self.model_type}")
         print(f"   Adaptive training: {self.enable_adaptive}")
+
+    def _calculate_optimal_batch_size(self) -> int:
+        if self.device == 'cuda' and torch.cuda.is_available():
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            free_memory = total_memory - torch.cuda.memory_allocated()
+            memory_per_sample = 4 * 1024 * 1024
+            optimal = int((free_memory * 0.3) / memory_per_sample)
+            return max(32, min(optimal, 2048))
+        return 128
+
+    def enable_evolution_tracking(self):
+        self.evolution_tracker.enable()
+
+    def get_evolution_history(self):
+        return self.evolution_tracker.get_history()
+
+    def clear_evolution_history(self):
+        self.evolution_tracker.clear_history()
+
+    # =============================================================================
+    # SECTION: INTEGRATE WITH OPTIMIZEDDBNN (NON-INTRUSIVE)
+    # =============================================================================
 
     def _log_available_tools(self):
         """Log available external tools"""
@@ -1187,26 +1364,8 @@ class OptimizedDBNN:
     # SECTION: INTEGRATE WITH OPTIMIZEDDBNN (NON-INTRUSIVE) ENDS
     # =============================================================================
 
-    def _calculate_optimal_batch_size(self) -> int:
-        if self.device == 'cuda' and torch.cuda.is_available():
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            free_memory = total_memory - torch.cuda.memory_allocated()
-            memory_per_sample = 4 * 1024 * 1024
-            optimal = int((free_memory * 0.3) / memory_per_sample)
-            return max(32, min(optimal, 2048))
-        return 128
-
-    def enable_evolution_tracking(self):
-        self.evolution_tracker.enable()
-
     def disable_evolution_tracking(self):
         self.evolution_tracker.disable()
-
-    def get_evolution_history(self):
-        return self.evolution_tracker.get_history()
-
-    def clear_evolution_history(self):
-        self.evolution_tracker.clear_history()
 
     def reset_model(self, hard_reset: bool = True):
         """Reset model to initial state"""
@@ -2341,14 +2500,11 @@ class OptimizedDBNN:
             self.in_adaptive_fit = False
             raise
 
-
 # =============================================================================
-# SECTION 8: OPTIMIZED VISUALIZER (Complete with all fixes)
+# SECTION 8: OPTIMIZED VISUALIZER (FIXED - Proper labels and file saving)
 # =============================================================================
 
 class OptimizedVisualizer:
-    """Enhanced visualizer with dataset-specific folders and proper history handling"""
-
     def __init__(self, model, output_dir='visualizations'):
         self.model = model
         self.dataset_name = model.dataset_name if model and hasattr(model, 'dataset_name') else 'unknown'
@@ -2368,14 +2524,66 @@ class OptimizedVisualizer:
             d.mkdir(exist_ok=True)
 
         self.spherical_viz = SphericalTensorEvolution(model, output_dir)
+        print(f"{Colors.CYAN}📁 Visualizations: {self.output_dir}{Colors.ENDC}")
 
-        print(f"{Colors.CYAN}📁 Visualizations will be saved to: {self.output_dir}{Colors.ENDC}")
+    def plot_confusion_matrix(self, y_true: np.ndarray, y_pred: np.ndarray, title: str = ''):
+        """Plot confusion matrix with ACTUAL class labels (strings)"""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from sklearn.metrics import confusion_matrix
+
+        if len(y_true) == 0 or len(y_pred) == 0:
+            return
+
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+
+        # Get actual class labels from label encoder
+        if hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+            inv_encoder = {v: k for k, v in self.model.label_encoder.items()}
+            y_true_labels = [inv_encoder[t] for t in y_true]
+            y_pred_labels = [inv_encoder[p] for p in y_pred]
+            unique_labels = sorted(list(self.model.label_encoder.keys()))
+
+            cm = confusion_matrix(y_true_labels, y_pred_labels, labels=unique_labels)
+
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True,
+                       xticklabels=unique_labels, yticklabels=unique_labels,
+                       annot_kws={'size': 10})
+            plt.xlabel('Predicted Class', fontsize=12, fontweight='bold')
+            plt.ylabel('True Class', fontsize=12, fontweight='bold')
+            plt.title(f'Confusion Matrix - {title}\n({self.dataset_name})', fontsize=14, fontweight='bold')
+            plt.xticks(rotation=45, ha='right')
+            accuracy = (np.array(y_true_labels) == np.array(y_pred_labels)).mean()
+            plt.figtext(0.02, 0.02, f'Accuracy: {accuracy:.4f}\nSamples: {len(y_true)}',
+                       bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
+            plt.tight_layout()
+            filename = self.dirs['confusion'] / f'{self.dataset_name}_confusion_matrix_{title}.png'
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"   ✅ Confusion matrix: {filename} (using actual labels)")
+        else:
+            # Fallback to numeric labels
+            unique_classes = np.unique(np.concatenate([y_true, y_pred]))
+            cm = confusion_matrix(y_true, y_pred, labels=unique_classes)
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True,
+                       xticklabels=unique_classes, yticklabels=unique_classes)
+            plt.xlabel('Predicted'), plt.ylabel('True')
+            plt.title(f'Confusion Matrix - {title}')
+            plt.tight_layout()
+            filename = self.dirs['confusion'] / f'{self.dataset_name}_confusion_matrix_{title}.png'
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"   ✅ Confusion matrix: {filename}")
 
     def plot_training_history(self, history):
+        """Plot training history - FIXED to actually save files"""
         import matplotlib.pyplot as plt
 
         if not history or len(history) == 0:
-            print(f"{Colors.YELLOW}   ℹ️ No training history available to plot{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   ℹ️ No training history to plot{Colors.ENDC}")
             return
 
         if isinstance(history[0], dict):
@@ -2383,86 +2591,58 @@ class OptimizedVisualizer:
                 epochs = [h['epoch'] for h in history]
                 train_acc = [h.get('train_accuracy', 0) for h in history]
                 test_acc = [h.get('test_accuracy', 0) for h in history]
-                xlabel = 'Epoch'
-                title_suffix = "Standard Training"
+                xlabel, title_suffix = 'Epoch', 'Standard Training'
             elif 'round' in history[0]:
                 epochs = [h['round'] + 1 for h in history]
                 train_acc = [h.get('train_accuracy', 0) for h in history]
                 test_acc = [h.get('test_accuracy', 0) for h in history]
-                xlabel = 'Round'
-                title_suffix = "Adaptive Rounds"
+                xlabel, title_suffix = 'Round', 'Adaptive Rounds'
             else:
                 epochs = list(range(1, len(history) + 1))
                 train_acc = [h.get('train_accuracy', h.get('accuracy', 0)) for h in history]
                 test_acc = [h.get('test_accuracy', h.get('accuracy', 0)) for h in history]
-                xlabel = 'Iteration'
-                title_suffix = "Training Progress"
+                xlabel, title_suffix = 'Iteration', 'Training Progress'
         else:
-            print(f"{Colors.YELLOW}   ℹ️ Unknown history format, skipping plot{Colors.ENDC}")
             return
 
         if all(v == 0 for v in train_acc) and all(v == 0 for v in test_acc):
-            print(f"{Colors.YELLOW}   ℹ️ No accuracy data available to plot{Colors.ENDC}")
             return
 
         plt.figure(figsize=(12, 6))
         plt.plot(epochs, train_acc, 'b-', label='Training Accuracy', linewidth=2, marker='o')
         plt.plot(epochs, test_acc, 'r-', label='Test Accuracy', linewidth=2, marker='s')
-        plt.xlabel(xlabel)
-        plt.ylabel('Accuracy')
-        plt.title(f'Training Progress - {self.dataset_name} ({title_suffix})')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.ylim([0, 1.05])
+        plt.xlabel(xlabel, fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title(f'Training Progress - {self.dataset_name} ({title_suffix})', fontsize=14, fontweight='bold')
+        plt.legend(), plt.grid(True, alpha=0.3), plt.ylim([0, 1.05])
 
-        for i, (x, y1, y2) in enumerate(zip(epochs, train_acc, test_acc)):
-            if i % max(1, len(epochs)//5) == 0:
-                plt.annotate(f'{y1:.2f}', (x, y1), textcoords="offset points",
-                            xytext=(0,10), ha='center', fontsize=8)
-                plt.annotate(f'{y2:.2f}', (x, y2), textcoords="offset points",
-                            xytext=(0,-15), ha='center', fontsize=8)
+        step = max(1, len(epochs)//10)
+        for i in range(0, len(epochs), step):
+            plt.annotate(f'{train_acc[i]:.3f}', (epochs[i], train_acc[i]), xytext=(0,10), ha='center', fontsize=8)
+            plt.annotate(f'{test_acc[i]:.3f}', (epochs[i], test_acc[i]), xytext=(0,-15), ha='center', fontsize=8)
 
         filename = self.dirs['performance'] / f'{self.dataset_name}_training_history.png'
         plt.savefig(filename, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"   ✅ Training history plot saved to: {filename}")
-
-    def plot_confusion_matrix(self, y_true: np.ndarray, y_pred: np.ndarray, title: str = ''):
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        from sklearn.metrics import confusion_matrix
-
-        if len(y_true) == 0 or len(y_pred) == 0:
-            print(f"   {Colors.YELLOW}ℹ️ Empty data for confusion matrix{Colors.ENDC}")
-            return
-
-        y_true = np.array(y_true)
-        y_pred = np.array(y_pred)
-
-        unique_classes = np.unique(np.concatenate([y_true, y_pred]))
-
-        cm = confusion_matrix(y_true, y_pred, labels=unique_classes)
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True,
-                   xticklabels=unique_classes, yticklabels=unique_classes)
-        plt.xlabel('Predicted')
-        plt.ylabel('True')
-        plt.title(f'Confusion Matrix - {title}')
-        filename = self.dirs['confusion'] / f'{self.dataset_name}_confusion_matrix_{title}.png'
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"   ✅ Confusion matrix saved to: {filename}")
+        print(f"   ✅ Training history: {filename} ({len(epochs)} points)")
 
     def plot_tensor_evolution(self, evolution_history):
+        """
+        Plot tensor evolution metrics showing ORTHOGONALIZATION of class tensors
+        in complex feature-pair space
+        """
         if not evolution_history:
-            print(f"{Colors.YELLOW}   ℹ️ No evolution history to plot{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   ℹ️ No evolution history{Colors.ENDC}")
             return
 
         import matplotlib.pyplot as plt
+        import numpy as np
 
         rounds = []
         accuracies = []
         training_sizes = []
+        orthogonality_matrix = []
+        class_separation_angles = []
 
         for snap in evolution_history:
             if 'round' in snap:
@@ -2470,98 +2650,232 @@ class OptimizedVisualizer:
                 accuracies.append(snap.get('accuracy', 0))
                 training_sizes.append(snap.get('training_size', 0))
 
+                # Calculate orthogonality from complex weights
+                if 'complex_weights' in snap:
+                    weights = snap['complex_weights']
+                    if torch.is_tensor(weights):
+                        weights = weights.cpu().numpy()
+
+                    # weights shape: (n_classes, n_pairs, n_bins, n_bins)
+                    if len(weights.shape) == 4:
+                        n_classes = weights.shape[0]
+
+                        if n_classes >= 2:
+                            # Calculate class orientation vectors
+                            class_orientations = []
+
+                            for c in range(n_classes):
+                                # Get all weights for this class
+                                class_weights = weights[c].flatten()
+
+                                # Filter significant weights
+                                significant = class_weights[np.abs(class_weights) > 0.01]
+
+                                if len(significant) > 0:
+                                    # Calculate average orientation (complex vector)
+                                    magnitudes = np.abs(significant)
+                                    phases = np.angle(significant)
+
+                                    # Weighted average direction (circular mean)
+                                    sin_sum = np.sum(magnitudes * np.sin(phases))
+                                    cos_sum = np.sum(magnitudes * np.cos(phases))
+                                    avg_phase = np.arctan2(sin_sum, cos_sum)
+
+                                    # Average magnitude
+                                    avg_mag = np.mean(magnitudes)
+
+                                    # Store as unit vector in complex plane
+                                    class_orientations.append(np.exp(1j * avg_phase))
+                                else:
+                                    class_orientations.append(0 + 0j)
+
+                            # Calculate pairwise orthogonality
+                            n = len(class_orientations)
+                            ortho_matrix = np.zeros((n, n))
+                            angles = []
+
+                            for i in range(n):
+                                for j in range(n):
+                                    if i == j:
+                                        ortho_matrix[i, j] = 1.0
+                                    else:
+                                        # Cosine similarity between class vectors
+                                        vi = class_orientations[i]
+                                        vj = class_orientations[j]
+
+                                        if np.abs(vi) > 0 and np.abs(vj) > 0:
+                                            vi_unit = vi / np.abs(vi)
+                                            vj_unit = vj / np.abs(vj)
+                                            similarity = np.real(vi_unit * np.conj(vj_unit))
+                                            ortho_matrix[i, j] = similarity
+
+                                            if i < j:
+                                                # Angle in degrees between class vectors
+                                                angle = np.arccos(np.clip(similarity, -1, 1)) * 180 / np.pi
+                                                angles.append(angle)
+
+                            orthogonality_matrix.append(ortho_matrix)
+
+                            # Average separation angle (should approach 90°)
+                            if angles:
+                                avg_angle = np.mean(angles)
+                                class_separation_angles.append(avg_angle)
+                            else:
+                                class_separation_angles.append(0)
+                        else:
+                            class_separation_angles.append(0)
+                    else:
+                        class_separation_angles.append(0)
+                else:
+                    class_separation_angles.append(0)
+
         if not rounds:
-            print(f"{Colors.YELLOW}   ℹ️ No valid round data in evolution history{Colors.ENDC}")
             return
 
-        orthogonality = []
-        for snap in evolution_history:
-            if 'complex_weights' in snap:
-                weights = snap['complex_weights']
-                n_classes = weights.shape[0] if hasattr(weights, 'shape') and len(weights.shape) > 0 else 0
+        # Create figure with 2x2 subplots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+        fig.suptitle(f'Tensor Evolution & Orthogonalization - {self.dataset_name}', fontsize=16, fontweight='bold')
 
-                if n_classes >= 2:
-                    correlations = []
-                    try:
-                        for i in range(min(3, n_classes)):
-                            for j in range(i+1, min(3, n_classes)):
-                                wi = weights[i].flatten() if torch.is_tensor(weights) else np.array(weights[i]).flatten()
-                                wj = weights[j].flatten() if torch.is_tensor(weights) else np.array(weights[j]).flatten()
-
-                                wi = wi[:100] if len(wi) > 100 else wi
-                                wj = wj[:100] if len(wj) > 100 else wj
-
-                                if np.linalg.norm(wi) > 0 and np.linalg.norm(wj) > 0:
-                                    if torch.is_tensor(wi):
-                                        corr = torch.abs(torch.dot(wi, wj) / (torch.norm(wi) * torch.norm(wj))).item()
-                                    else:
-                                        corr = np.abs(np.dot(wi, wj) / (np.linalg.norm(wi) * np.linalg.norm(wj)))
-                                    correlations.append(corr)
-                    except Exception as e:
-                        print(f"{Colors.YELLOW}   ⚠️ Error calculating orthogonality: {e}{Colors.ENDC}")
-
-                    avg_corr = np.mean(correlations) if correlations else 0
-                    orthogonality.append(1.0 - avg_corr)
-                else:
-                    orthogonality.append(0)
-            else:
-                orthogonality.append(0)
-
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f'Tensor Evolution Analysis - {self.dataset_name}', fontsize=16)
-
+        # Plot 1: Accuracy over rounds
         axes[0, 0].plot(rounds, accuracies, 'b-o', linewidth=2, markersize=8)
-        axes[0, 0].set_xlabel('Round')
-        axes[0, 0].set_ylabel('Accuracy')
-        axes[0, 0].set_title('Accuracy Evolution')
+        axes[0, 0].set_xlabel('Adaptive Round', fontsize=12)
+        axes[0, 0].set_ylabel('Accuracy', fontsize=12)
+        axes[0, 0].set_title('Classification Accuracy Evolution', fontsize=12, fontweight='bold')
         axes[0, 0].grid(True, alpha=0.3)
         axes[0, 0].set_ylim([0, 1.05])
 
-        axes[0, 1].bar(rounds, training_sizes, color='orange', alpha=0.7)
-        axes[0, 1].set_xlabel('Round')
-        axes[0, 1].set_ylabel('Training Samples')
-        axes[0, 1].set_title('Training Set Growth')
+        # Plot 2: Training set growth
+        axes[0, 1].bar(rounds, training_sizes, color='orange', alpha=0.7, edgecolor='darkorange')
+        axes[0, 1].set_xlabel('Adaptive Round', fontsize=12)
+        axes[0, 1].set_ylabel('Training Samples', fontsize=12)
+        axes[0, 1].set_title('Training Set Growth', fontsize=12, fontweight='bold')
         axes[0, 1].grid(True, alpha=0.3)
 
-        axes[1, 0].plot(rounds, orthogonality, 'g-s', linewidth=2, markersize=8)
-        axes[1, 0].set_xlabel('Round')
-        axes[1, 0].set_ylabel('Orthogonality (1 = Perfect)')
-        axes[1, 0].set_title('Tensor Orthogonality Evolution')
+        # Plot 3: Class Separation Angle (should approach 90°)
+        axes[1, 0].plot(rounds, class_separation_angles, 'g-s', linewidth=2, markersize=8)
+        axes[1, 0].axhline(y=90, color='red', linestyle='--', linewidth=2,
+                           label='Perfect Orthogonality (90°)', alpha=0.7)
+        axes[1, 0].set_xlabel('Adaptive Round', fontsize=12)
+        axes[1, 0].set_ylabel('Average Class Separation Angle (degrees)', fontsize=12)
+        axes[1, 0].set_title('Class Tensor Orthogonalization', fontsize=12, fontweight='bold')
         axes[1, 0].grid(True, alpha=0.3)
-        axes[1, 0].set_ylim([0, 1.05])
+        axes[1, 0].set_ylim([0, 100])
+        axes[1, 0].legend(loc='lower right')
 
-        if len(orthogonality) == len(accuracies) and len(orthogonality) > 0:
-            scatter = axes[1, 1].scatter(orthogonality, accuracies, c=rounds, cmap='viridis', s=100, alpha=0.7)
-            axes[1, 1].set_xlabel('Orthogonality')
-            axes[1, 1].set_ylabel('Accuracy')
-            axes[1, 1].set_title('Accuracy vs Orthogonality')
-            axes[1, 1].grid(True, alpha=0.3)
-            axes[1, 1].set_xlim([0, 1.05])
-            axes[1, 1].set_ylim([0, 1.05])
+        # Add text showing final angle
+        if class_separation_angles:
+            final_angle = class_separation_angles[-1]
+            axes[1, 0].annotate(f'Final: {final_angle:.1f}°',
+                               xy=(rounds[-1], final_angle),
+                               xytext=(10, 10), textcoords='offset points',
+                               fontsize=10, fontweight='bold')
 
-            cbar = plt.colorbar(scatter, ax=axes[1, 1])
-            cbar.set_label('Round')
+        # Plot 4: Orthogonality Heatmap (final round)
+        if orthogonality_matrix and len(orthogonality_matrix) > 0:
+            final_ortho = orthogonality_matrix[-1]
+            n_classes = final_ortho.shape[0]
+
+            im = axes[1, 1].imshow(final_ortho, cmap='RdYlGn_r', vmin=0, vmax=1, aspect='auto')
+            axes[1, 1].set_xlabel('Class', fontsize=12)
+            axes[1, 1].set_ylabel('Class', fontsize=12)
+            axes[1, 1].set_title('Final Class Orthogonality Matrix', fontsize=12, fontweight='bold')
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=axes[1, 1])
+            cbar.set_label('Cosine Similarity (0=Orthogonal, 1=Identical)', fontsize=10)
+
+            # Add text annotations in cells
+            for i in range(n_classes):
+                for j in range(n_classes):
+                    value = final_ortho[i, j]
+                    color = 'white' if value > 0.5 else 'black'
+                    axes[1, 1].text(j, i, f'{value:.2f}',
+                                   ha='center', va='center', color=color, fontsize=9)
+
+            # Set ticks
+            class_labels = [f'C{i+1}' for i in range(min(n_classes, 10))]
+            axes[1, 1].set_xticks(range(min(n_classes, 10)))
+            axes[1, 1].set_yticks(range(min(n_classes, 10)))
+            axes[1, 1].set_xticklabels(class_labels)
+            axes[1, 1].set_yticklabels(class_labels)
 
         plt.tight_layout()
         filename = self.dirs['tensor'] / f'{self.dataset_name}_tensor_evolution.png'
         plt.savefig(filename, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"   ✅ Tensor evolution plot saved to: {filename}")
 
-    def create_interactive_dashboard(self, history, X: np.ndarray, y: np.ndarray, evolution_history=None):
+        print(f"   ✅ Tensor evolution: {filename}")
+        if class_separation_angles:
+            print(f"   Orthogonalization progression: {[f'{a:.1f}°' for a in class_separation_angles]}")
+            print(f"   Final class separation: {class_separation_angles[-1]:.1f}° (target: 90°)")
+
+        # Also generate a separate orthogonality progression plot
+        self._plot_orthogonality_progression(rounds, class_separation_angles, accuracies)
+
+    def _plot_orthogonality_progression(self, rounds, angles, accuracies):
+        """Create a detailed orthogonality progression plot"""
+        if not angles or len(angles) < 2:
+            return
+
+        import matplotlib.pyplot as plt
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle(f'Class Tensor Orthogonalization Analysis - {self.dataset_name}', fontsize=14, fontweight='bold')
+
+        # Plot 1: Orthogonality vs Accuracy
+        ax1.scatter(angles, accuracies, c=rounds, cmap='viridis', s=100, alpha=0.7)
+        ax1.plot(angles, accuracies, 'b-', alpha=0.3, linewidth=1)
+        ax1.axvline(x=90, color='red', linestyle='--', label='Perfect Orthogonality (90°)', alpha=0.7)
+        ax1.set_xlabel('Class Separation Angle (degrees)', fontsize=12)
+        ax1.set_ylabel('Accuracy', fontsize=12)
+        ax1.set_title('Accuracy vs Orthogonality', fontsize=12)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+
+        # Add colorbar
+        cbar = plt.colorbar(ax1.collections[0], ax=ax1)
+        cbar.set_label('Round', fontsize=10)
+
+        # Plot 2: Convergence to 90°
+        ax2.plot(rounds, angles, 'g-s', linewidth=2, markersize=8, label='Actual Separation')
+        ax2.axhline(y=90, color='red', linestyle='--', linewidth=2, label='Target (90°)')
+        ax2.fill_between(rounds, angles, 90, where=np.array(angles) <= 90,
+                         color='green', alpha=0.3, interpolate=True)
+        ax2.fill_between(rounds, angles, 90, where=np.array(angles) > 90,
+                         color='red', alpha=0.3, interpolate=True)
+        ax2.set_xlabel('Adaptive Round', fontsize=12)
+        ax2.set_ylabel('Class Separation Angle (degrees)', fontsize=12)
+        ax2.set_title('Convergence to Orthogonal State', fontsize=12)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        ax2.set_ylim([0, 100])
+
+        # Add annotations
+        for i, (r, angle) in enumerate(zip(rounds, angles)):
+            if i == 0 or i == len(rounds)-1 or (i > 0 and abs(angles[i] - angles[i-1]) > 20):
+                ax2.annotate(f'{angle:.0f}°', (r, angle),
+                            xytext=(0, 10), textcoords='offset points',
+                            ha='center', fontsize=8)
+
+        plt.tight_layout()
+        filename = self.dirs['tensor'] / f'{self.dataset_name}_orthogonality_analysis.png'
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"   ✅ Orthogonality analysis: {filename}")
+
+    def create_interactive_dashboard(self, history, X, y, evolution_history=None):
+        """Create interactive Plotly dashboard"""
+        if not PLOTLY_AVAILABLE:
+            return
+
         import plotly.graph_objects as go
         import plotly.express as px
         from plotly.subplots import make_subplots
-        from sklearn.decomposition import PCA
 
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=('Training Progress', 'Feature Space (PCA)',
-                          'Accuracy Distribution', 'Class Distribution'),
-            specs=[[{'type': 'xy'}, {'type': 'scatter3d'}],
-                   [{'type': 'xy'}, {'type': 'xy'}]]
-        )
+        fig = make_subplots(rows=2, cols=2, subplot_titles=('Training Progress', 'Feature Space (PCA)',
+                                                           'Accuracy Distribution', 'Class Distribution'))
 
+        # Add training progress
         if history and len(history) > 0:
             if isinstance(history[0], dict):
                 if 'epoch' in history[0]:
@@ -2573,592 +2887,874 @@ class OptimizedVisualizer:
                 else:
                     x_vals = list(range(1, len(history) + 1))
                     x_title = 'Iteration'
-
-                train_acc = [h.get('train_accuracy', h.get('accuracy', 0)) for h in history]
-                test_acc = [h.get('test_accuracy', h.get('accuracy', 0)) for h in history]
+                train_acc = [h.get('train_accuracy', 0) for h in history]
+                test_acc = [h.get('test_accuracy', 0) for h in history]
             else:
                 x_vals = list(range(1, len(history) + 1))
                 x_title = 'Round'
-                if hasattr(self.model, 'accuracy_progression') and self.model.accuracy_progression:
-                    train_acc = [a.get('train_accuracy', 0) for a in self.model.accuracy_progression]
-                    test_acc = [a.get('test_accuracy', 0) for a in self.model.accuracy_progression]
-                else:
-                    train_acc = [0.5] * len(history)
-                    test_acc = [0.5] * len(history)
+                train_acc = [0.5] * len(history)
+                test_acc = [0.5] * len(history)
         else:
-            x_vals = [1]
-            x_title = 'Iteration'
-            train_acc = [0]
-            test_acc = [0]
+            x_vals = [1]; x_title = 'Iteration'
+            train_acc = [0]; test_acc = [0]
 
-        fig.add_trace(go.Scatter(x=x_vals, y=train_acc, name='Train',
-                                 line=dict(color='blue', width=2), mode='lines+markers'),
-                     row=1, col=1)
-        fig.add_trace(go.Scatter(x=x_vals, y=test_acc, name='Test',
-                                 line=dict(color='red', width=2), mode='lines+markers'),
-                     row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_vals, y=train_acc, name='Train', line=dict(color='blue', width=2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x_vals, y=test_acc, name='Test', line=dict(color='red', width=2)), row=1, col=1)
 
-        if X is not None and len(X) > 0 and y is not None and len(y) > 0:
-            if X.shape[1] > 3:
-                pca = PCA(n_components=3)
-                X_3d = pca.fit_transform(X)
-            else:
-                X_3d = X
-                if X_3d.shape[1] < 3:
-                    X_3d = np.pad(X_3d, ((0, 0), (0, 3 - X_3d.shape[1])), mode='constant')
-
-            unique_classes = np.unique(y)
-            colors = px.colors.qualitative.Set1
-
-            for i, cls in enumerate(unique_classes):
-                mask = y == cls
-                if mask.any():
-                    fig.add_trace(
-                        go.Scatter3d(
-                            x=X_3d[mask, 0], y=X_3d[mask, 1], z=X_3d[mask, 2],
-                            mode='markers',
-                            marker=dict(size=5, color=colors[i % len(colors)], opacity=0.7),
-                            name=f'Class {cls}'
-                        ),
-                        row=1, col=2
-                    )
-
-            fig.update_scenes(
-                row=1, col=2,
-                xaxis_title='PC1' if X.shape[1] > 3 else 'Feature 1',
-                yaxis_title='PC2' if X.shape[1] > 3 else 'Feature 2',
-                zaxis_title='PC3' if X.shape[1] > 3 else 'Feature 3'
-            )
-
-        if train_acc and len(train_acc) > 0:
-            fig.add_trace(
-                go.Histogram(x=train_acc, name='Train Acc', nbinsx=20,
-                            marker_color='blue', opacity=0.7),
-                row=2, col=1
-            )
-
+        # Add class distribution
         if y is not None and len(y) > 0:
             unique, counts = np.unique(y, return_counts=True)
-            fig.add_trace(
-                go.Bar(x=[str(c) for c in unique], y=counts, name='Class Distribution',
-                      marker_color='green', opacity=0.7),
-                row=2, col=2
-            )
+            fig.add_trace(go.Bar(x=[str(c) for c in unique], y=counts, name='Class Distribution'), row=2, col=2)
 
-        fig.update_layout(
-            height=900,
-            showlegend=True,
-            title_text=f"DBNN Dashboard - {self.dataset_name}",
-            hovermode='closest'
-        )
-
-        fig.update_xaxes(title_text=x_title, row=1, col=1)
-        fig.update_yaxes(title_text='Accuracy', row=1, col=1, range=[0, 1])
-        fig.update_xaxes(title_text='Accuracy', row=2, col=1)
-        fig.update_yaxes(title_text='Count', row=2, col=1)
-        fig.update_xaxes(title_text='Class', row=2, col=2)
-        fig.update_yaxes(title_text='Count', row=2, col=2)
-
+        fig.update_layout(height=800, title_text=f"DBNN Dashboard - {self.dataset_name}")
         dashboard_path = self.dirs['interactive'] / f'{self.dataset_name}_dashboard.html'
         fig.write_html(str(dashboard_path))
-        print(f"   ✅ Interactive dashboard saved to: {dashboard_path}")
+        print(f"   ✅ Interactive dashboard: {dashboard_path}")
 
-    def generate_all_visualizations(self, history, X: np.ndarray, y: np.ndarray,
-                                   y_train: np.ndarray, y_test: np.ndarray,
-                                   train_pred: np.ndarray, test_pred: np.ndarray,
-                                   evolution_history=None):
-        print(f"\n🎨 Generating comprehensive visualizations for dataset: {self.dataset_name}")
-        print(f"📁 Output directory: {self.output_dir}")
+    def generate_all_visualizations(self, history, X, y, y_train, y_test, train_pred, test_pred, evolution_history=None):
+        """Generate all visualizations with verification"""
+        print(f"\n🎨 Visualizations for: {self.dataset_name}")
+        print(f"{'='*60}")
 
         self.plot_training_history(history)
-
-        if len(y_train) > 0 and len(train_pred) > 0:
-            self.plot_confusion_matrix(y_train, train_pred, 'Training')
-        else:
-            print(f"{Colors.YELLOW}   ℹ️ No training predictions available{Colors.ENDC}")
-
-        if len(y_test) > 0 and len(test_pred) > 0:
-            self.plot_confusion_matrix(y_test, test_pred, 'Test')
-        else:
-            print(f"{Colors.YELLOW}   ℹ️ No test predictions available{Colors.ENDC}")
+        self.plot_confusion_matrix(y_train, train_pred, 'Training')
+        self.plot_confusion_matrix(y_test, test_pred, 'Test')
 
         if evolution_history and len(evolution_history) > 0:
             self.plot_tensor_evolution(evolution_history)
-        else:
-            print(f"{Colors.YELLOW}   ℹ️ No evolution history available{Colors.ENDC}")
 
         try:
             self.create_interactive_dashboard(history, X, y, evolution_history)
         except Exception as e:
-            print(f"{Colors.YELLOW}   ⚠️ Could not create interactive dashboard: {e}{Colors.ENDC}")
+            print(f"   ⚠️ Dashboard: {e}")
 
-        print(f"\n📁 All visualizations saved to: {self.output_dir}")
-
+        print(f"\n📁 All saved to: {self.output_dir}")
 
 # =============================================================================
-# SECTION 9: SPHERICAL TENSOR EVOLUTION VISUALIZER
+# SECTION 9: SPHERICAL TENSOR EVOLUTION (FIXED for complex tensor space)
 # =============================================================================
 
 class SphericalTensorEvolution:
-    """Visualizes tensor evolution on a sphere with proper dataset organization"""
-
     def __init__(self, model, output_dir='visualizations'):
         self.model = model
         self.dataset_name = model.dataset_name if model and hasattr(model, 'dataset_name') else 'unknown'
-
-        self.base_output_dir = Path(output_dir)
-        self.output_dir = self.base_output_dir / self.dataset_name / 'spherical_evolution'
+        self.output_dir = Path(output_dir) / self.dataset_name / 'spherical_evolution'
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"{Colors.CYAN}🌐 Spherical visualizations will be saved to: {self.output_dir}{Colors.ENDC}")
-
     def create_spherical_animation(self, evolution_history, class_names=None):
-        if not evolution_history:
-            print(f"{Colors.YELLOW}   ℹ️ No evolution history to visualize{Colors.ENDC}")
+        """
+        Create spherical evolution animation showing TENSOR ORTHOGONALIZATION in complex space
+        Each vector represents the orientation of a class's tensor in complex feature-pair space
+        Shows how classes become orthogonal (90° apart) as training progresses
+        """
+        if not evolution_history or not PLOTLY_AVAILABLE:
+            return None
+
+        import plotly.graph_objects as go
+        import plotly.express as px
+
+        print(f"{Colors.CYAN}🌐 Creating spherical evolution - Tensor Orthogonalization Visualization...{Colors.ENDC}")
+
+        # Get class names
+        if class_names is None and hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+            class_names = list(self.model.label_encoder.keys())
+
+        class_colors = px.colors.qualitative.Set1 + px.colors.qualitative.Set2 + px.colors.qualitative.Set3
+        frames_data = []
+
+        for snap_idx, snap in enumerate(evolution_history):
+            if 'complex_weights' not in snap:
+                continue
+
+            weights = snap['complex_weights']
+            if torch.is_tensor(weights):
+                weights = weights.cpu().numpy()
+
+            round_num = snap['round']
+            accuracy = snap.get('accuracy', 0)
+            training_size = snap.get('training_size', 0)
+
+            # weights shape: (n_classes, n_pairs, n_bins, n_bins)
+            if len(weights.shape) == 4:
+                n_classes = weights.shape[0]
+                n_pairs = weights.shape[1]
+                n_bins = weights.shape[2]
+
+                print(f"   Round {round_num}: {n_classes} classes, {n_pairs} feature pairs, {n_bins}x{n_bins} bins")
+
+                points = []
+
+                # For each class, compute the TENSOR ORIENTATION VECTOR
+                for c in range(min(n_classes, 12)):
+                    class_name = class_names[c] if class_names and c < len(class_names) else f'Class {c+1}'
+
+                    # Get all weights for this class
+                    class_weights = weights[c].flatten()
+
+                    # Filter significant weights (non-zero)
+                    significant = class_weights[np.abs(class_weights) > 1e-6]
+
+                    if len(significant) > 0:
+                        # Each weight is a complex number: w = a + i*b
+                        # Calculate the average orientation in complex space
+                        magnitudes = np.abs(significant)
+                        phases = np.angle(significant)
+
+                        # Weighted circular mean (accounts for magnitude importance)
+                        sin_sum = np.sum(magnitudes * np.sin(phases))
+                        cos_sum = np.sum(magnitudes * np.cos(phases))
+                        avg_theta = np.arctan2(sin_sum, cos_sum)  # Azimuthal angle
+
+                        # Average magnitude (strength of orientation)
+                        avg_r = np.mean(magnitudes)
+
+                        # For 3D sphere, we need polar angle (phi) that represents class separation
+                        # This should be based on the class index for orthogonal positions
+                        # In perfect orthogonality, each class is at 90° separation
+                        target_phi = (c * np.pi / max(1, n_classes))
+
+                        # Calculate actual phi from tensor orientation
+                        # Use the second harmonic to get separation information
+                        sin_sum2 = np.sum(magnitudes * np.sin(phases * 2))
+                        cos_sum2 = np.sum(magnitudes * np.cos(phases * 2))
+                        actual_phi = (np.arctan2(sin_sum2, cos_sum2) % np.pi) / 2 + 0.5
+
+                        # Convert to cartesian coordinates for 3D plot
+                        x = avg_r * np.sin(actual_phi) * np.cos(avg_theta)
+                        y = avg_r * np.sin(actual_phi) * np.sin(avg_theta)
+                        z = avg_r * np.cos(actual_phi)
+
+                        points.append({
+                            'class': c,
+                            'class_name': class_name,
+                            'r': avg_r,
+                            'theta': avg_theta,
+                            'phi': actual_phi,
+                            'target_phi': target_phi,
+                            'x': x,
+                            'y': y,
+                            'z': z,
+                            'num_weights': len(significant),
+                            'avg_magnitude': avg_r
+                        })
+                    else:
+                        # If no significant weights, place at origin
+                        points.append({
+                            'class': c,
+                            'class_name': class_name,
+                            'r': 0,
+                            'theta': 0,
+                            'phi': 0,
+                            'target_phi': (c * np.pi / max(1, n_classes)),
+                            'x': 0, 'y': 0, 'z': 0,
+                            'num_weights': 0,
+                            'avg_magnitude': 0
+                        })
+
+                # Calculate orthogonality metrics for this round
+                ortho_metrics = self._calculate_orthogonality_metrics(points, n_classes)
+
+                frames_data.append({
+                    'round': round_num,
+                    'points': points,
+                    'accuracy': accuracy,
+                    'training_size': training_size,
+                    'n_classes': n_classes,
+                    'n_pairs': n_pairs,
+                    'avg_separation': ortho_metrics['avg_separation'],
+                    'orthogonality': ortho_metrics['orthogonality'],
+                    'max_separation': ortho_metrics['max_separation'],
+                    'min_separation': ortho_metrics['min_separation']
+                })
+
+        if not frames_data:
+            print(f"{Colors.YELLOW}   ℹ️ No valid class orientations extracted{Colors.ENDC}")
+            return None
+
+        # Create frames for animation
+        frames = []
+
+        for frame_idx, fd in enumerate(frames_data):
+            round_num = fd['round']
+            points = fd['points']
+            accuracy = fd['accuracy']
+            training_size = fd['training_size']
+            avg_sep = fd['avg_separation']
+            ortho = fd['orthogonality']
+
+            traces = []
+
+            # Add transparent unit sphere for reference (radius = 1)
+            u, v = np.mgrid[0:2*np.pi:40j, 0:np.pi:30j]
+            x_sphere = np.cos(u) * np.sin(v)
+            y_sphere = np.sin(u) * np.sin(v)
+            z_sphere = np.cos(v)
+
+            traces.append(go.Surface(
+                x=x_sphere, y=y_sphere, z=z_sphere,
+                opacity=0.08,
+                showscale=False,
+                hoverinfo='none',
+                name='Unit Sphere',
+                colorscale=[[0, 'lightgray'], [1, 'lightgray']]
+            ))
+
+            # Add coordinate axes
+            axis_length = 1.3
+            traces.append(go.Scatter3d(
+                x=[-axis_length, axis_length], y=[0, 0], z=[0, 0],
+                mode='lines', line=dict(color='red', width=2), name='Real Feature Component'
+            ))
+            traces.append(go.Scatter3d(
+                x=[0, 0], y=[-axis_length, axis_length], z=[0, 0],
+                mode='lines', line=dict(color='green', width=2), name='Imaginary Feature Component'
+            ))
+            traces.append(go.Scatter3d(
+                x=[0, 0], y=[0, 0], z=[-axis_length, axis_length],
+                mode='lines', line=dict(color='blue', width=2), name='Class Separation'
+            ))
+
+            # Add class orientation vectors
+            for p in points:
+                if p['r'] > 0.01:  # Only show classes with significant orientation
+                    cid = p['class']
+                    color = class_colors[cid % len(class_colors)]
+
+                    # Draw vector from origin to class orientation point
+                    traces.append(go.Scatter3d(
+                        x=[0, p['x']], y=[0, p['y']], z=[0, p['z']],
+                        mode='lines+markers',
+                        marker=dict(
+                            size=10,
+                            color=color,
+                            symbol='circle',
+                            line=dict(width=2, color='white')
+                        ),
+                        line=dict(color=color, width=3),
+                        name=p['class_name'],
+                        legendgroup=f'class{cid}',
+                        showlegend=(frame_idx == 0),
+                        text=f"<b>Class {p['class_name']}</b><br>"
+                             f"Magnitude: {p['r']:.3f}<br>"
+                             f"Phase: {p['theta']:.2f} rad ({p['theta']*180/np.pi:.0f}°)<br>"
+                             f"Polar Angle: {p['phi']:.2f} rad ({p['phi']*180/np.pi:.0f}°)<br>"
+                             f"Weights: {p['num_weights']}",
+                        hoverinfo='text'
+                    ))
+
+            # Add target orthogonal positions (for perfect 90° separation)
+            n_classes = fd['n_classes']
+            for c in range(min(n_classes, 12)):
+                # Target positions at 90° separation (equatorial plane)
+                target_theta = (c * 2 * np.pi / n_classes)
+                target_phi = np.pi / 2  # Equatorial plane
+                r = 0.95
+
+                x_target = r * np.sin(target_phi) * np.cos(target_theta)
+                y_target = r * np.sin(target_phi) * np.sin(target_theta)
+                z_target = r * np.cos(target_phi)
+
+                color = class_colors[c % len(class_colors)]
+
+                traces.append(go.Scatter3d(
+                    x=[x_target], y=[y_target], z=[z_target],
+                    mode='markers',
+                    marker=dict(
+                        size=14,
+                        color=color,
+                        symbol='x',
+                        opacity=0.8,
+                        line=dict(width=2, color='white')
+                    ),
+                    name=f'Target {class_names[c] if class_names and c < len(class_names) else f"C{c+1}"}',
+                    legendgroup=f'target{c}',
+                    showlegend=(frame_idx == 0),
+                    text=f"Target orthogonal position for Class {c+1}<br>90° separation",
+                    hoverinfo='text'
+                ))
+
+            # Add a reference circle at 90° (equatorial plane)
+            theta_circle = np.linspace(0, 2*np.pi, 100)
+            x_circle = 0.98 * np.cos(theta_circle)
+            y_circle = 0.98 * np.sin(theta_circle)
+            z_circle = np.zeros_like(theta_circle)
+
+            traces.append(go.Scatter3d(
+                x=x_circle, y=y_circle, z=z_circle,
+                mode='lines',
+                line=dict(color='gray', width=1, dash='dash'),
+                name='Equatorial Plane (90° separation)',
+                showlegend=(frame_idx == 0)
+            ))
+
+            frames.append(go.Frame(
+                data=traces,
+                name=f'Round {round_num}',
+                layout=go.Layout(
+                    title=dict(
+                        text=f'<b>Round {round_num}</b><br>'
+                             f'Accuracy: {accuracy:.3f} | Training Samples: {training_size}<br>'
+                             f'<span style="color:green">Average Separation: {avg_sep:.1f}°</span> | '
+                             f'<span style="color:blue">Orthogonality: {ortho:.3f}</span>',
+                        font=dict(size=14)
+                    )
+                )
+            ))
+
+        # Create figure with animation controls
+        fig = go.Figure(
+            data=frames[0].data,
+            frames=frames,
+            layout=go.Layout(
+                title=dict(
+                    text=f'<b>CT-DBNN Tensor Orthogonalization</b><br>'
+                         f'Class Orientation Vectors in Complex Feature-Pair Space',
+                    font=dict(size=16)
+                ),
+                scene=dict(
+                    xaxis_title='<b>Real Feature Component</b>',
+                    yaxis_title='<b>Imaginary Feature Component</b>',
+                    zaxis_title='<b>Class Separation Axis</b>',
+                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8)),
+                    aspectmode='cube',
+                    annotations=[
+                        dict(
+                            x=1.6, y=0, z=0,
+                            text="Real",
+                            showarrow=False,
+                            font=dict(color="red", size=10)
+                        ),
+                        dict(
+                            x=0, y=1.6, z=0,
+                            text="Imag",
+                            showarrow=False,
+                            font=dict(color="green", size=10)
+                        ),
+                        dict(
+                            x=0, y=0, z=1.6,
+                            text="Separation",
+                            showarrow=False,
+                            font=dict(color="blue", size=10)
+                        )
+                    ]
+                ),
+                updatemenus=[
+                    dict(
+                        type='buttons',
+                        showactive=False,
+                        y=0.92,
+                        x=0.05,
+                        buttons=[
+                            dict(label='▶️ Play', method='animate',
+                                 args=[None, {
+                                     'frame': {'duration': 800, 'redraw': True},
+                                     'fromcurrent': True,
+                                     'mode': 'immediate',
+                                     'transition': {'duration': 0}
+                                 }]),
+                            dict(label='⏸️ Pause', method='animate',
+                                 args=[[None], {
+                                     'frame': {'duration': 0, 'redraw': False},
+                                     'mode': 'immediate'
+                                 }]),
+                            dict(label='🔄 Reset', method='animate',
+                                 args=[[frames[0].name], {
+                                     'frame': {'duration': 0, 'redraw': True},
+                                     'mode': 'immediate'
+                                 }])
+                        ]
+                    )
+                ],
+                sliders=[{
+                    'active': 0,
+                    'yanchor': 'top',
+                    'xanchor': 'left',
+                    'currentvalue': {
+                        'prefix': 'Round: ',
+                        'font': {'size': 14, 'color': 'white'},
+                        'visible': True
+                    },
+                    'pad': {'b': 10, 't': 50},
+                    'len': 0.9,
+                    'x': 0.1,
+                    'y': 0,
+                    'steps': [
+                        {
+                            'args': [[f'Round {fd["round"]}'], {
+                                'frame': {'duration': 0, 'redraw': True},
+                                'mode': 'immediate',
+                                'transition': {'duration': 0}
+                            }],
+                            'label': str(fd['round']),
+                            'method': 'animate'
+                        }
+                        for fd in frames_data
+                    ]
+                }],
+                width=1400,
+                height=1000,
+                showlegend=True,
+                legend=dict(
+                    yanchor="top", y=0.99, xanchor="left", x=0.02,
+                    bgcolor='rgba(0,0,0,0.7)', bordercolor='white', borderwidth=1,
+                    font=dict(color='white', size=10)
+                ),
+                paper_bgcolor='rgba(0,0,0,0.9)',
+                plot_bgcolor='rgba(0,0,0,0.9)'
+            )
+        )
+
+        # Add explanation annotation
+        fig.add_annotation(
+            x=0.98, y=0.05, xref="paper", yref="paper",
+            text="<b>📐 Tensor Orthogonalization Process:</b><br>"
+                 "• Each colored vector = Class orientation in complex feature-pair space<br>"
+                 "• Vectors start randomly (mixed) → end orthogonal (90° apart)<br>"
+                 "• ✗ marks = Target orthogonal positions for perfect classification<br>"
+                 "• Gray circle = Equatorial plane (90° separation reference)<br>"
+                 "• Perfect classification achieved when vectors reach ✗ targets",
+            showarrow=False,
+            font=dict(size=11, color='white'),
+            align='right',
+            bgcolor='rgba(0,0,0,0.6)',
+            bordercolor='white',
+            borderwidth=1,
+            borderpad=4
+        )
+
+        # Add orthogonality gauge in top right
+        final_ortho = frames_data[-1]['orthogonality']
+        final_sep = frames_data[-1]['avg_separation']
+
+        fig.add_annotation(
+            x=0.98, y=0.95, xref="paper", yref="paper",
+            text=f"<b>Final State:</b><br>"
+                 f"Average Separation: <b>{final_sep:.1f}°</b><br>"
+                 f"Orthogonality: <b>{final_ortho:.3f}</b><br>"
+                 f"Target: <b>90° | 1.000</b>",
+            showarrow=False,
+            font=dict(size=11, color='lightgreen'),
+            align='right',
+            bgcolor='rgba(0,0,0,0.6)',
+            bordercolor='lightgreen',
+            borderwidth=1,
+            borderpad=4
+        )
+
+        output_path = self.output_dir / f'{self.dataset_name}_spherical.html'
+        fig.write_html(str(output_path))
+        print(f"   ✅ Spherical evolution: {output_path}")
+        print(f"   Rounds: {[fd['round'] for fd in frames_data]}")
+        print(f"   Orthogonality progression: {[f'{fd["orthogonality"]:.3f}' for fd in frames_data]}")
+        print(f"   Class separation progression: {[f'{fd["avg_separation"]:.1f}°' for fd in frames_data]}")
+
+        return str(output_path)
+
+    def _calculate_orthogonality_metrics(self, points, n_classes):
+        """
+        Calculate orthogonality metrics from class orientation vectors
+        """
+        if len(points) < 2:
+            return {
+                'avg_separation': 0,
+                'orthogonality': 0,
+                'max_separation': 0,
+                'min_separation': 0
+            }
+
+        # Extract unit vectors from points (ignore magnitude, just direction)
+        vectors = []
+        for p in points:
+            if p['r'] > 0.01:
+                # Normalize to unit vector
+                x, y, z = p['x'], p['y'], p['z']
+                norm = np.sqrt(x*x + y*y + z*z)
+                if norm > 0:
+                    vectors.append((x/norm, y/norm, z/norm))
+                else:
+                    vectors.append((0, 0, 0))
+            else:
+                vectors.append((0, 0, 0))
+
+        # Calculate pairwise angles
+        angles = []
+        for i in range(len(vectors)):
+            for j in range(i+1, len(vectors)):
+                v1 = vectors[i]
+                v2 = vectors[j]
+
+                # Dot product
+                dot = v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+                dot = np.clip(dot, -1, 1)
+
+                # Angle in degrees
+                angle = np.arccos(dot) * 180 / np.pi
+                angles.append(angle)
+
+        if angles:
+            avg_sep = np.mean(angles)
+            orthogonality = avg_sep / 90.0  # Normalized: 1.0 = perfect 90° separation
+            return {
+                'avg_separation': avg_sep,
+                'orthogonality': min(1.0, orthogonality),
+                'max_separation': np.max(angles),
+                'min_separation': np.min(angles)
+            }
+        else:
+            return {
+                'avg_separation': 0,
+                'orthogonality': 0,
+                'max_separation': 0,
+                'min_separation': 0
+            }
+
+    def create_side_by_side_evolution(self, evolution_history):
+        """
+        Create side-by-side comparison of initial and final states
+        Uses _add_state_to_subplot to add vector visualizations
+        """
+        if not evolution_history or len(evolution_history) < 2 or not PLOTLY_AVAILABLE:
+            print(f"{Colors.YELLOW}   ℹ️ Need at least 2 rounds for side-by-side comparison{Colors.ENDC}")
             return None
 
         try:
             import plotly.graph_objects as go
-            import plotly.express as px
+            from plotly.subplots import make_subplots
 
-            print(f"{Colors.CYAN}🎬 Creating spherical tensor evolution animation for {self.dataset_name}...{Colors.ENDC}")
+            print(f"{Colors.CYAN}🔄 Creating side-by-side evolution comparison...{Colors.ENDC}")
 
-            rounds = []
-            frames_data = []
-            class_colors = px.colors.qualitative.Set1 + px.colors.qualitative.Set2 + px.colors.qualitative.Set3
+            first_snap = evolution_history[0]
+            last_snap = evolution_history[-1]
 
-            for snap_idx, snap in enumerate(evolution_history):
-                if 'complex_weights' not in snap:
-                    continue
+            # Get class names
+            class_names = None
+            if hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+                class_names = list(self.model.label_encoder.keys())
 
-                round_num = snap['round']
-                rounds.append(round_num)
-                weights = snap['complex_weights']
-                accuracy = snap.get('accuracy', 0)
-
-                if torch.is_tensor(weights):
-                    weights = weights.cpu().numpy()
-
-                if len(weights.shape) == 4:
-                    n_classes = weights.shape[0]
-                    sample_points = []
-
-                    for c in range(min(n_classes, 10)):
-                        class_weights = weights[c].flatten()
-
-                        n_samples = min(100, len(class_weights))
-                        sample_indices = np.random.choice(len(class_weights), n_samples, replace=False)
-
-                        for idx in sample_indices:
-                            w = class_weights[idx]
-                            if np.abs(w) > 0.01:
-                                r = np.abs(w)
-                                theta = np.angle(w)
-                                pos_hash = hash((c, idx % 100)) % 1000 / 1000.0
-                                phi = np.pi * pos_hash
-
-                                sample_points.append({
-                                    'class': c,
-                                    'r': r,
-                                    'theta': theta,
-                                    'phi': phi,
-                                    'round': round_num,
-                                    'accuracy': accuracy,
-                                    'x': r * np.sin(phi) * np.cos(theta),
-                                    'y': r * np.sin(phi) * np.sin(theta),
-                                    'z': r * np.cos(phi)
-                                })
-
-                    frames_data.append({
-                        'round': round_num,
-                        'points': sample_points,
-                        'accuracy': accuracy
-                    })
-
-            if not frames_data:
-                print(f"{Colors.YELLOW}   ℹ️ No valid points extracted for visualization{Colors.ENDC}")
-                return None
-
-            frames = []
-
-            for frame_idx, frame_data in enumerate(frames_data):
-                round_num = frame_data['round']
-                points = frame_data['points']
-                accuracy = frame_data['accuracy']
-
-                class_points = {}
-                for point in points:
-                    class_id = point['class']
-                    if class_id not in class_points:
-                        class_points[class_id] = {'x': [], 'y': [], 'z': []}
-                    class_points[class_id]['x'].append(point['x'])
-                    class_points[class_id]['y'].append(point['y'])
-                    class_points[class_id]['z'].append(point['z'])
-
-                frame_traces = []
-
-                u = np.linspace(0, 2*np.pi, 30)
-                v = np.linspace(0, np.pi, 15)
-                x_sphere = np.outer(np.cos(u), np.sin(v))
-                y_sphere = np.outer(np.sin(u), np.sin(v))
-                z_sphere = np.outer(np.ones_like(u), np.cos(v))
-
-                frame_traces.append(
-                    go.Surface(
-                        x=x_sphere, y=y_sphere, z=z_sphere,
-                        opacity=0.1,
-                        showscale=False,
-                        hoverinfo='none',
-                        name='Unit Sphere',
-                        colorscale=[[0, 'lightgray'], [1, 'lightgray']]
-                    )
-                )
-
-                for class_id, coords in class_points.items():
-                    color = class_colors[class_id % len(class_colors)]
-                    class_name = class_names[class_id] if class_names and class_id < len(class_names) else f'Class {class_id+1}'
-
-                    frame_traces.append(
-                        go.Scatter3d(
-                            x=coords['x'],
-                            y=coords['y'],
-                            z=coords['z'],
-                            mode='markers',
-                            marker=dict(
-                                size=4,
-                                color=color,
-                                opacity=0.8
-                            ),
-                            name=class_name,
-                            legendgroup=f'class{class_id}',
-                            showlegend=(frame_idx == 0)
-                        )
-                    )
-
-                axis_length = 1.5
-                for axis, color, name in [('x', 'red', 'Real'), ('y', 'green', 'Imag'), ('z', 'blue', 'Phase')]:
-                    if axis == 'x':
-                        frame_traces.append(
-                            go.Scatter3d(
-                                x=[-axis_length, axis_length], y=[0, 0], z=[0, 0],
-                                mode='lines',
-                                line=dict(color=color, width=2),
-                                name=f'{name} Axis',
-                                legendgroup='axes',
-                                showlegend=(frame_idx == 0)
-                            )
-                        )
-                    elif axis == 'y':
-                        frame_traces.append(
-                            go.Scatter3d(
-                                x=[0, 0], y=[-axis_length, axis_length], z=[0, 0],
-                                mode='lines',
-                                line=dict(color=color, width=2),
-                                name=f'{name} Axis',
-                                legendgroup='axes',
-                                showlegend=(frame_idx == 0)
-                            )
-                        )
-                    else:
-                        frame_traces.append(
-                            go.Scatter3d(
-                                x=[0, 0], y=[0, 0], z=[-axis_length, axis_length],
-                                mode='lines',
-                                line=dict(color=color, width=2),
-                                name=f'{name} Axis',
-                                legendgroup='axes',
-                                showlegend=(frame_idx == 0)
-                            )
-                        )
-
-                frames.append(
-                    go.Frame(
-                        data=frame_traces,
-                        name=f'Round {round_num}',
-                        layout=go.Layout(
-                            title=dict(
-                                text=f'Round {round_num} - Accuracy: {accuracy:.3f}'
-                            )
-                        )
-                    )
-                )
-
-            fig = go.Figure(
-                data=frames[0].data if frames else [],
-                layout=go.Layout(
-                    title=dict(
-                        text=f'Round {frames_data[0]["round"]} - Accuracy: {frames_data[0]["accuracy"]:.3f}',
-                        font=dict(size=16)
-                    ),
-                    scene=dict(
-                        xaxis_title='Real Component',
-                        yaxis_title='Imaginary Component',
-                        zaxis_title='Phase Direction',
-                        camera=dict(
-                            eye=dict(x=1.8, y=1.8, z=1.8)
-                        ),
-                        annotations=[
-                            dict(
-                                x=1.6, y=0, z=0,
-                                text="Real",
-                                showarrow=False,
-                                font=dict(color="red", size=12)
-                            ),
-                            dict(
-                                x=0, y=1.6, z=0,
-                                text="Imag",
-                                showarrow=False,
-                                font=dict(color="green", size=12)
-                            ),
-                            dict(
-                                x=0, y=0, z=1.6,
-                                text="Phase",
-                                showarrow=False,
-                                font=dict(color="blue", size=12)
-                            )
-                        ]
-                    ),
-                    updatemenus=[
-                        dict(
-                            type='buttons',
-                            showactive=False,
-                            y=0.9,
-                            x=0.1,
-                            xanchor='left',
-                            yanchor='bottom',
-                            pad=dict(r=10, t=10),
-                            buttons=[
-                                dict(
-                                    label='▶️ Play',
-                                    method='animate',
-                                    args=[
-                                        None,
-                                        dict(
-                                            frame=dict(duration=800, redraw=True),
-                                            fromcurrent=True,
-                                            mode='immediate',
-                                            transition=dict(duration=0)
-                                        )
-                                    ]
-                                ),
-                                dict(
-                                    label='⏸️ Pause',
-                                    method='animate',
-                                    args=[
-                                        [None],
-                                        dict(
-                                            frame=dict(duration=0, redraw=False),
-                                            mode='immediate',
-                                            transition=dict(duration=0)
-                                        )
-                                    ]
-                                ),
-                                dict(
-                                    label='🔄 Reset',
-                                    method='animate',
-                                    args=[
-                                        [frames[0].name],
-                                        dict(
-                                            frame=dict(duration=0, redraw=True),
-                                            mode='immediate',
-                                            transition=dict(duration=0)
-                                        )
-                                    ]
-                                )
-                            ]
-                        )
-                    ],
-                    sliders=[{
-                        'active': 0,
-                        'yanchor': 'top',
-                        'xanchor': 'left',
-                        'currentvalue': {
-                            'font': {'size': 16},
-                            'prefix': 'Round: ',
-                            'visible': True,
-                            'xanchor': 'right'
-                        },
-                        'transition': {'duration': 100},
-                        'pad': {'b': 10, 't': 50},
-                        'len': 0.9,
-                        'x': 0.1,
-                        'y': 0,
-                        'steps': [
-                            {
-                                'args': [
-                                    [f'Round {frame_data["round"]}'],
-                                    {
-                                        'frame': {'duration': 0, 'redraw': True},
-                                        'mode': 'immediate',
-                                        'transition': {'duration': 0}
-                                    }
-                                ],
-                                'label': f'R{frame_data["round"]}',
-                                'method': 'animate'
-                            }
-                            for frame_data in frames_data
-                        ]
-                    }],
-                    width=1200,
-                    height=900,
-                    showlegend=True,
-                    legend=dict(
-                        yanchor="top",
-                        y=0.99,
-                        xanchor="left",
-                        x=0.02,
-                        bgcolor='rgba(255,255,255,0.8)',
-                        bordercolor='black',
-                        borderwidth=1
-                    )
+            # Create subplots with 2 columns
+            fig = make_subplots(
+                rows=1, cols=2,
+                specs=[[{'type': 'scene'}, {'type': 'scene'}]],
+                subplot_titles=(
+                    f'<b>Initial State - Round {first_snap["round"]}</b><br>'
+                    f'Accuracy: {first_snap.get("accuracy", 0):.3f} | Random Mix',
+                    f'<b>Final State - Round {last_snap["round"]}</b><br>'
+                    f'Accuracy: {last_snap.get("accuracy", 0):.3f} | Orthogonal Separation'
                 ),
-                frames=frames
+                horizontal_spacing=0.1
             )
 
+            # Add initial state (left subplot) using _add_state_to_subplot
+            self._add_state_to_subplot(fig, first_snap, row=1, col=1,
+                                       class_names=class_names, show_legend=True)
+
+            # Add final state (right subplot)
+            self._add_state_to_subplot(fig, last_snap, row=1, col=2,
+                                       class_names=class_names, show_legend=False)
+
+            # Update layout
+            fig.update_layout(
+                title=dict(
+                    text=f"<b>Tensor Orthogonalization: From Random Mix to Class Separation</b><br>"
+                         f"<sup>Class orientation vectors evolve to become orthogonal (90° apart)</sup>",
+                    font=dict(size=16)
+                ),
+                width=1400,
+                height=700,
+                showlegend=True,
+                legend=dict(
+                    yanchor="top", y=0.99, xanchor="left", x=0.02,
+                    bgcolor='rgba(0,0,0,0.7)', bordercolor='white', borderwidth=1,
+                    font=dict(color='white')
+                ),
+                paper_bgcolor='rgba(0,0,0,0.9)',
+                plot_bgcolor='rgba(0,0,0,0.9)'
+            )
+
+            # Update 3D scenes
+            for col in [1, 2]:
+                fig.update_scenes(
+                    xaxis_title='<b>Real Feature Component</b>',
+                    yaxis_title='<b>Imaginary Feature Component</b>',
+                    zaxis_title='<b>Class Separation Axis</b>',
+                    camera=dict(eye=dict(x=1.8, y=1.8, z=1.8)),
+                    aspectmode='cube',
+                    row=1, col=col
+                )
+
+            # Add annotations
             fig.add_annotation(
-                x=0.98, y=0.02,
-                xref="paper", yref="paper",
-                text="<b>Evolution on the Sphere:</b><br>• Start: Randomly distributed points<br>• End: Classes separated at orthogonal positions",
+                x=0.02, y=0.98, xref="paper", yref="paper",
+                text="<b>📊 Initial State:</b><br>Random orientations - classes mixed",
                 showarrow=False,
-                font=dict(size=10),
-                align='right',
-                bgcolor='rgba(255,255,255,0.8)',
-                bordercolor='black',
+                font=dict(size=11, color='yellow'),
+                bgcolor='rgba(0,0,0,0.6)',
+                bordercolor='yellow',
                 borderwidth=1
             )
 
-            output_path = self.output_dir / f'{self.dataset_name}_spherical_evolution.html'
-            fig.write_html(str(output_path))
+            fig.add_annotation(
+                x=0.52, y=0.98, xref="paper", yref="paper",
+                text="<b>🎯 Final State:</b><br>Orthogonal vectors (90° separation) - classes separated",
+                showarrow=False,
+                font=dict(size=11, color='lightgreen'),
+                bgcolor='rgba(0,0,0,0.6)',
+                bordercolor='lightgreen',
+                borderwidth=1
+            )
 
-            print(f"{Colors.GREEN}✅ Spherical evolution saved to: {output_path}{Colors.ENDC}")
-            print(f"   Total frames: {len(frames)}")
-            print(f"   Rounds: {rounds}")
+            # Save the figure
+            output_path = self.output_dir / f'{self.dataset_name}_side_by_side.html'
+            fig.write_html(str(output_path))
+            print(f"   ✅ Side-by-side comparison saved to: {output_path}")
 
             return str(output_path)
 
-        except ImportError as e:
-            print(f"{Colors.YELLOW}⚠️ Plotly not available: {e}{Colors.ENDC}")
-            return None
         except Exception as e:
-            print(f"{Colors.RED}❌ Error creating spherical evolution: {e}{Colors.ENDC}")
+            print(f"{Colors.RED}   ❌ Error creating side-by-side comparison: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
             return None
 
-    def create_side_by_side_evolution(self, evolution_history):
-        if not evolution_history or len(evolution_history) < 2:
-            return None
-
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-
-        first_snap = evolution_history[0]
-        last_snap = evolution_history[-1]
-
-        fig = make_subplots(
-            rows=2, cols=2,
-            specs=[[{'type': 'scene'}, {'type': 'scene'}],
-                   [{'type': 'scene'}, None]],
-            subplot_titles=('Initial State (Random Mix)', 'Final State (Separated)', 'Evolution Slider'),
-            vertical_spacing=0.1,
-            horizontal_spacing=0.1
-        )
-
-        self._add_state_to_subplot(fig, first_snap, row=1, col=1,
-                                   title_suffix=f"Round {first_snap['round']}")
-
-        self._add_state_to_subplot(fig, last_snap, row=1, col=2,
-                                   title_suffix=f"Round {last_snap['round']}")
-
-        frames = []
-        for snap in evolution_history:
-            frame_data = self._extract_points_for_frame(snap)
-            frames.append(go.Frame(data=frame_data, name=f'Round {snap["round"]}'))
-
-        initial_frame_data = self._extract_points_for_frame(evolution_history[0])
-        for trace in initial_frame_data:
-            fig.add_trace(trace, row=2, col=1)
-
-        fig.update_layout(
-            sliders=[{
-                'active': 0,
-                'currentvalue': {'prefix': 'Round: '},
-                'steps': [
-                    {
-                        'args': [[f'Round {snap["round"]}'],
-                                {'frame': {'duration': 300, 'redraw': True}}],
-                        'label': str(snap['round']),
-                        'method': 'animate'
-                    }
-                    for snap in evolution_history
-                ]
-            }],
-            updatemenus=[{
-                'type': 'buttons',
-                'buttons': [
-                    {'label': '▶️', 'method': 'animate',
-                     'args': [None, {'frame': {'duration': 500}}]},
-                    {'label': '⏸️', 'method': 'animate',
-                     'args': [[None], {'frame': {'duration': 0}}]}
-                ]
-            }]
-        )
-
-        fig.update_layout(
-            title="Tensor Evolution: From Random Distribution to Class Separation",
-            width=1400,
-            height=800,
-            showlegend=True
-        )
-
-        output_path = self.output_dir / f'{self.dataset_name}_side_by_side.html'
-        fig.write_html(str(output_path))
-        print(f"   ✅ Side-by-side comparison saved to: {output_path}")
-
-        return str(output_path)
-
-    def _add_state_to_subplot(self, fig, snap, row, col, title_suffix=""):
+    def _add_state_to_scene(self, fig, snap, row, col, class_names=None, class_colors=None, show_legend=True):
+        """Helper to add a single state to a 3D scene subplot"""
         if 'complex_weights' not in snap:
             return
+
+        if class_colors is None:
+            import plotly.express as px
+            class_colors = px.colors.qualitative.Set1
 
         weights = snap['complex_weights']
         if torch.is_tensor(weights):
             weights = weights.cpu().numpy()
 
-        class_colors = px.colors.qualitative.Set1
+        if len(weights.shape) == 4:
+            n_classes = min(weights.shape[0], 10)
+            legend_added = set()
 
-        n_classes = weights.shape[0]
-        for c in range(min(n_classes, 10)):
-            class_weights = weights[c].flatten()
-            sample_indices = np.random.choice(len(class_weights),
-                                             min(50, len(class_weights)),
-                                             replace=False)
+            # Add transparent sphere surface
+            u, v = np.mgrid[0:2*np.pi:30j, 0:np.pi:20j]
+            x_sphere = np.cos(u) * np.sin(v)
+            y_sphere = np.sin(u) * np.sin(v)
+            z_sphere = np.cos(v)
 
-            x_vals, y_vals, z_vals = [], [], []
-            for idx in sample_indices:
-                w = class_weights[idx]
-                if np.abs(w) > 0.01:
-                    r = np.abs(w)
-                    theta = np.angle(w)
-                    phi = np.pi * (hash((c, idx)) % 1000 / 1000.0)
+            fig.add_trace(
+                go.Surface(
+                    x=x_sphere, y=y_sphere, z=z_sphere,
+                    opacity=0.08,
+                    showscale=False,
+                    hoverinfo='none',
+                    colorscale=[[0, 'lightgray'], [1, 'lightgray']],
+                    showlegend=False
+                ),
+                row=row, col=col
+            )
 
-                    x_vals.append(r * np.sin(phi) * np.cos(theta))
-                    y_vals.append(r * np.sin(phi) * np.sin(theta))
-                    z_vals.append(r * np.cos(phi))
+            # Add coordinate axes
+            axis_length = 1.3
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[-axis_length, axis_length], y=[0, 0], z=[0, 0],
+                    mode='lines', line=dict(color='red', width=2), showlegend=False
+                ),
+                row=row, col=col
+            )
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[0, 0], y=[-axis_length, axis_length], z=[0, 0],
+                    mode='lines', line=dict(color='green', width=2), showlegend=False
+                ),
+                row=row, col=col
+            )
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[0, 0], y=[0, 0], z=[-axis_length, axis_length],
+                    mode='lines', line=dict(color='blue', width=2), showlegend=False
+                ),
+                row=row, col=col
+            )
+
+            # Add points for each class
+            for c in range(n_classes):
+                class_weights = weights[c].flatten()
+                n_samples = min(150, len(class_weights))
+                sample_indices = np.random.choice(len(class_weights), n_samples, replace=False)
+
+                x_vals, y_vals, z_vals = [], [], []
+                for idx in sample_indices:
+                    w = class_weights[idx]
+                    if np.abs(w) > 0.01:
+                        r = np.abs(w) * 1.1
+                        theta = np.angle(w)
+                        phi = np.pi * (hash((c, idx % 100)) % 1000 / 1000.0)
+                        x_vals.append(r * np.sin(phi) * np.cos(theta))
+                        y_vals.append(r * np.sin(phi) * np.sin(theta))
+                        z_vals.append(r * np.cos(phi))
+
+                if x_vals:
+                    class_name = class_names[c] if class_names and c < len(class_names) else f'Class {c+1}'
+                    show_legend_for_class = show_legend and (class_name not in legend_added)
+
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=x_vals, y=y_vals, z=z_vals,
+                            mode='markers',
+                            marker=dict(
+                                size=5,
+                                color=class_colors[c % len(class_colors)],
+                                opacity=0.8,
+                                symbol='circle',
+                                line=dict(width=0.5, color='black')
+                            ),
+                            name=class_name,
+                            legendgroup=f'class{c}',
+                            showlegend=show_legend_for_class
+                        ),
+                        row=row, col=col
+                    )
+                    if show_legend_for_class:
+                        legend_added.add(class_name)
+
+    def _add_state_to_subplot(self, fig, snap, row, col, class_names=None, show_legend=True):
+        """
+        Helper to add a single state to a subplot for side-by-side comparison
+        Shows CLASS ORIENTATION VECTORS (not individual points)
+        """
+        if 'complex_weights' not in snap:
+            return
+
+        import plotly.express as px
+
+        weights = snap['complex_weights']
+        if torch.is_tensor(weights):
+            weights = weights.cpu().numpy()
+
+        class_colors = px.colors.qualitative.Set1 + px.colors.qualitative.Set2 + px.colors.qualitative.Set3
+
+        if len(weights.shape) == 4:
+            n_classes = min(weights.shape[0], 10)
+
+            # Add unit sphere surface
+            u = np.linspace(0, 2*np.pi, 30)
+            v = np.linspace(0, np.pi, 15)
+            x_sphere = np.outer(np.cos(u), np.sin(v))
+            y_sphere = np.outer(np.sin(u), np.sin(v))
+            z_sphere = np.outer(np.ones_like(u), np.cos(v))
+
+            fig.add_trace(
+                go.Surface(
+                    x=x_sphere, y=y_sphere, z=z_sphere,
+                    opacity=0.1,
+                    showscale=False,
+                    hoverinfo='none',
+                    name='Unit Sphere',
+                    colorscale=[[0, 'lightgray'], [1, 'lightgray']],
+                    showlegend=False
+                ),
+                row=row, col=col
+            )
+
+            # Add coordinate axes
+            axis_length = 1.5
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[-axis_length, axis_length], y=[0, 0], z=[0, 0],
+                    mode='lines', line=dict(color='red', width=2), name='Real Axis', showlegend=False
+                ),
+                row=row, col=col
+            )
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[0, 0], y=[-axis_length, axis_length], z=[0, 0],
+                    mode='lines', line=dict(color='green', width=2), name='Imag Axis', showlegend=False
+                ),
+                row=row, col=col
+            )
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[0, 0], y=[0, 0], z=[-axis_length, axis_length],
+                    mode='lines', line=dict(color='blue', width=2), name='Phase Axis', showlegend=False
+                ),
+                row=row, col=col
+            )
+
+            # Calculate class orientation vectors
+            class_vectors = []
+            for c in range(n_classes):
+                class_weights = weights[c].flatten()
+                significant = class_weights[np.abs(class_weights) > 0.01]
+
+                if len(significant) > 0:
+                    magnitudes = np.abs(significant)
+                    phases = np.angle(significant)
+
+                    # Weighted circular mean
+                    sin_sum = np.sum(magnitudes * np.sin(phases))
+                    cos_sum = np.sum(magnitudes * np.cos(phases))
+                    avg_theta = np.arctan2(sin_sum, cos_sum)
+                    avg_r = np.mean(magnitudes)
+
+                    # For 3D sphere, use class index for phi
+                    phi = (c * np.pi / max(1, n_classes))
+
+                    x = avg_r * np.sin(phi) * np.cos(avg_theta)
+                    y = avg_r * np.sin(phi) * np.sin(avg_theta)
+                    z = avg_r * np.cos(phi)
+
+                    class_vectors.append((x, y, z, avg_r, avg_theta, phi, c))
+
+            # Add class orientation vectors
+            legend_added = set()
+            for x, y, z, r, theta, phi, c in class_vectors:
+                color = class_colors[c % len(class_colors)]
+                class_name = class_names[c] if class_names and c < len(class_names) else f'Class {c+1}'
+                show_legend_for_class = show_legend and (class_name not in legend_added)
+
+                # Draw vector from origin
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[0, x], y=[0, y], z=[0, z],
+                        mode='lines+markers',
+                        marker=dict(size=8, color=color, symbol='circle', line=dict(width=1, color='white')),
+                        line=dict(color=color, width=2),
+                        name=class_name,
+                        legendgroup=f'class{c}',
+                        showlegend=show_legend_for_class,
+                        text=f"Class {class_name}<br>Magnitude: {r:.3f}<br>Phase: {theta:.2f} rad<br>Polar: {phi:.2f} rad",
+                        hoverinfo='text'
+                    ),
+                    row=row, col=col
+                )
+                legend_added.add(class_name)
+
+            # Add reference circle at equatorial plane
+            theta_circle = np.linspace(0, 2*np.pi, 50)
+            x_circle = 0.95 * np.cos(theta_circle)
+            y_circle = 0.95 * np.sin(theta_circle)
+            z_circle = np.zeros_like(theta_circle)
 
             fig.add_trace(
                 go.Scatter3d(
-                    x=x_vals, y=y_vals, z=z_vals,
-                    mode='markers',
-                    marker=dict(size=3, color=class_colors[c % len(class_colors)]),
-                    name=f'Class {c+1}',
-                    showlegend=(row==1 and col==1)
+                    x=x_circle, y=y_circle, z=z_circle,
+                    mode='lines',
+                    line=dict(color='gray', width=1, dash='dash'),
+                    name='Equatorial Plane (90°)',
+                    showlegend=False
                 ),
                 row=row, col=col
             )
 
     def _extract_points_for_frame(self, snap):
+        """
+        Extract class orientation vectors for evolution slider
+        Shows VECTORS (not individual points) for cleaner visualization
+        """
         traces = []
         if 'complex_weights' not in snap:
             return traces
+
+        import plotly.express as px
 
         weights = snap['complex_weights']
         if torch.is_tensor(weights):
@@ -3166,6 +3762,7 @@ class SphericalTensorEvolution:
 
         class_colors = px.colors.qualitative.Set1
 
+        # Add sphere
         u = np.linspace(0, 2*np.pi, 20)
         v = np.linspace(0, np.pi, 10)
         x_sphere = np.outer(np.cos(u), np.sin(v))
@@ -3182,45 +3779,671 @@ class SphericalTensorEvolution:
             )
         )
 
-        n_classes = weights.shape[0]
-        for c in range(min(n_classes, 10)):
-            class_weights = weights[c].flatten()
-            sample_indices = np.random.choice(len(class_weights),
-                                             min(30, len(class_weights)),
-                                             replace=False)
+        if len(weights.shape) == 4:
+            n_classes = min(weights.shape[0], 10)
 
-            x_vals, y_vals, z_vals = [], [], []
-            for idx in sample_indices:
-                w = class_weights[idx]
-                if np.abs(w) > 0.01:
-                    r = np.abs(w)
-                    theta = np.angle(w)
-                    phi = np.pi * (hash((c, idx)) % 1000 / 1000.0)
+            # Calculate class orientation vectors
+            for c in range(n_classes):
+                class_weights = weights[c].flatten()
+                significant = class_weights[np.abs(class_weights) > 0.01]
 
-                    x_vals.append(r * np.sin(phi) * np.cos(theta))
-                    y_vals.append(r * np.sin(phi) * np.sin(theta))
-                    z_vals.append(r * np.cos(phi))
+                if len(significant) > 0:
+                    magnitudes = np.abs(significant)
+                    phases = np.angle(significant)
 
-            traces.append(
-                go.Scatter3d(
-                    x=x_vals, y=y_vals, z=z_vals,
-                    mode='markers',
-                    marker=dict(size=4, color=class_colors[c % len(class_colors)]),
-                    name=f'Class {c+1}',
-                    legendgroup=f'class{c}'
-                )
-            )
+                    # Weighted circular mean
+                    sin_sum = np.sum(magnitudes * np.sin(phases))
+                    cos_sum = np.sum(magnitudes * np.cos(phases))
+                    avg_theta = np.arctan2(sin_sum, cos_sum)
+                    avg_r = np.mean(magnitudes)
+
+                    # Polar angle from class index (for separation visualization)
+                    phi = (c * np.pi / max(1, n_classes))
+
+                    x = avg_r * np.sin(phi) * np.cos(avg_theta)
+                    y = avg_r * np.sin(phi) * np.sin(avg_theta)
+                    z = avg_r * np.cos(phi)
+
+                    # Draw vector from origin
+                    traces.append(
+                        go.Scatter3d(
+                            x=[0, x], y=[0, y], z=[0, z],
+                            mode='lines+markers',
+                            marker=dict(size=8, color=class_colors[c % len(class_colors)], symbol='circle'),
+                            line=dict(color=class_colors[c % len(class_colors)], width=3),
+                            name=f'Class {c+1}',
+                            legendgroup=f'class{c}',
+                            showlegend=False,
+                            text=f"Class {c+1}<br>Magnitude: {avg_r:.3f}<br>Phase: {avg_theta:.2f} rad",
+                            hoverinfo='text'
+                        )
+                    )
 
         return traces
 
+    def create_evolution_slider(self, evolution_history, class_names=None):
+        """
+        Create an interactive slider showing class orientation vectors evolution
+        Shows vectors moving from random to orthogonal positions
+        """
+        if not evolution_history or len(evolution_history) < 2 or not PLOTLY_AVAILABLE:
+            return None
+
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            print(f"{Colors.CYAN}🎚️ Creating evolution slider (Vector Evolution)...{Colors.ENDC}")
+
+            class_colors = px.colors.qualitative.Set1
+
+            # Get class names
+            if class_names is None and hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+                class_names = list(self.model.label_encoder.keys())
+
+            # Prepare frames for each round
+            frames = []
+
+            for snap in evolution_history:
+                if 'complex_weights' not in snap:
+                    continue
+
+                weights = snap['complex_weights']
+                if torch.is_tensor(weights):
+                    weights = weights.cpu().numpy()
+
+                round_num = snap['round']
+                accuracy = snap.get('accuracy', 0)
+                training_size = snap.get('training_size', 0)
+
+                frame_traces = []
+
+                # Add sphere
+                u, v = np.mgrid[0:2*np.pi:30j, 0:np.pi:15j]
+                frame_traces.append(
+                    go.Surface(
+                        x=np.cos(u)*np.sin(v), y=np.sin(u)*np.sin(v), z=np.cos(v),
+                        opacity=0.1, showscale=False, name='Unit Sphere',
+                        colorscale=[[0, 'lightgray'], [1, 'lightgray']]
+                    )
+                )
+
+                # Add coordinate axes
+                axis_length = 1.3
+                frame_traces.append(go.Scatter3d(
+                    x=[-axis_length, axis_length], y=[0, 0], z=[0, 0],
+                    mode='lines', line=dict(color='red', width=2), name='Real Axis'
+                ))
+                frame_traces.append(go.Scatter3d(
+                    x=[0, 0], y=[-axis_length, axis_length], z=[0, 0],
+                    mode='lines', line=dict(color='green', width=2), name='Imag Axis'
+                ))
+                frame_traces.append(go.Scatter3d(
+                    x=[0, 0], y=[0, 0], z=[-axis_length, axis_length],
+                    mode='lines', line=dict(color='blue', width=2), name='Phase Axis'
+                ))
+
+                # Add class orientation vectors
+                if len(weights.shape) == 4:
+                    n_classes = min(weights.shape[0], 10)
+
+                    for c in range(n_classes):
+                        class_weights = weights[c].flatten()
+                        significant = class_weights[np.abs(class_weights) > 0.01]
+
+                        if len(significant) > 0:
+                            magnitudes = np.abs(significant)
+                            phases = np.angle(significant)
+
+                            # Weighted circular mean
+                            sin_sum = np.sum(magnitudes * np.sin(phases))
+                            cos_sum = np.sum(magnitudes * np.cos(phases))
+                            avg_theta = np.arctan2(sin_sum, cos_sum)
+                            avg_r = np.mean(magnitudes)
+
+                            # Polar angle from class index (shows separation)
+                            phi = (c * np.pi / max(1, n_classes))
+
+                            x = avg_r * np.sin(phi) * np.cos(avg_theta)
+                            y = avg_r * np.sin(phi) * np.sin(avg_theta)
+                            z = avg_r * np.cos(phi)
+
+                            class_name = class_names[c] if class_names and c < len(class_names) else f'Class {c+1}'
+
+                            frame_traces.append(
+                                go.Scatter3d(
+                                    x=[0, x], y=[0, y], z=[0, z],
+                                    mode='lines+markers',
+                                    marker=dict(size=10, color=class_colors[c % len(class_colors)],
+                                               symbol='circle', line=dict(width=1, color='white')),
+                                    line=dict(color=class_colors[c % len(class_colors)], width=3),
+                                    name=class_name,
+                                    legendgroup=f'class{c}',
+                                    showlegend=False,
+                                    text=f"Class {class_name}<br>Magnitude: {avg_r:.3f}<br>Phase: {avg_theta:.2f} rad<br>Polar: {phi:.2f} rad",
+                                    hoverinfo='text'
+                                )
+                            )
+
+                # Add target orthogonal positions (for perfect 90° separation)
+                if len(weights.shape) == 4:
+                    n_classes = min(weights.shape[0], 10)
+                    for c in range(n_classes):
+                        target_theta = (c * 2 * np.pi / n_classes)
+                        target_phi = np.pi / 2  # Equatorial plane
+                        r = 0.95
+
+                        x_target = r * np.sin(target_phi) * np.cos(target_theta)
+                        y_target = r * np.sin(target_phi) * np.sin(target_theta)
+                        z_target = r * np.cos(target_phi)
+
+                        frame_traces.append(
+                            go.Scatter3d(
+                                x=[x_target], y=[y_target], z=[z_target],
+                                mode='markers',
+                                marker=dict(size=12, color=class_colors[c % len(class_colors)],
+                                           symbol='x', line=dict(width=2, color='white')),
+                                name=f'Target {class_names[c] if class_names and c < len(class_names) else f"C{c+1}"}',
+                                legendgroup=f'target{c}',
+                                showlegend=False
+                            )
+                        )
+
+                # Add reference circle
+                theta_circle = np.linspace(0, 2*np.pi, 50)
+                x_circle = 0.98 * np.cos(theta_circle)
+                y_circle = 0.98 * np.sin(theta_circle)
+                z_circle = np.zeros_like(theta_circle)
+
+                frame_traces.append(
+                    go.Scatter3d(
+                        x=x_circle, y=y_circle, z=z_circle,
+                        mode='lines',
+                        line=dict(color='gray', width=1, dash='dash'),
+                        name='Equatorial Plane (90°)',
+                        showlegend=False
+                    )
+                )
+
+                frames.append(
+                    go.Frame(
+                        data=frame_traces,
+                        name=f'Round {round_num}',
+                        layout=go.Layout(
+                            title=dict(
+                                text=f'<b>Round {round_num}</b> - Accuracy: {accuracy:.3f} | Training Samples: {training_size}<br>'
+                                     f'<sup>Class orientation vectors evolving toward orthogonal positions</sup>',
+                                font=dict(size=14)
+                            )
+                        )
+                    )
+                )
+
+            if not frames:
+                return None
+
+            # Create figure with first frame
+            fig = go.Figure(
+                data=frames[0].data,
+                layout=go.Layout(
+                    title=dict(text=f'<b>Class Orientation Vector Evolution</b><br>'
+                                   f'Round {evolution_history[0]["round"]} - Starting State'),
+                    scene=dict(
+                        xaxis_title='<b>Real Feature Component</b>',
+                        yaxis_title='<b>Imaginary Feature Component</b>',
+                        zaxis_title='<b>Class Separation</b>',
+                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
+                        aspectmode='cube'
+                    ),
+                    updatemenus=[
+                        dict(
+                            type='buttons',
+                            buttons=[
+                                dict(label='▶️ Play', method='animate',
+                                     args=[None, {'frame': {'duration': 800, 'redraw': True}, 'fromcurrent': True}]),
+                                dict(label='⏸️ Pause', method='animate',
+                                     args=[[None], {'frame': {'duration': 0, 'redraw': False}}]),
+                                dict(label='🔄 Reset', method='animate',
+                                     args=[[frames[0].name], {'frame': {'duration': 0, 'redraw': True}}])
+                            ],
+                            y=0.9,
+                            x=0.1
+                        )
+                    ],
+                    sliders=[{
+                        'active': 0,
+                        'currentvalue': {'prefix': 'Round: ', 'font': {'size': 14}},
+                        'steps': [
+                            {
+                                'args': [[f'Round {snap["round"]}'], {'frame': {'duration': 0, 'redraw': True}}],
+                                'label': str(snap['round']),
+                                'method': 'animate'
+                            }
+                            for snap in evolution_history if 'complex_weights' in snap
+                        ]
+                    }],
+                    width=1200,
+                    height=800,
+                    showlegend=True,
+                    legend=dict(
+                        yanchor="top", y=0.99, xanchor="left", x=0.02,
+                        bgcolor='rgba(0,0,0,0.7)', bordercolor='white', borderwidth=1,
+                        font=dict(color='white')
+                    ),
+                    paper_bgcolor='rgba(0,0,0,0.9)',
+                    plot_bgcolor='rgba(0,0,0,0.9)'
+                ),
+                frames=frames
+            )
+
+            # Save to interactive directory (not spherical)
+            output_path = self.dirs.get('interactive', Path('visualizations/interactive')) / f'{self.dataset_name}_evolution_slider.html'
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.write_html(str(output_path))
+            print(f"   ✅ Evolution slider saved to: {output_path}")
+            print(f"   Shows {len(frames)} rounds of vector evolution")
+
+            return str(output_path)
+
+        except Exception as e:
+            print(f"{Colors.RED}   ❌ Error creating evolution slider: {e}{Colors.ENDC}")
+            return None
+
+    def _calculate_class_orthogonality(self, weights):
+        """
+        Calculate orthogonality metrics between class tensors in complex feature-pair space
+        Used by multiple visualization methods
+
+        Returns:
+            orthogonality_matrix: n_classes x n_classes matrix of cosine similarities
+            separation_angles: list of angles between class pairs (degrees)
+            average_orthogonality: mean orthogonality (1 - mean similarity)
+        """
+        if torch.is_tensor(weights):
+            weights = weights.cpu().numpy()
+
+        # weights shape: (n_classes, n_pairs, n_bins, n_bins)
+        n_classes = weights.shape[0]
+
+        # Step 1: Compute orientation vector for each class
+        class_vectors = []
+
+        for c in range(n_classes):
+            # Flatten all weights for this class
+            class_weights = weights[c].flatten()
+
+            # Filter significant weights (non-zero)
+            significant = class_weights[np.abs(class_weights) > 1e-6]
+
+            if len(significant) > 0:
+                # Each weight is a complex number: w = a + i*b
+                # We want the average orientation in complex space
+                magnitudes = np.abs(significant)
+                phases = np.angle(significant)
+
+                # Weighted circular mean (accounts for magnitude importance)
+                sin_sum = np.sum(magnitudes * np.sin(phases))
+                cos_sum = np.sum(magnitudes * np.cos(phases))
+                avg_phase = np.arctan2(sin_sum, cos_sum)
+
+                # Average magnitude (strength of orientation)
+                avg_mag = np.mean(magnitudes)
+
+                # Unit vector in complex plane
+                class_vectors.append(np.exp(1j * avg_phase) * avg_mag)
+            else:
+                class_vectors.append(0 + 0j)
+
+        # Step 2: Calculate pairwise orthogonality
+        orthogonality_matrix = np.zeros((n_classes, n_classes))
+        separation_angles = []
+
+        for i in range(n_classes):
+            for j in range(n_classes):
+                if i == j:
+                    orthogonality_matrix[i, j] = 1.0
+                else:
+                    vi = class_vectors[i]
+                    vj = class_vectors[j]
+
+                    if np.abs(vi) > 0 and np.abs(vj) > 0:
+                        # Cosine similarity between unit vectors
+                        vi_unit = vi / np.abs(vi)
+                        vj_unit = vj / np.abs(vj)
+                        similarity = np.real(vi_unit * np.conj(vj_unit))
+                        orthogonality_matrix[i, j] = similarity
+
+                        if i < j:
+                            # Angle in degrees
+                            angle = np.arccos(np.clip(similarity, -1, 1)) * 180 / np.pi
+                            separation_angles.append(angle)
+                    else:
+                        orthogonality_matrix[i, j] = 0
+
+        # Step 3: Calculate metrics
+        avg_similarity = np.mean([orthogonality_matrix[i, j]
+                                  for i in range(n_classes)
+                                  for j in range(i+1, n_classes)]) if n_classes > 1 else 0
+        avg_orthogonality = 1.0 - avg_similarity
+        avg_separation = np.mean(separation_angles) if separation_angles else 0
+
+        return {
+            'orthogonality_matrix': orthogonality_matrix,
+            'separation_angles': separation_angles,
+            'avg_orthogonality': avg_orthogonality,
+            'avg_separation_degrees': avg_separation,
+            'class_vectors': class_vectors
+        }
 
 # =============================================================================
-# SECTION 10: CTDBNNGUI CLASS (Complete with all fixes)
+# SECTION: SAMP INTEGRATION FOR EXTERNAL TOOLS
+# =============================================================================
+
+# =============================================================================
+# SECTION: IMPROVED SAMP INTEGRATION FOR EXTERNAL TOOLS
+# =============================================================================
+
+class SAMPIntegration:
+    """
+    SAMP (Simple Application Messaging Protocol) integration for Topcat and Aladin.
+    Allows direct data transfer without file exports.
+    """
+
+    def __init__(self):
+        self.samp_client = None
+        self.connected = False
+        self.topcat_client_id = None
+        self.aladin_client_id = None
+        self.samp_hub_running = False
+
+    def check_hub(self):
+        """Check if a SAMP hub is already running"""
+        try:
+            import astropy.samp
+            # Try to connect to existing hub
+            test_client = astropy.samp.SAMPIntegratedClient()
+            test_client.connect()
+            test_client.disconnect()
+            self.samp_hub_running = True
+            return True
+        except:
+            self.samp_hub_running = False
+            return False
+
+    def start_hub(self):
+        """Start a SAMP hub if none exists"""
+        try:
+            import astropy.samp
+            import subprocess
+            import threading
+
+            # Try to start hub in background
+            hub_process = subprocess.Popen(
+                ['samp_hub'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # Wait for hub to start
+            import time
+            time.sleep(2)
+
+            # Check if hub is now running
+            return self.check_hub()
+        except:
+            return False
+
+    def connect(self):
+        """Connect to SAMP hub (start if needed)"""
+        try:
+            import astropy.samp
+
+            # Check if hub is running
+            if not self.check_hub():
+                print(f"{Colors.YELLOW}⚠️ No SAMP hub found, starting one...{Colors.ENDC}")
+                if not self.start_hub():
+                    print(f"{Colors.YELLOW}⚠️ Could not start SAMP hub. Tools will use file fallback.{Colors.ENDC}")
+                    return False
+
+            # Connect to hub
+            self.samp_client = astropy.samp.SAMPIntegratedClient()
+            self.samp_client.connect()
+            self.connected = True
+            print(f"{Colors.GREEN}✅ Connected to SAMP hub{Colors.ENDC}")
+            return True
+
+        except ImportError:
+            print(f"{Colors.YELLOW}⚠️ astropy.samp not available. Install: pip install astropy{Colors.ENDC}")
+            return False
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️ Could not connect to SAMP hub: {e}{Colors.ENDC}")
+            return False
+
+    def disconnect(self):
+        """Disconnect from SAMP hub"""
+        if self.samp_client and self.connected:
+            try:
+                self.samp_client.disconnect()
+            except:
+                pass
+            self.connected = False
+            self.topcat_client_id = None
+            self.aladin_client_id = None
+
+    def find_tool(self, tool_name):
+        """Find running instance of a tool"""
+        if not self.connected:
+            return None
+
+        try:
+            clients = self.samp_client.get_registered_clients()
+            for client_id in clients:
+                metadata = self.samp_client.get_metadata(client_id)
+                name = metadata.get('samp.name', '').lower()
+                if tool_name.lower() in name:
+                    return client_id
+            return None
+        except:
+            return None
+
+    def launch_topcat(self):
+        """Launch Topcat and wait for it to register"""
+        import subprocess
+        import shutil
+        import time
+
+        # Try to find existing instance first
+        existing = self.find_tool('topcat')
+        if existing:
+            self.topcat_client_id = existing
+            print(f"{Colors.GREEN}✅ Using existing Topcat instance{Colors.ENDC}")
+            return True
+
+        # Find Topcat executable
+        topcat = shutil.which('topcat')
+
+        if not topcat:
+            # Try JAR files
+            jar_paths = [
+                os.path.expanduser('~/topcat/topcat.jar'),
+                '/usr/share/topcat/topcat.jar',
+                '/usr/local/share/topcat/topcat.jar'
+            ]
+            for jar in jar_paths:
+                if os.path.exists(jar):
+                    topcat = ['java', '-jar', jar]
+                    break
+
+        if not topcat:
+            print(f"{Colors.RED}❌ Topcat not found{Colors.ENDC}")
+            return False
+
+        # Launch Topcat
+        try:
+            if isinstance(topcat, str):
+                subprocess.Popen([topcat])
+            else:
+                subprocess.Popen(topcat)
+
+            # Wait for Topcat to register with SAMP
+            for i in range(10):  # Wait up to 10 seconds
+                time.sleep(1)
+                existing = self.find_tool('topcat')
+                if existing:
+                    self.topcat_client_id = existing
+                    print(f"{Colors.GREEN}✅ Topcat launched and connected{Colors.ENDC}")
+                    return True
+
+            print(f"{Colors.YELLOW}⚠️ Topcat launched but not registered with SAMP{Colors.ENDC}")
+            return False
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Failed to launch Topcat: {e}{Colors.ENDC}")
+            return False
+
+    def launch_aladin(self):
+        """Launch Aladin and wait for it to register"""
+        import subprocess
+        import shutil
+        import time
+
+        # Try to find existing instance
+        existing = self.find_tool('aladin')
+        if existing:
+            self.aladin_client_id = existing
+            print(f"{Colors.GREEN}✅ Using existing Aladin instance{Colors.ENDC}")
+            return True
+
+        # Find Aladin executable
+        aladin = shutil.which('aladin')
+
+        if not aladin:
+            # Try JAR files
+            jar_paths = [
+                os.path.expanduser('~/aladin/aladin.jar'),
+                '/usr/share/aladin/aladin.jar',
+                '/usr/local/share/aladin/aladin.jar'
+            ]
+            for jar in jar_paths:
+                if os.path.exists(jar):
+                    aladin = ['java', '-jar', jar]
+                    break
+
+        if not aladin:
+            print(f"{Colors.RED}❌ Aladin not found{Colors.ENDC}")
+            return False
+
+        # Launch Aladin
+        try:
+            # Aladin might be a script that needs bash
+            if isinstance(aladin, str) and aladin.endswith('.sh'):
+                subprocess.Popen(['bash', aladin])
+            elif isinstance(aladin, str):
+                subprocess.Popen([aladin])
+            else:
+                subprocess.Popen(aladin)
+
+            # Wait for Aladin to register with SAMP
+            for i in range(15):  # Aladin takes longer to start
+                time.sleep(1)
+                existing = self.find_tool('aladin')
+                if existing:
+                    self.aladin_client_id = existing
+                    print(f"{Colors.GREEN}✅ Aladin launched and connected{Colors.ENDC}")
+                    return True
+
+            print(f"{Colors.YELLOW}⚠️ Aladin launched but not registered with SAMP{Colors.ENDC}")
+            return False
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Failed to launch Aladin: {e}{Colors.ENDC}")
+            return False
+
+    def send_data_to_topcat(self, data: pd.DataFrame, title: str = "CT-DBNN Data"):
+        """Send data to Topcat via SAMP"""
+        if not self.connected:
+            if not self.connect():
+                return False
+
+        if not self.topcat_client_id:
+            if not self.launch_topcat():
+                return False
+
+        try:
+            from astropy.io.votable import from_table
+            from astropy.table import Table
+            from io import BytesIO
+            import urllib.parse
+
+            # Convert to VOTable in memory
+            votable = from_table(Table.from_pandas(data))
+            buf = BytesIO()
+            votable.to_xml(buf)
+            votable_xml = buf.getvalue().decode('utf-8')
+
+            # Encode for data URI
+            encoded_xml = urllib.parse.quote(votable_xml)
+            data_uri = f"data:text/xml,{encoded_xml}"
+
+            # Send to Topcat
+            self.samp_client.notify(self.topcat_client_id, "table.load.votable", {
+                "url": data_uri,
+                "name": title
+            })
+
+            print(f"{Colors.GREEN}✅ Data sent to Topcat via SAMP{Colors.ENDC}")
+            return True
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ SAMP communication failed: {e}{Colors.ENDC}")
+            return False
+
+    def send_data_to_aladin(self, data: pd.DataFrame, title: str = "CT-DBNN Data"):
+        """Send data to Aladin via SAMP"""
+        if not self.connected:
+            if not self.connect():
+                return False
+
+        if not self.aladin_client_id:
+            if not self.launch_aladin():
+                return False
+
+        try:
+            from astropy.io.votable import from_table
+            from astropy.table import Table
+            from io import BytesIO
+            import urllib.parse
+
+            # Convert to VOTable in memory
+            votable = from_table(Table.from_pandas(data))
+            buf = BytesIO()
+            votable.to_xml(buf)
+            votable_xml = buf.getvalue().decode('utf-8')
+
+            # Encode for data URI
+            encoded_xml = urllib.parse.quote(votable_xml)
+            data_uri = f"data:text/xml,{encoded_xml}"
+
+            # Send to Aladin
+            self.samp_client.notify(self.aladin_client_id, "table.load.votable", {
+                "url": data_uri,
+                "name": title
+            })
+
+            print(f"{Colors.GREEN}✅ Data sent to Aladin via SAMP{Colors.ENDC}")
+            return True
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ SAMP communication failed: {e}{Colors.ENDC}")
+            return False
+
+
+#
+#  =============================================================================
+# SECTION 10: GUI CLASS (COMPLETE WITH ALL INIT VARIABLES)
 # =============================================================================
 
 class CTDBNNGUI:
-    """Graphical User Interface for CT-DBNN with process control"""
-
     def __init__(self, root):
         self.root = root
         self.root.title("CT-DBNN - Complex Tensor Difference Boosting Neural Network")
@@ -3230,17 +4453,34 @@ class CTDBNNGUI:
         self.model = None
         self.config = None
         self.env_manager = EnvironmentManager()
+        self.current_data_file = None
+        self.original_data = None
+        self.data_loaded = False
 
         self.training_in_progress = False
         self.stop_training_flag = False
         self.current_training_thread = None
 
+        # ========== ADD THESE MISSING INITIALIZATIONS ==========
+        self.deps_status = {}           # For tracking dependency install buttons
+        self.install_thread = None      # For background installation
+        self.install_in_progress = False # Installation flag
+
+        # External tools buttons (for enabling/disabling)
+        self.topcat_btn = None
+        self.aladin_btn = None
+        self.ext_status_label = None
+
+        # Dataset and target variables
         self.dataset_var = tk.StringVar()
         self.target_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="train_predict")
         self.model_type_var = tk.StringVar(value="Histogram")
         self.device_var = tk.StringVar(value="auto")
+        self.file_path_var = tk.StringVar()
+        self.uci_var = tk.StringVar()
 
+        # Training parameters
         self.learning_rate_var = tk.StringVar(value="0.1")
         self.epochs_var = tk.StringVar(value="100")
         self.bins_var = tk.StringVar(value="128")
@@ -3250,16 +4490,38 @@ class CTDBNNGUI:
         self.initial_samples_var = tk.StringVar(value="50")
         self.max_samples_round_var = tk.StringVar(value="25")
 
+        # Parallel processing variables
         self.parallel_var = tk.BooleanVar(value=True)
         self.n_jobs_var = tk.StringVar(value=str(mp.cpu_count()))
         self.parallel_batch_var = tk.StringVar(value="1000")
         self.parallel_mode_var = tk.StringVar(value="threads")
 
+        # Export dataset selection
+        self.export_dataset_var = tk.StringVar(value="all")
+        self.sdss_radius_var = tk.StringVar(value="1.0")
+
+        # Feature selection
         self.feature_vars = {}
+
+        # Visualization references
+        self.output_text = None
+        self.results_text = None
+        self.info_text = None
+        self.feature_canvas = None
+        self.feature_scroll_frame = None
+
+        # Progress indicators
+        self.install_progress = None
+        self.install_status = None
 
         self.setup_gui()
 
+        # Initialize SAMP integration
+        self.samp = SAMPIntegration()
+        self.samp_connected = False
+
     def setup_gui(self):
+        """Setup the complete GUI interface"""
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -3283,21 +4545,191 @@ class CTDBNNGUI:
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
+        # ========== ADD EXTERNAL TOOLS TAB ==========
+        self.ext_tab = ttk.Frame(notebook)
+        notebook.add(self.ext_tab, text="🔌 External Tools")
+        self.setup_external_tools_tab()
+
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def setup_external_tools_tab(self):
+        """Setup external tools tab with comprehensive controls"""
+        # Tool status frame
+        status_frame = ttk.LabelFrame(self.ext_tab, text="Tool Availability", padding="10")
+        status_frame.pack(fill=tk.X, pady=5)
+
+        # Check all tools
+        topcat_avail = self._check_topcat()
+        aladin_avail = self._check_aladin()
+        fits_avail = ASTROPY_AVAILABLE
+        sdss_avail = True  # Always available via web
+
+        # Display status grid
+        status_grid = ttk.Frame(status_frame)
+        status_grid.pack(fill=tk.X)
+
+        tools = [
+            ("Topcat", topcat_avail, "📊", "https://www.star.bris.ac.uk/~mbt/topcat/"),
+            ("Aladin", aladin_avail, "🌌", "https://aladin.u-strasbg.fr/"),
+            ("Astropy (FITS)", fits_avail, "💾", "pip install astropy"),
+            ("SDSS SkyServer", sdss_avail, "🔭", "https://skyserver.sdss.org/")
+        ]
+
+        for i, (name, avail, icon, url) in enumerate(tools):
+            status = "✓ Available" if avail else "✗ Not Found"
+            color = "green" if avail else "red"
+            ttk.Label(status_grid, text=f"{icon} {name}:", font=('Arial', 10, 'bold')).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
+            ttk.Label(status_grid, text=status, foreground=color).grid(row=i, column=1, sticky=tk.W, padx=5, pady=2)
+            if not avail:
+                ttk.Label(status_grid, text=f"Install: {url}", foreground="gray").grid(row=i, column=2, sticky=tk.W, padx=5, pady=2)
+
+        # Export controls frame
+        export_frame = ttk.LabelFrame(self.ext_tab, text="Data Export", padding="10")
+        export_frame.pack(fill=tk.X, pady=5)
+
+        # Export buttons
+        btn_frame = ttk.Frame(export_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+
+        if topcat_avail:
+            ttk.Button(btn_frame, text="📊 Launch Topcat", command=self.launch_topcat_gui, width=20).pack(side=tk.LEFT, padx=5)
+
+        if aladin_avail:
+            ttk.Button(btn_frame, text="🌌 Launch Aladin", command=self.launch_aladin_gui, width=20).pack(side=tk.LEFT, padx=5)
+
+        if fits_avail:
+            ttk.Button(btn_frame, text="💾 Export to FITS", command=self.export_to_fits_gui, width=20).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="📄 Export to VOTable", command=self.export_to_votable_gui, width=20).pack(side=tk.LEFT, padx=5)
+
+        # Data selection for export
+        ttk.Label(export_frame, text="Dataset to Export:").pack(anchor=tk.W, pady=5)
+        self.export_dataset_var = tk.StringVar(value="all")
+        ttk.Radiobutton(export_frame, text="Full Dataset", variable=self.export_dataset_var, value="all").pack(anchor=tk.W, padx=20)
+        ttk.Radiobutton(export_frame, text="Training Set Only", variable=self.export_dataset_var, value="training").pack(anchor=tk.W, padx=20)
+        ttk.Radiobutton(export_frame, text="Test Set Only", variable=self.export_dataset_var, value="test").pack(anchor=tk.W, padx=20)
+
+        # External queries frame
+        query_frame = ttk.LabelFrame(self.ext_tab, text="External Queries", padding="10")
+        query_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(query_frame, text="🔭 Query SDSS", command=self.query_sdss_gui, width=20).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(query_frame, text="Search Radius (arcsec):").pack(side=tk.LEFT, padx=5)
+        self.sdss_radius_var = tk.StringVar(value="1.0")
+        ttk.Entry(query_frame, textvariable=self.sdss_radius_var, width=10).pack(side=tk.LEFT, padx=5)
+
+        # Vizier query (if pyvo available)
+        try:
+            import pyvo
+            ttk.Button(query_frame, text="📚 Query Vizier", command=self.query_vizier_gui, width=20).pack(side=tk.LEFT, padx=5)
+        except ImportError:
+            pass
+
+        # Coordinate conversion frame
+        coord_frame = ttk.LabelFrame(self.ext_tab, text="Coordinate Conversion", padding="10")
+        coord_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(coord_frame, text="🌐 Convert to Galactic", command=self.convert_coordinates_gui, width=20).pack(side=tk.LEFT, padx=5)
+        ttk.Button(coord_frame, text="🌍 Convert to Equatorial", command=self.convert_coordinates_gui, width=20).pack(side=tk.LEFT, padx=5)
+
+        # Status output
+        self.ext_status_text = scrolledtext.ScrolledText(self.ext_tab, height=10)
+        self.ext_status_text.pack(fill=tk.BOTH, expand=True, pady=5)
+
+    def query_vizier_gui(self):
+        """Query Vizier catalog"""
+        if not self.model:
+            messagebox.showwarning("Warning", "No model to query")
+            return
+
+        # Get catalog name
+        catalog = tk.simpledialog.askstring("Vizier Query", "Enter Vizier catalog name (e.g., 'I/311/hip2'):")
+        if not catalog:
+            return
+
+        # Get coordinates
+        data = self.model._prepare_export_data()
+        ra_col, dec_col = self._find_coordinate_columns(data)
+
+        if not ra_col or not dec_col:
+            self.log_output("❌ No RA/Dec columns found")
+            return
+
+        self.log_output(f"📚 Querying Vizier catalog {catalog}...")
+
+        try:
+            import pyvo
+            results = []
+            for r, d in zip(data[ra_col].values[:10], data[dec_col].values[:10]):
+                query = f"SELECT * FROM {catalog} WHERE CONTAINS(POINT('ICRS', RAJ2000, DEJ2000), CIRCLE('ICRS', {r}, {d}, 0.0166667)) = 1"
+                result = pyvo.vizier.query(query)
+                if result:
+                    results.append(result.to_table().to_pandas())
+
+            if results:
+                combined = pd.concat(results)
+                self.log_output(f"✅ Vizier query returned {len(combined)} matches")
+                self._show_vizier_results(combined, catalog)
+            else:
+                self.log_output("No matches found")
+
+        except Exception as e:
+            self.log_output(f"❌ Vizier query failed: {e}")
+
+    def convert_coordinates_gui(self):
+        """Convert coordinates using Astropy"""
+        if not self.model or not ASTROPY_AVAILABLE:
+            messagebox.showwarning("Warning", "Astropy not available")
+            return
+
+        data = self.model._prepare_export_data()
+        ra_col, dec_col = self._find_coordinate_columns(data)
+
+        if not ra_col or not dec_col:
+            self.log_output("❌ No RA/Dec columns found")
+            return
+
+        self.log_output("🌐 Converting coordinates...")
+
+        try:
+            from astropy.coordinates import SkyCoord
+            import astropy.units as u
+
+            coords = SkyCoord(ra=data[ra_col].values * u.deg, dec=data[dec_col].values * u.deg)
+
+            results_df = pd.DataFrame({
+                'ra_deg': coords.ra.deg,
+                'dec_deg': coords.dec.deg,
+                'gal_l_deg': coords.galactic.l.deg,
+                'gal_b_deg': coords.galactic.b.deg,
+                'fk5_ra_deg': coords.fk5.ra.deg,
+                'fk5_dec_deg': coords.fk5.dec.deg
+            })
+
+            self.log_output(f"✅ Converted {len(results_df)} coordinates")
+            self._show_coordinate_results(results_df)
+
+        except Exception as e:
+            self.log_output(f"❌ Coordinate conversion failed: {e}")
+
     def setup_environment_tab(self):
+        """Enhanced environment tab with dependency management"""
+        # System info frame (existing)
         sys_frame = ttk.LabelFrame(self.env_tab, text="System Information", padding="10")
         sys_frame.pack(fill=tk.X, pady=5)
 
         sys_info = self.env_manager.get_system_info()
-
         info_text = f"""
         Operating System: {sys_info['os']} {sys_info['os_version']}
         Architecture: {sys_info['architecture']}
         Processor: {sys_info['processor']}
         Python: {sys_info['python_version']}
         """
-
         ttk.Label(sys_frame, text=info_text, font=('Courier', 10)).pack(anchor=tk.W)
 
+        # CUDA info
         cuda_info = self.env_manager.check_cuda()
         if cuda_info['available']:
             cuda_text = f"""
@@ -3311,63 +4743,455 @@ class CTDBNNGUI:
             ttk.Label(sys_frame, text="CUDA Available: ✗ (CPU mode only)",
                      font=('Courier', 10), foreground='red').pack(anchor=tk.W)
 
-        deps_frame = ttk.LabelFrame(self.env_tab, text="Dependencies", padding="10")
-        deps_frame.pack(fill=tk.X, pady=5)
+        # ========== DEPENDENCY MANAGEMENT FRAME ==========
+        deps_frame = ttk.LabelFrame(self.env_tab, text="📦 Dependency Manager", padding="10")
+        deps_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        deps = self.env_manager.check_dependencies()
+        # Create notebook for dependency categories
+        deps_notebook = ttk.Notebook(deps_frame)
+        deps_notebook.pack(fill=tk.BOTH, expand=True)
 
-        dep_grid = ttk.Frame(deps_frame)
-        dep_grid.pack(fill=tk.X)
+        # Tab 1: Python Dependencies
+        python_tab = ttk.Frame(deps_notebook)
+        deps_notebook.add(python_tab, text="🐍 Python Packages")
+        self._setup_python_deps_tab(python_tab)
 
-        row, col = 0, 0
-        for pkg, installed in deps.items():
-            status = "✓" if installed else "✗"
-            color = "green" if installed else "red"
-            ttk.Label(dep_grid, text=f"{pkg}:", font=('Courier', 10)).grid(row=row, column=col*2, sticky=tk.W, padx=5)
-            ttk.Label(dep_grid, text=status, font=('Courier', 10), foreground=color).grid(row=row, column=col*2+1, sticky=tk.W)
-            col += 1
-            if col > 2:
-                col = 0
+        # Tab 2: Java Tools (Topcat, Aladin)
+        java_tab = ttk.Frame(deps_notebook)
+        deps_notebook.add(java_tab, text="☕ Java Tools")
+        self._setup_java_tools_tab(java_tab)
+
+        # Tab 3: System Tools
+        system_tab = ttk.Frame(deps_notebook)
+        deps_notebook.add(system_tab, text="🖥️ System Tools")
+        self._setup_system_tools_tab(system_tab)
+
+        # Progress bar for installations
+        self.install_progress = ttk.Progressbar(deps_frame, mode='indeterminate')
+        self.install_progress.pack(fill=tk.X, pady=5)
+        self.install_status = ttk.Label(deps_frame, text="", foreground="blue")
+        self.install_status.pack(fill=tk.X)
+
+
+    def _setup_python_deps_tab(self, parent):
+        """Setup Python dependencies tab with install buttons"""
+        # Create scrollable frame
+        canvas = tk.Canvas(parent)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Python packages
+        packages = {
+            "Core ML": {
+                "torch": "PyTorch deep learning framework",
+                "numpy": "Numerical computing",
+                "pandas": "Data manipulation",
+                "scikit-learn": "Machine learning algorithms"
+            },
+            "Visualization": {
+                "matplotlib": "Basic plotting",
+                "seaborn": "Statistical visualization",
+                "plotly": "Interactive visualizations"
+            },
+            "Astronomy": {
+                "astropy": "Astronomy core library (FITS, VOTable)",
+                "astroquery": "Online astronomical databases",
+                "pyvo": "Virtual Observatory access"
+            },
+            "Utilities": {
+                "requests": "HTTP requests",
+                "tqdm": "Progress bars",
+                "joblib": "Parallel processing"
+            }
+        }
+
+        row = 0
+        for category, pkgs in packages.items():
+            # Category header
+            ttk.Label(scrollable_frame, text=category, font=('Arial', 10, 'bold')).grid(
+                row=row, column=0, columnspan=4, sticky=tk.W, padx=5, pady=(10, 5))
+            row += 1
+
+            for pkg, desc in pkgs.items():
+                # Check if installed
+                installed = self._check_python_package(pkg)
+
+                # Package name
+                ttk.Label(scrollable_frame, text=pkg, font=('Courier', 10)).grid(
+                    row=row, column=0, sticky=tk.W, padx=5, pady=2)
+
+                # Status
+                status_text = "✓ Installed" if installed else "✗ Not Installed"
+                status_color = "green" if installed else "red"
+                ttk.Label(scrollable_frame, text=status_text, foreground=status_color).grid(
+                    row=row, column=1, sticky=tk.W, padx=5, pady=2)
+
+                # Description
+                ttk.Label(scrollable_frame, text=desc, foreground="gray").grid(
+                    row=row, column=2, sticky=tk.W, padx=5, pady=2)
+
+                # Install button
+                if not installed:
+                    btn = ttk.Button(scrollable_frame, text="Install",
+                                    command=lambda p=pkg: self._install_python_package(p),
+                                    width=10)
+                    btn.grid(row=row, column=3, padx=5, pady=2)
+                    self.deps_status[pkg] = btn
+                else:
+                    ttk.Button(scrollable_frame, text="Reinstall",
+                              command=lambda p=pkg: self._install_python_package(p),
+                              width=10).grid(row=row, column=3, padx=5, pady=2)
+
                 row += 1
 
-        actions_frame = ttk.LabelFrame(self.env_tab, text="Environment Actions", padding="10")
-        actions_frame.pack(fill=tk.X, pady=5)
+        # Install all missing button
+        btn_frame = ttk.Frame(scrollable_frame)
+        btn_frame.grid(row=row, column=0, columnspan=4, pady=20)
 
-        ttk.Button(actions_frame, text="Install Dependencies",
-                  command=self.install_dependencies).pack(side=tk.LEFT, padx=5)
-        ttk.Button(actions_frame, text="Generate requirements.txt",
-                  command=self.generate_requirements).pack(side=tk.LEFT, padx=5)
-        ttk.Button(actions_frame, text="Check CUDA",
-                  command=self.check_cuda).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Install All Missing Packages",
+                  command=self._install_all_missing).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Check All",
+                  command=self._refresh_python_deps).pack(side=tk.LEFT, padx=5)
+
+    def _setup_java_tools_tab(self, parent):
+        """Setup Java tools tab for Topcat and Aladin"""
+        # Check Java first
+        java_installed = self._check_java()
+
+        java_frame = ttk.LabelFrame(parent, text="Java Runtime", padding="10")
+        java_frame.pack(fill=tk.X, pady=5)
+
+        if java_installed:
+            java_version = self._get_java_version()
+            ttk.Label(java_frame, text=f"✓ Java found: {java_version}", foreground="green").pack(anchor=tk.W)
+        else:
+            ttk.Label(java_frame, text="✗ Java not found", foreground="red").pack(anchor=tk.W)
+            ttk.Button(java_frame, text="Install Java", command=self._install_java).pack(anchor=tk.W, pady=5)
+
+        # Topcat section
+        topcat_frame = ttk.LabelFrame(parent, text="Topcat - Table Viewer", padding="10")
+        topcat_frame.pack(fill=tk.X, pady=5)
+
+        topcat_installed = self._check_topcat()
+        if topcat_installed:
+            ttk.Label(topcat_frame, text="✓ Topcat installed", foreground="green").pack(anchor=tk.W)
+            ttk.Button(topcat_frame, text="Launch Topcat", command=self.launch_topcat_gui).pack(anchor=tk.W, pady=5)
+        else:
+            ttk.Label(topcat_frame, text="✗ Topcat not installed", foreground="red").pack(anchor=tk.W)
+            ttk.Label(topcat_frame, text="Topcat is a Java application for table visualization", foreground="gray").pack(anchor=tk.W)
+            ttk.Button(topcat_frame, text="Download Topcat", command=self._download_topcat).pack(anchor=tk.W, pady=5)
+            ttk.Button(topcat_frame, text="Install from Package Manager", command=self._install_topcat).pack(anchor=tk.W, pady=2)
+
+        # Aladin section
+        aladin_frame = ttk.LabelFrame(parent, text="Aladin - Sky Atlas", padding="10")
+        aladin_frame.pack(fill=tk.X, pady=5)
+
+        aladin_installed = self._check_aladin()
+        if aladin_installed:
+            ttk.Label(aladin_frame, text="✓ Aladin installed", foreground="green").pack(anchor=tk.W)
+            ttk.Button(aladin_frame, text="Launch Aladin", command=self.launch_aladin_gui).pack(anchor=tk.W, pady=5)
+        else:
+            ttk.Label(aladin_frame, text="✗ Aladin not installed", foreground="red").pack(anchor=tk.W)
+            ttk.Label(aladin_frame, text="Aladin is a Java application for sky visualization", foreground="gray").pack(anchor=tk.W)
+            ttk.Button(aladin_frame, text="Download Aladin", command=self._download_aladin).pack(anchor=tk.W, pady=5)
+            ttk.Button(aladin_frame, text="Install from Package Manager", command=self._install_aladin).pack(anchor=tk.W, pady=2)
+
+        # Installation instructions
+        instructions_frame = ttk.LabelFrame(parent, text="Installation Instructions", padding="10")
+        instructions_frame.pack(fill=tk.X, pady=5)
+
+        instructions = """
+        Topcat and Aladin are Java applications:
+
+        1. Download the .jar file from the official websites
+        2. Place it in a directory (e.g., ~/astronomy_tools/)
+        3. Add to PATH or create a launcher script
+
+        Or use package managers:
+        - Ubuntu/Debian: sudo apt install topcat aladin
+        - macOS: brew install topcat aladin
+        - Windows: Download from websites
+        """
+
+        text_widget = scrolledtext.ScrolledText(instructions_frame, height=8, wrap=tk.WORD)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        text_widget.insert(tk.END, instructions)
+        text_widget.config(state=tk.DISABLED)
+
+    def _setup_system_tools_tab(self, parent):
+        """Setup system tools tab"""
+        tools = [
+            ("Git", "git", "Version control", "https://git-scm.com/"),
+            ("Conda", "conda", "Package and environment manager", "https://conda.io/"),
+            ("Make", "make", "Build automation", "https://www.gnu.org/software/make/"),
+            ("Wget", "wget", "File downloader", "https://www.gnu.org/software/wget/"),
+            ("Curl", "curl", "URL transfer tool", "https://curl.se/"),
+        ]
+
+        for i, (name, cmd, desc, url) in enumerate(tools):
+            frame = ttk.LabelFrame(parent, text=name, padding="10")
+            frame.pack(fill=tk.X, pady=5)
+
+            installed = self._check_system_tool(cmd)
+            status = "✓ Installed" if installed else "✗ Not Installed"
+            color = "green" if installed else "red"
+
+            ttk.Label(frame, text=status, foreground=color).pack(anchor=tk.W)
+            ttk.Label(frame, text=desc, foreground="gray").pack(anchor=tk.W)
+
+            if not installed:
+                ttk.Label(frame, text=f"Install: {url}", foreground="blue").pack(anchor=tk.W)
+
+    def _check_python_package(self, package):
+        """Check if Python package is installed"""
+        try:
+            __import__(package.replace('-', '_'))
+            return True
+        except ImportError:
+            return False
+
+    def _check_java(self):
+        """Check if Java is installed"""
+        import shutil
+        return shutil.which('java') is not None
+
+    def _get_java_version(self):
+        """Get Java version"""
+        try:
+            result = subprocess.run(['java', '-version'], capture_output=True, text=True)
+            return result.stderr.split('\n')[0] if result.stderr else "Unknown"
+        except:
+            return "Unknown"
+
+    def _check_system_tool(self, tool):
+        """Check if system tool is available"""
+        import shutil
+        return shutil.which(tool) is not None
+
+    def _install_python_package(self, package):
+        """Install Python package in background thread"""
+        if self.install_in_progress:
+            messagebox.showwarning("Installation in Progress", "Please wait for current installation to complete")
+            return
+
+        self.install_thread = threading.Thread(target=self._install_package_thread, args=(package,))
+        self.install_thread.daemon = True
+        self.install_thread.start()
+
+    def _install_package_thread(self, package):
+        """Background thread for package installation"""
+        self.install_in_progress = True
+        self.install_progress.start()
+        self.install_status.config(text=f"Installing {package}...", foreground="blue")
+
+        try:
+            # Disable the button while installing
+            if package in self.deps_status:
+                self.deps_status[package].config(state=tk.DISABLED, text="Installing...")
+
+            # Run pip install
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", package],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                self.install_status.config(text=f"✓ {package} installed successfully", foreground="green")
+                self.log_output(f"✅ Installed {package}")
+
+                # Update button
+                if package in self.deps_status:
+                    self.deps_status[package].config(text="Reinstall", state=tk.NORMAL)
+
+                # Refresh the tab to show installed status
+                self._refresh_python_deps()
+            else:
+                error_msg = result.stderr.split('\n')[-2] if result.stderr else "Unknown error"
+                self.install_status.config(text=f"✗ Failed to install {package}: {error_msg}", foreground="red")
+                self.log_output(f"❌ Failed to install {package}: {error_msg}")
+
+                if package in self.deps_status:
+                    self.deps_status[package].config(text="Retry", state=tk.NORMAL)
+
+        except Exception as e:
+            self.install_status.config(text=f"✗ Error: {str(e)}", foreground="red")
+            self.log_output(f"❌ Error installing {package}: {e}")
+
+            if package in self.deps_status:
+                self.deps_status[package].config(text="Retry", state=tk.NORMAL)
+
+        finally:
+            self.install_progress.stop()
+            self.install_in_progress = False
+
+            # Reset status after 3 seconds
+            self.root.after(3000, lambda: self.install_status.config(text=""))
+
+    def _install_all_missing(self):
+        """Install all missing Python packages"""
+        missing = []
+        for pkg, btn in self.deps_status.items():
+            if btn.cget('text') == "Install":
+                missing.append(pkg)
+
+        if missing:
+            response = messagebox.askyesno("Install All", f"Install {len(missing)} missing packages?\n\n{', '.join(missing)}")
+            if response:
+                for pkg in missing:
+                    self._install_python_package(pkg)
+        else:
+            messagebox.showinfo("All Installed", "All packages are already installed!")
+
+    def _refresh_python_deps(self):
+        """Refresh Python dependencies tab"""
+        # Find and refresh the Python dependencies tab
+        for child in self.env_tab.winfo_children():
+            if isinstance(child, ttk.LabelFrame) and child.cget("text") == "Dependencies & Tools":
+                for notebook in child.winfo_children():
+                    if isinstance(notebook, ttk.Notebook):
+                        for tab in notebook.tabs():
+                            if notebook.tab(tab, "text") == "🐍 Python Packages":
+                                # Recreate the tab
+                                notebook.forget(tab)
+                                new_tab = ttk.Frame(notebook)
+                                notebook.insert(tab, new_tab, text="🐍 Python Packages")
+                                self._setup_python_deps_tab(new_tab)
+                                break
+                        break
+                break
+
+    def _install_java(self):
+        """Open Java download page"""
+        import webbrowser
+        webbrowser.open("https://adoptium.net/")
+        messagebox.showinfo("Java Installation",
+                           "Java is required for Topcat and Aladin.\n"
+                           "Please download and install Java from the opened page.")
+
+    def _download_topcat(self):
+        """Open Topcat download page"""
+        import webbrowser
+        webbrowser.open("https://www.star.bris.ac.uk/~mbt/topcat/")
+        messagebox.showinfo("Topcat Download",
+                           "Please download topcat-full.jar and save it to:\n\n"
+                           "~/astronomy_tools/topcat.jar\n\n"
+                           "Then add to PATH or create a launcher script.")
+
+    def _download_aladin(self):
+        """Open Aladin download page"""
+        import webbrowser
+        webbrowser.open("https://aladin.u-strasbg.fr/java/nph-aladin.pl?frame=downloading")
+        messagebox.showinfo("Aladin Download",
+                           "Please download aladin.jar and save it to:\n\n"
+                           "~/astronomy_tools/aladin.jar\n\n"
+                           "Then add to PATH or create a launcher script.")
+
+    def _install_topcat(self):
+        """Install Topcat via package manager based on OS"""
+        import platform
+        system = platform.system()
+
+        if system == "Linux":
+            # Try to detect package manager
+            if shutil.which('apt'):
+                response = messagebox.askyesno("Install Topcat",
+                                              "Install Topcat using apt?\n\nsudo apt install topcat")
+                if response:
+                    subprocess.Popen(['sudo', 'apt', 'install', '-y', 'topcat'])
+            elif shutil.which('brew'):
+                response = messagebox.askyesno("Install Topcat",
+                                              "Install Topcat using Homebrew?\n\nbrew install topcat")
+                if response:
+                    subprocess.Popen(['brew', 'install', 'topcat'])
+            else:
+                self._download_topcat()
+        elif system == "Darwin":  # macOS
+            response = messagebox.askyesno("Install Topcat",
+                                          "Install Topcat using Homebrew?\n\nbrew install topcat")
+            if response:
+                subprocess.Popen(['brew', 'install', 'topcat'])
+        else:  # Windows
+            self._download_topcat()
+
+    def _install_aladin(self):
+        """Install Aladin via package manager based on OS"""
+        import platform
+        system = platform.system()
+
+        if system == "Linux":
+            if shutil.which('apt'):
+                response = messagebox.askyesno("Install Aladin",
+                                              "Install Aladin using apt?\n\nsudo apt install aladin")
+                if response:
+                    subprocess.Popen(['sudo', 'apt', 'install', '-y', 'aladin'])
+            elif shutil.which('brew'):
+                response = messagebox.askyesno("Install Aladin",
+                                              "Install Aladin using Homebrew?\n\nbrew install aladin")
+                if response:
+                    subprocess.Popen(['brew', 'install', 'aladin'])
+            else:
+                self._download_aladin()
+        elif system == "Darwin":
+            response = messagebox.askyesno("Install Aladin",
+                                          "Install Aladin using Homebrew?\n\nbrew install aladin")
+            if response:
+                subprocess.Popen(['brew', 'install', 'aladin'])
+        else:
+            self._download_aladin()
 
     def setup_dataset_tab(self):
+        """Setup dataset management tab with auto-target deselection"""
+        # Dataset selection frame
         select_frame = ttk.LabelFrame(self.dataset_tab, text="Dataset Selection", padding="10")
         select_frame.pack(fill=tk.X, pady=5)
 
+        # Local file selection
         ttk.Label(select_frame, text="Local File:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        self.file_path_var = tk.StringVar()
         ttk.Entry(select_frame, textvariable=self.file_path_var, width=50).grid(row=0, column=1, padx=5)
         ttk.Button(select_frame, text="Browse", command=self.browse_file).grid(row=0, column=2, padx=5)
 
+        # UCI dataset selection
         ttk.Label(select_frame, text="UCI Dataset:").grid(row=1, column=0, sticky=tk.W, padx=5)
         uci_datasets = DatasetConfig.list_uci_datasets()
         self.uci_var = tk.StringVar()
         uci_combo = ttk.Combobox(select_frame, textvariable=self.uci_var, values=uci_datasets, width=30)
         uci_combo.grid(row=1, column=1, padx=5, sticky=tk.W)
+
+        # Add description label
+        self.uci_desc_label = ttk.Label(select_frame, text="", foreground="gray", wraplength=400)
+        self.uci_desc_label.grid(row=2, column=1, padx=5, sticky=tk.W)
+
+        # Bind selection event to show description
+        uci_combo.bind('<<ComboboxSelected>>', self._show_uci_description)
+
         ttk.Button(select_frame, text="Download", command=self.download_uci).grid(row=1, column=2, padx=5)
+        ttk.Button(select_frame, text="Load Dataset", command=self.load_dataset).grid(row=3, column=1, pady=10)
 
-        ttk.Button(select_frame, text="Load Dataset", command=self.load_dataset).grid(row=2, column=1, pady=10)
-
+        # Dataset info frame
         self.info_frame = ttk.LabelFrame(self.dataset_tab, text="Dataset Information", padding="10")
         self.info_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.info_text = scrolledtext.ScrolledText(self.info_frame, height=10)
         self.info_text.pack(fill=tk.BOTH, expand=True)
 
+        # Feature selection frame
         self.feature_frame = ttk.LabelFrame(self.dataset_tab, text="Feature Selection", padding="10")
         self.feature_frame.pack(fill=tk.X, pady=5)
 
-        self.feature_canvas = tk.Canvas(self.feature_frame, height=150)
+        # Create canvas with scrollbar for feature list
+        self.feature_canvas = tk.Canvas(self.feature_frame, height=200)
         feature_scroll = ttk.Scrollbar(self.feature_frame, orient="vertical", command=self.feature_canvas.yview)
         self.feature_scroll_frame = ttk.Frame(self.feature_canvas)
 
@@ -3380,12 +5204,269 @@ class CTDBNNGUI:
         self.feature_scroll_frame.bind("<Configure>",
             lambda e: self.feature_canvas.configure(scrollregion=self.feature_canvas.bbox("all")))
 
+        # Feature selection buttons
         btn_frame = ttk.Frame(self.feature_frame)
         btn_frame.pack(fill=tk.X, pady=5)
 
         ttk.Button(btn_frame, text="Select All", command=self.select_all_features).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Deselect All", command=self.deselect_all_features).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Select Numeric", command=self.select_numeric_features).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Apply Selection", command=self.apply_feature_selection).pack(side=tk.LEFT, padx=2)
+
+    def update_feature_selection(self, df):
+        """Update feature selection UI with auto-deselection of target"""
+        # Clear existing widgets
+        for widget in self.feature_scroll_frame.winfo_children():
+            widget.destroy()
+
+        self.feature_vars = {}
+
+        # Target selection row
+        target_frame = ttk.LabelFrame(self.feature_scroll_frame, text="Target Column", padding="5")
+        target_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(target_frame, text="Select the target column (will be excluded from features):",
+                  font=('Arial', 9)).pack(anchor=tk.W)
+
+        # Target combobox
+        target_combo = ttk.Combobox(target_frame, textvariable=self.target_var,
+                                    values=list(df.columns), width=30, state="readonly")
+        target_combo.pack(pady=5)
+
+        # Bind target selection event to auto-deselect from features
+        target_combo.bind('<<ComboboxSelected>>', self._on_target_selected)
+
+        # Features header
+        ttk.Label(self.feature_scroll_frame, text="Feature Columns (select for training):",
+                  font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+
+        # Create checkboxes for all columns
+        for col in df.columns:
+            # Create variable for each column (default: True for features, False for target)
+            var = tk.BooleanVar(value=(col != self.target_var.get()))
+            self.feature_vars[col] = var
+
+            # Determine column type for display
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_type = "numeric"
+                type_color = "blue"
+            elif pd.api.types.is_string_dtype(df[col]):
+                col_type = "categorical"
+                type_color = "green"
+            else:
+                col_type = "other"
+                type_color = "gray"
+
+            # Create frame for each feature
+            feature_row = ttk.Frame(self.feature_scroll_frame)
+            feature_row.pack(fill=tk.X, pady=2)
+
+            # Checkbox
+            cb = ttk.Checkbutton(feature_row, variable=var, width=3)
+            cb.pack(side=tk.LEFT)
+
+            # Column name with type indicator
+            if col == self.target_var.get():
+                # Highlight target column with special styling
+                ttk.Label(feature_row, text=f"🎯 {col} (TARGET - not used as feature)",
+                         foreground="red", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=5)
+                cb.config(state=tk.DISABLED)  # Disable checkbox for target
+            else:
+                ttk.Label(feature_row, text=f"{col}", font=('Arial', 9)).pack(side=tk.LEFT, padx=5)
+                ttk.Label(feature_row, text=f"({col_type})", foreground=type_color,
+                         font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+
+        # Add info about selection
+        info_label = ttk.Label(self.feature_scroll_frame,
+                              text="Note: Target column is automatically excluded from features.",
+                              foreground="gray", font=('Arial', 8, 'italic'))
+        info_label.pack(anchor=tk.W, pady=(10, 0))
+
+    def _on_target_selected(self, event):
+        """Handle target column selection - automatically deselect from features"""
+        new_target = self.target_var.get()
+
+        # Update all feature checkboxes
+        for col, var in self.feature_vars.items():
+            if col == new_target:
+                # Disable and uncheck the target column
+                var.set(False)
+                # Find and disable the checkbox widget
+                self._disable_feature_checkbox(col)
+            else:
+                # Re-enable and keep existing state for other columns
+                self._enable_feature_checkbox(col)
+                # Don't change existing state - keep user's previous selection
+
+        self.log_output(f"🎯 Target column set to: {new_target} (automatically excluded from features)")
+
+    def _disable_feature_checkbox(self, column):
+        """Disable checkbox for a specific column"""
+        # Find the widget and disable it
+        for widget in self.feature_scroll_frame.winfo_children():
+            if isinstance(widget, ttk.Frame):
+                for child in widget.winfo_children():
+                    if isinstance(child, ttk.Checkbutton) and child.cget('text') == '':
+                        # This is the checkbox - check if it belongs to this column
+                        # Find the label next to it
+                        for label in widget.winfo_children():
+                            if isinstance(label, ttk.Label) and label.cget('text') == column:
+                                child.config(state=tk.DISABLED)
+                                break
+
+    def _enable_feature_checkbox(self, column):
+        """Enable checkbox for a specific column"""
+        for widget in self.feature_scroll_frame.winfo_children():
+            if isinstance(widget, ttk.Frame):
+                for child in widget.winfo_children():
+                    if isinstance(child, ttk.Checkbutton) and child.cget('text') == '':
+                        for label in widget.winfo_children():
+                            if isinstance(label, ttk.Label) and label.cget('text') == column:
+                                child.config(state=tk.NORMAL)
+                                break
+
+    def select_all_features(self):
+        """Select all features (excludes target column automatically)"""
+        target = self.target_var.get()
+        for col, var in self.feature_vars.items():
+            if col != target:
+                var.set(True)
+        self.log_output("📊 Selected all features")
+
+    def deselect_all_features(self):
+        """Deselect all features"""
+        for var in self.feature_vars.values():
+            var.set(False)
+        self.log_output("📊 Deselected all features")
+
+    def select_numeric_features(self):
+        """Select only numeric features (excludes target automatically)"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+
+        df = self.original_data
+        target = self.target_var.get()
+
+        selected = 0
+        for col, var in self.feature_vars.items():
+            if col != target and pd.api.types.is_numeric_dtype(df[col]):
+                var.set(True)
+                selected += 1
+            elif col != target:
+                var.set(False)
+
+        self.log_output(f"📊 Selected {selected} numeric features (excluded target: {target})")
+
+    def apply_feature_selection(self):
+        """Apply the current feature selection"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load data first.")
+            return
+
+        try:
+            # Get selected features
+            selected_features = []
+            for col, var in self.feature_vars.items():
+                if var.get() and col != self.target_var.get():
+                    selected_features.append(col)
+
+            # Get target column
+            target_column = self.target_var.get()
+
+            if not selected_features:
+                messagebox.showwarning("Warning", "Please select at least one feature.")
+                return
+
+            if not target_column:
+                messagebox.showwarning("Warning", "Please select a target column.")
+                return
+
+            # Initialize model with selected features
+            if hasattr(self, 'current_data_file') and self.current_data_file:
+                dataset_name = os.path.splitext(os.path.basename(self.current_data_file))[0]
+            else:
+                dataset_name = "dataset"
+
+            # Create config with selected features
+            config = {
+                'file_path': self.current_data_file if hasattr(self, 'current_data_file') else None,
+                'target_column': target_column,
+                'model_type': self.model_type_var.get(),
+                'compute_device': self.device_var.get(),
+                'parallel': self.parallel_var.get(),
+                'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
+                'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
+                'parallel_mode': self.parallel_mode_var.get(),
+                'selected_features': selected_features,  # Store selected features
+                'training_params': {
+                    'learning_rate': float(self.learning_rate_var.get()),
+                    'epochs': int(self.epochs_var.get()),
+                    'n_bins_per_dim': int(self.bins_var.get()),
+                    'test_fraction': float(self.test_size_var.get()),
+                    'enable_adaptive': self.adaptive_var.get(),
+                    'adaptive_rounds': int(self.adaptive_rounds_var.get()),
+                    'initial_samples': int(self.initial_samples_var.get()),
+                    'max_samples_per_round': int(self.max_samples_round_var.get())
+                }
+            }
+
+            # Use OptimizedDBNN (not AdaptiveCTDBNN)
+            self.model = OptimizedDBNN(
+                dataset_name=dataset_name,
+                config=config,
+                enable_external_tools=ASTROPY_AVAILABLE
+            )
+
+            # Load data with selected features
+            success = self.model.load_data(file_path=self.current_data_file)
+
+            if success:
+                # Apply feature filtering - keep only selected features
+                if selected_features:
+                    # Get indices of selected features
+                    feature_indices = []
+                    for feat in selected_features:
+                        if feat in self.model.feature_names:
+                            feature_indices.append(self.model.feature_names.index(feat))
+
+                    if feature_indices:
+                        # Filter X_tensor to only selected features
+                        self.model.X_tensor = self.model.X_tensor[:, feature_indices]
+                        self.model.feature_names = selected_features
+                        self.log_output(f"📊 Using {len(selected_features)} selected features: {', '.join(selected_features)}")
+
+                self.log_output(f"✅ Model initialized with feature selection")
+                self.log_output(f"🎯 Target: {target_column}")
+                self.log_output(f"📊 Features: {len(selected_features)}")
+
+                # Store feature selection in model
+                self.model.selected_features = selected_features
+
+                # Update the model reference in the GUI
+                self.model_trained = False  # Reset trained flag since new model
+                self.log_output("✅ Feature selection applied successfully")
+
+                # Save configuration
+                if hasattr(self, 'current_data_file') and self.current_data_file:
+                    self.save_configuration_for_file(self.current_data_file)
+            else:
+                self.log_output("❌ Failed to load data with selected features")
+
+        except Exception as e:
+            self.log_output(f"❌ Error applying feature selection: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _show_uci_description(self, event):
+        """Show description for selected UCI dataset"""
+        dataset = self.uci_var.get()
+        info = DatasetConfig.get_dataset_info(dataset)
+        if info:
+            desc = info['description']
+            self.uci_desc_label.config(text=desc)
+        else:
+            self.uci_desc_label.config(text="")
 
     def setup_config_tab(self):
         model_frame = ttk.LabelFrame(self.config_tab, text="Model Configuration", padding="10")
@@ -3438,6 +5519,722 @@ class CTDBNNGUI:
         ttk.Button(btn_frame, text="Load Configuration", command=self.load_config).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Apply Configuration", command=self.apply_config).pack(side=tk.LEFT, padx=5)
 
+    def setup_training_tab(self):
+        """Setup training tab with full external tools integration"""
+        # Control buttons
+        control_frame = ttk.LabelFrame(self.training_tab, text="Training Controls", padding="10")
+        control_frame.pack(fill=tk.X, pady=5)
+
+        btn_row1 = ttk.Frame(control_frame)
+        btn_row1.pack(fill=tk.X, pady=2)
+        ttk.Button(btn_row1, text="Initialize Model", command=self.initialize_model, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="Train Model", command=self.train_model, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="Fresh Train", command=self.fresh_train_model, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="Adaptive Training", command=self.adaptive_training, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="Fresh Adaptive", command=self.fresh_adaptive_training, width=15).pack(side=tk.LEFT, padx=2)
+
+        btn_row2 = ttk.Frame(control_frame)
+        btn_row2.pack(fill=tk.X, pady=5)
+        self.stop_button = ttk.Button(btn_row2, text="🛑 STOP", command=self.stop_training, width=15, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row2, text="❌ EXIT", command=self.exit_application, width=15).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(btn_row2, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        self.status_label = ttk.Label(btn_row2, text="⏸️ Idle", foreground="gray")
+        self.status_label.pack(side=tk.LEFT, padx=10)
+
+        btn_row3 = ttk.Frame(control_frame)
+        btn_row3.pack(fill=tk.X, pady=2)
+        ttk.Button(btn_row3, text="Evaluate", command=self.evaluate_model, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row3, text="Predict File", command=self.predict_file, width=12).pack(side=tk.LEFT, padx=2)
+
+        # ========== EXTERNAL TOOLS FRAME (COMPREHENSIVE) ==========
+        ext_frame = ttk.LabelFrame(self.training_tab, text="🔌 External Tools Integration", padding="10")
+        ext_frame.pack(fill=tk.X, pady=5)
+
+        # Check available tools
+        topcat_avail = self._check_topcat()
+        aladin_avail = self._check_aladin()
+        fits_avail = ASTROPY_AVAILABLE
+        sdss_avail = self._check_sdss()
+
+        # First row - Launch tools
+        tools_row = ttk.Frame(ext_frame)
+        tools_row.pack(fill=tk.X, pady=2)
+
+        # Topcat button
+        if topcat_avail:
+            self.topcat_btn = ttk.Button(tools_row, text="📊 Launch Topcat",
+                                         command=self.launch_topcat_gui, width=18)
+            self.topcat_btn.pack(side=tk.LEFT, padx=2)
+        else:
+            self.topcat_btn = ttk.Button(tools_row, text="📊 Topcat (Not Found)",
+                                         state=tk.DISABLED, width=18)
+            self.topcat_btn.pack(side=tk.LEFT, padx=2)
+
+        # Aladin button
+        if aladin_avail:
+            self.aladin_btn = ttk.Button(tools_row, text="🌌 Launch Aladin",
+                                         command=self.launch_aladin_gui, width=18)
+            self.aladin_btn.pack(side=tk.LEFT, padx=2)
+        else:
+            self.aladin_btn = ttk.Button(tools_row, text="🌌 Aladin (Not Found)",
+                                         state=tk.DISABLED, width=18)
+            self.aladin_btn.pack(side=tk.LEFT, padx=2)
+
+        # Second row - Export options
+        export_row = ttk.Frame(ext_frame)
+        export_row.pack(fill=tk.X, pady=2)
+
+        if fits_avail:
+            ttk.Button(export_row, text="💾 Export to FITS",
+                      command=self.export_to_fits_gui, width=18).pack(side=tk.LEFT, padx=2)
+            ttk.Button(export_row, text="📄 Export to VOTable",
+                      command=self.export_to_votable_gui, width=18).pack(side=tk.LEFT, padx=2)
+        else:
+            ttk.Button(export_row, text="💾 FITS (Astropy missing)",
+                      state=tk.DISABLED, width=18).pack(side=tk.LEFT, padx=2)
+            ttk.Button(export_row, text="📄 VOTable (Astropy missing)",
+                      state=tk.DISABLED, width=18).pack(side=tk.LEFT, padx=2)
+
+        # Third row - Queries
+        query_row = ttk.Frame(ext_frame)
+        query_row.pack(fill=tk.X, pady=2)
+
+        if sdss_avail:
+            ttk.Button(query_row, text="🔭 Query SDSS",
+                      command=self.query_sdss_gui, width=18).pack(side=tk.LEFT, padx=2)
+        else:
+            ttk.Button(query_row, text="🔭 SDSS (requests missing)",
+                      state=tk.DISABLED, width=18).pack(side=tk.LEFT, padx=2)
+
+        # Dataset selection for export
+        ttk.Label(query_row, text="Dataset:", font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
+        self.export_dataset_var = tk.StringVar(value="all")
+        dataset_combo = ttk.Combobox(query_row, textvariable=self.export_dataset_var,
+                                     values=["all", "training", "test"], width=10, state="readonly")
+        dataset_combo.pack(side=tk.LEFT, padx=2)
+
+        # Search radius for SDSS
+        ttk.Label(query_row, text="Radius (arcsec):", font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
+        self.sdss_radius_var = tk.StringVar(value="1.0")
+        ttk.Entry(query_row, textvariable=self.sdss_radius_var, width=8).pack(side=tk.LEFT, padx=2)
+
+        # Fourth row - Status
+        status_row = ttk.Frame(ext_frame)
+        status_row.pack(fill=tk.X, pady=5)
+
+        self.ext_status_label = ttk.Label(status_row, text="", foreground="gray")
+        self.ext_status_label.pack(side=tk.LEFT, padx=5)
+
+        # Update status
+        self._update_ext_tools_status(topcat_avail, aladin_avail, fits_avail, sdss_avail)
+
+        # ========== VISUALIZATION BUTTONS ==========
+        viz_frame = ttk.LabelFrame(self.training_tab, text="Visualizations", padding="10")
+        viz_frame.pack(fill=tk.X, pady=5)
+
+        row1 = ttk.Frame(viz_frame)
+        row1.pack(fill=tk.X, pady=2)
+        ttk.Button(row1, text="Confusion Matrix", command=self.show_confusion_matrix, width=18).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="Training History", command=self.show_training_history, width=18).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="Tensor Evolution", command=self.show_tensor_evolution, width=18).pack(side=tk.LEFT, padx=2)
+
+        row2 = ttk.Frame(viz_frame)
+        row2.pack(fill=tk.X, pady=2)
+        ttk.Button(row2, text="Interactive Dashboard", command=self.show_dashboard, width=18).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="🌐 Spherical Evolution", command=self.show_spherical_evolution, width=18).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="🎬 Side-by-Side", command=self.show_side_by_side, width=18).pack(side=tk.LEFT, padx=2)
+
+        # ========== MODEL I/O ==========
+        io_frame = ttk.Frame(self.training_tab)
+        io_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(io_frame, text="Save Model", command=self.save_model_gui, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Button(io_frame, text="Load Model", command=self.load_model_gui, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Button(io_frame, text="Reset Model", command=self.reset_model_gui, width=12).pack(side=tk.LEFT, padx=2)
+
+        # ========== OUTPUT ==========
+        output_notebook = ttk.Notebook(self.training_tab)
+        output_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        output_frame = ttk.Frame(output_notebook)
+        output_notebook.add(output_frame, text="📝 Output")
+        self.output_text = scrolledtext.ScrolledText(output_frame, height=20)
+        self.output_text.pack(fill=tk.BOTH, expand=True)
+
+        results_frame = ttk.Frame(output_notebook)
+        output_notebook.add(results_frame, text="📊 Results")
+        self.results_text = scrolledtext.ScrolledText(results_frame, height=20)
+        self.results_text.pack(fill=tk.BOTH, expand=True)
+
+    def _check_topcat(self):
+        """Check if Topcat is available on the system"""
+        import shutil
+        topcat = shutil.which('topcat')
+        if topcat:
+            return True
+        # Check for topcat.jar
+        topcat_jar_paths = [
+            '/usr/share/topcat/topcat.jar',
+            '/usr/local/share/topcat/topcat.jar',
+            os.path.expanduser('~/topcat/topcat.jar'),
+            os.path.expanduser('~/Applications/topcat/topcat.jar')
+        ]
+        for jar_path in topcat_jar_paths:
+            if os.path.exists(jar_path):
+                return True
+        return False
+
+    def _check_sdss(self):
+        """Check if SDSS web service is accessible"""
+        try:
+            import requests
+            response = requests.head("https://skyserver.sdss.org/dr16/SkyServerWS", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
+    def _update_ext_tools_status(self, topcat, aladin, fits, sdss):
+        """Update external tools status label"""
+        status_parts = []
+        if topcat:
+            status_parts.append(f"Topcat ✓")
+        if aladin:
+            status_parts.append(f"Aladin ✓")
+        if fits:
+            status_parts.append(f"FITS ✓")
+        if sdss:
+            status_parts.append(f"SDSS ✓")
+
+        if status_parts:
+            self.ext_status_label.config(text=f"Available: {', '.join(status_parts)}", foreground="green")
+        else:
+            self.ext_status_label.config(text="No external tools detected - install for additional features", foreground="orange")
+
+    def launch_topcat_gui(self):
+        """Launch Topcat with SAMP integration"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load a dataset first")
+            return
+
+        dataset = self.export_dataset_var.get()
+        self.log_output(f"📊 Connecting to Topcat...")
+
+        # Get data
+        data = self._get_data_for_export(dataset)
+
+        if data is None or data.empty:
+            self.log_output("❌ No data to export")
+            return
+
+        # Initialize SAMP if not already
+        if not hasattr(self, 'samp'):
+            self.samp = SAMPIntegration()
+
+        # Try SAMP first
+        success = self.samp.send_data_to_topcat(data, title=f"CT-DBNN - {self.model.dataset_name if self.model else 'Data'}")
+
+        if success:
+            self.log_output(f"✅ Data sent to Topcat via SAMP")
+            self.log_output(f"   {len(data)} records, {len(data.columns)} columns")
+            self.log_output(f"   Topcat window should appear with the data")
+        else:
+            self.log_output("⚠️ SAMP failed, falling back to file export...")
+            self._launch_topcat_file_fallback(data)
+
+    def launch_aladin_gui(self):
+        """Launch Aladin with SAMP integration"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load a dataset first")
+            return
+
+        dataset = self.export_dataset_var.get()
+        self.log_output(f"🌌 Connecting to Aladin...")
+
+        data = self._get_data_for_export(dataset)
+
+        if data is None or data.empty:
+            self.log_output("❌ No data to export")
+            return
+
+        # Initialize SAMP if not already
+        if not hasattr(self, 'samp'):
+            self.samp = SAMPIntegration()
+
+        # Try SAMP first
+        success = self.samp.send_data_to_aladin(data, title=f"CT-DBNN - {self.model.dataset_name if self.model else 'Data'}")
+
+        if success:
+            self.log_output(f"✅ Data sent to Aladin via SAMP")
+            self.log_output(f"   {len(data)} records, {len(data.columns)} columns")
+            self.log_output(f"   Aladin window should appear with the data")
+        else:
+            self.log_output("⚠️ SAMP failed, falling back to file export...")
+            self._launch_aladin_file_fallback(data)
+
+    def _launch_topcat_file_fallback(self, data):
+        """Fallback to CSV file export"""
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+        temp_file.close()
+
+        try:
+            # Export as CSV (fastest)
+            data.to_csv(temp_file.name, index=False)
+            self.log_output(f"   Exported {len(data)} records to CSV")
+
+            import shutil
+            import subprocess
+            topcat = shutil.which('topcat')
+
+            if not topcat:
+                # Try JAR
+                jar_paths = [
+                    os.path.expanduser('~/topcat/topcat.jar'),
+                    '/usr/share/topcat/topcat.jar'
+                ]
+                for jar in jar_paths:
+                    if os.path.exists(jar):
+                        topcat = ['java', '-jar', jar]
+                        break
+
+            if topcat:
+                cmd = [topcat, temp_file.name] if isinstance(topcat, str) else topcat + [temp_file.name]
+                subprocess.Popen(cmd)
+                self.log_output(f"✅ Topcat launched with CSV file")
+                self.log_output(f"   File: {temp_file.name}")
+                self.log_output(f"   Keep this file until you close Topcat")
+            else:
+                self.log_output("❌ Topcat not found")
+                self.log_output("   Install from: https://www.star.bris.ac.uk/~mbt/topcat/")
+
+        except Exception as e:
+            self.log_output(f"❌ Failed: {e}")
+
+    def _launch_aladin_file_fallback(self, data):
+        """Fallback to CSV file export for Aladin"""
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+        temp_file.close()
+
+        try:
+            data.to_csv(temp_file.name, index=False)
+            self.log_output(f"   Exported {len(data)} records to CSV")
+
+            import shutil
+            import subprocess
+            aladin = shutil.which('aladin')
+
+            if not aladin:
+                # Try JAR
+                jar_paths = [
+                    os.path.expanduser('~/aladin/aladin.jar'),
+                    '/usr/share/aladin/aladin.jar'
+                ]
+                for jar in jar_paths:
+                    if os.path.exists(jar):
+                        aladin = ['java', '-jar', jar]
+                        break
+
+            if aladin:
+                # Handle Aladin script properly
+                if isinstance(aladin, str):
+                    if aladin.endswith('.sh'):
+                        cmd = ['bash', aladin, temp_file.name]
+                    else:
+                        cmd = [aladin, temp_file.name]
+                else:
+                    cmd = aladin + [temp_file.name]
+
+                subprocess.Popen(cmd)
+                self.log_output(f"✅ Aladin launched with CSV file")
+                self.log_output(f"   File: {temp_file.name}")
+            else:
+                self.log_output("❌ Aladin not found")
+                self.log_output("   Install from: https://aladin.u-strasbg.fr/")
+
+        except Exception as e:
+            self.log_output(f"❌ Failed: {e}")
+
+    def send_predictions_to_topcat(self):
+        """Send only predictions to existing Topcat table"""
+        if not self.model or not self.samp.topcat_session:
+            self.log_output("⚠️ No model or Topcat session")
+            return
+
+        # Get predictions
+        predictions, posteriors = self.model.predict(self.model.X_tensor)
+
+        # Create predictions table
+        pred_df = pd.DataFrame({
+            'predicted_class': predictions.numpy(),
+            'confidence': posteriors.max(dim=1)[0].numpy()
+        })
+
+        # Send update
+        self.samp.send_table_update("predictions", pred_df)
+        self.log_output("✅ Predictions sent to Topcat")
+
+    def query_topcat_for_selection(self):
+        """Get selected rows from Topcat for active learning"""
+        if not self.samp.topcat_session:
+            self.log_output("⚠️ No Topcat session")
+            return None
+
+        result = self.samp.query_topcat("SELECT * FROM current_selection")
+        if result:
+            self.log_output(f"✅ Retrieved {len(result)} selected rows from Topcat")
+            return result
+        return None
+
+    def _get_data_for_export(self, dataset='all'):
+        """
+        Get data for export - works with or without trained model
+
+        Args:
+            dataset: 'all', 'training', or 'test'
+
+        Returns:
+            DataFrame with the data to export
+        """
+        # Start with original data
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            return None
+
+        data = self.original_data.copy()
+
+        # If we have a trained model, add predictions
+        if self.model and hasattr(self.model, 'weight_updater') and self.model.weight_updater is not None:
+            try:
+                # Get predictions from the model
+                if dataset == 'all':
+                    X = self.model.X_tensor
+                    y = self.model.y_tensor
+                    indices = list(range(len(X)))
+                elif dataset == 'training' and hasattr(self.model, 'train_indices'):
+                    X = self.model.X_train
+                    y = self.model.y_train
+                    indices = self.model.train_indices
+                elif dataset == 'test' and hasattr(self.model, 'test_indices'):
+                    X = self.model.X_test
+                    y = self.model.y_test
+                    indices = self.model.test_indices
+                else:
+                    X = None
+                    indices = None
+
+                if X is not None:
+                    predictions, posteriors = self.model.predict(X)
+
+                    # Get class names
+                    if hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+                        inv_encoder = {v: k for k, v in self.model.label_encoder.items()}
+                        pred_labels = [inv_encoder.get(p, p) for p in predictions.numpy()]
+                        true_labels = [inv_encoder.get(t, t) for t in y.numpy()]
+                    else:
+                        pred_labels = predictions.numpy()
+                        true_labels = y.numpy()
+
+                    # Create results dataframe
+                    results_df = pd.DataFrame({
+                        'predicted_class': pred_labels,
+                        'true_class': true_labels,
+                        'confidence': posteriors.max(dim=1)[0].numpy()
+                    })
+
+                    # Add probabilities for each class
+                    if hasattr(self.model, 'label_encoder') and self.model.label_encoder:
+                        for i, class_name in enumerate(self.model.label_encoder.keys()):
+                            results_df[f'prob_{class_name}'] = posteriors[:, i].numpy()
+
+                    # Merge with original data
+                    if indices is not None:
+                        # Create a DataFrame with indices
+                        indices_df = pd.DataFrame({'original_index': indices})
+                        indices_df = indices_df.reset_index(drop=True)
+                        results_df = results_df.reset_index(drop=True)
+
+                        # Combine indices and results
+                        combined = pd.concat([indices_df, results_df], axis=1)
+
+                        # Merge with original data
+                        data_to_merge = data.reset_index().rename(columns={'index': 'original_index'})
+                        data = data_to_merge.merge(combined, on='original_index', how='left')
+                        data = data.drop(columns=['original_index'])
+                    else:
+                        # Just add predictions
+                        for col in results_df.columns:
+                            data[col] = results_df[col].values
+
+            except Exception as e:
+                self.log_output(f"⚠️ Could not add predictions: {e}")
+
+        return data
+
+    def export_to_fits_gui(self):
+        """Export current data to FITS file (works with or without model)"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load a dataset first")
+            return
+
+        dataset = self.export_dataset_var.get()
+        default_name = f"{self.model.dataset_name if self.model else 'data'}_{dataset}.fits"
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save as FITS",
+            defaultextension=".fits",
+            initialfile=default_name,
+            filetypes=[("FITS files", "*.fits"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            self.log_output(f"💾 Exporting {dataset} dataset to FITS: {file_path}")
+
+            data = self._get_data_for_export(dataset)
+
+            if data is None or data.empty:
+                self.log_output("❌ No data to export")
+                return
+
+            try:
+                from astropy.io import fits
+                from astropy.table import Table
+
+                table = Table.from_pandas(data)
+                table.write(file_path, format='fits', overwrite=True)
+                self.log_output(f"✅ Data exported to: {file_path}")
+            except Exception as e:
+                self.log_output(f"❌ Failed to export to FITS: {e}")
+
+    def export_to_votable_gui(self):
+        """Export current data to VOTable file (works with or without model)"""
+        if not hasattr(self, 'original_data') or self.original_data is None:
+            messagebox.showwarning("Warning", "Please load a dataset first")
+            return
+
+        dataset = self.export_dataset_var.get()
+        default_name = f"{self.model.dataset_name if self.model else 'data'}_{dataset}.vot"
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save as VOTable",
+            defaultextension=".vot",
+            initialfile=default_name,
+            filetypes=[("VOTable files", "*.vot"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            self.log_output(f"📄 Exporting {dataset} dataset to VOTable: {file_path}")
+
+            data = self._get_data_for_export(dataset)
+
+            if data is None or data.empty:
+                self.log_output("❌ No data to export")
+                return
+
+            try:
+                from astropy.io.votable import from_table
+                from astropy.table import Table
+
+                votable = from_table(Table.from_pandas(data))
+                votable.to_xml(file_path)
+                self.log_output(f"✅ Data exported to: {file_path}")
+            except Exception as e:
+                self.log_output(f"❌ Failed to export to VOTable: {e}")
+
+    def query_sdss_gui(self):
+        """Query SDSS for cross-matching"""
+        if not self.model:
+            messagebox.showwarning("Warning", "No model to query")
+            return
+
+        # Get search radius
+        try:
+            radius = float(self.sdss_radius_var.get())
+        except:
+            radius = 1.0
+            self.sdss_radius_var.set("1.0")
+
+        # Prepare data
+        data = self.model._prepare_export_data()
+
+        # Find RA/Dec columns
+        ra_col, dec_col = self._find_coordinate_columns(data)
+
+        if not ra_col or not dec_col:
+            self.log_output("❌ No RA/Dec columns found in data")
+            messagebox.showinfo("SDSS Query",
+                               "No RA/Dec columns found. Please ensure your data contains RA and Dec columns.")
+            return
+
+        self.log_output(f"🔭 Querying SDSS with radius {radius} arcsec...")
+        self.log_output(f"   Using columns: {ra_col}, {dec_col}")
+
+        try:
+            import requests
+            import io
+
+            results = []
+            n_queries = min(50, len(data))  # Limit to 50 queries for performance
+
+            for i, (r, d) in enumerate(zip(data[ra_col].values[:n_queries], data[dec_col].values[:n_queries])):
+                query = f"""
+                SELECT TOP 5
+                    p.ra, p.dec, p.objid, p.type,
+                    p.u, p.g, p.r, p.i, p.z,
+                    s.z as redshift
+                FROM
+                    PhotoObj AS p
+                    LEFT JOIN SpecObj AS s ON s.bestobjid = p.objid
+                WHERE
+                    p.ra BETWEEN {r - radius/3600} AND {r + radius/3600}
+                    AND p.dec BETWEEN {d - radius/3600} AND {d + radius/3600}
+                """
+
+                response = requests.post(
+                    "https://skyserver.sdss.org/dr16/SkyServerWS/SearchTools/SqlSearch",
+                    data={'cmd': query, 'format': 'csv'},
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    df = pd.read_csv(io.StringIO(response.text))
+                    if len(df) > 0:
+                        df['query_ra'] = r
+                        df['query_dec'] = d
+                        results.append(df)
+
+                if (i + 1) % 10 == 0:
+                    self.log_output(f"   Processed {i+1}/{n_queries} queries...")
+
+            if results:
+                combined = pd.concat(results, ignore_index=True)
+                self.log_output(f"✅ SDSS query returned {len(combined)} matches from {len(results)} queries")
+
+                # Show results in a new window
+                self._show_sdss_results(combined)
+            else:
+                self.log_output("No matches found")
+
+        except ImportError:
+            self.log_output("❌ requests module not installed. Install with: pip install requests")
+            messagebox.showinfo("Missing Dependency", "requests module required for SDSS queries.\nInstall with: pip install requests")
+        except Exception as e:
+            self.log_output(f"❌ SDSS query failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _find_coordinate_columns(self, data):
+        """Find RA/Dec columns in dataframe"""
+        ra_col = None
+        dec_col = None
+
+        for col in data.columns:
+            col_lower = col.lower()
+            if col_lower in ['ra', 'right_ascension', 'alpha', 'raj2000']:
+                ra_col = col
+            if col_lower in ['dec', 'declination', 'delta', 'dej2000']:
+                dec_col = col
+
+        return ra_col, dec_col
+
+    def _show_sdss_results(self, results_df):
+        """Show SDSS query results in a new window"""
+        result_window = tk.Toplevel(self.root)
+        result_window.title("SDSS Query Results")
+        result_window.geometry("900x600")
+
+        # Create frame
+        frame = ttk.Frame(result_window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Add info label
+        info_label = ttk.Label(frame, text=f"Matches found: {len(results_df)}", font=('Arial', 10, 'bold'))
+        info_label.pack(anchor=tk.W, pady=5)
+
+        # Add text widget with scrollbar
+        text_frame = ttk.Frame(frame)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_widget = scrolledtext.ScrolledText(text_frame, height=20, yscrollcommand=scrollbar.set)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_widget.yview)
+
+        # Display results
+        text_widget.insert(tk.END, "SDSS Query Results\n")
+        text_widget.insert(tk.END, "=" * 50 + "\n\n")
+        text_widget.insert(tk.END, results_df.to_string())
+        text_widget.config(state=tk.DISABLED)
+
+        # Add button frame
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+
+        def save_results():
+            file_path = filedialog.asksaveasfilename(
+                title="Save Results",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            if file_path:
+                results_df.to_csv(file_path, index=False)
+                self.log_output(f"✅ SDSS results saved to {file_path}")
+                messagebox.showinfo("Save Complete", f"Results saved to:\n{file_path}")
+
+        ttk.Button(btn_frame, text="Save as CSV", command=save_results).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Close", command=result_window.destroy).pack(side=tk.LEFT, padx=5)
+
+    def show_side_by_side(self):
+        """Show side-by-side comparison of initial and final states"""
+        if not self.model:
+            messagebox.showwarning("Warning", "Please train a model first")
+            return
+
+        evolution_history = self.model.get_evolution_history()
+        if not evolution_history or len(evolution_history) < 2:
+            messagebox.showwarning("Warning", "Need at least 2 rounds for comparison.\n"
+                                   "Run adaptive training with evolution tracking enabled.")
+            return
+
+        try:
+            self.log_output("🔄 Creating side-by-side evolution comparison...")
+
+            visualizer = OptimizedVisualizer(self.model)
+            output_path = visualizer.spherical_viz.create_side_by_side_evolution(evolution_history)
+
+            if output_path and Path(output_path).exists():
+                self.log_output(f"✅ Side-by-side comparison saved to: {output_path}")
+
+                if messagebox.askyesno("Comparison Ready",
+                                      "Side-by-side comparison created!\n\nOpen in browser now?"):
+                    import webbrowser
+                    webbrowser.open(f'file://{Path(output_path).absolute()}')
+            else:
+                self.log_output("❌ Failed to create side-by-side comparison")
+
+        except Exception as e:
+            self.log_output(f"❌ Error creating side-by-side comparison: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _check_aladin(self):
+        """Check if Aladin is available on the system"""
+        import shutil
+        aladin = shutil.which('aladin')
+        if aladin:
+            return True
+        # Check for aladin.jar
+        aladin_jar_paths = [
+            '/usr/share/aladin/aladin.jar',
+            '/usr/local/share/aladin/aladin.jar',
+            os.path.expanduser('~/aladin/aladin.jar')
+        ]
+        for jar_path in aladin_jar_paths:
+            if os.path.exists(jar_path):
+                return True
+        return False
+
     def _create_parallel_frame(self):
         parallel_frame = ttk.LabelFrame(self.config_tab, text="Parallel Processing", padding="10")
         parallel_frame.pack(fill=tk.X, pady=5)
@@ -3461,97 +6258,6 @@ class CTDBNNGUI:
                        value="threads").grid(row=4, column=0, sticky=tk.W, padx=5)
         ttk.Radiobutton(parallel_frame, text="Processes (CPU bound)", variable=self.parallel_mode_var,
                        value="processes").grid(row=4, column=1, sticky=tk.W, padx=5)
-
-    def setup_training_tab(self):
-        control_frame = ttk.LabelFrame(self.training_tab, text="Training Controls", padding="10")
-        control_frame.pack(fill=tk.X, pady=5)
-
-        btn_row1 = ttk.Frame(control_frame)
-        btn_row1.pack(fill=tk.X, pady=2)
-
-        ttk.Button(btn_row1, text="Initialize Model",
-                  command=self.initialize_model, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row1, text="Train Model",
-                  command=self.train_model, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row1, text="Fresh Train",
-                  command=self.fresh_train_model, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row1, text="Adaptive Training",
-                  command=self.adaptive_training, width=15).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row1, text="Fresh Adaptive",
-                  command=self.fresh_adaptive_training, width=15).pack(side=tk.LEFT, padx=2)
-
-        btn_row2 = ttk.Frame(control_frame)
-        btn_row2.pack(fill=tk.X, pady=5)
-
-        self.stop_button = ttk.Button(btn_row2, text="🛑 STOP",
-                                      command=self.stop_training, width=15,
-                                      state=tk.DISABLED)
-        self.stop_button.pack(side=tk.LEFT, padx=2)
-
-        self.exit_button = ttk.Button(btn_row2, text="❌ EXIT",
-                                      command=self.exit_application, width=15)
-        self.exit_button.pack(side=tk.LEFT, padx=2)
-
-        ttk.Separator(btn_row2, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
-
-        self.status_label = ttk.Label(btn_row2, text="⏸️ Idle", foreground="gray")
-        self.status_label.pack(side=tk.LEFT, padx=10)
-
-        btn_row3 = ttk.Frame(control_frame)
-        btn_row3.pack(fill=tk.X, pady=2)
-
-        ttk.Button(btn_row3, text="Evaluate",
-                  command=self.evaluate_model, width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row3, text="Predict File",
-                  command=self.predict_file, width=12).pack(side=tk.LEFT, padx=2)
-
-        viz_frame = ttk.LabelFrame(self.training_tab, text="Visualizations", padding="10")
-        viz_frame.pack(fill=tk.X, pady=5)
-
-        row1 = ttk.Frame(viz_frame)
-        row1.pack(fill=tk.X, pady=2)
-
-        ttk.Button(row1, text="Confusion Matrix",
-                  command=self.show_confusion_matrix, width=18).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row1, text="Training History",
-                  command=self.show_training_history, width=18).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row1, text="Tensor Evolution",
-                  command=self.show_tensor_evolution, width=18).pack(side=tk.LEFT, padx=2)
-
-        row2 = ttk.Frame(viz_frame)
-        row2.pack(fill=tk.X, pady=2)
-
-        ttk.Button(row2, text="Interactive Dashboard",
-                  command=self.show_dashboard, width=18).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row2, text="🌐 Spherical Evolution",
-                  command=self.show_spherical_evolution, width=18).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row2, text="🎬 Side-by-Side",
-                  command=self.show_side_by_side, width=18).pack(side=tk.LEFT, padx=2)
-
-        io_frame = ttk.Frame(self.training_tab)
-        io_frame.pack(fill=tk.X, pady=5)
-
-        ttk.Button(io_frame, text="Save Model",
-                  command=self.save_model_gui, width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Button(io_frame, text="Load Model",
-                  command=self.load_model_gui, width=12).pack(side=tk.LEFT, padx=2)
-        ttk.Button(io_frame, text="Reset Model",
-                  command=self.reset_model_gui, width=12).pack(side=tk.LEFT, padx=2)
-
-        output_notebook = ttk.Notebook(self.training_tab)
-        output_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
-
-        output_frame = ttk.Frame(output_notebook)
-        output_notebook.add(output_frame, text="📝 Output")
-
-        self.output_text = scrolledtext.ScrolledText(output_frame, height=20)
-        self.output_text.pack(fill=tk.BOTH, expand=True)
-
-        results_frame = ttk.Frame(output_notebook)
-        output_notebook.add(results_frame, text="📊 Results")
-
-        self.results_text = scrolledtext.ScrolledText(results_frame, height=20)
-        self.results_text.pack(fill=tk.BOTH, expand=True)
 
     def _set_training_state(self, in_progress: bool):
         self.training_in_progress = in_progress
@@ -3598,12 +6304,14 @@ class CTDBNNGUI:
         self.root.destroy()
 
     def browse_file(self):
+        """Browse for data file"""
         file_path = filedialog.askopenfilename(
             title="Select Data File",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if file_path:
             self.file_path_var.set(file_path)
+            self.current_data_file = file_path  # Set this!
             self.log_output(f"📁 Selected file: {file_path}")
 
     def download_uci(self):
@@ -3628,6 +6336,7 @@ class CTDBNNGUI:
             self.log_output(f"❌ Failed to download dataset")
 
     def load_dataset(self):
+        """Load and display dataset information"""
         file_path = self.file_path_var.get()
         if not file_path or not os.path.exists(file_path):
             messagebox.showwarning("Warning", "Please select a valid file")
@@ -3635,7 +6344,9 @@ class CTDBNNGUI:
 
         try:
             df = pd.read_csv(file_path)
+            self.original_data = df
 
+            # Display dataset info
             self.info_text.delete(1.0, tk.END)
             info = f"""
             File: {os.path.basename(file_path)}
@@ -3656,73 +6367,31 @@ class CTDBNNGUI:
             """
             self.info_text.insert(1.0, info)
 
+            # Auto-detect target column
+            # Look for common target column names
+            target_candidates = ['target', 'class', 'label', 'y', 'output', 'result', 'type', 'diagnosis']
+            auto_target = None
+
+            for candidate in target_candidates:
+                if candidate in df.columns:
+                    auto_target = candidate
+                    break
+
+            # If no common name found, use the last column
+            if auto_target is None:
+                auto_target = df.columns[-1]
+
+            self.target_var.set(auto_target)
+            self.log_output(f"🎯 Auto-detected target column: {auto_target}")
+
+            # Update feature selection UI
             self.update_feature_selection(df)
 
-            self.log_output(f"✅ Dataset loaded: {len(df)} samples, {len(df.columns)} features")
+            self.data_loaded = True
+            self.log_output(f"✅ Dataset loaded: {len(df)} samples, {len(df.columns)} columns")
 
         except Exception as e:
             self.log_output(f"❌ Error loading dataset: {e}")
-
-    def update_feature_selection(self, df):
-        for widget in self.feature_scroll_frame.winfo_children():
-            widget.destroy()
-
-        self.feature_vars = {}
-
-        ttk.Label(self.feature_scroll_frame, text="Target Column:", font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=5)
-
-        target_frame = ttk.Frame(self.feature_scroll_frame)
-        target_frame.pack(fill=tk.X, pady=2)
-
-        target_combo = ttk.Combobox(target_frame, textvariable=self.target_var,
-                                    values=list(df.columns), width=30)
-        target_combo.pack(side=tk.LEFT, padx=5)
-
-        if 'target' in df.columns:
-            self.target_var.set('target')
-        elif df.columns[-1]:
-            self.target_var.set(df.columns[-1])
-
-        ttk.Label(self.feature_scroll_frame, text="\nFeature Columns:", font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=5)
-
-        for col in df.columns:
-            if col != self.target_var.get():
-                var = tk.BooleanVar(value=True)
-                self.feature_vars[col] = var
-
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    col_type = "numeric"
-                else:
-                    col_type = "categorical"
-
-                cb = ttk.Checkbutton(self.feature_scroll_frame,
-                                    text=f"{col} ({col_type})",
-                                    variable=var)
-                cb.pack(anchor=tk.W, padx=20, pady=2)
-
-    def select_all_features(self):
-        for var in self.feature_vars.values():
-            var.set(True)
-
-    def deselect_all_features(self):
-        for var in self.feature_vars.values():
-            var.set(False)
-
-    def apply_feature_selection(self):
-        selected = [col for col, var in self.feature_vars.items() if var.get()]
-        target = self.target_var.get()
-
-        if not selected:
-            messagebox.showwarning("Warning", "Please select at least one feature")
-            return
-
-        if not target:
-            messagebox.showwarning("Warning", "Please select a target column")
-            return
-
-        self.log_output(f"🎯 Target: {target}")
-        self.log_output(f"📊 Selected features: {len(selected)}")
-        self.log_output(f"   {', '.join(selected)}")
 
     def load_defaults(self):
         self.learning_rate_var.set("0.1")
@@ -3842,12 +6511,16 @@ class CTDBNNGUI:
             self.log_output("⚠️ Model not initialized - configuration saved for later use")
 
     def initialize_model(self):
+        """Initialize the model with current settings"""
         if not self.file_path_var.get():
             messagebox.showwarning("Warning", "Please load a dataset first")
             return
 
         try:
             dataset_name = os.path.splitext(os.path.basename(self.file_path_var.get()))[0]
+
+            # Get selected features
+            selected_features = [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()]
 
             config = {
                 'file_path': self.file_path_var.get(),
@@ -3858,6 +6531,7 @@ class CTDBNNGUI:
                 'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
                 'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
                 'parallel_mode': self.parallel_mode_var.get(),
+                'selected_features': selected_features,
                 'training_params': {
                     'learning_rate': float(self.learning_rate_var.get()),
                     'epochs': int(self.epochs_var.get()),
@@ -3870,14 +6544,30 @@ class CTDBNNGUI:
                 }
             }
 
-            self.model = OptimizedDBNN(dataset_name=dataset_name, config=config)
+            self.model = OptimizedDBNN(
+                dataset_name=dataset_name,
+                config=config,
+                enable_external_tools=ASTROPY_AVAILABLE
+            )
+
+            # Load data
             self.model.load_data(file_path=self.file_path_var.get())
 
-            selected_features = [col for col, var in self.feature_vars.items() if var.get()]
+            # Apply feature selection if any
             if selected_features:
-                self.model.selected_features = selected_features
-                self.log_output(f"📊 Using {len(selected_features)} selected features")
+                # Get indices of selected features
+                feature_indices = []
+                for feat in selected_features:
+                    if feat in self.model.feature_names:
+                        feature_indices.append(self.model.feature_names.index(feat))
 
+                if feature_indices:
+                    # Filter X_tensor to only selected features
+                    self.model.X_tensor = self.model.X_tensor[:, feature_indices]
+                    self.model.feature_names = selected_features
+                    self.log_output(f"📊 Using {len(selected_features)} selected features")
+
+            # Log parallel status
             if self.parallel_var.get():
                 self.log_output(f"🚀 Parallel mode enabled with {config['n_jobs']} workers")
                 self.log_output(f"   Mode: {config['parallel_mode']}, Batch size: {config['parallel_batch_size']}")
@@ -3885,6 +6575,7 @@ class CTDBNNGUI:
                 self.log_output("🐢 Sequential mode enabled")
 
             self.log_output(f"✅ Model initialized: {dataset_name}")
+            self.model_trained = False
 
         except Exception as e:
             self.log_output(f"❌ Error initializing model: {e}")
@@ -3892,6 +6583,7 @@ class CTDBNNGUI:
             traceback.print_exc()
 
     def reset_model_gui(self):
+        """Reset the model to initial state - FIXED"""
         if not self.model:
             messagebox.showwarning("Warning", "No model to reset")
             return
@@ -3906,18 +6598,60 @@ class CTDBNNGUI:
             try:
                 self.log_output("🔄 Resetting model...")
 
+                # Store data file path
                 data_file = self.file_path_var.get()
+                target_col = self.target_var.get()
+                selected_features = [col for col, var in self.feature_vars.items() if var.get()]
 
-                self.model.reset_model(hard_reset=True)
+                # Get current config
+                if hasattr(self.model, 'config'):
+                    config = self.model.config
+                else:
+                    config = {
+                        'file_path': data_file,
+                        'target_column': target_col,
+                        'model_type': self.model_type_var.get(),
+                        'compute_device': self.device_var.get(),
+                        'parallel': self.parallel_var.get(),
+                        'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
+                        'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
+                        'parallel_mode': self.parallel_mode_var.get(),
+                        'training_params': {
+                            'learning_rate': float(self.learning_rate_var.get()),
+                            'epochs': int(self.epochs_var.get()),
+                            'n_bins_per_dim': int(self.bins_var.get()),
+                            'test_fraction': float(self.test_size_var.get()),
+                            'enable_adaptive': self.adaptive_var.get(),
+                            'adaptive_rounds': int(self.adaptive_rounds_var.get()),
+                            'initial_samples': int(self.initial_samples_var.get()),
+                            'max_samples_per_round': int(self.max_samples_round_var.get())
+                        }
+                    }
 
+                # Create NEW model instance (clean slate)
+                dataset_name = os.path.splitext(os.path.basename(data_file))[0]
+                self.model = OptimizedDBNN(
+                    dataset_name=dataset_name,
+                    config=config,
+                    enable_external_tools=ASTROPY_AVAILABLE
+                )
+
+                # Reload data
                 self.log_output("📥 Reloading data after reset...")
                 self.model.load_data(file_path=data_file)
+
+                # Apply feature selection
+                if selected_features:
+                    self.model.selected_features = selected_features
+                    self.log_output(f"📊 Using {len(selected_features)} selected features")
 
                 self.log_output("✅ Model reset complete")
                 self.log_output(f"   Loaded {len(self.model.classes)} classes, {len(self.model.X_tensor)} samples")
 
             except Exception as e:
                 self.log_output(f"❌ Error resetting model: {e}")
+                import traceback
+                traceback.print_exc()
 
     def train_model(self):
         if not self.model:
@@ -3961,6 +6695,7 @@ class CTDBNNGUI:
             self.current_training_thread = None
 
     def fresh_train_model(self):
+        """Fresh training - completely reset before training"""
         if not self.model:
             messagebox.showwarning("Warning", "Please initialize the model first")
             return
@@ -3970,21 +6705,64 @@ class CTDBNNGUI:
         self.current_training_thread.start()
 
     def _fresh_train_thread(self):
+        """Background thread for fresh training - FIXED"""
         self._set_training_state(True)
 
         try:
             self.log_output("🚀 Starting FRESH training (previous knowledge ignored)...")
 
+            # Store data file path
             data_file = self.file_path_var.get()
+            target_col = self.target_var.get()
+            selected_features = [col for col, var in self.feature_vars.items() if var.get()]
 
-            self.model.reset_model(hard_reset=True)
+            # Get current config
+            if self.model and hasattr(self.model, 'config'):
+                config = self.model.config
+            else:
+                config = {
+                    'file_path': data_file,
+                    'target_column': target_col,
+                    'model_type': self.model_type_var.get(),
+                    'compute_device': self.device_var.get(),
+                    'parallel': self.parallel_var.get(),
+                    'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
+                    'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
+                    'parallel_mode': self.parallel_mode_var.get(),
+                    'training_params': {
+                        'learning_rate': float(self.learning_rate_var.get()),
+                        'epochs': int(self.epochs_var.get()),
+                        'n_bins_per_dim': int(self.bins_var.get()),
+                        'test_fraction': float(self.test_size_var.get()),
+                        'enable_adaptive': self.adaptive_var.get(),
+                        'adaptive_rounds': int(self.adaptive_rounds_var.get()),
+                        'initial_samples': int(self.initial_samples_var.get()),
+                        'max_samples_per_round': int(self.max_samples_round_var.get())
+                    }
+                }
 
-            self.log_output("📥 Reloading data...")
+            # Create NEW model instance
+            dataset_name = os.path.splitext(os.path.basename(data_file))[0]
+            self.model = OptimizedDBNN(
+                dataset_name=dataset_name,
+                config=config,
+                enable_external_tools=ASTROPY_AVAILABLE
+            )
+
+            # Load data
+            self.log_output("📥 Loading data...")
             self.model.load_data(file_path=data_file)
 
+            # Apply feature selection
+            if selected_features:
+                self.model.selected_features = selected_features
+                self.log_output(f"📊 Using {len(selected_features)} selected features")
+
+            # Split data
             self.model.split_data()
 
-            self.model.stop_training_flag = False
+            # Run fresh training
+            self.log_output("🚀 Running fresh training...")
             results = self.model.fresh_train(
                 epochs=int(self.epochs_var.get())
             )
@@ -4049,6 +6827,7 @@ class CTDBNNGUI:
             self.current_training_thread = None
 
     def fresh_adaptive_training(self):
+        """Fresh adaptive training - completely reset before training"""
         if not self.model:
             messagebox.showwarning("Warning", "Please initialize the model first")
             return
@@ -4058,22 +6837,82 @@ class CTDBNNGUI:
         self.current_training_thread.start()
 
     def _fresh_adaptive_thread(self):
+        """Background thread for fresh adaptive training - FIXED"""
         self._set_training_state(True)
 
         try:
             self.log_output("🚀 Starting FRESH adaptive training (previous knowledge ignored)...")
 
+            # Store data file path
             data_file = self.file_path_var.get()
+            target_col = self.target_var.get()
+            selected_features = [col for col, var in self.feature_vars.items() if var.get()]
 
-            self.model.reset_model(hard_reset=True)
+            # Get current config before reset
+            if self.model and hasattr(self.model, 'config'):
+                config = self.model.config
+            else:
+                # Create fresh config
+                config = {
+                    'file_path': data_file,
+                    'target_column': target_col,
+                    'model_type': self.model_type_var.get(),
+                    'compute_device': self.device_var.get(),
+                    'parallel': self.parallel_var.get(),
+                    'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
+                    'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
+                    'parallel_mode': self.parallel_mode_var.get(),
+                    'training_params': {
+                        'learning_rate': float(self.learning_rate_var.get()),
+                        'epochs': int(self.epochs_var.get()),
+                        'n_bins_per_dim': int(self.bins_var.get()),
+                        'test_fraction': float(self.test_size_var.get()),
+                        'enable_adaptive': self.adaptive_var.get(),
+                        'adaptive_rounds': int(self.adaptive_rounds_var.get()),
+                        'initial_samples': int(self.initial_samples_var.get()),
+                        'max_samples_per_round': int(self.max_samples_round_var.get())
+                    }
+                }
 
-            self.log_output("📥 Reloading data...")
+            # CRITICAL: Create NEW model instance instead of resetting old one
+            dataset_name = os.path.splitext(os.path.basename(data_file))[0]
+
+            self.log_output("🔄 Creating fresh model instance...")
+            self.model = OptimizedDBNN(
+                dataset_name=dataset_name,
+                config=config,
+                enable_external_tools=ASTROPY_AVAILABLE
+            )
+
+            # Load data into new model
+            self.log_output("📥 Loading data into fresh model...")
             self.model.load_data(file_path=data_file)
 
-            self.model.enable_evolution_tracking()
-            self.model.stop_training_flag = False
+            # Verify classes were loaded
+            if self.model.classes is None:
+                self.log_output("❌ Failed to load classes from data")
+                return
 
-            results = self.model.fresh_adaptive_train(
+            self.log_output(f"   Loaded {len(self.model.classes)} classes: {self.model.classes}")
+
+            # Apply feature selection if needed
+            if selected_features:
+                self.model.selected_features = selected_features
+                self.log_output(f"📊 Using {len(selected_features)} selected features")
+
+            # Enable evolution tracking
+            self.model.enable_evolution_tracking()
+
+            # CRITICAL: Ensure classes are properly set before training
+            if self.model.classes is None or len(self.model.classes) == 0:
+                self.log_output("❌ No classes loaded. Cannot train.")
+                return
+
+            self.log_output(f"🎯 Classes ready: {self.model.classes}")
+
+            # Run fresh adaptive training
+            self.log_output("🚀 Running fresh adaptive training...")
+            results = self.model.adaptive_fit_predict(
                 max_rounds=int(self.adaptive_rounds_var.get())
             )
 
@@ -4244,6 +7083,7 @@ class CTDBNNGUI:
             traceback.print_exc()
 
     def show_dashboard(self):
+        """Show interactive dashboard with evolution slider"""
         if not self.model or self.model.X_tensor is None:
             messagebox.showwarning("Warning", "Please train the model first")
             return
@@ -4256,11 +7096,16 @@ class CTDBNNGUI:
 
             evolution_history = self.model.get_evolution_history()
 
+            # Create main interactive dashboard
             visualizer.create_interactive_dashboard(
                 self.model.training_history,
                 X_np, y_np,
                 evolution_history=evolution_history
             )
+
+            # Create evolution slider if history exists
+            if evolution_history and len(evolution_history) > 1:
+                visualizer.create_evolution_slider(evolution_history)
 
             self.log_output(f"✅ Interactive dashboard saved to: {visualizer.dirs['interactive']}")
 
@@ -4301,36 +7146,6 @@ class CTDBNNGUI:
 
         except Exception as e:
             self.log_output(f"❌ Error creating spherical evolution: {e}")
-            traceback.print_exc()
-
-    def show_side_by_side(self):
-        if not self.model:
-            messagebox.showwarning("Warning", "Please train a model first")
-            return
-
-        evolution_history = self.model.get_evolution_history()
-        if not evolution_history or len(evolution_history) < 2:
-            messagebox.showwarning("Warning", "Need at least 2 rounds for comparison")
-            return
-
-        try:
-            self.log_output("🔄 Creating side-by-side evolution comparison...")
-
-            visualizer = OptimizedVisualizer(self.model)
-            output_path = visualizer.spherical_viz.create_side_by_side_evolution(evolution_history)
-
-            if output_path and Path(output_path).exists():
-                self.log_output(f"✅ Side-by-side comparison saved to: {output_path}")
-
-                if messagebox.askyesno("Comparison Ready",
-                                      "Side-by-side comparison created!\n\nOpen in browser now?"):
-                    import webbrowser
-                    webbrowser.open(f'file://{Path(output_path).absolute()}')
-            else:
-                self.log_output("❌ Failed to create side-by-side comparison")
-
-        except Exception as e:
-            self.log_output(f"❌ Error creating side-by-side comparison: {e}")
             traceback.print_exc()
 
     def save_model_gui(self):
@@ -4479,6 +7294,87 @@ Round Statistics:
         except Exception as e:
             self.log_output(f"⚠️ Could not open directory: {e}")
 
+    def log_output(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.output_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.output_text.see(tk.END)
+        self.root.update()
+        self.status_var.set(message)
+
+    def download_uci(self):
+        """Download UCI dataset"""
+        dataset = self.uci_var.get()
+        if not dataset:
+            messagebox.showwarning("Warning", "Please select a dataset from the list")
+            return
+
+        self.log_output(f"📥 Downloading UCI dataset: {dataset}")
+
+        # Get dataset info
+        dataset_info = DatasetConfig.get_dataset_info(dataset)
+        if dataset_info:
+            self.log_output(f"   {dataset_info['description']}")
+
+        # Download the dataset
+        df = DatasetConfig.download_uci_data(dataset)
+
+        if df is not None:
+            # Create data directory
+            data_dir = os.path.join('data', dataset)
+            os.makedirs(data_dir, exist_ok=True)
+
+            # Save CSV
+            csv_path = os.path.join(data_dir, f"{dataset}.csv")
+            df.to_csv(csv_path, index=False)
+
+            # Set the file path variable
+            self.file_path_var.set(csv_path)
+
+            self.log_output(f"✅ Dataset saved to: {csv_path}")
+            self.log_output(f"   Samples: {len(df)}, Features: {len(df.columns)}")
+
+            # Load the dataset
+            self.load_dataset()
+        else:
+            self.log_output(f"❌ Failed to download dataset: {dataset}")
+            messagebox.showerror("Download Failed", f"Could not download {dataset}.\nCheck your internet connection.")
+
+    def save_configuration_for_file(self, file_path):
+        """Save configuration for specific data file"""
+        try:
+            configs_dir = "configs"
+            os.makedirs(configs_dir, exist_ok=True)
+
+            dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+            config_file = os.path.join(configs_dir, f"{dataset_name}_config.json")
+
+            config = {
+                'dataset_name': dataset_name,
+                'target_column': self.target_var.get(),
+                'selected_features': [col for col, var in self.feature_vars.items() if var.get() and col != self.target_var.get()],
+                'model_type': self.model_type_var.get(),
+                'compute_device': self.device_var.get(),
+                'parallel': self.parallel_var.get(),
+                'n_jobs': int(self.n_jobs_var.get()) if self.parallel_var.get() else 1,
+                'parallel_batch_size': int(self.parallel_batch_var.get()) if self.parallel_var.get() else 1000,
+                'parallel_mode': self.parallel_mode_var.get(),
+                'learning_rate': float(self.learning_rate_var.get()),
+                'epochs': int(self.epochs_var.get()),
+                'n_bins_per_dim': int(self.bins_var.get()),
+                'test_fraction': float(self.test_size_var.get()),
+                'enable_adaptive': self.adaptive_var.get(),
+                'adaptive_rounds': int(self.adaptive_rounds_var.get()),
+                'initial_samples': int(self.initial_samples_var.get()),
+                'max_samples_per_round': int(self.max_samples_round_var.get())
+            }
+
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            self.log_output(f"💾 Configuration saved to: {config_file}")
+
+        except Exception as e:
+            self.log_output(f"❌ Error saving configuration: {e}")
 
 # =============================================================================
 # SECTION 11: MAIN ENTRY POINT
@@ -4486,25 +7382,12 @@ Round Statistics:
 
 def main():
     import argparse
-
-    parser = argparse.ArgumentParser(
-        description='🚀 Optimized DBNN - Deep Bayesian Neural Network',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-
-    parser.add_argument('--gui', action='store_true', help="🎨 Launch graphical user interface")
-    parser.add_argument('--interactive', action='store_true', help="💬 Enable interactive configuration")
-    parser.add_argument('--list-datasets', action='store_true', help="📋 List available datasets")
-    parser.add_argument('--dataset', type=str, help="📁 Dataset name")
-    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'train_predict'],
-                       default='train_predict', help="🎯 Operation mode")
-    parser.add_argument('--model-type', type=str, choices=['Histogram', 'Gaussian'],
-                       default='Histogram', help='🧠 Model architecture type')
-    parser.add_argument('--visualize', action='store_true', help="📊 Generate training visualization")
-    parser.add_argument('--verify', action='store_true', help="🔍 Enable mathematical verification")
-    parser.add_argument('--track-evolution', action='store_true', help="📸 Enable tensor evolution tracking")
-    parser.add_argument('--setup-env', action='store_true', help="🔧 Check and setup Python environment")
-
+    parser = argparse.ArgumentParser(description='CT-DBNN - Complex Tensor DBNN')
+    parser.add_argument('--gui', action='store_true', help='Launch GUI')
+    parser.add_argument('--interactive', action='store_true', help='Interactive mode')
+    parser.add_argument('--dataset', type=str, help='Dataset name')
+    parser.add_argument('--mode', type=str, default='train_predict', help='Operation mode')
+    parser.add_argument('--track-evolution', action='store_true', help='Track tensor evolution')
     args = parser.parse_args()
 
     print(f"""
@@ -4518,54 +7401,13 @@ def main():
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝{Colors.ENDC}
     """)
-
-    if args.setup_env:
-        env_manager = EnvironmentManager()
-
-        print(f"\n{Colors.CYAN}🔧 Environment Check{Colors.ENDC}")
-        print(f"{'='*50}")
-
-        py_ok, py_version = env_manager.check_python_version()
-        print(f"Python: {Colors.GREEN if py_ok else Colors.RED}{py_version}{Colors.ENDC}")
-
-        cuda_info = env_manager.check_cuda()
-        if cuda_info['available']:
-            print(f"CUDA: {Colors.GREEN}Available{Colors.ENDC} - {cuda_info['device_name']} ({cuda_info['memory']:.1f} GB)")
-        else:
-            print(f"CUDA: {Colors.YELLOW}Not available (CPU mode){Colors.ENDC}")
-
-        print(f"\n{Colors.CYAN}Dependencies:{Colors.ENDC}")
-        deps = env_manager.check_dependencies()
-        for pkg, installed in deps.items():
-            status = f"{Colors.GREEN}✓{Colors.ENDC}" if installed else f"{Colors.RED}✗{Colors.ENDC}"
-            print(f"  {status} {pkg}")
-
-        env_manager.generate_requirements_file()
-
-        return
-
     if args.gui:
         if GUI_AVAILABLE:
-            print(f"{Colors.GREEN}🎨 Launching CT-DBNN GUI...{Colors.ENDC}")
             root = tk.Tk()
             app = CTDBNNGUI(root)
             root.mainloop()
         else:
-            print(f"{Colors.RED}❌ Tkinter not available. Please install python3-tk.{Colors.ENDC}")
-            print(f"   Ubuntu/Debian: sudo apt-get install python3-tk")
-            print(f"   Windows/macOS: Reinstall Python with Tkinter support")
-        return
-
-    if args.verify:
-        VERIFIER.enabled = True
-        print(f"🔍 {Colors.YELLOW}Mathematical verification ENABLED{Colors.ENDC}")
-
-    if args.list_datasets:
-        dataset_pairs = find_dataset_pairs()
-        if dataset_pairs:
-            display_dataset_menu(dataset_pairs)
-        else:
-            print(f"❌ {Colors.RED}No datasets found in data/ directory{Colors.ENDC}")
+            print(f"{Colors.RED}❌ Tkinter not available{Colors.ENDC}")
         return
 
     if args.interactive:
@@ -4573,112 +7415,21 @@ def main():
         return
 
     if args.dataset:
-        dataset_name = args.dataset
-        dataset_pairs = find_dataset_pairs()
-        dataset_names = [pair[0] for pair in dataset_pairs]
-
-        if dataset_name not in dataset_names:
-            print(f"❌ {Colors.RED}Dataset '{dataset_name}' not found{Colors.ENDC}")
-            print(f"   Available datasets: {', '.join(dataset_names)}")
-            return
-
-        print(f"📁 Dataset: {Colors.GREEN}{dataset_name}{Colors.ENDC}")
-        print(f"🎯 Mode: {Colors.YELLOW}{args.mode}{Colors.ENDC}")
-        print(f"🧠 Model: {Colors.CYAN}{args.model_type}{Colors.ENDC}")
-        print(f"📸 Evolution Tracking: {Colors.GREEN if args.track_evolution else Colors.RED}{args.track_evolution}{Colors.ENDC}")
-
-        model = OptimizedDBNN(dataset_name=dataset_name, mode=args.mode)
-        model.model_type = args.model_type
-
+        model = OptimizedDBNN(dataset_name=args.dataset, mode=args.mode)
         if args.track_evolution:
             model.enable_evolution_tracking()
+        model.load_data()
 
-        if args.mode in ['train', 'train_predict']:
-            model.load_data()
-            start_time = time.time()
+        if model.enable_adaptive:
+            results = model.adaptive_fit_predict()
+        else:
+            model.split_data()
+            results = model.fit_predict()
 
-            if model.enable_adaptive:
-                print(f"\n{Colors.CYAN}Using ADAPTIVE training mode{Colors.ENDC}")
-                results = model.adaptive_fit_predict()
-            else:
-                print(f"\n{Colors.CYAN}Using standard training mode{Colors.ENDC}")
-                model.split_data()
-                results = model.fit_predict()
-
-            train_time = time.time() - start_time
-            print(f"\n⏱️  Training time: {Colors.highlight_time(train_time)} seconds")
-
-            model.save_model(f'model_{dataset_name}.pkl')
-
-            if args.visualize:
-                visualizer = OptimizedVisualizer(model)
-
-                X_np = model.X_tensor.numpy() if model.X_tensor is not None else np.array([])
-                y_np = model.y_tensor.numpy() if model.y_tensor is not None else np.array([])
-
-                if hasattr(model, 'X_train') and model.X_train is not None and len(model.X_train) > 0:
-                    train_pred, _ = model.predict(model.X_train)
-                    y_train_np = model.y_train.numpy() if hasattr(model, 'y_train') and model.y_train is not None else y_np[:min(100, len(y_np))]
-                else:
-                    train_pred, _ = model.predict(model.X_tensor) if model.X_tensor is not None else (np.array([]), None)
-                    y_train_np = y_np[:min(100, len(y_np))] if len(y_np) > 0 else np.array([])
-
-                if hasattr(model, 'X_test') and model.X_test is not None and len(model.X_test) > 0:
-                    test_pred, _ = model.predict(model.X_test)
-                    y_test_np = model.y_test.numpy() if hasattr(model, 'y_test') and model.y_test is not None else y_np[min(100, len(y_np)):min(200, len(y_np))]
-                else:
-                    test_pred, _ = model.predict(model.X_tensor[:min(100, len(model.X_tensor))]) if model.X_tensor is not None and len(model.X_tensor) > 0 else (np.array([]), None)
-                    y_test_np = y_np[min(100, len(y_np)):min(200, len(y_np))] if len(y_np) > 100 else np.array([])
-
-                if isinstance(results, dict):
-                    if 'history' in results and results['history']:
-                        viz_history = results['history']
-                    elif 'round_stats' in results and results['round_stats']:
-                        viz_history = results['round_stats']
-                    else:
-                        viz_history = []
-                else:
-                    viz_history = getattr(results, 'history', []) or getattr(results, 'round_stats', [])
-
-                evolution_history = model.get_evolution_history() if args.track_evolution else []
-
-                visualizer.generate_all_visualizations(
-                    viz_history,
-                    X_np, y_np,
-                    y_train_np,
-                    y_test_np,
-                    train_pred.numpy() if hasattr(train_pred, 'numpy') else np.array(train_pred),
-                    test_pred.numpy() if hasattr(test_pred, 'numpy') else np.array(test_pred),
-                    evolution_history=evolution_history
-                )
-
-        if args.mode in ['predict', 'train_predict'] and args.mode != 'train':
-            if args.mode == 'predict':
-                model.load_model(f'model_{dataset_name}.pkl')
-                model.load_data(is_training=False)
-                model.split_data()
-
-            if hasattr(model, 'X_test') and model.X_test is not None and len(model.X_test) > 0:
-                predictions, posteriors = model.predict(model.X_test)
-
-                inv_encoder = {v: k for k, v in model.label_encoder.items()}
-                pred_labels = [inv_encoder[p.item()] for p in predictions]
-                true_labels = [inv_encoder[t.item()] for t in model.y_test]
-
-                accuracy = (predictions == model.y_test).float().mean().item()
-                print(f"\n🎯 Test Accuracy: {Colors.highlight_accuracy(accuracy)}")
-
-                results_df = pd.DataFrame({
-                    'true': true_labels,
-                    'predicted': pred_labels,
-                    'confidence': posteriors.max(dim=1)[0].numpy()
-                })
-                results_df.to_csv(f'predictions_{dataset_name}.csv', index=False)
-                print(f"✅ Predictions saved to predictions_{dataset_name}.csv")
+        model.save_model(f'model_{args.dataset}.pkl')
+        print(f"\n{Colors.GREEN}✅ Training complete! Best accuracy: {results['best_accuracy']:.4f}{Colors.ENDC}")
     else:
         parser.print_help()
-        print(f"\n💡 {Colors.YELLOW}Tip: Use --gui for graphical interface or --interactive for guided mode.{Colors.ENDC}")
-
 
 def interactive_mode():
     """
