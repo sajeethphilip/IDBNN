@@ -5197,36 +5197,46 @@ class OptimizedVisualizer:
         print(f"\n🎨 Visualizations for: {self.dataset_name}")
         print(f"{'='*60}")
 
+        # Convert to numpy if they're tensors (they should be numpy already)
+        X_np = X if isinstance(X, np.ndarray) else X.numpy() if hasattr(X, 'numpy') else X
+        y_np = y if isinstance(y, np.ndarray) else y.numpy() if hasattr(y, 'numpy') else y
+        y_train_np = y_train if isinstance(y_train, np.ndarray) else y_train.numpy() if hasattr(y_train, 'numpy') else y_train
+        y_test_np = y_test if isinstance(y_test, np.ndarray) else y_test.numpy() if hasattr(y_test, 'numpy') else y_test
+        train_pred_np = train_pred if isinstance(train_pred, np.ndarray) else train_pred.numpy() if hasattr(train_pred, 'numpy') else train_pred
+        test_pred_np = test_pred if isinstance(test_pred, np.ndarray) else test_pred.numpy() if hasattr(test_pred, 'numpy') else test_pred
+
         # Standard visualizations
         self.plot_training_history(history)
-        self.plot_confusion_matrix(y_train, train_pred, 'Training')
-        self.plot_confusion_matrix(y_test, test_pred, 'Test')
+        self.plot_confusion_matrix(y_train_np, train_pred_np, 'Training')
+        self.plot_confusion_matrix(y_test_np, test_pred_np, 'Test')
 
         # Tensor evolution
         if evolution_history and len(evolution_history) > 0:
             self.plot_tensor_evolution(evolution_history)
-       # Add polar evolution
-        if evolution_history and len(evolution_history) > 1 and X is not None and y is not None:
+
+        # Add polar evolution
+        if evolution_history and len(evolution_history) > 1 and X_np is not None and y_np is not None:
             try:
-                self.create_point_based_spherical_evolution(evolution_history, X, y, class_names)
+                self.create_point_based_spherical_evolution(evolution_history, X_np, y_np, class_names)
             except Exception as e:
                 print(f"   ⚠️ Point-based spherical evolution: {e}")
+
         # Interactive dashboard
         try:
-            self.create_interactive_dashboard(history, X, y, evolution_history)
+            self.create_interactive_dashboard(history, X_np, y_np, evolution_history)
         except Exception as e:
             print(f"   ⚠️ Dashboard: {e}")
 
         # Advanced visualizations
         try:
-            if hasattr(self, 'advanced_visualizer') and X is not None and len(X) > 0:
-                self.advanced_visualizer.create_advanced_3d_dashboard(X, y, history, self.model.feature_names)
+            if hasattr(self, 'advanced_visualizer') and X_np is not None and len(X_np) > 0:
+                self.advanced_visualizer.create_advanced_3d_dashboard(X_np, y_np, history, self.model.feature_names)
         except Exception as e:
             print(f"   ⚠️ Advanced 3D: {e}")
 
         try:
             if hasattr(self, 'comprehensive_visualizer') and history:
-                self.comprehensive_visualizer.plot_3d_networks(X, y, history, self.model.feature_names)
+                self.comprehensive_visualizer.plot_3d_networks(X_np, y_np, history, self.model.feature_names)
         except Exception as e:
             print(f"   ⚠️ 3D Networks: {e}")
 
@@ -8465,6 +8475,10 @@ class OptimizedDBNN(ExternalToolsMixin):
     def _compute_batch_posterior(self, features: torch.Tensor,
                                  return_bin_indices: bool = True) -> Tuple[torch.Tensor, Optional[Dict]]:
         with torch.no_grad():
+            # Ensure features are on the correct device
+            if features.device != self.device:
+                features = features.to(self.device)
+
             posteriors, bin_indices = self.batch_processor.process_batch(
                 features, self.feature_pairs, self.bin_edges, self.bin_probs,
                 self.weight_updater.weights, self.n_bins_per_dim, len(self.classes)
@@ -8481,14 +8495,14 @@ class OptimizedDBNN(ExternalToolsMixin):
         for i in range(0, n_samples, self.batch_size):
             batch_X = X[i:min(i + self.batch_size, n_samples)]
 
-            # Move batch to the correct device
+            # Move batch to the correct device for computation
             if batch_X.device != self.device:
                 batch_X = batch_X.to(self.device)
 
             posteriors, _ = self._compute_batch_posterior(batch_X, return_bin_indices=False)
             predictions = torch.argmax(posteriors, dim=1)
 
-            # Return to CPU immediately
+            # Return to CPU immediately after computation
             all_predictions.append(predictions.cpu())
             all_posteriors.append(posteriors.cpu())
 
@@ -14690,7 +14704,6 @@ def interactive_mode():
         print(f"   Final train accuracy: {Colors.highlight_accuracy(results['train_accuracy'])}")
         print(f"   Final test accuracy: {Colors.highlight_accuracy(results['test_accuracy'])}")
 
-    # In interactive_mode function, after training completes, fix the confusion matrix display:
 
     # =========================================================================
     # SECTION 8: CONFUSION MATRIX DISPLAY
@@ -14729,6 +14742,7 @@ def interactive_mode():
             "Test Data"
         )
 
+
     # =========================================================================
     # SECTION 9: VISUALIZATION (if enabled)
     # =========================================================================
@@ -14738,9 +14752,9 @@ def interactive_mode():
 
         visualizer = OptimizedVisualizer(model)
 
-        # Prepare data for visualization
-        X_np = model.X_tensor.numpy()
-        y_np = model.y_tensor.numpy()
+        # Prepare data for visualization - move to CPU and convert to numpy
+        X_np = model.X_tensor.cpu().numpy()  # Move to CPU first
+        y_np = model.y_tensor.cpu().numpy()  # Move to CPU first
 
         if use_adaptive:
             train_mask = np.zeros(len(X_np), dtype=bool)
@@ -14750,13 +14764,23 @@ def interactive_mode():
             y_train_np = y_np[train_mask]
             y_test_np = y_np[test_mask]
 
+            # Get predictions - they are already on CPU from predict() method
             train_pred, _ = model.predict(model.X_tensor[train_mask])
             test_pred, _ = model.predict(model.X_tensor[test_mask])
+
+            # Convert to numpy (predictions are already on CPU)
+            train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
+            test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
         else:
-            y_train_np = model.y_train.numpy()
-            y_test_np = model.y_test.numpy()
+            # Move to CPU and convert to numpy
+            y_train_np = model.y_train.cpu().numpy()
+            y_test_np = model.y_test.cpu().numpy()
+
             train_pred, _ = model.predict(model.X_train)
             test_pred, _ = model.predict(model.X_test)
+
+            train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
+            test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
 
         # Get history
         if use_adaptive:
@@ -14771,8 +14795,8 @@ def interactive_mode():
             viz_history,
             X_np, y_np,
             y_train_np, y_test_np,
-            train_pred.numpy() if hasattr(train_pred, 'numpy') else np.array(train_pred),
-            test_pred.numpy() if hasattr(test_pred, 'numpy') else np.array(test_pred),
+            train_pred_np,
+            test_pred_np,
             evolution_history=evolution_history
         )
 
