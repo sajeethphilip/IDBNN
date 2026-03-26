@@ -132,6 +132,7 @@ class Colors:
     def print_error(message):
         print(f"{Colors.RED}❌ {message}{Colors.ENDC}")
 
+
 # =============================================================================
 # SECTION 0.8: OPTIONAL EXTERNAL TOOLS INTEGRATION
 # =============================================================================
@@ -149,7 +150,137 @@ except ImportError:
 if ASTROPY_AVAILABLE:
     print(f"{Colors.GREEN}✓ Astropy available for FITS/VOTable export{Colors.ENDC}")
 
+class RobustCSVReader:
+    """
+    Robust CSV reader that handles:
+    - Comment lines starting with #
+    - Missing or extra columns
+    - Unknown class labels
+    """
 
+    @staticmethod
+    def read_csv(file_path: str, expected_columns: List[str] = None,
+                 ignore_comments: bool = True) -> pd.DataFrame:
+        """
+        Read CSV file, ignoring comment lines and handling malformed data.
+
+        Args:
+            file_path: Path to CSV file
+            expected_columns: Optional list of expected column names
+            ignore_comments: If True, skip lines starting with #
+
+        Returns:
+            DataFrame with cleaned data
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # First, try pandas with comment parameter
+        if ignore_comments:
+            try:
+                df = pd.read_csv(file_path, comment='#')
+                if expected_columns:
+                    # Keep only expected columns
+                    available_cols = [col for col in expected_columns if col in df.columns]
+                    if available_cols:
+                        df = df[available_cols]
+                return df
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️ Pandas read with comment failed: {e}{Colors.ENDC}")
+                # Fall through to manual parsing
+
+        # Manual parsing fallback
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+
+        # Find first non-comment line for header
+        header_line = None
+        header_index = None
+        data_lines = []
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                if header_line is None:
+                    header_line = stripped
+                    header_index = i
+                else:
+                    data_lines.append(stripped)
+
+        if header_line is None:
+            raise ValueError(f"No valid header found in {file_path}")
+
+        # Parse header
+        import csv
+        header = next(csv.reader([header_line]))
+
+        # Parse data lines
+        rows = []
+        for line in data_lines:
+            try:
+                row = next(csv.reader([line]))
+                # If row has fewer columns than header, pad with None
+                if len(row) < len(header):
+                    row.extend([None] * (len(header) - len(row)))
+                # If row has more columns, truncate
+                elif len(row) > len(header):
+                    row = row[:len(header)]
+                rows.append(row)
+            except Exception:
+                continue  # Skip malformed rows
+
+        df = pd.DataFrame(rows, columns=header)
+
+        # Convert numeric columns
+        for col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            except:
+                pass
+
+        if expected_columns:
+            available_cols = [col for col in expected_columns if col in df.columns]
+            if available_cols:
+                df = df[available_cols]
+
+        return df
+
+    @staticmethod
+    def filter_known_classes(df: pd.DataFrame, target_col: str,
+                             known_classes: Dict[str, int]) -> pd.DataFrame:
+        """
+        Filter dataframe to only include rows with known class labels.
+
+        Args:
+            df: Input dataframe
+            target_col: Name of target column
+            known_classes: Dictionary mapping class labels to encoded values
+
+        Returns:
+            Filtered dataframe (only rows with known classes)
+        """
+        if target_col not in df.columns:
+            return df
+
+        # Get unique classes in data
+        data_classes = df[target_col].astype(str).unique()
+
+        # Find unknown classes
+        known_labels = set(known_classes.keys())
+        unknown_classes = [c for c in data_classes if c not in known_labels]
+
+        if unknown_classes:
+            print(f"{Colors.YELLOW}⚠️ Found {len(unknown_classes)} unknown classes: {unknown_classes[:5]}{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   These rows will be ignored for training/evaluation{Colors.ENDC}")
+
+            # Filter to keep only known classes
+            mask = df[target_col].astype(str).isin(known_labels)
+            filtered_df = df[mask].copy()
+
+            print(f"{Colors.GREEN}   Kept {len(filtered_df)}/{len(df)} rows with known classes{Colors.ENDC}")
+            return filtered_df
+
+        return df
 
 class DebugLogger:
     def __init__(self):
@@ -8115,21 +8246,51 @@ class OptimizedDatasetProcessor:
         self.label_encoder = {}
 
     def load_and_preprocess(self, file_path: str, target_column: str,
-                           is_training: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if os.path.getsize(file_path) > 100 * 1024 * 1024:
-            df = pd.read_csv(file_path, memory_map=True)
-        else:
-            df = pd.read_csv(file_path)
+                           is_training: bool = True,
+                           known_classes: Dict[str, int] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Load and preprocess data with robust CSV handling.
+
+        Args:
+            file_path: Path to CSV file
+            target_column: Name of target column
+            is_training: Whether this is training data
+            known_classes: For prediction mode, classes seen during training
+        """
+        # Use robust CSV reader
+        df = RobustCSVReader.read_csv(file_path, ignore_comments=True)
 
         if target_column in df.columns:
             X = df.drop(columns=[target_column])
             y = df[target_column].astype(str)
+
+            # Filter out unknown classes if this is training or evaluation
+            if known_classes is not None:
+                # For prediction mode - keep all rows, but unknown classes will be marked
+                if not is_training:
+                    # Create mask for known classes
+                    mask = y.isin(known_classes.keys())
+                    if not mask.all():
+                        print(f"{Colors.YELLOW}⚠️ {len(mask) - mask.sum()} rows have unknown classes{Colors.ENDC}")
+                        print(f"{Colors.YELLOW}   These rows will still be processed but labels will be ignored{Colors.ENDC}")
+            elif is_training:
+                # For training, we only want known classes
+                known_labels = set(self.label_encoder.keys()) if self.label_encoder else set()
+                if known_labels:
+                    mask = y.isin(known_labels)
+                    if not mask.all():
+                        print(f"{Colors.YELLOW}⚠️ Filtering out {len(mask) - mask.sum()} rows with unknown classes{Colors.ENDC}")
+                        df = df[mask]
+                        X = X[mask]
+                        y = y[mask]
         else:
             X = df
             y = None
 
+        # Preprocess features
         X_processed = self._preprocess_features(X, is_training)
 
+        # Convert to tensor
         X_tensor = torch.tensor(X_processed, dtype=torch.float64)
 
         if y is not None:
@@ -8206,6 +8367,19 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.model_type = self.config.get('model_type', self.config.get('modelType', 'Histogram'))
         self.target_column = self.config.get('target_column')
 
+        # ========== FIX: Get feature names from config ==========
+        # Get column names from config
+        self.all_columns = self.config.get('column_names', [])
+
+        # Extract feature names (all columns except target)
+        if self.all_columns and self.target_column:
+            self.feature_names = [col for col in self.all_columns if col != self.target_column]
+            print(f"{Colors.CYAN}📋 Using {len(self.feature_names)} features from config{Colors.ENDC}")
+        else:
+            self.feature_names = None
+            print(f"{Colors.YELLOW}⚠️ No feature names in config - will auto-detect{Colors.ENDC}")
+        # ========== END FIX ==========
+
         compute_device = self.config.get('compute_device', 'auto')
         if compute_device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -8247,7 +8421,6 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.train_indices = None
         self.test_indices = None
         self.data_original = None
-        self.feature_names = None
         self.preprocessor = None
 
         self.training_history = []
@@ -8324,37 +8497,101 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.evolution_tracker.clear_history()
 
     def load_data(self, file_path: str = None, is_training: bool = True):
+        """
+        Load data using the column structure from config.
+        Preserves original data for later use.
+        """
         processor = OptimizedDatasetProcessor(self.config, self.device)
 
         file_path = file_path or self.config.get('file_path')
         if not file_path:
             raise ValueError("No file path provided")
 
-        X_tensor, y_tensor = processor.load_and_preprocess(
-            file_path, self.target_column, is_training=is_training
-        )
+        print(f"{Colors.CYAN}📖 Loading data from: {file_path}{Colors.ENDC}")
 
-        # Move to correct device
-        self.X_tensor = X_tensor.to(self.device)
-        if y_tensor is not None:
-            self.y_tensor = y_tensor.to(self.device)
+        # Load CSV with comment skipping - preserve all data
+        try:
+            df_original = pd.read_csv(file_path, comment='#')
+            print(f"{Colors.GREEN}✓ Loaded {len(df_original)} rows, {len(df_original.columns)} columns{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error loading CSV: {e}{Colors.ENDC}")
+            raise
 
-        self.label_encoder = processor.label_encoder
+        # Store original data (preserve all columns)
+        self.data_original = df_original
+
+        # Get target column
+        target_column = self.config.get('target_column', self.target_column)
+
+        # If no target column in config, try to detect
+        if not target_column:
+            target_candidates = ['target', 'class', 'label', 'y', 'prediction', 'type', 'diagnosis']
+            for candidate in target_candidates:
+                if candidate in df_original.columns:
+                    target_column = candidate
+                    break
+            if not target_column:
+                target_column = df_original.columns[-1]
+            print(f"{Colors.CYAN}   Auto-detected target column: {target_column}{Colors.ENDC}")
+
+        self.target_column = target_column
+
+        # Separate features and target for training
+        if target_column in df_original.columns:
+            y = df_original[target_column].astype(str)
+
+            # Use feature_names if available, otherwise use all other columns
+            if self.feature_names:
+                # Use only specified features
+                X = df_original[self.feature_names].copy()
+            else:
+                # Use all columns except target
+                X = df_original.drop(columns=[target_column])
+                self.feature_names = list(X.columns)
+                print(f"{Colors.GREEN}✓ Auto-detected {len(self.feature_names)} features{Colors.ENDC}")
+        else:
+            if is_training:
+                raise ValueError(f"Target column '{target_column}' not found in training data")
+            X = df_original
+            y = None
+
+        # Ensure all features are numeric
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                try:
+                    X[col] = pd.to_numeric(X[col], errors='coerce')
+                except:
+                    X[col] = 0.0
+
+        # Handle missing values
+        X = X.fillna(0)
+
+        # Preprocess features
+        X_processed = processor._preprocess_features(X, is_training)
+        X_tensor = torch.tensor(X_processed, dtype=torch.float64, device=self.device)
+
+        # Handle target
+        if y is not None:
+            y_tensor = torch.tensor(processor._encode_labels(y, is_training), dtype=torch.long, device=self.device)
+            self.y_tensor = y_tensor
+
+            if is_training:
+                # Log class distribution
+                class_counts = y.value_counts()
+                print(f"{Colors.GREEN}✓ Found {len(class_counts)} classes in training data:{Colors.ENDC}")
+                for cls, count in list(class_counts.items())[:10]:
+                    print(f"   {cls}: {count} samples")
+                if len(class_counts) > 10:
+                    print(f"   ... and {len(class_counts) - 10} more classes")
+        else:
+            self.y_tensor = None
+
+        self.X_tensor = X_tensor
         self.preprocessor = processor
 
-        if self.y_tensor is not None:
-            self.classes = torch.unique(self.y_tensor)
-            print(f"   Loaded {len(self.X_tensor)} samples, {len(self.classes)} classes")
+        print(f"{Colors.GREEN}✓ Data prepared: {len(X_tensor)} samples, {len(self.feature_names)} features{Colors.ENDC}")
 
-        self.data_original = pd.read_csv(file_path)
-
-        if hasattr(self.data_original, 'columns'):
-            if self.target_column in self.data_original.columns:
-                self.feature_names = [col for col in self.data_original.columns if col != self.target_column]
-            else:
-                self.feature_names = self.data_original.columns.tolist()
-
-        return self.X_tensor, self.y_tensor
+        return X_tensor, self.y_tensor
 
     def split_data(self):
         from sklearn.model_selection import train_test_split
@@ -8792,6 +9029,14 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.n_bins_per_dim = model_state['n_bins_per_dim']
         self.feature_pairs = model_state['feature_pairs']
 
+        # CRITICAL: Load feature names from saved model
+        self.feature_names = model_state.get('feature_names', [])
+        self.selected_features = model_state.get('selected_features', [])
+        self.target_column = model_state.get('target_column', self.target_column)
+
+        # Also load the all_columns from config if available
+        self.all_columns = self.config.get('column_names', [])
+
         self.bin_edges = []
         for pair in model_state['bin_edges']:
             pair_edges = []
@@ -8813,80 +9058,220 @@ class OptimizedDBNN(ExternalToolsMixin):
             self.classes = model_state['classes'].to(self.device) if torch.is_tensor(model_state['classes']) else torch.tensor(model_state['classes'], device=self.device)
 
         self.label_encoder = model_state.get('label_encoder', {})
-        self.feature_names = model_state.get('feature_names', [])
-        self.target_column = model_state.get('target_column', self.target_column)
 
         if 'evolution_history' in model_state:
             self.evolution_tracker.tensor_evolution_history = model_state['evolution_history']
+
+        # Restore preprocessor stats if available
+        if 'preprocessor_stats' in model_state:
+            if not hasattr(self, 'preprocessor') or self.preprocessor is None:
+                self.preprocessor = OptimizedDatasetProcessor(self.config, self.device)
+            self.preprocessor.feature_stats = model_state['preprocessor_stats'].get('feature_stats', {})
+            self.preprocessor.categorical_encoders = model_state['preprocessor_stats'].get('categorical_encoders', {})
+            self.preprocessor.label_encoder = model_state['preprocessor_stats'].get('label_encoder', {})
 
         print(f"✅ Model loaded from {path}")
         print(f"   Dataset: {self.dataset_name}")
         print(f"   Classes: {len(self.classes) if self.classes is not None else 0}")
         print(f"   Features: {len(self.feature_names) if self.feature_names else 0}")
+        if self.feature_names:
+            print(f"   First 5 features: {self.feature_names[:5]}")
 
     def predict_from_file(self, input_csv: str, output_path: str = None, **kwargs) -> Dict:
+        """
+        Predict from a new CSV file.
+        Preserves all original data including metadata columns.
+        Only uses numeric features from training for prediction.
+        """
         if output_path:
             os.makedirs(output_path, exist_ok=True)
 
-        df = pd.read_csv(input_csv)
-        has_target = self.target_column in df.columns
+        print(f"{Colors.CYAN}📖 Reading prediction file: {input_csv}{Colors.ENDC}")
 
-        if has_target:
-            y_true = df[self.target_column]
-            X = df.drop(columns=[self.target_column])
-        else:
-            X = df
-            y_true = None
+        # Read CSV with comment skipping - preserve all data
+        try:
+            df_original = pd.read_csv(input_csv, comment='#')
+            print(f"{Colors.GREEN}✓ Loaded {len(df_original)} rows, {len(df_original.columns)} columns{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.RED}❌ Failed to read file: {e}{Colors.ENDC}")
+            return {'predictions': None, 'error': str(e)}
 
-        processor = OptimizedDatasetProcessor(self.config, self.device)
+        # CRITICAL: Use ONLY the feature_names from the trained model
+        if not self.feature_names:
+            print(f"{Colors.RED}❌ No feature names available from trained model{Colors.ENDC}")
+            return {'predictions': None, 'error': 'Model not properly trained'}
 
-        if hasattr(self, 'preprocessor') and self.preprocessor:
-            processor.feature_stats = self.preprocessor.feature_stats
-            processor.categorical_encoders = self.preprocessor.categorical_encoders
-            processor.label_encoder = self.preprocessor.label_encoder
-        else:
-            processor = OptimizedDatasetProcessor(self.config, self.device)
-            if self.X_tensor is not None:
-                X_train_np = self.X_tensor.numpy()
-                if self.feature_names:
-                    X_train_df = pd.DataFrame(X_train_np, columns=self.feature_names)
-                    processor._preprocess_features(X_train_df, is_training=True)
+        print(f"{Colors.CYAN}📊 Model was trained with {len(self.feature_names)} numeric features:{Colors.ENDC}")
+        print(f"{Colors.CYAN}   {self.feature_names[:5]}... (total {len(self.feature_names)}){Colors.ENDC}")
 
-        X_tensor, _ = processor.load_and_preprocess(
-            input_csv, self.target_column, is_training=False
-        )
+        # Build feature dataframe with ONLY the numeric features from training
+        # This is separate from the original data - we only use these for prediction
+        X = pd.DataFrame(index=df_original.index)
+        missing_features = []
+        non_numeric_features = []
 
-        predictions, posteriors = self.predict(X_tensor)
+        for feat in self.feature_names:
+            if feat in df_original.columns:
+                # Try to convert to numeric
+                try:
+                    X[feat] = pd.to_numeric(df_original[feat], errors='coerce')
+                    # Check if conversion resulted in all NaN (completely non-numeric column)
+                    if X[feat].isna().all():
+                        non_numeric_features.append(feat)
+                        X[feat] = 0.0
+                except:
+                    non_numeric_features.append(feat)
+                    X[feat] = 0.0
+            else:
+                missing_features.append(feat)
+                X[feat] = 0.0
 
-        inv_label_encoder = {v: k for k, v in self.label_encoder.items()}
-        pred_labels = [inv_label_encoder[p.item()] for p in predictions]
+        if missing_features:
+            print(f"{Colors.YELLOW}⚠️ Missing {len(missing_features)} feature columns in prediction file:{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   These will be filled with 0{Colors.ENDC}")
 
-        results = df.copy()
-        results['predicted_class'] = pred_labels
-        results['confidence'] = posteriors.max(dim=1)[0].numpy()
+        if non_numeric_features:
+            print(f"{Colors.YELLOW}⚠️ {len(non_numeric_features)} feature columns contain non-numeric data:{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   {non_numeric_features[:10]}{'...' if len(non_numeric_features) > 10 else ''}{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   These will be filled with 0{Colors.ENDC}")
 
-        for i, (label, idx) in enumerate(self.label_encoder.items()):
-            results[f'prob_{label}'] = posteriors[:, i].numpy()
+        # Handle any NaN values
+        X = X.fillna(0)
 
-        if has_target:
-            results['true_class'] = y_true
+        # Verify all features are numeric
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                X[col] = 0.0
 
-        if output_path:
-            csv_path = os.path.join(output_path, 'predictions.csv')
-            results.to_csv(csv_path, index=False)
-            print(f"✅ Predictions saved to {csv_path}")
+        print(f"{Colors.GREEN}✓ Prepared {len(X)} rows with {len(X.columns)} numeric features for prediction{Colors.ENDC}")
+
+        # Convert to tensor
+        X_np = X.values.astype(np.float64)
+        X_tensor = torch.tensor(X_np, dtype=torch.float64, device=self.device)
+
+        print(f"{Colors.CYAN}🔮 Making predictions on {len(X_tensor)} samples...{Colors.ENDC}")
+
+        try:
+            predictions, posteriors = self.predict(X_tensor)
+
+            # Convert predictions to labels
+            inv_label_encoder = {v: k for k, v in self.label_encoder.items()}
+            pred_labels = [inv_label_encoder.get(p.item(), f"unknown_{p.item()}") for p in predictions]
+
+            # Create results dataframe that preserves ALL original data
+            results = df_original.copy()
+
+            # Add prediction columns
+            results['predicted_class'] = pred_labels
+            results['confidence'] = posteriors.max(dim=1)[0].cpu().numpy()
+
+            # Add probability columns for each class
+            for i, (label, idx) in enumerate(self.label_encoder.items()):
+                results[f'prob_{label}'] = posteriors[:, i].cpu().numpy()
+
+            # Add uncertainty
+            results['uncertainty'] = 1.0 - results['confidence']
+
+            # Add a flag for rows that had issues (missing features or non-numeric)
+            results['has_missing_features'] = False
+            results['has_non_numeric_features'] = False
+
+            # Mark rows with issues (if any)
+            if missing_features or non_numeric_features:
+                # For simplicity, mark all rows if any features were missing
+                # You could make this more granular if needed
+                if missing_features:
+                    results['has_missing_features'] = True
+                if non_numeric_features:
+                    results['has_non_numeric_features'] = True
+
+            # If true labels exist, add them and calculate metrics
+            target_column = self.target_column
+            has_target = target_column in df_original.columns
 
             if has_target:
-                from sklearn.metrics import accuracy_score
-                y_true_encoded = [self.label_encoder.get(str(val), -1) for val in y_true]
-                y_true_encoded = [v for v in y_true_encoded if v != -1]
-                y_pred_encoded = predictions.numpy()[:len(y_true_encoded)]
+                y_true = df_original[target_column].astype(str)
+                results['true_class'] = y_true
 
-                if len(y_true_encoded) > 0:
-                    accuracy = accuracy_score(y_true_encoded, y_pred_encoded)
-                    print(f"   Accuracy: {Colors.highlight_accuracy(accuracy)}")
+                # Calculate accuracy only on rows where true class is known to the model
+                known_true_mask = y_true.isin(self.label_encoder.keys())
+                if known_true_mask.any():
+                    known_true = y_true[known_true_mask]
+                    known_pred = results.loc[known_true_mask, 'predicted_class']
+                    accuracy = (known_true == known_pred).mean()
+                    print(f"{Colors.GREEN}✓ Accuracy on known classes: {accuracy:.4f} ({known_true_mask.sum()} samples){Colors.ENDC}")
+                else:
+                    print(f"{Colors.YELLOW}⚠️ No samples with known classes for evaluation{Colors.ENDC}")
 
-        return {'predictions': results}
+                # Report unknown classes found
+                unknown_true_mask = ~known_true_mask
+                if unknown_true_mask.any():
+                    unknown_classes = y_true[unknown_true_mask].unique()
+                    print(f"{Colors.YELLOW}⚠️ Found {unknown_true_mask.sum()} samples with unknown classes: {unknown_classes[:5]}{Colors.ENDC}")
+
+            # Save complete results (all original data + predictions)
+            if output_path:
+                csv_path = os.path.join(output_path, 'predictions.csv')
+                results.to_csv(csv_path, index=False)
+                print(f"{Colors.GREEN}✅ Complete predictions saved to: {csv_path}{Colors.ENDC}")
+
+                # Save a compact version with just predictions and key columns
+                summary_cols = ['predicted_class', 'confidence', 'uncertainty']
+                if has_target:
+                    summary_cols.insert(0, 'true_class')
+
+                # Also include any identifier columns if they exist
+                id_cols = ['id', 'ID', 'filename', 'filepath', 'name', 'Name']
+                for id_col in id_cols:
+                    if id_col in results.columns:
+                        summary_cols.insert(0, id_col)
+
+                summary = results[summary_cols]
+                summary_path = os.path.join(output_path, 'predictions_summary.csv')
+                summary.to_csv(summary_path, index=False)
+                print(f"{Colors.GREEN}✅ Summary saved to: {summary_path}{Colors.ENDC}")
+
+                # Save predictions with probabilities for each class
+                prob_cols = ['predicted_class', 'confidence', 'uncertainty'] + \
+                           [f'prob_{label}' for label in self.label_encoder.keys()]
+                if has_target:
+                    prob_cols.insert(0, 'true_class')
+                if any(col in results.columns for col in id_cols):
+                    for id_col in id_cols:
+                        if id_col in results.columns:
+                            prob_cols.insert(0, id_col)
+                            break
+
+                prob_df = results[prob_cols]
+                prob_path = os.path.join(output_path, 'predictions_with_probs.csv')
+                prob_df.to_csv(prob_path, index=False)
+                print(f"{Colors.GREEN}✅ Probabilities saved to: {prob_path}{Colors.ENDC}")
+
+                # Also save a debug file showing which features were used
+                feature_info = pd.DataFrame({
+                    'feature_name': self.feature_names,
+                    'present_in_prediction': [f in df_original.columns for f in self.feature_names],
+                    'is_numeric': [not pd.api.types.is_numeric_dtype(df_original[f]) if f in df_original.columns else False for f in self.feature_names]
+                })
+                feature_info_path = os.path.join(output_path, 'feature_analysis.csv')
+                feature_info.to_csv(feature_info_path, index=False)
+                print(f"{Colors.GREEN}✅ Feature analysis saved to: {feature_info_path}{Colors.ENDC}")
+
+            return {
+                'predictions': results,
+                'n_samples': len(results),
+                'has_target': has_target,
+                'features_used': self.feature_names,
+                'missing_features': missing_features,
+                'non_numeric_features': non_numeric_features
+            }
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            return {'predictions': None, 'error': str(e)}
 
     def _format_class_distribution(self, indices):
         if not indices:
@@ -9442,23 +9827,23 @@ class OptimizedDBNN(ExternalToolsMixin):
                     }
                     adaptive_patience_counter = 0
                     self.save_last_split(train_indices, test_indices)
-                    print(f"\n{Colors.GREEN}{'✨'*20}{Colors.ENDC}")
+                    print(f"\n{Colors.GREEN}{'-'*20}{Colors.ENDC}")
                     print(f"{Colors.GREEN}🎉 NEW BEST ACCURACY! Combined: {combined_accuracy:.4f}{Colors.ENDC}")
-                    print(f"{Colors.GREEN}{'✨'*20}{Colors.ENDC}")
+                    print(f"{Colors.GREEN}{'-'*20}{Colors.ENDC}")
                 else:
                     adaptive_patience_counter += 1
                     print(f"\n{Colors.YELLOW}⚠️ No improvement. Patience: {adaptive_patience_counter}/{patience}{Colors.ENDC}")
 
                 if total_accuracy >= 0.9999:
-                    print(f"\n{Colors.GREEN}{'🎯'*30}{Colors.ENDC}")
+                    print(f"\n{Colors.GREEN}{'-'*30}{Colors.ENDC}")
                     print(f"{Colors.GREEN}🎯 TOTAL ACCURACY REACHED 100%! Training complete.{Colors.ENDC}")
-                    print(f"{Colors.GREEN}{'🎯'*30}{Colors.ENDC}")
+                    print(f"{Colors.GREEN}{'-'*30}{Colors.ENDC}")
                     break
 
                 if adaptive_patience_counter >= patience:
-                    print(f"\n{Colors.YELLOW}{'⚠️'*30}{Colors.ENDC}")
-                    print(f"{Colors.YELLOW}No improvement after {patience} rounds. Stopping.{Colors.ENDC}")
-                    print(f"{Colors.YELLOW}{'⚠️'*30}{Colors.ENDC}")
+                    print(f"\n{Colors.YELLOW}{'-'*30}{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}⚠️No improvement after {patience} rounds. Stopping.{Colors.ENDC}⚠️")
+                    print(f"{Colors.YELLOW}{'⚠-'*30}{Colors.ENDC}")
                     break
 
                 if test_indices:
@@ -9500,9 +9885,9 @@ class OptimizedDBNN(ExternalToolsMixin):
             end_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
 
             print(f"\n{Colors.BOLD}{Colors.BLUE}{'='*60}{Colors.ENDC}")
-            print(f"{Colors.BOLD}{Colors.GREEN}{'🏆'*15}{Colors.ENDC}")
-            print(f"{Colors.BOLD}{Colors.GREEN}✅ ADAPTIVE TRAINING COMPLETE{Colors.ENDC}")
-            print(f"{Colors.BOLD}{Colors.GREEN}{'🏆'*15}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{Colors.GREEN}{'-'*15}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{Colors.GREEN}✅ ADAPTIVE TRAINING COMPLETE{Colors.ENDC}🏆")
+            print(f"{Colors.BOLD}{Colors.GREEN}{'-'*15}{Colors.ENDC}")
             print(f"{Colors.BOLD}Started at: {start_clock}{Colors.ENDC}")
             print(f"{Colors.BOLD}Ended at: {end_clock}{Colors.ENDC}")
             print(f"{Colors.BOLD}Total time: {elapsed_time:.2f} seconds{Colors.ENDC}")
@@ -14286,8 +14671,21 @@ def main():
     parser.add_argument('--gui', action='store_true', help='Launch GUI')
     parser.add_argument('--interactive', action='store_true', help='Interactive mode')
     parser.add_argument('--dataset', type=str, help='Dataset name')
-    parser.add_argument('--mode', type=str, default='train_predict', help='Operation mode')
+    parser.add_argument('--mode', type=str, default='train_predict',
+                       choices=['train', 'predict', 'train_predict', 'adaptive'],
+                       help='Operation mode: train, predict, train_predict (default), or adaptive')
+    parser.add_argument('--predict-file', type=str, help='File to make predictions on (for predict mode)')
+    parser.add_argument('--output-dir', type=str, default='predictions', help='Output directory for predictions')
     parser.add_argument('--track-evolution', action='store_true', help='Track tensor evolution')
+    parser.add_argument('--model-file', type=str, help='Specific model file to load (for predict mode)')
+    parser.add_argument('--no-confusion', action='store_true', help='Skip confusion matrix display')
+    parser.add_argument('--data-dir', type=str, default='data', help='Data directory (default: data)')
+    parser.add_argument('--input-path', type=str, help='Custom path to input CSV file (overrides dataset name)')
+    parser.add_argument('--config-file', type=str, help='Specific config file to use')
+    parser.add_argument('--csv-file', type=str, help='Specific CSV file to use')
+    parser.add_argument('--skip-comments', action='store_true', default=True,
+                       help='Skip lines starting with # (default: True)')
+    parser.add_argument('--verbose', action='store_true', help='Print verbose output')
     args = parser.parse_args()
 
     print(f"""
@@ -14301,6 +14699,7 @@ def main():
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝{Colors.ENDC}
     """)
+
     if args.gui:
         if GUI_AVAILABLE:
             root = tk.Tk()
@@ -14314,26 +14713,486 @@ def main():
         interactive_mode()
         return
 
-    if args.dataset:
-        model = OptimizedDBNN(dataset_name=args.dataset, mode=args.mode)
-        if args.track_evolution:
-            model.enable_evolution_tracking()
-        model.load_data()
+    # Helper function to load CSV with comment skipping
+    def load_csv_with_comments(file_path, skip_comments=True):
+        """Load CSV file, skipping comment lines starting with #"""
+        if not os.path.exists(file_path):
+            return None
 
+        if args.verbose:
+            print(f"{Colors.CYAN}   Reading file: {file_path}{Colors.ENDC}")
+
+        if skip_comments:
+            # Read all lines and filter out comments
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+
+            # Filter out lines that start with # (after stripping whitespace)
+            data_lines = [line for line in lines if not line.strip().startswith('#')]
+
+            if not data_lines:
+                print(f"{Colors.RED}❌ No non-comment lines found in {file_path}{Colors.ENDC}")
+                return None
+
+            if args.verbose:
+                print(f"{Colors.CYAN}   Found {len(data_lines)} data lines (skipped {len(lines) - len(data_lines)} comment lines){Colors.ENDC}")
+
+            # Write filtered lines to a temporary file
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
+            temp_file.writelines(data_lines)
+            temp_file.close()
+
+            # Read the temporary file with pandas
+            try:
+                df = pd.read_csv(temp_file.name)
+                # Clean up temp file
+                os.unlink(temp_file.name)
+                return df
+            except Exception as e:
+                os.unlink(temp_file.name)
+                print(f"{Colors.RED}❌ Error reading CSV after filtering comments: {e}{Colors.ENDC}")
+                return None
+        else:
+            # Read normally
+            try:
+                return pd.read_csv(file_path)
+            except Exception as e:
+                print(f"{Colors.RED}❌ Error reading CSV: {e}{Colors.ENDC}")
+                return None
+
+    # If no dataset specified, show help
+    if not args.dataset:
+        print(f"{Colors.YELLOW}No dataset specified. Please use --dataset to specify a dataset.{Colors.ENDC}")
+        print(f"\n{Colors.CYAN}Examples:{Colors.ENDC}")
+        print(f"  # Train a model")
+        print(f"  python adbnn.py --dataset breast_cancer --mode train")
+        print(f"  # Train with adaptive learning")
+        print(f"  python adbnn.py --dataset breast_cancer --mode adaptive --track-evolution")
+        print(f"  # Make predictions")
+        print(f"  python adbnn.py --dataset breast_cancer --mode predict --predict-file new_data.csv")
+        print(f"  # Use custom input file")
+        print(f"  python adbnn.py --dataset galaxy --mode train --input-path /path/to/data.csv")
+        parser.print_help()
+        return
+
+    # First, try to locate dataset files
+    print(f"{Colors.BOLD}{Colors.CYAN}📁 Locating dataset files...{Colors.ENDC}")
+    print(f"{'='*60}")
+
+    # Determine file paths with priority:
+    # 1. Explicit command-line arguments (--input-path, --config-file, --csv-file)
+    # 2. Standard location: data/<dataset>/<dataset>.conf and data/<dataset>/<dataset>.csv
+    # 3. Local files: <dataset>.conf and <dataset>.csv in current directory
+
+    config_path = None
+    csv_path = None
+    dataset_name = args.dataset
+
+    # Priority 1: Explicit command-line arguments
+    if args.input_path:
+        csv_path = args.input_path
+        if os.path.exists(csv_path):
+            print(f"{Colors.GREEN}✓ Using input file: {csv_path}{Colors.ENDC}")
+            # Try to infer config from same directory
+            csv_dir = os.path.dirname(csv_path)
+            csv_base = os.path.splitext(os.path.basename(csv_path))[0]
+            inferred_config = os.path.join(csv_dir, f"{csv_base}.conf")
+            if os.path.exists(inferred_config):
+                config_path = inferred_config
+                print(f"{Colors.GREEN}✓ Found config file: {config_path}{Colors.ENDC}")
+            else:
+                # Also try with dataset name
+                dataset_config = os.path.join(csv_dir, f"{args.dataset}.conf")
+                if os.path.exists(dataset_config):
+                    config_path = dataset_config
+                    print(f"{Colors.GREEN}✓ Found config file: {config_path}{Colors.ENDC}")
+        else:
+            print(f"{Colors.RED}❌ Input file not found: {csv_path}{Colors.ENDC}")
+            return
+
+    if args.config_file:
+        config_path = args.config_file
+        if os.path.exists(config_path):
+            print(f"{Colors.GREEN}✓ Using config file: {config_path}{Colors.ENDC}")
+        else:
+            print(f"{Colors.RED}❌ Config file not found: {config_path}{Colors.ENDC}")
+            return
+
+    if args.csv_file:
+        csv_path = args.csv_file
+        if os.path.exists(csv_path):
+            print(f"{Colors.GREEN}✓ Using CSV file: {csv_path}{Colors.ENDC}")
+        else:
+            print(f"{Colors.RED}❌ CSV file not found: {csv_path}{Colors.ENDC}")
+            return
+
+    # Priority 2: Standard location in data directory
+    if not config_path:
+        standard_config = os.path.join(args.data_dir, args.dataset, f"{args.dataset}.conf")
+        if os.path.exists(standard_config):
+            config_path = standard_config
+            print(f"{Colors.GREEN}✓ Found config file: {config_path}{Colors.ENDC}")
+
+    if not csv_path:
+        standard_csv = os.path.join(args.data_dir, args.dataset, f"{args.dataset}.csv")
+        if os.path.exists(standard_csv):
+            csv_path = standard_csv
+            print(f"{Colors.GREEN}✓ Found CSV file: {csv_path}{Colors.ENDC}")
+
+    # Priority 3: Local files in current directory
+    if not config_path:
+        local_config = f"{args.dataset}.conf"
+        if os.path.exists(local_config):
+            config_path = local_config
+            print(f"{Colors.GREEN}✓ Found local config file: {config_path}{Colors.ENDC}")
+
+    if not csv_path:
+        local_csv = f"{args.dataset}.csv"
+        if os.path.exists(local_csv):
+            csv_path = local_csv
+            print(f"{Colors.GREEN}✓ Found local CSV file: {csv_path}{Colors.ENDC}")
+
+    # Check if we found the CSV file
+    if not csv_path:
+        print(f"{Colors.RED}❌ Could not find data file for '{args.dataset}'{Colors.ENDC}")
+        print(f"{Colors.YELLOW}Searched locations:{Colors.ENDC}")
+        print(f"   1. Explicit: --input-path, --csv-file")
+        print(f"   2. Standard: {args.data_dir}/{args.dataset}/{args.dataset}.csv")
+        print(f"   3. Local: {args.dataset}.csv")
+        print(f"\n{Colors.CYAN}Please ensure your data file exists or use --input-path{Colors.ENDC}")
+        return
+
+    # Load the CSV file (skipping comments)
+    print(f"\n{Colors.CYAN}📖 Loading data from: {csv_path}{Colors.ENDC}")
+    if args.skip_comments:
+        print(f"{Colors.CYAN}   Skipping comment lines (starting with #){Colors.ENDC}")
+
+    df = load_csv_with_comments(csv_path, skip_comments=args.skip_comments)
+
+    if df is None:
+        print(f"{Colors.RED}❌ Failed to load data from {csv_path}{Colors.ENDC}")
+        return
+
+    print(f"{Colors.GREEN}✓ Loaded {len(df)} rows, {len(df.columns)} columns{Colors.ENDC}")
+    if args.verbose:
+        print(f"   Columns: {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}")
+
+    # If we have a config file, load it
+    target_column = None
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                saved_config = json.load(f)
+                target_column = saved_config.get('target_column')
+                print(f"{Colors.GREEN}✓ Loaded config from: {config_path}{Colors.ENDC}")
+                if target_column:
+                    print(f"   Target column: {target_column}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️ Could not load config file: {e}{Colors.ENDC}")
+
+    # If no target column in config, try to detect it
+    if not target_column:
+        # Look for common target column names
+        target_candidates = ['target', 'class', 'label', 'y', 'prediction', 'type', 'diagnosis', 'class_label', 'true_class']
+        for candidate in target_candidates:
+            if candidate in df.columns:
+                target_column = candidate
+                print(f"{Colors.GREEN}✓ Auto-detected target column: {target_column}{Colors.ENDC}")
+                break
+
+        # If still not found, use last column
+        if not target_column:
+            target_column = df.columns[-1]
+            print(f"{Colors.YELLOW}⚠️ Using last column as target: {target_column}{Colors.ENDC}")
+
+    # Check if this is a prediction-only mode
+    if args.mode == 'predict':
+        print(f"\n{Colors.BOLD}{Colors.CYAN}🔮 PREDICTION MODE - Using Existing Model{Colors.ENDC}")
+        print(f"{'='*60}")
+
+        # Find available models
+        models_dir = "models"
+        dataset_models = []
+
+        if os.path.exists(models_dir):
+            dataset_models = [f for f in os.listdir(models_dir)
+                            if f.endswith('.pkl') and f.startswith(args.dataset)]
+
+        if not dataset_models:
+            print(f"{Colors.RED}❌ No saved models found for dataset '{args.dataset}'{Colors.ENDC}")
+            print(f"{Colors.YELLOW}Please train a model first using: python adbnn.py --dataset {args.dataset} --mode train{Colors.ENDC}")
+            return
+
+        # Select model
+        if args.model_file:
+            # Use specified model file
+            model_file = args.model_file
+            if not model_file.endswith('.pkl'):
+                model_file += '.pkl'
+            model_path = os.path.join(models_dir, model_file)
+            if not os.path.exists(model_path):
+                print(f"{Colors.RED}❌ Model file not found: {model_path}{Colors.ENDC}")
+                return
+            print(f"{Colors.CYAN}📥 Using specified model: {model_file}{Colors.ENDC}")
+        else:
+            # Use the most recent model
+            model_file = sorted(dataset_models)[-1]
+            model_path = os.path.join(models_dir, model_file)
+            print(f"{Colors.CYAN}📥 Using most recent model: {model_file}{Colors.ENDC}")
+
+        # Check if prediction file is specified
+        if not args.predict_file:
+            print(f"{Colors.RED}❌ No prediction file specified. Use --predict-file to specify input file.{Colors.ENDC}")
+            return
+
+        if not os.path.exists(args.predict_file):
+            print(f"{Colors.RED}❌ Prediction file not found: {args.predict_file}{Colors.ENDC}")
+            return
+
+        # Load model and make predictions
+        try:
+            print(f"{Colors.CYAN}📥 Loading model...{Colors.ENDC}")
+            config = {
+                'file_path': csv_path,
+                'target_column': target_column,
+                'model_type': 'Histogram',
+                'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu'
+            }
+            model = OptimizedDBNN(dataset_name=args.dataset, config=config)
+            model.load_model(model_path)
+            print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.ENDC}")
+
+            # Load dataset to reconstruct preprocessing structures
+            print(f"{Colors.CYAN}📥 Loading dataset to reconstruct preprocessing...{Colors.ENDC}")
+            model.target_column = target_column
+
+            # Save filtered data to temp file
+            import tempfile
+            temp_csv = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
+            df.to_csv(temp_csv.name, index=False)
+            temp_csv.close()
+
+            try:
+                model.load_data(file_path=temp_csv.name)
+            finally:
+                os.unlink(temp_csv.name)
+
+            print(f"{Colors.GREEN}✓ Dataset loaded: {len(model.X_tensor)} samples, {len(model.classes)} classes{Colors.ENDC}")
+
+            # Make predictions
+            output_dir = os.path.join(args.output_dir, f"{args.dataset}_predictions")
+            os.makedirs(output_dir, exist_ok=True)
+
+            print(f"\n{Colors.CYAN}🔮 Making predictions on: {args.predict_file}{Colors.ENDC}")
+            pred_results = model.predict_from_file(args.predict_file, output_path=output_dir)
+
+            if pred_results and 'predictions' in pred_results:
+                pred_df = pred_results['predictions']
+                print(f"\n{Colors.GREEN}✅ Predictions completed successfully!{Colors.ENDC}")
+                print(f"   Output directory: {output_dir}")
+                print(f"   Predictions file: {output_dir}/predictions.csv")
+                print(f"   Number of predictions: {len(pred_df)}")
+
+                # Show sample predictions
+                print(f"\n{Colors.CYAN}Sample predictions (first 10):{Colors.ENDC}")
+                sample_cols = ['predicted_class', 'confidence']
+                if 'true_class' in pred_df.columns:
+                    sample_cols.insert(0, 'true_class')
+                print(pred_df[sample_cols].head(10).to_string(index=False))
+
+                # Calculate and display confusion matrix if true labels exist
+                if 'true_class' in pred_df.columns and not args.no_confusion:
+                    print(f"\n{Colors.BOLD}📈 CONFUSION MATRIX - Prediction Performance{Colors.ENDC}")
+                    print(f"{'='*60}")
+
+                    # Get unique classes
+                    true_classes = pred_df['true_class'].astype(str)
+                    pred_classes = pred_df['predicted_class'].astype(str)
+                    unique_classes = sorted(set(true_classes) | set(pred_classes))
+
+                    # Create confusion matrix
+                    from sklearn.metrics import confusion_matrix
+                    cm = confusion_matrix(true_classes, pred_classes, labels=unique_classes)
+
+                    # Calculate per-class accuracy
+                    class_accuracies = {}
+                    for i, cls in enumerate(unique_classes):
+                        total = cm[i].sum()
+                        if total > 0:
+                            acc = cm[i, i] / total
+                            class_accuracies[cls] = acc
+
+                    # Overall accuracy
+                    total_correct = np.diag(cm).sum()
+                    total_samples = cm.sum()
+                    overall_acc = total_correct / total_samples if total_samples > 0 else 0
+
+                    # Determine column widths
+                    max_class_len = max(len(str(cls)) for cls in unique_classes)
+                    col_width = max(8, max_class_len + 2)
+
+                    # Print header
+                    print(f"\n{'True\\Pred':<{col_width}}", end='')
+                    for cls in unique_classes:
+                        print(f"{str(cls):<{col_width}}", end='')
+                    print(f"{'Class Acc':<12}")
+                    print("-" * (col_width + len(unique_classes) * col_width + 12))
+
+                    # Print each row
+                    for i, true_cls in enumerate(unique_classes):
+                        print(f"{Colors.BOLD}{str(true_cls):<{col_width}}{Colors.ENDC}", end='')
+
+                        for j, pred_cls in enumerate(unique_classes):
+                            count = cm[i, j]
+                            if i == j:
+                                if count > 0:
+                                    color = Colors.GREEN
+                                else:
+                                    color = Colors.RED
+                                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
+                            else:
+                                if count > 0:
+                                    color = Colors.RED
+                                else:
+                                    color = Colors.WHITE
+                                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
+
+                        acc = class_accuracies.get(true_cls, 0)
+                        if acc >= 0.9:
+                            acc_color = Colors.GREEN
+                        elif acc >= 0.7:
+                            acc_color = Colors.YELLOW
+                        else:
+                            acc_color = Colors.RED
+                        print(f"{acc_color}{acc:>6.2%}{Colors.ENDC}")
+
+                    print("-" * (col_width + len(unique_classes) * col_width + 12))
+                    if overall_acc >= 0.9:
+                        acc_color = Colors.GREEN
+                    elif overall_acc >= 0.7:
+                        acc_color = Colors.YELLOW
+                    else:
+                        acc_color = Colors.RED
+                    print(f"{Colors.BOLD}Overall Accuracy:{Colors.ENDC} {acc_color}{overall_acc:.2%}{Colors.ENDC}")
+                    print(f"{Colors.BOLD}Total Samples:{Colors.ENDC} {total_samples}")
+
+                    # Save confusion matrix as image
+                    try:
+                        import matplotlib.pyplot as plt
+                        import seaborn as sns
+
+                        plt.figure(figsize=(10, 8))
+                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                                   xticklabels=unique_classes, yticklabels=unique_classes,
+                                   annot_kws={'size': 12})
+                        plt.xlabel('Predicted Class', fontsize=12, fontweight='bold')
+                        plt.ylabel('True Class', fontsize=12, fontweight='bold')
+                        plt.title(f'Confusion Matrix - {args.dataset}\nPredictions on {os.path.basename(args.predict_file)}',
+                                 fontsize=14, fontweight='bold')
+
+                        cm_path = os.path.join(output_dir, 'confusion_matrix.png')
+                        plt.tight_layout()
+                        plt.savefig(cm_path, dpi=150, bbox_inches='tight')
+                        plt.close()
+                        print(f"\n{Colors.GREEN}✓ Confusion matrix saved to: {cm_path}{Colors.ENDC}")
+                    except Exception as e:
+                        print(f"{Colors.YELLOW}⚠️ Could not save confusion matrix image: {e}{Colors.ENDC}")
+
+                    # Show classification report
+                    print(f"\n{Colors.CYAN}📊 Classification Report:{Colors.ENDC}")
+                    from sklearn.metrics import classification_report
+                    report = classification_report(true_classes, pred_classes,
+                                                  target_names=unique_classes,
+                                                  digits=4)
+                    print(report)
+
+                    # Save classification report
+                    report_path = os.path.join(output_dir, 'classification_report.txt')
+                    with open(report_path, 'w') as f:
+                        f.write(f"Classification Report - {args.dataset}\n")
+                        f.write(f"Predictions on: {args.predict_file}\n")
+                        f.write(f"{'='*60}\n\n")
+                        f.write(report)
+                    print(f"{Colors.GREEN}✓ Classification report saved to: {report_path}{Colors.ENDC}")
+
+                print(f"\n{Colors.GREEN}🎉 Prediction complete!{Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}❌ Prediction failed{Colors.ENDC}")
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            return
+
+        return
+
+    # Training modes
+    print(f"\n{Colors.BOLD}{Colors.BLUE}🏋️ TRAINING MODE - {args.mode.upper()}{Colors.ENDC}")
+    print(f"{'='*60}")
+
+    # Create config with the found paths and target column
+    config = {
+        'file_path': csv_path,
+        'target_column': target_column,
+        'model_type': 'Histogram',
+        'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'training_params': {
+            'enable_adaptive': args.mode == 'adaptive'
+        }
+    }
+
+    # Create model
+    model = OptimizedDBNN(dataset_name=args.dataset, config=config)
+
+    if args.track_evolution:
+        model.enable_evolution_tracking()
+
+    # Load data (save filtered data to temp file for model loading)
+    print(f"{Colors.CYAN}📥 Loading data into model...{Colors.ENDC}")
+    import tempfile
+    temp_csv = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
+    df.to_csv(temp_csv.name, index=False)
+    temp_csv.close()
+
+    try:
+        model.load_data(file_path=temp_csv.name)
+    finally:
+        # Clean up temp file
+        os.unlink(temp_csv.name)
+
+    if args.mode == 'adaptive':
+        print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
+        results = model.adaptive_fit_predict()
+    elif args.mode == 'train':
+        print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
+        model.split_data()
+        results = model.fit_predict()
+    else:  # train_predict (default)
         if model.enable_adaptive:
+            print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
             results = model.adaptive_fit_predict()
         else:
+            print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
             model.split_data()
             results = model.fit_predict()
 
-        model.save_model(f'model_{args.dataset}.pkl')
-        print(f"\n{Colors.GREEN}✅ Training complete! Best accuracy: {results['best_accuracy']:.4f}{Colors.ENDC}")
-    else:
-        parser.print_help()
+    # Save model
+    os.makedirs("models", exist_ok=True)
+    model_path = f'models/{args.dataset}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+    model.save_model(model_path)
+    print(f"\n{Colors.GREEN}✅ Training complete! Best accuracy: {results['best_accuracy']:.4f}{Colors.ENDC}")
+    print(f"{Colors.GREEN}✓ Model saved to: {model_path}{Colors.ENDC}")
+
+    # If in train_predict mode, optionally make predictions
+    if args.mode == 'train_predict':
+        print(f"\n{Colors.CYAN}🔮 Model trained and saved. Use --mode predict for future predictions.{Colors.ENDC}")
 
 def interactive_mode():
     """
     Enhanced interactive mode with ALL GUI features for headless GPU servers
+    Dataset is primary - models are associated with their dataset
     """
     print(f"\n{Colors.BOLD}{Colors.BLUE}╔══════════════════════════════════════════════════════════════╗{Colors.ENDC}")
     print(f"{Colors.BOLD}{Colors.BLUE}║     🧠 CT-DBNN INTERACTIVE MODE - HEADLESS GPU SERVER READY    ║{Colors.ENDC}")
@@ -14377,9 +15236,9 @@ def interactive_mode():
             env_manager.install_dependencies(missing)
 
     # =========================================================================
-    # SECTION 2: DATASET SELECTION
+    # SECTION 2: DATASET SELECTION (PRIMARY)
     # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.CYAN}📊 DATASET SELECTION{Colors.ENDC}")
+    print(f"\n{Colors.BOLD}{Colors.CYAN}📊 DATASET SELECTION (Primary){Colors.ENDC}")
     print(f"{'='*60}")
 
     # Check for existing datasets
@@ -14398,6 +15257,7 @@ def interactive_mode():
         if choice.isdigit() and 1 <= int(choice) <= len(dataset_pairs):
             dataset_name, conf_path, csv_path = dataset_pairs[int(choice)-1]
             file_path = csv_path
+            config_path = conf_path
         elif choice.isdigit() and int(choice) == len(dataset_pairs) + 1:
             # Download UCI dataset
             print(f"\n{Colors.CYAN}Available UCI datasets:{Colors.ENDC}")
@@ -14414,6 +15274,7 @@ def interactive_mode():
                     data_dir = os.path.join('data', dataset_name)
                     os.makedirs(data_dir, exist_ok=True)
                     file_path = os.path.join(data_dir, f"{dataset_name}.csv")
+                    config_path = os.path.join(data_dir, f"{dataset_name}.conf")
                     df.to_csv(file_path, index=False)
                     print(f"{Colors.GREEN}✓ Dataset saved to {file_path}{Colors.ENDC}")
                 else:
@@ -14429,6 +15290,16 @@ def interactive_mode():
                 print(f"{Colors.RED}File not found: {file_path}{Colors.ENDC}")
                 return
             dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+            # Create default config path
+            data_dir = os.path.join('data', dataset_name)
+            os.makedirs(data_dir, exist_ok=True)
+            config_path = os.path.join(data_dir, f"{dataset_name}.conf")
+            # Move/copy file to standard location
+            if file_path != os.path.join(data_dir, f"{dataset_name}.csv"):
+                import shutil
+                shutil.copy2(file_path, os.path.join(data_dir, f"{dataset_name}.csv"))
+                file_path = os.path.join(data_dir, f"{dataset_name}.csv")
+                print(f"{Colors.GREEN}✓ Dataset copied to {file_path}{Colors.ENDC}")
     else:
         print(f"{Colors.YELLOW}No local datasets found{Colors.ENDC}")
         print(f"\nOptions:")
@@ -14452,6 +15323,7 @@ def interactive_mode():
                     data_dir = os.path.join('data', dataset_name)
                     os.makedirs(data_dir, exist_ok=True)
                     file_path = os.path.join(data_dir, f"{dataset_name}.csv")
+                    config_path = os.path.join(data_dir, f"{dataset_name}.conf")
                     df.to_csv(file_path, index=False)
                     print(f"{Colors.GREEN}✓ Dataset saved to {file_path}{Colors.ENDC}")
                 else:
@@ -14466,16 +15338,46 @@ def interactive_mode():
                 print(f"{Colors.RED}File not found: {file_path}{Colors.ENDC}")
                 return
             dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+            # Create default config path
+            data_dir = os.path.join('data', dataset_name)
+            os.makedirs(data_dir, exist_ok=True)
+            config_path = os.path.join(data_dir, f"{dataset_name}.conf")
+            # Move/copy file to standard location
+            if file_path != os.path.join(data_dir, f"{dataset_name}.csv"):
+                import shutil
+                shutil.copy2(file_path, os.path.join(data_dir, f"{dataset_name}.csv"))
+                file_path = os.path.join(data_dir, f"{dataset_name}.csv")
+                print(f"{Colors.GREEN}✓ Dataset copied to {file_path}{Colors.ENDC}")
+
+    print(f"\n{Colors.GREEN}✓ Dataset: {dataset_name}{Colors.ENDC}")
+    print(f"   Data file: {file_path}")
+    print(f"   Config file: {config_path}")
 
     # =========================================================================
-    # SECTION 3: FEATURE AND TARGET SELECTION
+    # SECTION 3: MAIN OPERATION MODE SELECTION
     # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.CYAN}🔧 FEATURE CONFIGURATION{Colors.ENDC}")
+    print(f"\n{Colors.BOLD}{Colors.CYAN}🎯 SELECT OPERATION MODE{Colors.ENDC}")
     print(f"{'='*60}")
+    print(f"\n{Colors.BOLD}Choose an option:{Colors.ENDC}")
+    print(f"   1. Train a new model on this dataset")
+    print(f"   2. Load existing model for this dataset and make predictions")
+    print(f"   3. Quick prediction (use latest model for this dataset)")
+    print(f"   4. Exit")
 
+    mode_choice = input(f"\n{Colors.CYAN}Select option (1-4) [1]: {Colors.ENDC}").strip() or "1"
+
+    if mode_choice == "4":
+        print(f"\n{Colors.GREEN}Goodbye!{Colors.ENDC}")
+        return
+
+    # =========================================================================
+    # SECTION 4: FEATURE AND TARGET SELECTION (for training or prediction)
+    # =========================================================================
     # Load data to examine columns
     df = pd.read_csv(file_path)
 
+    print(f"\n{Colors.BOLD}{Colors.CYAN}🔧 FEATURE CONFIGURATION{Colors.ENDC}")
+    print(f"{'='*60}")
     print(f"\n{Colors.GREEN}Dataset loaded: {len(df)} samples, {len(df.columns)} columns{Colors.ENDC}")
     print(f"\n{Colors.CYAN}Columns:{Colors.ENDC}")
     for i, col in enumerate(df.columns):
@@ -14541,341 +15443,495 @@ def interactive_mode():
         print(f"{Colors.GREEN}✓ Using all {len(selected_features)} features except target{Colors.ENDC}")
 
     # =========================================================================
-    # SECTION 4: MODEL CONFIGURATION
+    # OPTION 2 & 3: PREDICTION ONLY MODES
     # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.CYAN}⚙️ MODEL CONFIGURATION{Colors.ENDC}")
-    print(f"{'='*60}")
+    if mode_choice in ["2", "3"]:
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🔮 PREDICTION MODE - Using Existing Model{Colors.ENDC}")
+        print(f"{'='*60}")
 
-    # Model type
-    print(f"\n{Colors.BOLD}Model type:{Colors.ENDC}")
-    print(f"   1. Histogram (faster, discrete bins)")
-    print(f"   2. Gaussian (more precise, continuous)")
-    model_type_choice = input(f"\n{Colors.CYAN}Select model type (1-2) [1]: {Colors.ENDC}").strip() or "1"
-    model_type = "Histogram" if model_type_choice == "1" else "Gaussian"
+        # Find models for this dataset
+        models_dir = "models"
+        dataset_models = []
 
-    # Training mode
-    print(f"\n{Colors.BOLD}Training mode:{Colors.ENDC}")
-    print(f"   1. Standard training (fixed train/test split)")
-    print(f"   2. Adaptive training (active learning)")
-    mode_choice = input(f"\n{Colors.CYAN}Select mode (1-2) [2]: {Colors.ENDC}").strip() or "2"
-    use_adaptive = mode_choice == "2"
+        if os.path.exists(models_dir):
+            # Look for models that start with the dataset name
+            dataset_models = [f for f in os.listdir(models_dir)
+                            if f.endswith('.pkl') and f.startswith(dataset_name)]
 
-    # Hyperparameters
-    print(f"\n{Colors.BOLD}Hyperparameters (press Enter for defaults):{Colors.ENDC}")
+        if not dataset_models:
+            print(f"{Colors.RED}❌ No saved models found for dataset '{dataset_name}' in 'models' directory.{Colors.ENDC}")
+            print(f"{Colors.YELLOW}Please train a model first (Option 1).{Colors.ENDC}")
+            return
 
-    learning_rate = input(f"{Colors.CYAN}Learning rate [0.1]: {Colors.ENDC}").strip()
-    learning_rate = float(learning_rate) if learning_rate else 0.1
+        if mode_choice == "3":
+            # Quick prediction with the most recent model for this dataset
+            model_file = sorted(dataset_models)[-1]
+            model_path = os.path.join(models_dir, model_file)
+            print(f"{Colors.CYAN}📥 Using most recent model: {model_file}{Colors.ENDC}")
 
-    n_bins = input(f"{Colors.CYAN}Number of bins [128]: {Colors.ENDC}").strip()
-    n_bins = int(n_bins) if n_bins else 128
+            # Load the model
+            try:
+                # Create model with dataset info
+                model = OptimizedDBNN(dataset_name=dataset_name)
+                model.load_model(model_path)
+                print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.RED}❌ Error loading model: {e}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                return
+        else:
+            # Manual model selection
+            print(f"\n{Colors.GREEN}Models for dataset '{dataset_name}':{Colors.ENDC}")
+            for i, model_file in enumerate(dataset_models):
+                model_path = os.path.join(models_dir, model_file)
+                try:
+                    with open(model_path, 'rb') as f:
+                        model_state = pickle.load(f)
+                    classes = len(model_state.get('classes', []))
+                    # Try to get timestamp from filename
+                    timestamp = model_file.replace(f"{dataset_name}_", "").replace(".pkl", "")
+                    print(f"   {i+1:2d}. {model_file} (classes: {classes}, created: {timestamp})")
+                except:
+                    print(f"   {i+1:2d}. {model_file}")
 
-    test_size = input(f"{Colors.CYAN}Test size [0.2]: {Colors.ENDC}").strip()
-    test_size = float(test_size) if test_size else 0.2
+            model_choice = input(f"\n{Colors.CYAN}Select model (1-{len(dataset_models)}): {Colors.ENDC}").strip()
+            if not model_choice.isdigit() or not (1 <= int(model_choice) <= len(dataset_models)):
+                print(f"{Colors.RED}Invalid selection{Colors.ENDC}")
+                return
 
-    epochs = input(f"{Colors.CYAN}Epochs [100]: {Colors.ENDC}").strip()
-    epochs = int(epochs) if epochs else 100
+            model_file = dataset_models[int(model_choice)-1]
+            model_path = os.path.join(models_dir, model_file)
 
-    if use_adaptive:
-        adaptive_rounds = input(f"{Colors.CYAN}Adaptive rounds [10]: {Colors.ENDC}").strip()
-        adaptive_rounds = int(adaptive_rounds) if adaptive_rounds else 10
+            print(f"{Colors.CYAN}📥 Loading model: {model_file}{Colors.ENDC}")
 
-        initial_samples = input(f"{Colors.CYAN}Initial samples per class [5]: {Colors.ENDC}").strip()
-        initial_samples = int(initial_samples) if initial_samples else 5
+            try:
+                # Create model with dataset info
+                model = OptimizedDBNN(dataset_name=dataset_name)
+                model.load_model(model_path)
+                print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.RED}❌ Error loading model: {e}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                return
 
-        max_samples_round = input(f"{Colors.CYAN}Max samples per round [25]: {Colors.ENDC}").strip()
-        max_samples_round = int(max_samples_round) if max_samples_round else 25
+        # Now get prediction file
+        print(f"\n{Colors.BOLD}📁 Prediction file setup{Colors.ENDC}")
+        print(f"{Colors.CYAN}The prediction file should have the same features as training data.{Colors.ENDC}")
+        print(f"{Colors.CYAN}Target column is optional - if present, accuracy will be reported.{Colors.ENDC}")
+        print(f"{Colors.CYAN}Prediction results will include class probabilities and confidence scores.{Colors.ENDC}\n")
 
-    # Parallel processing
-    print(f"\n{Colors.BOLD}Parallel processing:{Colors.ENDC}")
-    parallel_choice = input(f"{Colors.CYAN}Enable parallel processing? (y/n) [y]: {Colors.ENDC}").strip().lower()
-    parallel = parallel_choice != 'n'
+        pred_file = input(f"{Colors.BOLD}Enter prediction file path: {Colors.ENDC}").strip()
 
-    if parallel:
-        n_jobs = input(f"{Colors.CYAN}Number of CPU cores [auto, {mp.cpu_count()}]: {Colors.ENDC}").strip()
-        n_jobs = int(n_jobs) if n_jobs and n_jobs.isdigit() else mp.cpu_count()
+        if not os.path.exists(pred_file):
+            print(f"{Colors.RED}❌ File not found: {pred_file}{Colors.ENDC}")
+            return
 
-        parallel_mode = input(f"{Colors.CYAN}Parallel mode (threads/processes) [threads]: {Colors.ENDC}").strip().lower()
-        parallel_mode = parallel_mode if parallel_mode in ['threads', 'processes'] else 'threads'
+        # Create output directory
+        output_dir = f"predictions/{dataset_name}_prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(output_dir, exist_ok=True)
 
-        batch_size = input(f"{Colors.CYAN}Parallel batch size [1000]: {Colors.ENDC}").strip()
-        batch_size = int(batch_size) if batch_size else 1000
+        print(f"\n{Colors.CYAN}🔮 Making predictions...{Colors.ENDC}")
 
-    # Visualization
-    print(f"\n{Colors.BOLD}Visualization:{Colors.ENDC}")
-    visualize = input(f"{Colors.CYAN}Generate visualizations? (y/n) [y]: {Colors.ENDC}").strip().lower()
-    visualize = visualize != 'n'
+        try:
+            # Make predictions
+            pred_results = model.predict_from_file(pred_file, output_path=output_dir)
 
-    track_evolution = False
-    if use_adaptive:
-        track_evolution = input(f"{Colors.CYAN}Track tensor evolution? (y/n) [y]: {Colors.ENDC}").strip().lower()
-        track_evolution = track_evolution != 'n'
+            if pred_results and 'predictions' in pred_results:
+                pred_df = pred_results['predictions']
+                print(f"\n{Colors.GREEN}✅ Predictions completed successfully!{Colors.ENDC}")
+                print(f"   Output directory: {output_dir}")
+                print(f"   Predictions file: {output_dir}/predictions.csv")
+                print(f"   Number of predictions: {len(pred_df)}")
+
+                # Show sample predictions
+                print(f"\n{Colors.CYAN}Sample predictions (first 10):{Colors.ENDC}")
+                sample_cols = ['predicted_class', 'confidence']
+                if 'true_class' in pred_df.columns:
+                    sample_cols.insert(0, 'true_class')
+                print(pred_df[sample_cols].head(10).to_string(index=False))
+
+                # Show class probability columns
+                prob_cols = [col for col in pred_df.columns if col.startswith('prob_')]
+                if prob_cols:
+                    print(f"\n{Colors.CYAN}Class probabilities available for: {', '.join(prob_cols)}{Colors.ENDC}")
+
+                # Calculate accuracy if true labels present
+                if 'true_class' in pred_df.columns:
+                    accuracy = (pred_df['predicted_class'] == pred_df['true_class']).mean()
+                    print(f"\n{Colors.GREEN}✓ Accuracy on prediction file: {accuracy:.4f}{Colors.ENDC}")
+
+                # Ask to open results
+                open_results = input(f"\n{Colors.CYAN}Open results directory? (y/n) [n]: {Colors.ENDC}").strip().lower()
+                if open_results == 'y':
+                    if os.name == 'nt':
+                        os.startfile(output_dir)
+                    elif sys.platform == 'darwin':
+                        subprocess.Popen(['open', output_dir])
+                    else:
+                        subprocess.Popen(['xdg-open', output_dir])
+
+                # Ask for another prediction
+                another = input(f"\n{Colors.CYAN}Make predictions on another file? (y/n) [n]: {Colors.ENDC}").strip().lower()
+                if another == 'y':
+                    # Go back to prediction mode with same dataset
+                    interactive_mode()  # Restart with same dataset? For simplicity, just restart
+                else:
+                    print(f"\n{Colors.GREEN}Prediction session complete!{Colors.ENDC}")
+                    return
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            return
 
     # =========================================================================
-    # SECTION 5: CREATE AND CONFIGURE MODEL
+    # OPTION 1: TRAIN NEW MODEL
     # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.BLUE}🚀 CREATING MODEL{Colors.ENDC}")
-    print(f"{'='*60}")
+    if mode_choice == "1":
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🏋️ TRAINING MODE - Train New Model{Colors.ENDC}")
+        print(f"{'='*60}")
 
-    # Build configuration
-    config = {
-        'file_path': file_path,
-        'target_column': target_column,
-        'model_type': model_type,
-        'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'parallel': parallel,
-        'n_jobs': n_jobs if parallel else 1,
-        'parallel_batch_size': batch_size if parallel else 1000,
-        'parallel_mode': parallel_mode if parallel else 'threads',
-        'training_params': {
-            'learning_rate': learning_rate,
-            'epochs': epochs,
-            'n_bins_per_dim': n_bins,
-            'test_fraction': test_size,
-            'enable_adaptive': use_adaptive,
-            'adaptive_rounds': adaptive_rounds if use_adaptive else 10,
-            'initial_samples': initial_samples if use_adaptive else 50,
-            'max_samples_per_round': max_samples_round if use_adaptive else 25,
-            'patience': 25
+        # =========================================================================
+        # MODEL CONFIGURATION
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.CYAN}⚙️ MODEL CONFIGURATION{Colors.ENDC}")
+        print(f"{'='*60}")
+
+        # Model type
+        print(f"\n{Colors.BOLD}Model type:{Colors.ENDC}")
+        print(f"   1. Histogram (faster, discrete bins)")
+        print(f"   2. Gaussian (more precise, continuous)")
+        model_type_choice = input(f"\n{Colors.CYAN}Select model type (1-2) [1]: {Colors.ENDC}").strip() or "1"
+        model_type = "Histogram" if model_type_choice == "1" else "Gaussian"
+
+        # Training mode
+        print(f"\n{Colors.BOLD}Training mode:{Colors.ENDC}")
+        print(f"   1. Standard training (fixed train/test split)")
+        print(f"   2. Adaptive training (active learning)")
+        training_mode = input(f"\n{Colors.CYAN}Select mode (1-2) [2]: {Colors.ENDC}").strip() or "2"
+        use_adaptive = training_mode == "2"
+
+        # Hyperparameters
+        print(f"\n{Colors.BOLD}Hyperparameters (press Enter for defaults):{Colors.ENDC}")
+
+        learning_rate = input(f"{Colors.CYAN}Learning rate [0.1]: {Colors.ENDC}").strip()
+        learning_rate = float(learning_rate) if learning_rate else 0.1
+
+        n_bins = input(f"{Colors.CYAN}Number of bins [128]: {Colors.ENDC}").strip()
+        n_bins = int(n_bins) if n_bins else 128
+
+        test_size = input(f"{Colors.CYAN}Test size [0.2]: {Colors.ENDC}").strip()
+        test_size = float(test_size) if test_size else 0.2
+
+        epochs = input(f"{Colors.CYAN}Epochs [100]: {Colors.ENDC}").strip()
+        epochs = int(epochs) if epochs else 100
+
+        if use_adaptive:
+            adaptive_rounds = input(f"{Colors.CYAN}Adaptive rounds [10]: {Colors.ENDC}").strip()
+            adaptive_rounds = int(adaptive_rounds) if adaptive_rounds else 10
+
+            initial_samples = input(f"{Colors.CYAN}Initial samples per class [5]: {Colors.ENDC}").strip()
+            initial_samples = int(initial_samples) if initial_samples else 5
+
+            max_samples_round = input(f"{Colors.CYAN}Max samples per round [25]: {Colors.ENDC}").strip()
+            max_samples_round = int(max_samples_round) if max_samples_round else 25
+
+        # Parallel processing
+        print(f"\n{Colors.BOLD}Parallel processing:{Colors.ENDC}")
+        parallel_choice = input(f"{Colors.CYAN}Enable parallel processing? (y/n) [y]: {Colors.ENDC}").strip().lower()
+        parallel = parallel_choice != 'n'
+
+        if parallel:
+            n_jobs = input(f"{Colors.CYAN}Number of CPU cores [auto, {mp.cpu_count()}]: {Colors.ENDC}").strip()
+            n_jobs = int(n_jobs) if n_jobs and n_jobs.isdigit() else mp.cpu_count()
+
+            parallel_mode = input(f"{Colors.CYAN}Parallel mode (threads/processes) [threads]: {Colors.ENDC}").strip().lower()
+            parallel_mode = parallel_mode if parallel_mode in ['threads', 'processes'] else 'threads'
+
+            batch_size = input(f"{Colors.CYAN}Parallel batch size [1000]: {Colors.ENDC}").strip()
+            batch_size = int(batch_size) if batch_size else 1000
+
+        # Visualization
+        print(f"\n{Colors.BOLD}Visualization:{Colors.ENDC}")
+        visualize = input(f"{Colors.CYAN}Generate visualizations? (y/n) [y]: {Colors.ENDC}").strip().lower()
+        visualize = visualize != 'n'
+
+        track_evolution = False
+        if use_adaptive:
+            track_evolution = input(f"{Colors.CYAN}Track tensor evolution? (y/n) [y]: {Colors.ENDC}").strip().lower()
+            track_evolution = track_evolution != 'n'
+
+        # =========================================================================
+        # CREATE AND CONFIGURE MODEL
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🚀 CREATING MODEL{Colors.ENDC}")
+        print(f"{'='*60}")
+
+        # Build configuration
+        config = {
+            'file_path': file_path,
+            'target_column': target_column,
+            'model_type': model_type,
+            'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'parallel': parallel,
+            'n_jobs': n_jobs if parallel else 1,
+            'parallel_batch_size': batch_size if parallel else 1000,
+            'parallel_mode': parallel_mode if parallel else 'threads',
+            'training_params': {
+                'learning_rate': learning_rate,
+                'epochs': epochs,
+                'n_bins_per_dim': n_bins,
+                'test_fraction': test_size,
+                'enable_adaptive': use_adaptive,
+                'adaptive_rounds': adaptive_rounds if use_adaptive else 10,
+                'initial_samples': initial_samples if use_adaptive else 50,
+                'max_samples_per_round': max_samples_round if use_adaptive else 25,
+                'patience': 25
+            }
         }
-    }
 
-    # Create model
-    model = OptimizedDBNN(dataset_name=dataset_name, config=config)
+        # Create model
+        model = OptimizedDBNN(dataset_name=dataset_name, config=config)
 
-    # Apply feature selection
-    model.selected_features = selected_features
+        # Apply feature selection
+        model.selected_features = selected_features
 
-    # Load data
-    print(f"{Colors.CYAN}📥 Loading data...{Colors.ENDC}")
-    model.load_data(file_path=file_path)
+        # Load data
+        print(f"{Colors.CYAN}📥 Loading data...{Colors.ENDC}")
+        model.load_data(file_path=file_path)
 
-    print(f"{Colors.GREEN}✓ Data loaded: {len(model.X_tensor)} samples, {len(model.classes)} classes{Colors.ENDC}")
+        print(f"{Colors.GREEN}✓ Data loaded: {len(model.X_tensor)} samples, {len(model.classes)} classes{Colors.ENDC}")
 
-    # =========================================================================
-    # SECTION 6: TRAINING
-    # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.BLUE}🏋️ TRAINING{Colors.ENDC}")
-    print(f"{'='*60}")
+        # =========================================================================
+        # TRAINING
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🏋️ TRAINING{Colors.ENDC}")
+        print(f"{'='*60}")
 
-    start_time = time.time()
+        start_time = time.time()
 
-    if track_evolution:
-        model.enable_evolution_tracking()
+        if track_evolution:
+            model.enable_evolution_tracking()
 
-    if use_adaptive:
-        print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
-        results = model.adaptive_fit_predict(max_rounds=adaptive_rounds)
-    else:
-        print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
-        model.split_data()
-        results = model.fit_predict()
+        if use_adaptive:
+            print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
+            results = model.adaptive_fit_predict(max_rounds=adaptive_rounds)
+        else:
+            print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
+            model.split_data()
+            results = model.fit_predict()
 
-    training_time = time.time() - start_time
+        training_time = time.time() - start_time
 
-    # =========================================================================
-    # SECTION 7: RESULTS DISPLAY
-    # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.BLUE}📊 RESULTS{Colors.ENDC}")
-    print(f"{'='*60}")
+        # =========================================================================
+        # RESULTS DISPLAY
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.BLUE}📊 RESULTS{Colors.ENDC}")
+        print(f"{'='*60}")
 
-    print(f"\n{Colors.GREEN}✅ Training completed in {training_time:.2f} seconds{Colors.ENDC}")
+        print(f"\n{Colors.GREEN}✅ Training completed in {training_time:.2f} seconds{Colors.ENDC}")
 
-    if use_adaptive:
-        print(f"\n{Colors.BOLD}Adaptive Training Results:{Colors.ENDC}")
-        print(f"   Best combined accuracy: {Colors.highlight_accuracy(results['best_accuracy'])}")
-        print(f"   Final total accuracy: {Colors.highlight_accuracy(results['final_total_accuracy'])}")
-        print(f"   Training samples: {len(results['train_indices'])}")
-        print(f"   Test samples: {len(results['test_indices'])}")
-        print(f"   Rounds completed: {len(results['round_stats'])}")
+        if use_adaptive:
+            print(f"\n{Colors.BOLD}Adaptive Training Results:{Colors.ENDC}")
+            print(f"   Best combined accuracy: {Colors.highlight_accuracy(results['best_accuracy'])}")
+            print(f"   Final total accuracy: {Colors.highlight_accuracy(results['final_total_accuracy'])}")
+            print(f"   Training samples: {len(results['train_indices'])}")
+            print(f"   Test samples: {len(results['test_indices'])}")
+            print(f"   Rounds completed: {len(results['round_stats'])}")
 
-        # Round summary
-        print(f"\n{Colors.CYAN}Round progression:{Colors.ENDC}")
-        print(f"{'Round':>6} {'Train Acc':>10} {'Test Acc':>10} {'Total Acc':>10} {'Train Size':>12}")
-        print(f"{'-'*56}")
-        for stat in results['round_stats']:
-            print(f"{stat['round']+1:6d} {stat['train_accuracy']:10.4f} {stat['test_accuracy']:10.4f} "
-                  f"{stat['total_accuracy']:10.4f} {stat['train_size']:12d}")
+            # Round summary
+            print(f"\n{Colors.CYAN}Round progression:{Colors.ENDC}")
+            print(f"{'Round':>6} {'Train Acc':>10} {'Test Acc':>10} {'Total Acc':>10} {'Train Size':>12}")
+            print(f"{'-'*56}")
+            for stat in results['round_stats']:
+                print(f"{stat['round']+1:6d} {stat['train_accuracy']:10.4f} {stat['test_accuracy']:10.4f} "
+                      f"{stat['total_accuracy']:10.4f} {stat['train_size']:12d}")
 
-        if 'evolution_history' in results and results['evolution_history']:
-            print(f"\n{Colors.GREEN}📸 Tensor evolution captured: {len(results['evolution_history'])} states{Colors.ENDC}")
-    else:
-        print(f"\n{Colors.BOLD}Standard Training Results:{Colors.ENDC}")
-        print(f"   Best accuracy: {Colors.highlight_accuracy(results['best_accuracy'])}")
-        print(f"   Final train accuracy: {Colors.highlight_accuracy(results['train_accuracy'])}")
-        print(f"   Final test accuracy: {Colors.highlight_accuracy(results['test_accuracy'])}")
+            if 'evolution_history' in results and results['evolution_history']:
+                print(f"\n{Colors.GREEN}📸 Tensor evolution captured: {len(results['evolution_history'])} states{Colors.ENDC}")
+        else:
+            print(f"\n{Colors.BOLD}Standard Training Results:{Colors.ENDC}")
+            print(f"   Best accuracy: {Colors.highlight_accuracy(results['best_accuracy'])}")
+            print(f"   Final train accuracy: {Colors.highlight_accuracy(results['train_accuracy'])}")
+            print(f"   Final test accuracy: {Colors.highlight_accuracy(results['test_accuracy'])}")
 
+        # =========================================================================
+        # CONFUSION MATRIX DISPLAY
+        # =========================================================================
+        print(f"\n{Colors.BOLD}📈 Confusion Matrices:{Colors.ENDC}")
+        print(f"{'='*60}")
 
-    # =========================================================================
-    # SECTION 8: CONFUSION MATRIX DISPLAY
-    # =========================================================================
-    print(f"\n{Colors.BOLD}📈 Confusion Matrices:{Colors.ENDC}")
-    print(f"{'='*60}")
-
-    # Training confusion matrix
-    if model.X_train is not None and len(model.X_train) > 0:
-        train_pred, _ = model.predict(model.X_train)
-        # Convert to CPU before numpy
-        model.print_colored_confusion_matrix(
-            model.y_train.cpu().numpy(),
-            train_pred.cpu().numpy(),
-            "Training Data"
-        )
-
-    # Test confusion matrix
-    if use_adaptive:
-        test_indices = list(set(range(len(model.X_tensor))) - set(results['train_indices']))
-        X_test = model.X_tensor[test_indices]
-        y_test = model.y_tensor[test_indices]
-
-        if len(X_test) > 0:
-            test_pred, _ = model.predict(X_test)
+        # Training confusion matrix
+        if model.X_train is not None and len(model.X_train) > 0:
+            train_pred, _ = model.predict(model.X_train)
             model.print_colored_confusion_matrix(
-                y_test.cpu().numpy(),
+                model.y_train.cpu().numpy(),
+                train_pred.cpu().numpy(),
+                "Training Data"
+            )
+
+        # Test confusion matrix
+        if use_adaptive:
+            test_indices = list(set(range(len(model.X_tensor))) - set(results['train_indices']))
+            X_test = model.X_tensor[test_indices]
+            y_test = model.y_tensor[test_indices]
+
+            if len(X_test) > 0:
+                test_pred, _ = model.predict(X_test)
+                model.print_colored_confusion_matrix(
+                    y_test.cpu().numpy(),
+                    test_pred.cpu().numpy(),
+                    "Test Data"
+                )
+        elif model.X_test is not None and len(model.X_test) > 0:
+            test_pred, _ = model.predict(model.X_test)
+            model.print_colored_confusion_matrix(
+                model.y_test.cpu().numpy(),
                 test_pred.cpu().numpy(),
                 "Test Data"
             )
-    elif model.X_test is not None and len(model.X_test) > 0:
-        test_pred, _ = model.predict(model.X_test)
-        model.print_colored_confusion_matrix(
-            model.y_test.cpu().numpy(),
-            test_pred.cpu().numpy(),
-            "Test Data"
-        )
 
+        # =========================================================================
+        # VISUALIZATION (if enabled)
+        # =========================================================================
+        if visualize:
+            print(f"\n{Colors.BOLD}🎨 GENERATING VISUALIZATIONS{Colors.ENDC}")
+            print(f"{'='*60}")
 
-    # =========================================================================
-    # SECTION 9: VISUALIZATION (if enabled)
-    # =========================================================================
-    if visualize:
-        print(f"\n{Colors.BOLD}🎨 GENERATING VISUALIZATIONS{Colors.ENDC}")
+            visualizer = OptimizedVisualizer(model)
+
+            # Prepare data for visualization
+            X_np = model.X_tensor.cpu().numpy()
+            y_np = model.y_tensor.cpu().numpy()
+
+            if use_adaptive:
+                train_mask = np.zeros(len(X_np), dtype=bool)
+                train_mask[results['train_indices']] = True
+                test_mask = ~train_mask
+
+                y_train_np = y_np[train_mask]
+                y_test_np = y_np[test_mask]
+
+                train_pred, _ = model.predict(model.X_tensor[train_mask])
+                test_pred, _ = model.predict(model.X_tensor[test_mask])
+
+                train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
+                test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
+            else:
+                y_train_np = model.y_train.cpu().numpy()
+                y_test_np = model.y_test.cpu().numpy()
+
+                train_pred, _ = model.predict(model.X_train)
+                test_pred, _ = model.predict(model.X_test)
+
+                train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
+                test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
+
+            if use_adaptive:
+                viz_history = results.get('round_stats', [])
+                evolution_history = results.get('evolution_history', [])
+            else:
+                viz_history = results.get('history', [])
+                evolution_history = []
+
+            visualizer.generate_all_visualizations(
+                viz_history,
+                X_np, y_np,
+                y_train_np, y_test_np,
+                train_pred_np,
+                test_pred_np,
+                evolution_history=evolution_history
+            )
+
+            if evolution_history and len(evolution_history) > 1:
+                print(f"\n{Colors.CYAN}🌐 Creating spherical tensor evolution...{Colors.ENDC}")
+                spherical_path = visualizer.spherical_viz.create_spherical_animation(evolution_history)
+                if spherical_path:
+                    print(f"   Saved to: {spherical_path}")
+
+        # =========================================================================
+        # SAVE MODEL
+        # =========================================================================
+        print(f"\n{Colors.BOLD}💾 SAVE MODEL{Colors.ENDC}")
         print(f"{'='*60}")
 
-        visualizer = OptimizedVisualizer(model)
+        save_model = input(f"{Colors.CYAN}Save trained model? (y/n) [y]: {Colors.ENDC}").strip().lower()
+        if save_model != 'n':
+            model_path = f"models/{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+            os.makedirs("models", exist_ok=True)
+            model.save_model(model_path)
+            print(f"{Colors.GREEN}✓ Model saved to: {model_path}{Colors.ENDC}")
 
-        # Prepare data for visualization - move to CPU and convert to numpy
-        X_np = model.X_tensor.cpu().numpy()  # Move to CPU first
-        y_np = model.y_tensor.cpu().numpy()  # Move to CPU first
+        # =========================================================================
+        # PREDICTION WITH TRAINED MODEL (OPTIONAL)
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.CYAN}🔮 PREDICTION OPTION - Make predictions with the trained model{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.ENDC}")
+
+        predict_choice = input(f"\n{Colors.BOLD}Do you want to make predictions on a file using this model?{Colors.ENDC} {Colors.CYAN}(y/n) [y]: {Colors.ENDC}").strip().lower()
+        predict_choice = predict_choice if predict_choice else 'y'
+
+        if predict_choice == 'y':
+            print(f"\n{Colors.CYAN}📁 Prediction file should have the same features as training data.{Colors.ENDC}\n")
+
+            pred_file = input(f"{Colors.BOLD}Enter prediction file path: {Colors.ENDC}").strip()
+
+            if os.path.exists(pred_file):
+                output_dir = f"predictions/{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                os.makedirs(output_dir, exist_ok=True)
+
+                print(f"\n{Colors.CYAN}🔮 Making predictions...{Colors.ENDC}")
+                try:
+                    pred_results = model.predict_from_file(pred_file, output_path=output_dir)
+
+                    if pred_results and 'predictions' in pred_results:
+                        pred_df = pred_results['predictions']
+                        print(f"\n{Colors.GREEN}✅ Predictions completed successfully!{Colors.ENDC}")
+                        print(f"   Output directory: {output_dir}")
+                        print(f"   Predictions file: {output_dir}/predictions.csv")
+                        print(f"   Number of predictions: {len(pred_df)}")
+
+                        print(f"\n{Colors.CYAN}Sample predictions (first 10):{Colors.ENDC}")
+                        sample_cols = ['predicted_class', 'confidence']
+                        if 'true_class' in pred_df.columns:
+                            sample_cols.insert(0, 'true_class')
+                        print(pred_df[sample_cols].head(10).to_string(index=False))
+
+                        if 'true_class' in pred_df.columns:
+                            accuracy = (pred_df['predicted_class'] == pred_df['true_class']).mean()
+                            print(f"\n{Colors.GREEN}✓ Accuracy: {accuracy:.4f}{Colors.ENDC}")
+                except Exception as e:
+                    print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}❌ File not found: {pred_file}{Colors.ENDC}")
+
+        # =========================================================================
+        # SUMMARY
+        # =========================================================================
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🎉 TRAINING SESSION COMPLETE{Colors.ENDC}")
+        print(f"{'='*60}")
+        print(f"\n{Colors.GREEN}Summary:{Colors.ENDC}")
+        print(f"   Dataset: {dataset_name}")
+        print(f"   Model type: {model_type}")
+        print(f"   Training mode: {'Adaptive' if use_adaptive else 'Standard'}")
+        print(f"   Parallel: {'Enabled' if parallel else 'Disabled'}")
+        print(f"   Training time: {training_time:.2f} seconds")
 
         if use_adaptive:
-            train_mask = np.zeros(len(X_np), dtype=bool)
-            train_mask[results['train_indices']] = True
-            test_mask = ~train_mask
-
-            y_train_np = y_np[train_mask]
-            y_test_np = y_np[test_mask]
-
-            # Get predictions - they are already on CPU from predict() method
-            train_pred, _ = model.predict(model.X_tensor[train_mask])
-            test_pred, _ = model.predict(model.X_tensor[test_mask])
-
-            # Convert to numpy (predictions are already on CPU)
-            train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
-            test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
+            print(f"   Final accuracy: {results['final_total_accuracy']:.4f}")
+            print(f"   Training samples: {len(results['train_indices'])}")
         else:
-            # Move to CPU and convert to numpy
-            y_train_np = model.y_train.cpu().numpy()
-            y_test_np = model.y_test.cpu().numpy()
+            print(f"   Test accuracy: {results['test_accuracy']:.4f}")
 
-            train_pred, _ = model.predict(model.X_train)
-            test_pred, _ = model.predict(model.X_test)
+        if visualize:
+            print(f"   Visualizations: visualizations/{dataset_name}/")
 
-            train_pred_np = train_pred.numpy() if torch.is_tensor(train_pred) else train_pred
-            test_pred_np = test_pred.numpy() if torch.is_tensor(test_pred) else test_pred
-
-        # Get history
-        if use_adaptive:
-            viz_history = results.get('round_stats', [])
-            evolution_history = results.get('evolution_history', [])
-        else:
-            viz_history = results.get('history', [])
-            evolution_history = []
-
-        # Generate visualizations
-        visualizer.generate_all_visualizations(
-            viz_history,
-            X_np, y_np,
-            y_train_np, y_test_np,
-            train_pred_np,
-            test_pred_np,
-            evolution_history=evolution_history
-        )
-
-        # Create spherical evolution if available
-        if evolution_history and len(evolution_history) > 1:
-            print(f"\n{Colors.CYAN}🌐 Creating spherical tensor evolution...{Colors.ENDC}")
-            spherical_path = visualizer.spherical_viz.create_spherical_animation(evolution_history)
-            if spherical_path:
-                print(f"   Saved to: {spherical_path}")
-
-            # Create side-by-side comparison
-            print(f"{Colors.CYAN}🔄 Creating side-by-side comparison...{Colors.ENDC}")
-            side_by_side_path = visualizer.spherical_viz.create_side_by_side_evolution(evolution_history)
-            if side_by_side_path:
-                print(f"   Saved to: {side_by_side_path}")
-
-    # =========================================================================
-    # SECTION 10: SAVE MODEL
-    # =========================================================================
-    print(f"\n{Colors.BOLD}💾 SAVE MODEL{Colors.ENDC}")
-    print(f"{'='*60}")
-
-    save_model = input(f"{Colors.CYAN}Save trained model? (y/n) [y]: {Colors.ENDC}").strip().lower()
-    if save_model != 'n':
-        model_path = f"models/{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
-        os.makedirs("models", exist_ok=True)
-        model.save_model(model_path)
-        print(f"{Colors.GREEN}✓ Model saved to: {model_path}{Colors.ENDC}")
-
-    # =========================================================================
-    # SECTION 11: PREDICTION (optional)
-    # =========================================================================
-    print(f"\n{Colors.BOLD}🔮 PREDICTION{Colors.ENDC}")
-    print(f"{'='*60}")
-
-    predict = input(f"{Colors.CYAN}Make predictions on a file? (y/n) [n]: {Colors.ENDC}").strip().lower()
-    if predict == 'y':
-        pred_file = input(f"{Colors.CYAN}Enter prediction file path: {Colors.ENDC}").strip()
-        if os.path.exists(pred_file):
-            output_dir = f"predictions/{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            os.makedirs(output_dir, exist_ok=True)
-
-            print(f"{Colors.CYAN}🔮 Making predictions...{Colors.ENDC}")
-            results = model.predict_from_file(pred_file, output_path=output_dir)
-
-            if results and 'predictions' in results:
-                print(f"{Colors.GREEN}✓ Predictions saved to: {output_dir}{Colors.ENDC}")
-
-                # Show sample predictions
-                df = pd.read_csv(pred_file)
-                pred_df = results['predictions']
-                print(f"\n{Colors.CYAN}Sample predictions (first 5):{Colors.ENDC}")
-                print(pred_df[['predicted_class', 'confidence']].head())
-        else:
-            print(f"{Colors.RED}File not found: {pred_file}{Colors.ENDC}")
-
-    # =========================================================================
-    # SECTION 12: SUMMARY
-    # =========================================================================
-    print(f"\n{Colors.BOLD}{Colors.BLUE}🎉 INTERACTIVE SESSION COMPLETE{Colors.ENDC}")
-    print(f"{'='*60}")
-    print(f"\n{Colors.GREEN}Summary:{Colors.ENDC}")
-    print(f"   Dataset: {dataset_name}")
-    print(f"   Model type: {model_type}")
-    print(f"   Training mode: {'Adaptive' if use_adaptive else 'Standard'}")
-    print(f"   Parallel: {'Enabled' if parallel else 'Disabled'}")
-    print(f"   Training time: {training_time:.2f} seconds")
-
-    if use_adaptive:
-        print(f"   Final accuracy: {results['final_total_accuracy']:.4f}")
-        print(f"   Training samples: {len(results['train_indices'])}")
-    else:
-        print(f"   Test accuracy: {results['test_accuracy']:.4f}")
-
-    if visualize:
-        print(f"   Visualizations: visualizations/{dataset_name}/")
-
-    print(f"\n{Colors.CYAN}Tip: Run with --gui for graphical interface{Colors.ENDC}")
-    print(f"      Run with --help for command-line options{Colors.ENDC}")
+        print(f"\n{Colors.CYAN}Tip: Run with --gui for graphical interface{Colors.ENDC}")
+        print(f"      Run with --help for command-line options{Colors.ENDC}")
 
 
 # Also add this function to handle stop signal for headless mode
@@ -14940,5 +15996,11 @@ def display_dataset_menu(dataset_pairs: List[Tuple[str, str, str]]):
 
 
 if __name__ == "__main__":
-    main()
+    print("""
+Example Usage:
+python adbnn.py --dataset breast_cancer --mode adaptive
 
+ python adbnn.py --dataset breast_cancer --mode predict --predict-file data/breast_cancer/breast_cancer.cs
+
+    """)
+    main()
