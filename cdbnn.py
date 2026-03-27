@@ -1772,7 +1772,7 @@ class PredictionManager:
             'cluster_confidence': []
         }
 
-        # Collect targets and filenames for CSV output
+        # Collect metadata for CSV output
         collected_targets = []
         collected_filenames = []
         collected_filepaths = []
@@ -1835,7 +1835,7 @@ class PredictionManager:
                         logger.warning(f"Error extracting quality metrics for sample {i}: {e}")
                         quality_metrics_list.append({})
 
-            # Collect target labels and filenames for CSV output
+            # Collect metadata for CSV output
             start_idx = batch_idx * batch_size
             for i in range(original_batch_size):
                 actual_idx = start_idx + i
@@ -1909,8 +1909,11 @@ class PredictionManager:
         else:
             logger.info(f"All images are from unknown class (single folder)")
 
-        # Save predictions with target column
-        self._save_predictions(all_predictions, output_csv, targets=collected_targets)
+        # Save predictions with file metadata and target column
+        self._save_predictions(all_predictions, output_csv,
+                              targets=collected_targets,
+                              filenames=collected_filenames,
+                              filepaths=collected_filepaths)
 
         # Copy configuration
         self._copy_config_to_output()
@@ -1921,9 +1924,9 @@ class PredictionManager:
             logger.info(f"Features shape: {all_predictions['features'].shape}")
         logger.info(f"Results saved to: {output_csv}")
 
-        # Log target info for debugging
-        if len(set(collected_targets)) <= 10:  # Only log if not too many classes
-            logger.info(f"Target classes in CSV: {sorted(set(collected_targets))}")
+        # Log metadata info
+        logger.info(f"Columns: features (0-{all_predictions['features'].shape[1]-1}), domain features, quality metrics, predictions, and file metadata")
+        logger.info(f"Sample files: {collected_filenames[:3]}..." if len(collected_filenames) > 3 else f"Files: {collected_filenames}")
 
         return all_predictions
 
@@ -2212,8 +2215,9 @@ class PredictionManager:
         logger.info(f"Configuration created at {output_path}")
         logger.info(f"CSV columns ({len(column_names)}): {', '.join(column_names[:5])}...")
 
-    def _save_predictions(self, predictions: Dict, output_csv: str, targets: Optional[List[str]] = None):
-        """Save predictions with rich domain-specific information including target labels"""
+    def _save_predictions(self, predictions: Dict, output_csv: str, targets: Optional[List[str]] = None,
+                          filenames: Optional[List[str]] = None, filepaths: Optional[List[str]] = None):
+        """Save predictions with rich domain-specific information including file metadata"""
         data = {}
 
         # Basic compressed features
@@ -2249,7 +2253,11 @@ class PredictionManager:
         if 'cluster_confidence' in predictions:
             data['cluster_confidence'] = predictions['cluster_confidence']
 
-        # ADD BACK: Target column (class labels)
+        # Add file metadata for tracing
+        if filenames is not None:
+            data['filename'] = filenames
+        if filepaths is not None:
+            data['filepath'] = filepaths
         if targets is not None:
             data['target'] = targets
 
