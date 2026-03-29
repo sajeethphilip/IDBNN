@@ -1457,6 +1457,54 @@ class BaseAutoencoder(nn.Module):
 
         return output
 
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor, return_features: bool = True) -> Dict[str, torch.Tensor]:
+        """Deterministic prediction method for inference"""
+        self.eval()
+
+        original_batch_size = x.size(0)
+        duplicated = False
+
+        if original_batch_size == 1:
+            x = torch.cat([x, x], dim=0)
+            duplicated = True
+
+        embedding = self.encode(x)
+
+        if self._is_feature_selection_frozen and self._selected_feature_indices is not None:
+            selected_embedding = embedding[:, self._selected_feature_indices]
+        else:
+            selected_embedding = embedding
+
+        compressed = self.feature_compressor(selected_embedding)
+        decompressed = self.feature_decompressor(compressed)
+
+        output = {
+            'compressed_embedding': self._fix_tensor_dim(compressed, original_batch_size, duplicated)
+        }
+
+        if self.training_phase == 2:
+            if self.use_class_encoding and hasattr(self, 'classifier') and self.classifier is not None:
+                logits = self.classifier(compressed)
+                output.update({
+                    'class_logits': self._fix_tensor_dim(logits, original_batch_size, duplicated),
+                    'class_predictions': self._fix_tensor_dim(logits.argmax(dim=1), original_batch_size, duplicated),
+                    'class_probabilities': self._fix_tensor_dim(F.softmax(logits, dim=1), original_batch_size, duplicated)
+                })
+
+            if self.use_kl_divergence and hasattr(self, 'cluster_centers') and self.cluster_centers is not None:
+                distances = torch.cdist(compressed, self.cluster_centers)
+                q = 1.0 / (1.0 + distances ** 2)
+                q = q / (q.sum(dim=1, keepdim=True) + 1e-8)
+
+                output.update({
+                    'cluster_probabilities': self._fix_tensor_dim(q, original_batch_size, duplicated),
+                    'cluster_assignments': self._fix_tensor_dim(q.argmax(dim=1), original_batch_size, duplicated),
+                    'cluster_confidence': self._fix_tensor_dim(q.max(dim=1)[0], original_batch_size, duplicated)
+                })
+
+        return output
+
     def _fix_tensor_dim(self, tensor: torch.Tensor, target_batch_size: int, duplicated: bool) -> torch.Tensor:
         if duplicated and tensor.size(0) > target_batch_size:
             tensor = tensor[:target_batch_size]
@@ -1542,15 +1590,7 @@ class BaseAutoencoder(nn.Module):
         logger.info(f"Features saved to {output_path}")
 
 # =============================================================================
-# PREDICTION MANAGER
-# =============================================================================
-
-# =============================================================================
-# PREDICTION MANAGER - FIXED VERSION
-# =============================================================================
-
-# =============================================================================
-# PREDICTION MANAGER - FIXED VERSION
+# PREDICTION MANAGER - FIXED VERSION WITH COMPLETE STATE RESTORATION
 # =============================================================================
 
 class PredictionManager:
@@ -1590,20 +1630,42 @@ class PredictionManager:
         self.domain_processor = None
         self.domain_info = {'domain': 'general', 'domain_config': {}}
 
-        # Load the model (this will also load domain info)
+        # CRITICAL: Set deterministic behavior for reproducible predictions
+        self._set_deterministic()
+
+        # Load the model with complete state
         self.model = None
         self._load_model()
 
         self.image_processor = ImageProcessor(config.input_size)
         self.transform = self._build_transform()
 
+        # CRITICAL: Set model to eval mode for prediction
+        if self.model:
+            self.model.eval()
+            self.model.to(self.device)
+
+    def _set_deterministic(self):
+        """Set deterministic behavior for reproducible predictions"""
+        # Set random seeds for reproducibility
+        torch.manual_seed(42)
+        np.random.seed(42)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+
+        # Enable deterministic algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     def _load_model(self):
-        """Load model with domain information embedded in checkpoint"""
-        # First create the base model
+        """Load model with COMPLETE training state including feature selection"""
+        # First create the base model with the same configuration
         self.model = BaseAutoencoder(self.config)
 
-        # Set training phase to 2 to initialize classifier and cluster centers
-        self.model.set_training_phase(2)
+        # CRITICAL: Set training phase to match saved model
+        # We'll set this after loading
 
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
 
@@ -1647,21 +1709,29 @@ class PredictionManager:
                 checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
 
                 # =====================================================================
-                # CRITICAL: Load domain information from checkpoint
+                # CRITICAL: Load ALL training state information
                 # =====================================================================
+
+                # 1. Load domain information
                 self.domain_info = {
                     'domain': checkpoint.get('domain', 'general'),
                     'domain_config': checkpoint.get('domain_config', {}),
                     'model_metadata': checkpoint.get('model_metadata', {})
                 }
 
-                # Initialize domain processor if domain is specified and not general
+                # 2. Get training phase from checkpoint
+                checkpoint_phase = checkpoint.get('phase', 2)  # Default to 2 for prediction
+
+                # 3. Set model's training phase (this initializes classifier and cluster centers)
+                self.model.set_training_phase(checkpoint_phase)
+
+                # 4. Initialize domain processor if domain is specified
                 domain = self.domain_info['domain']
                 if domain != 'general':
                     self._init_domain_processor(domain, self.domain_info['domain_config'])
                     logger.info(f"Initialized {domain} domain processor from saved model")
 
-                # Load model state dict
+                # 5. Load model state dict
                 model_state = self.model.state_dict()
                 filtered_state = {}
                 skipped_keys = []
@@ -1682,23 +1752,119 @@ class PredictionManager:
                 # Load the state dict
                 self.model.load_state_dict(filtered_state, strict=False)
 
-                # Load feature selection information
+                # =====================================================================
+                # CRITICAL: Load and FREEZE feature selection information
+                # =====================================================================
                 if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
                     indices = checkpoint['selected_feature_indices']
+
+                    # Convert to torch tensor on the correct device
                     if isinstance(indices, torch.Tensor):
                         self.model._selected_feature_indices = indices.to(self.device)
                     else:
                         self.model._selected_feature_indices = torch.tensor(indices, device=self.device)
-                    self.model._is_feature_selection_frozen = True
-                    logger.info(f"Loaded feature selection with {len(indices)} features")
 
-                # Set the model's training phase
-                checkpoint_phase = checkpoint.get('phase', 1)
-                self.model.set_training_phase(checkpoint_phase)
+                    # CRITICAL: Set the freeze flag to True
+                    self.model._is_feature_selection_frozen = True
+
+                    # Also load feature importance scores if available
+                    if 'feature_importance_scores' in checkpoint and checkpoint['feature_importance_scores'] is not None:
+                        scores = checkpoint['feature_importance_scores']
+                        if isinstance(scores, torch.Tensor):
+                            self.model._feature_importance_scores = scores.to(self.device)
+                        else:
+                            self.model._feature_importance_scores = torch.tensor(scores, device=self.device)
+
+                    logger.info(f"✓ Feature selection FROZEN with {len(indices)} features")
+                    logger.info(f"  Selected feature indices: {indices[:10]}{'...' if len(indices) > 10 else ''}")
+
+                    # Log feature selection info from metadata
+                    if 'feature_selection_info' in checkpoint:
+                        fs_info = checkpoint['feature_selection_info']
+                        logger.info(f"  Selection method: {fs_info.get('selection_method', 'unknown')}")
+                        logger.info(f"  Number of selected features: {fs_info.get('num_selected_features', len(indices))}")
+                else:
+                    logger.warning("⚠️ No feature selection indices found in checkpoint!")
+                    logger.warning("  This may cause inconsistent predictions!")
+                    logger.warning("  The model will use all compressed features instead of selected subset.")
+
+                    # Try to infer if feature selection should be frozen
+                    if checkpoint_phase >= 2:
+                        logger.warning("  Phase 2 model should have frozen features, but none were saved.")
+                        logger.warning("  Consider retraining the model to save feature selection info.")
+
+                # =====================================================================
+                # Load cluster centers if using KL divergence
+                # =====================================================================
+                if self.config.use_kl_divergence and hasattr(self.model, 'cluster_centers'):
+                    if 'cluster_centers' in checkpoint and checkpoint['cluster_centers'] is not None:
+                        cluster_centers = checkpoint['cluster_centers']
+                        if isinstance(cluster_centers, torch.Tensor):
+                            self.model.cluster_centers = nn.Parameter(cluster_centers.to(self.device))
+                        else:
+                            self.model.cluster_centers = nn.Parameter(torch.tensor(cluster_centers, device=self.device))
+                        logger.info(f"✓ Loaded cluster centers with shape {self.model.cluster_centers.shape}")
+                    else:
+                        logger.warning("⚠️ No cluster centers found in checkpoint!")
+
+                # =====================================================================
+                # Load classifier weights if using class encoding
+                # =====================================================================
+                if self.config.use_class_encoding and hasattr(self.model, 'classifier'):
+                    if 'classifier_state' in checkpoint and checkpoint['classifier_state'] is not None:
+                        try:
+                            classifier_state = checkpoint['classifier_state']
+                            self.model.classifier.load_state_dict(classifier_state)
+                            logger.info(f"✓ Loaded classifier state")
+                        except Exception as e:
+                            logger.warning(f"Could not load classifier state: {e}")
+                    else:
+                        logger.warning("⚠️ No classifier state found in checkpoint!")
+
+                # 6. Load metadata for debugging
+                if 'model_metadata' in checkpoint:
+                    metadata = checkpoint['model_metadata']
+                    logger.info(f"Model metadata: version={metadata.get('version', 'unknown')}, "
+                              f"training_date={metadata.get('training_date', 'unknown')}")
+
+                    # Verify configuration matches
+                    saved_feature_dims = metadata.get('feature_dims', self.config.feature_dims)
+                    saved_compressed_dims = metadata.get('compressed_dims', self.config.compressed_dims)
+                    saved_use_kl = metadata.get('use_kl_divergence', self.config.use_kl_divergence)
+                    saved_use_class = metadata.get('use_class_encoding', self.config.use_class_encoding)
+
+                    if saved_feature_dims != self.config.feature_dims:
+                        logger.warning(f"Feature dim mismatch: saved={saved_feature_dims}, current={self.config.feature_dims}")
+
+                    if saved_compressed_dims != self.config.compressed_dims:
+                        logger.warning(f"Compressed dim mismatch: saved={saved_compressed_dims}, current={self.config.compressed_dims}")
+
+                    # CRITICAL: Ensure KL divergence and class encoding flags match
+                    if saved_use_kl != self.config.use_kl_divergence:
+                        logger.warning(f"KL divergence mismatch: saved={saved_use_kl}, current={self.config.use_kl_divergence}")
+                        # Override config to match saved model
+                        self.config.use_kl_divergence = saved_use_kl
+                        logger.info(f"  Overriding config to match saved model")
+
+                    if saved_use_class != self.config.use_class_encoding:
+                        logger.warning(f"Class encoding mismatch: saved={saved_use_class}, current={self.config.use_class_encoding}")
+                        # Override config to match saved model
+                        self.config.use_class_encoding = saved_use_class
+                        logger.info(f"  Overriding config to match saved model")
 
                 logger.info(f"Successfully loaded model from {best_path}")
                 logger.info(f"Model domain: {self.domain_info['domain']}")
                 logger.info(f"Model phase: {checkpoint_phase}")
+                logger.info(f"Feature selection frozen: {self.model._is_feature_selection_frozen}")
+
+                # Final verification
+                if not self.model._is_feature_selection_frozen:
+                    logger.error("❌ CRITICAL: Feature selection is NOT frozen!")
+                    logger.error("  Predictions may be inconsistent across runs!")
+                    logger.error("  Please check that the checkpoint contains 'selected_feature_indices'")
+                else:
+                    logger.info("✓ Feature selection is properly frozen - predictions will be consistent")
+
                 return
 
             except Exception as e:
@@ -1709,6 +1875,9 @@ class PredictionManager:
         logger.warning(f"No valid model found. Using random weights - predictions will be random!")
         logger.warning(f"Please train the model first with: python cdbnn.py --mode train --data_name {self.config.dataset_name} --data_path <path>")
 
+        # Initialize with random weights but ensure deterministic
+        self.model.set_training_phase(2)
+        self.model._is_feature_selection_frozen = False  # Mark as not frozen
         self.model.eval()
         self.model.to(self.device)
 
@@ -1745,7 +1914,14 @@ class PredictionManager:
     @torch.no_grad()
     @memory_efficient
     def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = 128):
-        """Predict images with domain-specific processing if available"""
+        """Predict images with COMPLETE state restoration for reproducibility"""
+        # CRITICAL: Set deterministic behavior again before prediction
+        self._set_deterministic()
+
+        # Ensure model is in eval mode
+        if self.model:
+            self.model.eval()
+
         image_files, class_labels, original_filenames = self._get_image_files(data_path)
         if not image_files:
             logger.warning(f"No image files found in {data_path}")
@@ -1798,8 +1974,9 @@ class PredictionManager:
             # Get model predictions
             output = self.model(batch_tensor)
 
-            # Extract features
+            # Extract features - CRITICAL: Use same method as training
             if self.model._is_feature_selection_frozen and self.model._selected_feature_indices is not None:
+                # Use selected features exactly as in training
                 features = output['selected_embedding'].float().cpu().numpy()
             else:
                 features = output['compressed_embedding'].float().cpu().numpy()
@@ -2351,13 +2528,13 @@ class Trainer:
         else:  # Phase 2
             # Phase 2: Prefer higher accuracy, then lower loss
             if current_accuracy is not None:
-                # Check if accuracy improved
+                # Check if accuracy improved (STRICTLY greater)
                 if current_accuracy > self.best_phase2_accuracy:
                     return True
-                # If accuracy is the same, check if loss improved
+                # If accuracy is the same (within tolerance), check if loss improved
                 elif abs(current_accuracy - self.best_phase2_accuracy) < 1e-6:
                     return current_loss < self.best_phase2_loss
-                # Accuracy is worse
+                # Accuracy is worse - definitely not better
                 return False
             # If no accuracy (unlikely in Phase 2), fall back to loss
             return current_loss < self.best_phase2_loss
@@ -2496,11 +2673,36 @@ class Trainer:
                 if val_acc:
                     self.prev_val_acc = val_acc
 
-                # Check if model improved using the loaded best metrics
-                is_better = self._is_better(val_loss, val_acc, phase)
+                # =================================================================
+                # CRITICAL FIX: Check if model improved
+                # =================================================================
+                is_better = False
+                improvement_reason = ""
+
+                if phase == 2 and val_acc is not None:
+                    # Check accuracy improvement (strict)
+                    if val_acc > self.best_phase2_accuracy:
+                        is_better = True
+                        improvement_reason = f"accuracy improved from {self.best_phase2_accuracy:.2%} to {val_acc:.2%}"
+                    # Check if accuracy is equal but loss improved
+                    elif abs(val_acc - self.best_phase2_accuracy) < 1e-6 and val_loss < self.best_phase2_loss:
+                        is_better = True
+                        improvement_reason = f"same accuracy, loss improved from {self.best_phase2_loss:.6f} to {val_loss:.6f}"
+                    else:
+                        # Log why it's NOT better
+                        if val_acc < self.best_phase2_accuracy:
+                            logger.debug(f"Model not better: accuracy {val_acc:.2%} < best {self.best_phase2_accuracy:.2%}")
+                        elif val_loss >= self.best_phase2_loss:
+                            logger.debug(f"Model not better: loss {val_loss:.6f} >= best {self.best_phase2_loss:.6f}")
+                elif phase == 1:
+                    if val_loss < self.best_phase1_loss:
+                        is_better = True
+                        improvement_reason = f"loss improved from {self.best_phase1_loss:.6f} to {val_loss:.6f}"
+                    else:
+                        logger.debug(f"Model not better: loss {val_loss:.6f} >= best {self.best_phase1_loss:.6f}")
 
                 if is_better:
-                    # Update best metrics (this will preserve the actual improvement)
+                    # Update best metrics
                     self._update_best_metrics(val_loss, val_acc, epoch, phase)
                     # Save checkpoint with is_best=True
                     self._save_checkpoint(epoch, phase, val_loss, val_acc, is_best=True)
@@ -2508,11 +2710,20 @@ class Trainer:
 
                     # Print improvement message
                     if phase == 2 and val_acc:
-                        print(f"\n{Colors.GREEN}✓ New best model saved! Accuracy: {val_acc:.2%} (was {self.best_phase2_accuracy:.2%}), Loss: {val_loss:.6f} (was {self.best_phase2_loss:.6f}){Colors.ENDC}")
+                        print(f"\n{Colors.GREEN}✓ New best model saved! {improvement_reason}{Colors.ENDC}")
+                    elif phase == 1:
+                        print(f"\n{Colors.GREEN}✓ New best model saved! {improvement_reason}{Colors.ENDC}")
                 else:
                     patience_counter += 1
                     # Still save latest checkpoint for resuming, but not as best
                     self._save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+
+                    # Optionally show why it wasn't saved
+                    if phase == 2 and val_acc:
+                        if val_acc < self.best_phase2_accuracy:
+                            print(f"\n{Colors.YELLOW}⚠ Model not saved: accuracy {val_acc:.2%} < best {self.best_phase2_accuracy:.2%}{Colors.ENDC}")
+                        elif val_loss >= self.best_phase2_loss:
+                            print(f"\n{Colors.YELLOW}⚠ Model not saved: loss {val_loss:.6f} >= best {self.best_phase2_loss:.6f}{Colors.ENDC}")
 
                 # Print epoch summary with colors
                 if avg_train_acc is not None:
@@ -2532,15 +2743,43 @@ class Trainer:
                           f"{self.optimizer.param_groups[0]['lr']:.2e}")
             else:
                 # No validation loader - Phase 1 with no validation
-                is_better = avg_train_loss < self.best_phase1_loss
+                # =================================================================
+                # CRITICAL FIX: Check if model improved for training-only
+                # =================================================================
+                is_better = False
+
+                if phase == 2 and avg_train_acc is not None:
+                    if avg_train_acc > self.best_phase2_accuracy:
+                        is_better = True
+                        improvement_reason = f"accuracy improved from {self.best_phase2_accuracy:.2%} to {avg_train_acc:.2%}"
+                    elif abs(avg_train_acc - self.best_phase2_accuracy) < 1e-6 and avg_train_loss < self.best_phase2_loss:
+                        is_better = True
+                        improvement_reason = f"same accuracy, loss improved from {self.best_phase2_loss:.6f} to {avg_train_loss:.6f}"
+                elif phase == 1:
+                    if avg_train_loss < self.best_phase1_loss:
+                        is_better = True
+                        improvement_reason = f"loss improved from {self.best_phase1_loss:.6f} to {avg_train_loss:.6f}"
 
                 if is_better:
                     self._update_best_metrics(avg_train_loss, avg_train_acc, epoch, phase)
                     self._save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=True)
                     patience_counter = 0
+
+                    # Print improvement message
+                    if phase == 2 and avg_train_acc:
+                        print(f"\n{Colors.GREEN}✓ New best model saved! {improvement_reason}{Colors.ENDC}")
+                    elif phase == 1:
+                        print(f"\n{Colors.GREEN}✓ New best model saved! {improvement_reason}{Colors.ENDC}")
                 else:
                     patience_counter += 1
                     self._save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
+
+                    # Optionally show why it wasn't saved
+                    if phase == 2 and avg_train_acc:
+                        if avg_train_acc < self.best_phase2_accuracy:
+                            print(f"\n{Colors.YELLOW}⚠ Model not saved: accuracy {avg_train_acc:.2%} < best {self.best_phase2_accuracy:.2%}{Colors.ENDC}")
+                        elif avg_train_loss >= self.best_phase2_loss:
+                            print(f"\n{Colors.YELLOW}⚠ Model not saved: loss {avg_train_loss:.6f} >= best {self.best_phase2_loss:.6f}{Colors.ENDC}")
 
                 # Print epoch summary without validation
                 if avg_train_acc is not None:
@@ -2590,7 +2829,7 @@ class Trainer:
         return phase_history
 
     def _save_checkpoint(self, epoch: int, phase: int, loss: float, accuracy: Optional[float], is_best: bool = False):
-        """Save checkpoint with domain information embedded"""
+        """Save checkpoint with COMPLETE state for reproduction and resuming"""
 
         # Get domain configuration from the model's config
         domain_config = {}
@@ -2653,21 +2892,73 @@ class Trainer:
                     "measure_dimensions": getattr(self.config, 'measure_dimensions', True)
                 }
 
+        # CRITICAL: Save classifier state separately for reliable restoration
+        classifier_state = None
+        if hasattr(self.model, 'classifier') and self.model.classifier is not None:
+            try:
+                classifier_state = self.model.classifier.state_dict()
+            except Exception as e:
+                logger.warning(f"Could not save classifier state: {e}")
+
+        # CRITICAL: Save cluster centers for KL divergence
+        cluster_centers = None
+        clustering_temperature = None
+        if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
+            cluster_centers = self.model.cluster_centers.data.clone()
+        if hasattr(self.model, 'clustering_temperature') and self.model.clustering_temperature is not None:
+            clustering_temperature = self.model.clustering_temperature.data.clone()
+
+        # Save random states for full reproducibility
+        random_state = {
+            'torch': torch.random.get_rng_state(),
+            'numpy': np.random.get_state(),
+            'python': None  # Python's random state can be saved if needed
+        }
+
+        # Add CUDA random state if available
+        if torch.cuda.is_available():
+            random_state['cuda'] = torch.cuda.get_rng_state_all()
+
+        # Save the configuration with all parameters
+        config_dict = self.config.to_dict()
+
+        # Add feature selection metadata
+        feature_selection_info = {
+            'is_frozen': self.model._is_feature_selection_frozen,
+            'num_selected_features': len(self.model._selected_feature_indices) if self.model._selected_feature_indices is not None else 0,
+            'selection_method': getattr(self.config, 'feature_selection_method', 'balanced')
+        }
+
         checkpoint = {
+            # Core training information
             'epoch': epoch,
             'phase': phase,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,
             'accuracy': accuracy,
-            'selected_feature_indices': self.model._selected_feature_indices,
-            'feature_importance_scores': self.model._feature_importance_scores,
-            'config': self.config.to_dict(),
             'timestamp': datetime.now().isoformat(),
 
-            # Embed domain information in checkpoint
+            # Model state
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self.scheduler, 'state_dict') else None,
+            'scaler_state_dict': self.scaler.state_dict() if self.scaler is not None else None,
+
+            # CRITICAL: Classifier and clustering components
+            'classifier_state': classifier_state,
+            'cluster_centers': cluster_centers,
+            'clustering_temperature': clustering_temperature,
+
+            # Feature selection information
+            'selected_feature_indices': self.model._selected_feature_indices,
+            'feature_importance_scores': self.model._feature_importance_scores,
+            'feature_selection_info': feature_selection_info,
+
+            # Configuration
+            'config': config_dict,
             'domain': getattr(self.config, 'domain', 'general'),
             'domain_config': domain_config,
+
+            # Training history and best metrics
             'model_metadata': {
                 'framework': 'CDBNN',
                 'version': '2.3',
@@ -2677,8 +2968,9 @@ class Trainer:
                 'compressed_dims': getattr(self.config, 'compressed_dims', 32),
                 'use_kl_divergence': getattr(self.config, 'use_kl_divergence', True),
                 'use_class_encoding': getattr(self.config, 'use_class_encoding', True),
+                'use_distance_correlation': getattr(self.config, 'use_distance_correlation', True),
 
-                # Store best metrics in checkpoint
+                # Store best metrics for each phase
                 'best_phase1_loss': self.best_phase1_loss,
                 'best_phase1_epoch': self.best_phase1_epoch,
                 'best_phase2_loss': self.best_phase2_loss,
@@ -2687,9 +2979,26 @@ class Trainer:
                 'best_overall_loss': self.best_loss,
                 'best_overall_accuracy': self.best_accuracy,
                 'best_overall_epoch': self.best_epoch,
-                'best_overall_phase': self.best_phase
+                'best_overall_phase': self.best_phase,
+
+                # Random state for reproducibility
+                'random_state': random_state,
+
+                # Architecture parameters
+                'input_size': list(self.config.input_size),
+                'in_channels': self.config.in_channels,
+                'batch_size': self.config.batch_size,
+                'learning_rate': self.config.learning_rate,
+
+                # Class information if available
+                'num_classes': self.config.num_classes,
+                'class_names': self.config.class_names if hasattr(self.config, 'class_names') else None
             }
         }
+
+        # Add class to index mapping if available
+        if hasattr(self.config, 'class_to_idx'):
+            checkpoint['model_metadata']['class_to_idx'] = self.config.class_to_idx
 
         # Ensure checkpoint directory exists
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -2703,12 +3012,18 @@ class Trainer:
 
             if latest_temp_path.exists() and latest_temp_path.stat().st_size > 0:
                 try:
+                    # Verify the checkpoint can be loaded
                     test_load = torch.load(latest_temp_path, map_location='cpu', weights_only=False)
                     if test_load:
+                        # Remove old latest if exists
                         if latest_path.exists():
                             latest_path.unlink()
                         latest_temp_path.rename(latest_path)
                         logger.debug(f"Latest checkpoint saved: {latest_path} ({latest_path.stat().st_size} bytes)")
+                    else:
+                        logger.error(f"Verification failed: checkpoint appears invalid")
+                        if latest_temp_path.exists():
+                            latest_temp_path.unlink()
                 except Exception as e:
                     logger.error(f"Verification failed: {e}")
                     if latest_temp_path.exists():
@@ -2732,28 +3047,47 @@ class Trainer:
 
                 if best_temp_path.exists() and best_temp_path.stat().st_size > 0:
                     try:
+                        # Verify the checkpoint can be loaded
                         test_load = torch.load(best_temp_path, map_location='cpu', weights_only=False)
                         if test_load:
+                            # Remove old best if exists
                             if best_path.exists():
                                 best_path.unlink()
                             best_temp_path.rename(best_path)
 
-                            # Double-check the final file
+                            # Double-check the final file is valid
                             final_check = torch.load(best_path, map_location='cpu', weights_only=False)
                             if final_check:
-                                if phase == 2 and accuracy:
+                                # Print success message with improvements
+                                if phase == 2 and accuracy is not None:
+                                    improvement_msg = ""
+                                    if accuracy > self.best_phase2_accuracy:
+                                        improvement_msg = f" (+{(accuracy - self.best_phase2_accuracy)*100:.2f}%)"
                                     print(f"\n{Colors.GREEN}✓ New best model saved!")
                                     print(f"  Phase: {phase}")
                                     print(f"  Epoch: {epoch+1}")
                                     print(f"  Loss: {loss:.6f} (previous best: {self.best_phase2_loss:.6f})")
-                                    print(f"  Accuracy: {accuracy:.2%} (previous best: {self.best_phase2_accuracy:.2%}){Colors.ENDC}")
+                                    print(f"  Accuracy: {accuracy:.2%} (previous best: {self.best_phase2_accuracy:.2%}){improvement_msg}{Colors.ENDC}")
                                 elif phase == 1:
+                                    improvement_msg = f" (-{(self.best_phase1_loss - loss):.6f})" if loss < self.best_phase1_loss else ""
                                     print(f"\n{Colors.GREEN}✓ New best Phase 1 model saved!")
                                     print(f"  Epoch: {epoch+1}")
-                                    print(f"  Loss: {loss:.6f} (previous best: {self.best_phase1_loss:.6f}){Colors.ENDC}")
+                                    print(f"  Loss: {loss:.6f} (previous best: {self.best_phase1_loss:.6f}){improvement_msg}{Colors.ENDC}")
 
                                 logger.info(f"New best model saved: loss={loss:.6f}" +
-                                          (f", accuracy={accuracy:.2%}" if accuracy else ""))
+                                          (f", accuracy={accuracy:.2%}" if accuracy is not None else ""))
+
+                                # Log feature selection status
+                                if self.model._is_feature_selection_frozen and self.model._selected_feature_indices is not None:
+                                    logger.info(f"Feature selection frozen with {len(self.model._selected_feature_indices)} features")
+                            else:
+                                logger.error("Final verification failed - checkpoint appears corrupted")
+                                if best_path.exists():
+                                    best_path.unlink()
+                        else:
+                            logger.error("Verification failed: checkpoint appears invalid")
+                            if best_temp_path.exists():
+                                best_temp_path.unlink()
                     except Exception as e:
                         logger.error(f"Verification failed: {e}")
                         if best_temp_path.exists():
