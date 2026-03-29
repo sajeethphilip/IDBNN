@@ -179,6 +179,7 @@ class RobustCSVReader:
         if ignore_comments:
             try:
                 df = pd.read_csv(file_path, comment='#')
+                print(f"   Loaded {len(df)} rows (skipping comment lines)")
                 if expected_columns:
                     # Keep only expected columns
                     available_cols = [col for col in expected_columns if col in df.columns]
@@ -189,7 +190,7 @@ class RobustCSVReader:
                 print(f"{Colors.YELLOW}⚠️ Pandas read with comment failed: {e}{Colors.ENDC}")
                 # Fall through to manual parsing
 
-        # Manual parsing fallback
+        # Manual parsing fallback (preserve existing logic)
         with open(file_path, 'r') as f:
             lines = f.readlines()
 
@@ -281,6 +282,79 @@ class RobustCSVReader:
             return filtered_df
 
         return df
+
+    @staticmethod
+    def read_csv_with_config(file_path: str, config: Dict, is_training: bool = True) -> pd.DataFrame:
+        """
+        Read CSV file, filter and reorder columns based on config column_names.
+        Columns are identified by NAME, not by position.
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Get column configuration from config
+        column_names = config.get('column_names', [])
+        target_column = config.get('target_column')
+
+        if not column_names:
+            print(f"{Colors.YELLOW}⚠️ No column_names in config. Loading all columns.{Colors.ENDC}")
+            try:
+                df = pd.read_csv(file_path, comment='#')
+                return df
+            except Exception as e:
+                print(f"{Colors.RED}❌ Error loading CSV: {e}{Colors.ENDC}")
+                raise
+
+        try:
+            # Read the CSV with comment skipping
+            df_raw = pd.read_csv(file_path, comment='#')
+
+            print(f"{Colors.CYAN}   CSV has columns: {list(df_raw.columns)[:10]}{'...' if len(df_raw.columns) > 10 else ''}{Colors.ENDC}")
+            print(f"{Colors.CYAN}   Config expects: {column_names[:10]}{'...' if len(column_names) > 10 else ''}{Colors.ENDC}")
+
+            # Create a new dataframe with columns in the exact order of config column_names
+            # Identify columns by NAME, not by position
+            df = pd.DataFrame(index=df_raw.index)
+
+            missing_columns = []
+
+            for config_col in column_names:
+                if config_col in df_raw.columns:
+                    # Column found by name - use it
+                    df[config_col] = df_raw[config_col]
+                else:
+                    # Column not found in CSV
+                    missing_columns.append(config_col)
+                    # Fill with 0 for numeric features, empty string for target
+                    if config_col == target_column:
+                        # Target column missing - this is a problem
+                        print(f"{Colors.RED}❌ Target column '{target_column}' not found in CSV!{Colors.ENDC}")
+                        raise ValueError(f"Target column '{target_column}' not found in CSV file")
+                    else:
+                        # Feature column missing - fill with 0
+                        df[config_col] = 0
+                        print(f"{Colors.YELLOW}   Missing column '{config_col}' in CSV, filling with 0{Colors.ENDC}")
+
+            # Report missing columns
+            if missing_columns:
+                print(f"{Colors.YELLOW}⚠️ Missing {len(missing_columns)} columns in CSV: {missing_columns[:10]}{'...' if len(missing_columns) > 10 else ''}{Colors.ENDC}")
+                print(f"{Colors.YELLOW}   These will be filled with 0{Colors.ENDC}")
+
+            # Check for extra columns in CSV not in config
+            extra_columns = [col for col in df_raw.columns if col not in column_names]
+            if extra_columns and not is_training:
+                print(f"{Colors.YELLOW}⚠️ Ignoring {len(extra_columns)} extra columns in CSV: {extra_columns[:10]}{'...' if len(extra_columns) > 10 else ''}{Colors.ENDC}")
+
+            print(f"{Colors.GREEN}   Loaded {len(df)} rows, {len(df.columns)} columns (ordered by config){Colors.ENDC}")
+            print(f"{Colors.CYAN}   Final columns: {list(df.columns)[:10]}{'...' if len(df.columns) > 10 else ''}{Colors.ENDC}")
+
+            return df
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error reading CSV: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 class DebugLogger:
     def __init__(self):
@@ -5479,24 +5553,28 @@ class ExternalToolsMixin:
         if self.X_tensor is None:
             return None
 
-        X_np = self.X_tensor.numpy()
+        X_np = self.X_tensor.cpu().numpy()
         cols = self.feature_names if self.feature_names else [f'f{i}' for i in range(X_np.shape[1])]
         data = pd.DataFrame(X_np, columns=cols)
 
         if self.y_tensor is not None:
-            inv = {v: k for k, v in self.label_encoder.items()} if hasattr(self, 'label_encoder') else {}
-            data['true_class'] = [inv.get(t, t) for t in self.y_tensor.numpy()] if inv else self.y_tensor.numpy()
+            # CRITICAL: Use label encoder if available
+            if hasattr(self, 'label_encoder') and self.label_encoder:
+                inv = {v: k for k, v in self.label_encoder.items()}
+                data['true_class'] = [inv.get(t.item(), str(t)) for t in self.y_tensor]
+            else:
+                data['true_class'] = self.y_tensor.cpu().numpy()
 
         # Only add predictions if model is trained
-        if hasattr(self, 'predict') and self.weight_updater is not None:
+        if hasattr(self, 'predict') and self.weight_updater is not None and self.weight_updater.weights is not None:
             try:
                 predictions, posteriors = self.predict(self.X_tensor)
                 if hasattr(self, 'label_encoder') and self.label_encoder:
                     inv = {v: k for k, v in self.label_encoder.items()}
-                    data['predicted_class'] = [inv.get(p, p) for p in predictions.numpy()]
+                    data['predicted_class'] = [inv.get(p.item(), str(p.item())) for p in predictions]
                 else:
-                    data['predicted_class'] = predictions.numpy()
-                data['confidence'] = posteriors.max(dim=1)[0].numpy()
+                    data['predicted_class'] = predictions.cpu().numpy()
+                data['confidence'] = posteriors.max(dim=1)[0].cpu().numpy()
             except Exception as e:
                 print(f"{Colors.YELLOW}⚠️ Could not add predictions: {e}{Colors.ENDC}")
 
@@ -5944,73 +6022,160 @@ class DatasetConfig:
 
     @staticmethod
     def load_config(dataset_name: str) -> Dict:
-        """Configuration loading with UCI dataset support"""
+        """Load configuration from .conf file with proper parsing"""
         if not dataset_name or not isinstance(dataset_name, str):
             print("Error: Invalid dataset name provided.")
             return None
 
-        config_path = os.path.join('data', dataset_name, f"{dataset_name}.conf")
-        csv_path = os.path.join('data', dataset_name, f"{dataset_name}.csv")
+        # Check multiple possible config paths
+        config_paths = [
+            os.path.join('data', dataset_name, f"{dataset_name}.conf"),
+            f"{dataset_name}.conf",
+            os.path.join('configs', f"{dataset_name}.conf"),
+            f"configs/{dataset_name}.conf"
+        ]
 
-        try:
-            if not os.path.exists(config_path) and dataset_name in DatasetConfig.UCI_DATASETS:
-                print(f"📥 UCI dataset '{dataset_name}' found. Downloading...")
-                df = DatasetConfig.download_uci_data(dataset_name)
+        config = None
+        config_path = None
 
-                if df is not None:
-                    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-                    df.to_csv(csv_path, index=False)
-                    print(f"✅ Dataset saved to {csv_path}")
+        for path in config_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
 
-                    config = DatasetConfig.DEFAULT_CONFIG.copy()
-                    config.update({
-                        "file_path": csv_path,
-                        "column_names": list(df.columns),
-                        "target_column": DatasetConfig.UCI_DATASETS[dataset_name]["target"],
-                        "has_header": True,
-                        "modelType": "Histogram",
-                    })
+        if config_path:
+            try:
+                print(f"{Colors.CYAN}📖 Reading config from: {config_path}{Colors.ENDC}")
 
-                    with open(config_path, 'w') as f:
-                        json.dump(config, f, indent=2)
-                    print(f"✅ Configuration saved to {config_path}")
-
-                    return config
-                else:
-                    print(f"❌ Failed to download dataset {dataset_name}")
-                    return None
-
-            if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+                    content = f.read()
+
+                # Try to parse as JSON first (since your config is JSON format)
+                try:
+                    config = json.loads(content)
+                    print(f"{Colors.GREEN}✓ Loaded JSON config from: {config_path}{Colors.ENDC}")
+                except json.JSONDecodeError:
+                    # If not JSON, try to parse as key=value format
+                    print(f"{Colors.YELLOW}   Config not JSON, trying key=value format{Colors.ENDC}")
+                    config = {}
+
+                    # Parse key=value lines
+                    for line in content.split('\n'):
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+
+                        if '=' in line:
+                            key, value = line.split('=', 1)
+                            key = key.strip()
+                            value = value.strip()
+
+                            # Handle quoted strings
+                            if (value.startswith('"') and value.endswith('"')) or \
+                               (value.startswith("'") and value.endswith("'")):
+                                value = value[1:-1]
+
+                            # Handle lists
+                            if value.startswith('[') and value.endswith(']'):
+                                try:
+                                    import ast
+                                    value = ast.literal_eval(value)
+                                except:
+                                    # Simple comma parsing
+                                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(',')]
+
+                            # Handle booleans
+                            elif value.lower() == 'true':
+                                value = True
+                            elif value.lower() == 'false':
+                                value = False
+                            # Handle numbers
+                            elif value.isdigit():
+                                value = int(value)
+                            elif value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                                try:
+                                    value = float(value)
+                                except:
+                                    pass
+
+                            config[key] = value
+
+                # CRITICAL: Ensure column_names is properly set
+                column_names = config.get('column_names', [])
+
+                # If column_names is a string (like "['diagnosis', 'feature_1', ...]"), parse it
+                if isinstance(column_names, str):
+                    try:
+                        import ast
+                        column_names = ast.literal_eval(column_names)
+                        config['column_names'] = column_names
+                        print(f"{Colors.GREEN}✓ Parsed column_names from string: {len(column_names)} columns{Colors.ENDC}")
+                    except:
+                        # Try simple comma splitting
+                        column_names = [c.strip().strip('"').strip("'") for c in column_names.strip('[]').split(',')]
+                        config['column_names'] = column_names
+                        print(f"{Colors.GREEN}✓ Split column_names: {len(column_names)} columns{Colors.ENDC}")
+
+                # Ensure column_names is a list
+                if not isinstance(column_names, list):
+                    column_names = [column_names] if column_names else []
+                    config['column_names'] = column_names
+
+                # Get target column
+                target_column = config.get('target_column')
+
+                if column_names:
+                    print(f"{Colors.GREEN}✓ Found {len(column_names)} columns in config:{Colors.ENDC}")
+                    print(f"{Colors.CYAN}   {column_names[:10]}{'...' if len(column_names) > 10 else ''}{Colors.ENDC}")
+
+                    if target_column:
+                        print(f"{Colors.GREEN}✓ Target column: {target_column}{Colors.ENDC}")
+
+                        # Verify target is in column_names
+                        if target_column not in column_names:
+                            print(f"{Colors.YELLOW}⚠️ Target '{target_column}' not in column_names list{Colors.ENDC}")
+                            # Add it if it's a valid column
+                            if target_column:
+                                column_names.append(target_column)
+                                config['column_names'] = column_names
+                    else:
+                        print(f"{Colors.YELLOW}⚠️ No target_column in config{Colors.ENDC}")
+                else:
+                    print(f"{Colors.RED}❌ No column_names in config!{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}   Config keys: {list(config.keys())}{Colors.ENDC}")
+
+                # Extract class info if available
+                class_info = config.get('class_info', {})
+                if class_info:
+                    print(f"{Colors.GREEN}✓ Found class_info: {class_info.get('class_names', [])}{Colors.ENDC}")
+                    config['label_encoder'] = class_info.get('class_to_idx', {})
+
+                # Ensure training_params exists
+                if 'training_params' not in config:
+                    config['training_params'] = {
+                        'learning_rate': config.get('learning_rate', 0.1),
+                        'epochs': config.get('epochs', 100),
+                        'n_bins_per_dim': config.get('feature_dims', 128),
+                        'test_fraction': config.get('test_fraction', 0.2),
+                        'enable_adaptive': config.get('enable_adaptive', True),
+                        'adaptive_rounds': config.get('adaptive_rounds', 10),
+                        'initial_samples': config.get('initial_samples', 50),
+                        'max_samples_per_round': config.get('max_samples_per_round', 500),
+                        'patience': 25,
+                        'batch_size': config.get('batch_size', 128)
+                    }
+
+                print(f"{Colors.GREEN}✓ Config loaded successfully{Colors.ENDC}")
                 return config
 
-            if os.path.exists(csv_path):
-                print(f"📁 Found data file: {csv_path}. Creating configuration...")
-                df = pd.read_csv(csv_path)
+            except Exception as e:
+                print(f"{Colors.RED}❌ Error loading config from {config_path}: {e}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                return None
 
-                config = DatasetConfig.DEFAULT_CONFIG.copy()
-                config.update({
-                    "file_path": csv_path,
-                    "column_names": list(df.columns),
-                    "target_column": df.columns[-1],
-                    "has_header": True,
-                    "modelType": "Histogram",
-                })
-
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                print(f"✅ Configuration saved to {config_path}")
-
-                return config
-
-            print(f"❌ No data file found for dataset: {dataset_name}")
-            return None
-
-        except Exception as e:
-            print(f"❌ Error loading configuration for {dataset_name}: {e}")
-            return None
-
+        print(f"{Colors.RED}❌ No config file found for dataset: {dataset_name}{Colors.ENDC}")
+        return None
 
 # =============================================================================
 # SECTION 3: COMPILED KERNELS (JIT - Mathematically Equivalent)
@@ -8236,72 +8401,102 @@ class OptimizedBatchProcessor:
 # =============================================================================
 
 class OptimizedDatasetProcessor:
-    """Memory-efficient dataset loading - preserves exact preprocessing"""
+    """Memory-efficient dataset loading with config-based column filtering"""
 
     def __init__(self, config: Dict, device: str):
         self.config = config
         self.device = device
         self.categorical_encoders = {}
         self.feature_stats = {}
-        self.label_encoder = {}
+        self.label_encoder = config.get('label_encoder', {})
+        self.prediction_original_df = None
 
-    def load_and_preprocess(self, file_path: str, target_column: str,
-                           is_training: bool = True,
-                           known_classes: Dict[str, int] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Load and preprocess data with robust CSV handling.
+        # Get column order and target from config
+        self.column_order = config.get('column_names', [])
+        self.target_column = config.get('target_column')
 
-        Args:
-            file_path: Path to CSV file
-            target_column: Name of target column
-            is_training: Whether this is training data
-            known_classes: For prediction mode, classes seen during training
-        """
-        # Use robust CSV reader
-        df = RobustCSVReader.read_csv(file_path, ignore_comments=True)
+        # Extract feature names (all columns except target, in config order)
+        if self.column_order:
+            if self.target_column and self.target_column in self.column_order:
+                self.ordered_feature_names = [col for col in self.column_order if col != self.target_column]
+            else:
+                self.ordered_feature_names = self.column_order.copy()
 
-        if target_column in df.columns:
-            X = df.drop(columns=[target_column])
-            y = df[target_column].astype(str)
-
-            # Filter out unknown classes if this is training or evaluation
-            if known_classes is not None:
-                # For prediction mode - keep all rows, but unknown classes will be marked
-                if not is_training:
-                    # Create mask for known classes
-                    mask = y.isin(known_classes.keys())
-                    if not mask.all():
-                        print(f"{Colors.YELLOW}⚠️ {len(mask) - mask.sum()} rows have unknown classes{Colors.ENDC}")
-                        print(f"{Colors.YELLOW}   These rows will still be processed but labels will be ignored{Colors.ENDC}")
-            elif is_training:
-                # For training, we only want known classes
-                known_labels = set(self.label_encoder.keys()) if self.label_encoder else set()
-                if known_labels:
-                    mask = y.isin(known_labels)
-                    if not mask.all():
-                        print(f"{Colors.YELLOW}⚠️ Filtering out {len(mask) - mask.sum()} rows with unknown classes{Colors.ENDC}")
-                        df = df[mask]
-                        X = X[mask]
-                        y = y[mask]
+            print(f"{Colors.GREEN}✓ Loaded {len(self.ordered_feature_names)} feature names from config{Colors.ENDC}")
+            if self.ordered_feature_names:
+                print(f"{Colors.CYAN}   First 5 features: {self.ordered_feature_names[:5]}{'...' if len(self.ordered_feature_names) > 5 else ''}{Colors.ENDC}")
         else:
-            X = df
-            y = None
+            self.ordered_feature_names = []
+            print(f"{Colors.YELLOW}⚠️ No column_names in config{Colors.ENDC}")
+
+    def load_and_preprocess(self, file_path: str, is_training: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Load and preprocess data with config-based column filtering.
+        Columns are identified by NAME, not by position.
+        """
+        # Use RobustCSVReader with config-based filtering
+        df = RobustCSVReader.read_csv_with_config(file_path, self.config, is_training=is_training)
+
+        if df is None or len(df) == 0:
+            raise ValueError(f"No data loaded from {file_path}")
+
+        print(f"{Colors.CYAN}   Loaded {len(df)} rows, {len(df.columns)} columns{Colors.ENDC}")
+
+        # Get target column from config
+        target_column = self.target_column
+
+        # CRITICAL: Check if target column exists in dataframe
+        if target_column not in df.columns:
+            print(f"{Colors.RED}❌ Target column '{target_column}' not found in loaded data!{Colors.ENDC}")
+            print(f"{Colors.CYAN}   Available columns: {list(df.columns)}{Colors.ENDC}")
+            raise ValueError(f"Target column '{target_column}' not found in data")
+
+        # Separate features and target
+        y = df[target_column].astype(str)
+
+        # Get feature columns (all columns except target, in config order)
+        feature_columns = [col for col in self.ordered_feature_names if col != target_column]
+
+        # Select features in order from config by NAME
+        X = pd.DataFrame()
+        for col in feature_columns:
+            if col in df.columns:
+                # Convert to numeric, coerce errors to NaN
+                X[col] = pd.to_numeric(df[col], errors='coerce')
+            else:
+                # Missing feature - fill with 0 (should not happen if config matches CSV)
+                X[col] = 0.0
+                print(f"{Colors.YELLOW}   Warning: Feature column '{col}' not found, filling with 0{Colors.ENDC}")
+
+        # Fill any NaN values that resulted from conversion
+        X = X.fillna(0)
+
+        print(f"{Colors.CYAN}   Features extracted: {len(X.columns)} columns{Colors.ENDC}")
+        print(f"{Colors.CYAN}   Feature names: {list(X.columns)[:10]}{'...' if len(X.columns) > 10 else ''}{Colors.ENDC}")
+
+        # Check if we have any features
+        if X.shape[1] == 0:
+            print(f"{Colors.RED}❌ No features extracted!{Colors.ENDC}")
+            raise ValueError("No features extracted from data")
 
         # Preprocess features
-        X_processed = self._preprocess_features(X, is_training)
+        X_processed = self._preprocess_features(X, is_training=is_training)
 
         # Convert to tensor
-        X_tensor = torch.tensor(X_processed, dtype=torch.float64)
+        X_tensor = torch.tensor(X_processed, dtype=torch.float64, device=self.device)
 
-        if y is not None:
-            y_tensor = torch.tensor(self._encode_labels(y, is_training), dtype=torch.long)
-            return X_tensor, y_tensor
+        # Encode labels
+        y_tensor = torch.tensor(self._encode_labels(y, is_training=is_training), dtype=torch.long, device=self.device)
 
-        return X_tensor, None
+        print(f"{Colors.GREEN}✓ Features shape: {X_tensor.shape}, Labels shape: {y_tensor.shape}{Colors.ENDC}")
+
+        return X_tensor, y_tensor
 
     def _preprocess_features(self, X: pd.DataFrame, is_training: bool) -> np.ndarray:
+        """Preprocess features with proper handling of categorical and missing values"""
         X = X.fillna(-99999)
 
+        # Encode categorical columns
         for col in X.select_dtypes(include=['object', 'category']).columns:
             if is_training or col not in self.categorical_encoders:
                 unique_vals = X[col].unique()
@@ -8309,29 +8504,62 @@ class OptimizedDatasetProcessor:
 
             X[col] = X[col].map(self.categorical_encoders[col]).fillna(-1)
 
+        # Convert to numeric
         X_np = X.values.astype(np.float64)
 
+        # Scale features (standardization)
         if is_training:
             self.feature_stats['mean'] = X_np.mean(axis=0)
             self.feature_stats['std'] = X_np.std(axis=0)
             self.feature_stats['std'][self.feature_stats['std'] == 0] = 1
 
-        X_scaled = (X_np - self.feature_stats['mean']) / self.feature_stats['std']
+        # Apply scaling using training stats
+        if self.feature_stats.get('mean') is not None and self.feature_stats.get('std') is not None:
+            n_features = min(len(self.feature_stats['mean']), X_np.shape[1])
+            X_scaled = (X_np[:, :n_features] - self.feature_stats['mean'][:n_features]) / self.feature_stats['std'][:n_features]
+            if X_np.shape[1] > n_features:
+                X_scaled = np.hstack([X_scaled, X_np[:, n_features:]])
+        else:
+            X_scaled = X_np
 
         return X_scaled
 
     def _encode_labels(self, y: pd.Series, is_training: bool) -> np.ndarray:
-        if is_training:
-            self.label_encoder = {v: i for i, v in enumerate(y.unique())}
+        """Encode labels with consistent mapping"""
+        if isinstance(y, pd.DataFrame):
+            if len(y.columns) == 1:
+                y = y.iloc[:, 0]
+            else:
+                raise ValueError(f"Expected single column for labels, got {len(y.columns)} columns")
 
-        return y.map(self.label_encoder).values
+        if is_training:
+            # Sort classes for consistent ordering
+            unique_classes = sorted(y.unique())
+            self.label_encoder = {v: i for i, v in enumerate(unique_classes)}
+            print(f"{Colors.GREEN}   Classes encoded: {list(self.label_encoder.keys())}{Colors.ENDC}")
+
+        # Map labels using trained encoder
+        return y.map(self.label_encoder).fillna(-1).values.astype(np.int64)
 
     def get_feature_info(self) -> Dict:
+        """Return feature information for model saving"""
         return {
             'categorical_encoders': self.categorical_encoders,
             'feature_stats': self.feature_stats,
-            'label_encoder': self.label_encoder
+            'label_encoder': self.label_encoder,
+            'column_order': self.column_order,
+            'ordered_feature_names': self.ordered_feature_names,
+            'target_column': self.target_column
         }
+
+    def restore_feature_info(self, feature_info: Dict):
+        """Restore feature information from saved model"""
+        self.categorical_encoders = feature_info.get('categorical_encoders', {})
+        self.feature_stats = feature_info.get('feature_stats', {})
+        self.label_encoder = feature_info.get('label_encoder', {})
+        self.column_order = feature_info.get('column_order', self.column_order)
+        self.ordered_feature_names = feature_info.get('ordered_feature_names', self.ordered_feature_names)
+        self.target_column = feature_info.get('target_column', self.target_column)
 
 
 # =============================================================================
@@ -8345,73 +8573,103 @@ class OptimizedDBNN(ExternalToolsMixin):
                  mode: str = 'train_predict', parallel: bool = True,
                  enable_external_tools: bool = ASTROPY_AVAILABLE):
 
-        super().__init__(enable_external_tools=enable_external_tools)
-
+        # Initialize ExternalToolsMixin
         ExternalToolsMixin.__init__(self, enable_external_tools=enable_external_tools)
 
         self.dataset_name = dataset_name
         self.mode = mode
         self.stop_training_flag = False
 
+        # Load config
         if config is None and dataset_name is not None:
             self.config = DatasetConfig.load_config(dataset_name)
         elif isinstance(config, str):
-            with open(config, 'r') as f:
-                self.config = json.load(f)
+            if os.path.exists(config):
+                with open(config, 'r') as f:
+                    self.config = json.load(f)
+            else:
+                self.config = json.loads(config)
         else:
             self.config = config or {}
 
         if self.config is None:
             raise ValueError(f"Could not load configuration for {dataset_name}")
 
-        self.model_type = self.config.get('model_type', self.config.get('modelType', 'Histogram'))
-        self.target_column = self.config.get('target_column')
+        # Set model_type
+        self.model_type = self.config.get('model_type', 'Histogram')
 
-        # ========== FIX: Get feature names from config ==========
-        # Get column names from config
-        self.all_columns = self.config.get('column_names', [])
-
-        # Extract feature names (all columns except target)
-        if self.all_columns and self.target_column:
-            self.feature_names = [col for col in self.all_columns if col != self.target_column]
-            print(f"{Colors.CYAN}📋 Using {len(self.feature_names)} features from config{Colors.ENDC}")
-        else:
-            self.feature_names = None
-            print(f"{Colors.YELLOW}⚠️ No feature names in config - will auto-detect{Colors.ENDC}")
-        # ========== END FIX ==========
-
+        # Set device
         compute_device = self.config.get('compute_device', 'auto')
         if compute_device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = compute_device
 
+        print(f"🚀 Optimized DBNN initialized on {self.device}")
+        print(f"   Dataset: {dataset_name}")
+        print(f"   Model type: {self.model_type}")
+
+        # CRITICAL: Extract feature names from config's column_names
+        column_names = self.config.get('column_names', [])
+        target_column = self.config.get('target_column')
+        print(f'col. names are:{column_names}')
+
+        if column_names:
+            # Features are all columns except target, preserving config order
+            if target_column and target_column in column_names:
+                self.feature_names = [col for col in column_names if col != target_column]
+            else:
+                self.feature_names = column_names.copy()
+            print(f"{Colors.GREEN}✓ Loaded {len(self.feature_names)} feature names from config{Colors.ENDC}")
+            print(f"{Colors.CYAN}   First 5: {self.feature_names[:5]}{'...' if len(self.feature_names) > 5 else ''}{Colors.ENDC}")
+        else:
+            self.feature_names = None
+            print(f"{Colors.YELLOW}⚠️ No column_names in config - will auto-detect{Colors.ENDC}")
+
+        # Set target column
+        self.target_column = target_column
+
+        # Extract class info if available
+        class_info = self.config.get('class_info', {})
+        if class_info:
+            self.label_encoder = class_info.get('class_to_idx', {})
+            print(f"{Colors.GREEN}✓ Using class info from config: {self.label_encoder}{Colors.ENDC}")
+        else:
+            self.label_encoder = {}
+
+        # Training parameters
         training_params = self.config.get('training_params', {})
-        self.learning_rate = training_params.get('learning_rate', 0.1)
-        self.n_bins_per_dim = training_params.get('n_bins_per_dim', 128)
-        self.test_size = training_params.get('test_fraction', 0.2)
+        if not training_params:
+            training_params = self.config.get('training_config', {})
+
+        self.learning_rate = training_params.get('learning_rate', self.config.get('learning_rate', 0.1))
+        self.epochs = training_params.get('epochs', self.config.get('epochs', 100))
+        self.n_bins_per_dim = training_params.get('n_bins_per_dim', self.config.get('feature_dims', 128))
+        self.test_size = training_params.get('test_fraction', training_params.get('validation_split', 0.2))
         self.enable_adaptive = training_params.get('enable_adaptive', True)
         self.adaptive_rounds = training_params.get('adaptive_rounds', 10)
         self.initial_samples = training_params.get('initial_samples', 50)
         self.max_samples_per_round = training_params.get('max_samples_per_round', 500)
         self.patience = training_params.get('patience', 25)
+        self.batch_size_param = training_params.get('batch_size', self.config.get('batch_size', 128))
 
+        # Active learning parameters
         active_learning = self.config.get('active_learning', {})
         self.similarity_threshold = active_learning.get('similarity_threshold', 0.25)
         self.min_divergence = active_learning.get('min_divergence', 0.1)
 
+        # Initialize components
         self.batch_processor = OptimizedBatchProcessor(self, self.device)
         self.batch_size = self._calculate_optimal_batch_size()
 
         self.evolution_tracker = TensorEvolutionTracker(self)
-
         self.feature_pairs = None
         self.bin_edges = None
         self.bin_probs = None
         self.weight_updater = None
         self.classes = None
-        self.label_encoder = None
 
+        # Data storage
         self.X_tensor = None
         self.y_tensor = None
         self.X_train = None
@@ -8423,16 +8681,15 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.data_original = None
         self.preprocessor = None
 
+        # Training history
         self.training_history = []
         self.accuracy_progression = []
         self.best_round_initial_conditions = None
         self.best_combined_accuracy = 0.0
         self.in_adaptive_fit = False
 
-        print(f"🚀 Optimized DBNN initialized on {self.device}")
-        print(f"   Dataset: {dataset_name}")
         print(f"   Batch size: {self.batch_size}")
-        print(f"   Model type: {self.model_type}")
+        print(f"   Features: {len(self.feature_names) if self.feature_names else 'auto-detect'}")
         print(f"   Adaptive training: {self.enable_adaptive}")
 
     def _calculate_optimal_batch_size(self) -> int:
@@ -8498,100 +8755,289 @@ class OptimizedDBNN(ExternalToolsMixin):
 
     def load_data(self, file_path: str = None, is_training: bool = True):
         """
-        Load data using the column structure from config.
-        Preserves original data for later use.
+        Load data using config-based column filtering.
+        Properly sets feature_names from config column_names.
         """
-        processor = OptimizedDatasetProcessor(self.config, self.device)
-
-        file_path = file_path or self.config.get('file_path')
+        # Get file path
+        file_path = file_path or self.config.get('file_path') or self.config.get('csv_file')
         if not file_path:
             raise ValueError("No file path provided")
 
         print(f"{Colors.CYAN}📖 Loading data from: {file_path}{Colors.ENDC}")
 
-        # Load CSV with comment skipping - preserve all data
-        try:
-            df_original = pd.read_csv(file_path, comment='#')
-            print(f"{Colors.GREEN}✓ Loaded {len(df_original)} rows, {len(df_original.columns)} columns{Colors.ENDC}")
-        except Exception as e:
-            print(f"{Colors.RED}❌ Error loading CSV: {e}{Colors.ENDC}")
-            raise
+        # Store original file path for prediction output
+        self.original_input_file = file_path
 
-        # Store original data (preserve all columns)
-        self.data_original = df_original
-
-        # Get target column
+        # CRITICAL: Ensure feature_names is set from config before loading
+        column_names = self.config.get('column_names', [])
         target_column = self.config.get('target_column', self.target_column)
 
-        # If no target column in config, try to detect
-        if not target_column:
-            target_candidates = ['target', 'class', 'label', 'y', 'prediction', 'type', 'diagnosis']
-            for candidate in target_candidates:
-                if candidate in df_original.columns:
-                    target_column = candidate
-                    break
-            if not target_column:
-                target_column = df_original.columns[-1]
-            print(f"{Colors.CYAN}   Auto-detected target column: {target_column}{Colors.ENDC}")
-
-        self.target_column = target_column
-
-        # Separate features and target for training
-        if target_column in df_original.columns:
-            y = df_original[target_column].astype(str)
-
-            # Use feature_names if available, otherwise use all other columns
-            if self.feature_names:
-                # Use only specified features
-                X = df_original[self.feature_names].copy()
+        if column_names:
+            # Set feature_names from config (all columns except target)
+            if target_column and target_column in column_names:
+                self.feature_names = [col for col in column_names if col != target_column]
             else:
-                # Use all columns except target
-                X = df_original.drop(columns=[target_column])
-                self.feature_names = list(X.columns)
-                print(f"{Colors.GREEN}✓ Auto-detected {len(self.feature_names)} features{Colors.ENDC}")
+                self.feature_names = column_names.copy()
+            print(f"{Colors.GREEN}✓ Set feature_names from config: {len(self.feature_names)} features{Colors.ENDC}")
+            print(f"{Colors.CYAN}   First 5: {self.feature_names[:5]}{'...' if len(self.feature_names) > 5 else ''}{Colors.ENDC}")
         else:
-            if is_training:
-                raise ValueError(f"Target column '{target_column}' not found in training data")
-            X = df_original
-            y = None
+            print(f"{Colors.YELLOW}⚠️ No column_names in config. Features will be auto-detected.{Colors.ENDC}")
+            self.feature_names = None
 
-        # Ensure all features are numeric
-        for col in X.columns:
-            if not pd.api.types.is_numeric_dtype(X[col]):
-                try:
-                    X[col] = pd.to_numeric(X[col], errors='coerce')
-                except:
-                    X[col] = 0.0
-
-        # Handle missing values
-        X = X.fillna(0)
-
-        # Preprocess features
-        X_processed = processor._preprocess_features(X, is_training)
-        X_tensor = torch.tensor(X_processed, dtype=torch.float64, device=self.device)
-
-        # Handle target
-        if y is not None:
-            y_tensor = torch.tensor(processor._encode_labels(y, is_training), dtype=torch.long, device=self.device)
-            self.y_tensor = y_tensor
-
-            if is_training:
-                # Log class distribution
-                class_counts = y.value_counts()
-                print(f"{Colors.GREEN}✓ Found {len(class_counts)} classes in training data:{Colors.ENDC}")
-                for cls, count in list(class_counts.items())[:10]:
-                    print(f"   {cls}: {count} samples")
-                if len(class_counts) > 10:
-                    print(f"   ... and {len(class_counts) - 10} more classes")
+        # Create preprocessor if not exists
+        if self.preprocessor is None:
+            self.preprocessor = OptimizedDatasetProcessor(self.config, self.device)
         else:
-            self.y_tensor = None
+            # Update preprocessor with current config
+            self.preprocessor.config = self.config
+            self.preprocessor.column_order = column_names
+            self.preprocessor.target_column = target_column
+            self.preprocessor.ordered_feature_names = [
+                col for col in column_names if col != target_column
+            ] if column_names else []
+
+        # Save existing label encoder before loading new data
+        existing_label_encoder = None
+        if hasattr(self, 'label_encoder') and self.label_encoder:
+            existing_label_encoder = self.label_encoder.copy()
+            print(f"{Colors.CYAN}   Preserving existing label encoder with {len(existing_label_encoder)} entries{Colors.ENDC}")
+
+        # Load and preprocess with config-based filtering
+        X_tensor, y_tensor = self.preprocessor.load_and_preprocess(
+            file_path=file_path,
+            is_training=is_training
+        )
 
         self.X_tensor = X_tensor
-        self.preprocessor = processor
+        self.y_tensor = y_tensor
 
-        print(f"{Colors.GREEN}✓ Data prepared: {len(X_tensor)} samples, {len(self.feature_names)} features{Colors.ENDC}")
+        # Restore or update label encoder
+        if existing_label_encoder is not None and existing_label_encoder:
+            self.label_encoder = existing_label_encoder
+            self.preprocessor.label_encoder = existing_label_encoder
+            self.label_decoder = {v: k for k, v in existing_label_encoder.items()}
+            print(f"{Colors.GREEN}✓ Restored label encoder with {len(self.label_encoder)} entries{Colors.ENDC}")
+        else:
+            # Update label encoder from preprocessor
+            if hasattr(self.preprocessor, 'label_encoder') and self.preprocessor.label_encoder:
+                self.label_encoder = self.preprocessor.label_encoder.copy()
+                self.label_decoder = {v: k for k, v in self.label_encoder.items()}
+                print(f"{Colors.GREEN}✓ Loaded label encoder from data: {self.label_encoder}{Colors.ENDC}")
+
+        # CRITICAL: If feature_names is still None, set it from the processed data
+        if self.feature_names is None:
+            # Get feature names from X_tensor shape
+            n_features = X_tensor.shape[1]
+            self.feature_names = [f"feature_{i}" for i in range(n_features)]
+            print(f"{Colors.YELLOW}⚠️ Auto-generated feature names: {self.feature_names[:5]}...{Colors.ENDC}")
+
+        # Load original data for reference
+        try:
+            self.data_original = pd.read_csv(file_path, comment='#')
+            print(f"{Colors.CYAN}   Loaded raw data: {len(self.data_original)} rows, {len(self.data_original.columns)} columns{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️ Could not load raw data: {e}{Colors.ENDC}")
+            if hasattr(self.preprocessor, 'prediction_original_df') and self.preprocessor.prediction_original_df is not None:
+                self.data_original = self.preprocessor.prediction_original_df
+
+        # Update classes
+        if self.label_encoder:
+            self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)
+
+        # Log class distribution if training
+        if y_tensor is not None and is_training and not existing_label_encoder:
+            y_np = y_tensor.cpu().numpy()
+            valid_mask = y_np >= 0
+            if valid_mask.any():
+                class_counts = np.bincount(y_np[valid_mask])
+                print(f"{Colors.GREEN}✓ Found {len(class_counts)} classes in data:{Colors.ENDC}")
+                for i, count in enumerate(class_counts):
+                    if i < len(self.label_encoder):
+                        class_name = list(self.label_encoder.keys())[i]
+                        print(f"   {class_name}: {count} samples")
+
+        print(f"{Colors.GREEN}✓ Data prepared: {len(X_tensor)} samples, {X_tensor.shape[1]} features{Colors.ENDC}")
+        print(f"{Colors.CYAN}   Feature names: {self.feature_names[:5]}{'...' if len(self.feature_names) > 5 else ''}{Colors.ENDC}")
 
         return X_tensor, self.y_tensor
+
+    def enforce_feature_order(self, df: pd.DataFrame, is_prediction: bool = False) -> pd.DataFrame:
+        """
+        Enforce consistent feature ordering based on saved model state.
+        Handles feature name mismatches by trying to match by position.
+        """
+        # Get the reference feature order
+        reference_features = None
+
+        if hasattr(self, 'feature_order') and self.feature_order:
+            reference_features = self.feature_order
+            print(f"{Colors.CYAN}📋 Using saved feature_order: {len(reference_features)} features{Colors.ENDC}")
+        elif self.feature_names:
+            reference_features = self.feature_names
+            print(f"{Colors.CYAN}📋 Using feature_names: {len(reference_features)} features{Colors.ENDC}")
+        elif self.config and self.config.get('column_names'):
+            target = self.config.get('target_column', self.target_column)
+            reference_features = [col for col in self.config['column_names'] if col != target]
+            print(f"{Colors.CYAN}📋 Using config column_names: {len(reference_features)} features{Colors.ENDC}")
+        else:
+            # No reference - use all numeric columns
+            reference_features = df.select_dtypes(include=[np.number]).columns.tolist()
+            if self.target_column in reference_features:
+                reference_features.remove(self.target_column)
+            print(f"{Colors.YELLOW}⚠️ No reference, using {len(reference_features)} numeric columns{Colors.ENDC}")
+
+        # Store the definitive feature order
+        self.feature_names = reference_features.copy()
+        self.feature_order = reference_features.copy()
+
+        # Handle feature name mismatches - try to map by position
+        df_columns = list(df.columns)
+
+        # If feature names are like feature_1, feature_2 but reference uses feature_0, feature_1
+        # Try to map by removing prefix or adjusting indices
+        mapped_features = []
+        mapping_needed = False
+
+        for i, ref_feat in enumerate(reference_features):
+            # Check if exact match exists
+            if ref_feat in df_columns:
+                mapped_features.append(ref_feat)
+            else:
+                # Try to find by pattern
+                # Example: reference has "feature_0", data has "feature_1"
+                if ref_feat.startswith('feature_') and ref_feat[8:].isdigit():
+                    # Try with +1 offset
+                    try:
+                        idx = int(ref_feat[8:])
+                        alt_name = f"feature_{idx + 1}"
+                        if alt_name in df_columns:
+                            mapped_features.append(alt_name)
+                            mapping_needed = True
+                            continue
+                    except:
+                        pass
+
+                # Try with the same name but without underscores
+                alt_name = ref_feat.replace('_', '')
+                if alt_name in df_columns:
+                    mapped_features.append(alt_name)
+                    mapping_needed = True
+                    continue
+
+                # Try lowercase/uppercase variations
+                alt_name = ref_feat.lower()
+                if alt_name in df_columns:
+                    mapped_features.append(alt_name)
+                    mapping_needed = True
+                    continue
+
+                alt_name = ref_feat.upper()
+                if alt_name in df_columns:
+                    mapped_features.append(alt_name)
+                    mapping_needed = True
+                    continue
+
+                # If all else fails, use position-based mapping
+                if i < len(df_columns):
+                    mapped_features.append(df_columns[i])
+                    mapping_needed = True
+                    print(f"{Colors.YELLOW}   Mapping '{ref_feat}' to '{df_columns[i]}' by position{Colors.ENDC}")
+                else:
+                    mapped_features.append(ref_feat)
+
+        if mapping_needed:
+            print(f"{Colors.YELLOW}⚠️ Feature name mapping applied. Some features were renamed.{Colors.ENDC}")
+            # Update feature_names to use actual column names
+            self.feature_names = mapped_features.copy()
+            self.feature_order = mapped_features.copy()
+
+        # Check which features exist in the dataframe
+        missing_features = []
+        for feat in self.feature_names:
+            if feat not in df.columns:
+                missing_features.append(feat)
+
+        if missing_features:
+            print(f"{Colors.YELLOW}⚠️ Missing {len(missing_features)} features in input data:{Colors.ENDC}")
+            print(f"   {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}")
+            print(f"   These will be filled with 0")
+
+        # Create dataframe with features in the correct order
+        X = pd.DataFrame(index=df.index)
+
+        for feat in self.feature_names:
+            if feat in df.columns:
+                # Convert to numeric, coerce errors to NaN
+                X[feat] = pd.to_numeric(df[feat], errors='coerce')
+            else:
+                # Missing feature - fill with 0
+                X[feat] = 0.0
+
+        # Handle any remaining NaN values
+        X = X.fillna(0)
+
+        # Discard any columns not in reference features
+        extra_cols = [col for col in df.columns if col not in self.feature_names and col != self.target_column]
+        if extra_cols and not is_prediction:
+            print(f"{Colors.YELLOW}⚠️ Discarding {len(extra_cols)} columns not in reference features:{Colors.ENDC}")
+            print(f"   {extra_cols[:10]}{'...' if len(extra_cols) > 10 else ''}")
+
+        return X
+
+    def generate_feature_pairs(self, n_features: int) -> List[Tuple[int, int]]:
+        """
+        Generate feature pairs based on the DEFINITIVE feature order.
+        These indices refer to positions in self.feature_names.
+        """
+        from itertools import combinations
+
+        # CRITICAL: Ensure feature_names is set
+        if self.feature_names is None:
+            # If still None, create generic names
+            self.feature_names = [f"feature_{i}" for i in range(n_features)]
+            print(f"{Colors.YELLOW}⚠️ feature_names was None. Auto-generated {n_features} feature names.{Colors.ENDC}")
+
+        # Use indices based on feature order
+        feature_indices = list(range(n_features))
+        self.feature_pairs = list(combinations(feature_indices, 2))
+
+        print(f"{Colors.CYAN}📊 Generated {len(self.feature_pairs)} feature pairs{Colors.ENDC}")
+        print(f"   First 5 pairs: {self.feature_pairs[:5]}")
+
+        return self.feature_pairs
+
+    def compute_bin_edges(self, X: torch.Tensor) -> List[List[torch.Tensor]]:
+        """
+        Compute bin edges using the DEFINITIVE feature order.
+        """
+        # Ensure feature_pairs is set
+        if not self.feature_pairs:
+            raise ValueError("Feature pairs not generated. Call generate_feature_pairs first.")
+
+        if X.device != self.device:
+            X = X.to(self.device)
+
+        bin_edges = []
+
+        for f1, f2 in self.feature_pairs:
+            pair_data = X[:, [f1, f2]]
+
+            mins = torch.min(pair_data, dim=0)[0]
+            maxs = torch.max(pair_data, dim=0)[0]
+            padding = (maxs - mins) * 0.01
+
+            edges_dim0 = torch.linspace(
+                mins[0] - padding[0], maxs[0] + padding[0],
+                self.n_bins_per_dim + 1, device=self.device
+            )
+            edges_dim1 = torch.linspace(
+                mins[1] - padding[1], maxs[1] + padding[1],
+                self.n_bins_per_dim + 1, device=self.device
+            )
+
+            bin_edges.append([edges_dim0, edges_dim1])
+
+        return bin_edges
 
     def split_data(self):
         from sklearn.model_selection import train_test_split
@@ -8619,50 +9065,21 @@ class OptimizedDBNN(ExternalToolsMixin):
 
         return self.X_train, self.X_test, self.y_train, self.y_test
 
-    def generate_feature_pairs(self, n_features: int) -> List[Tuple[int, int]]:
-        from itertools import combinations
-
-        feature_indices = list(range(n_features))
-        self.feature_pairs = list(combinations(feature_indices, 2))
-
-        return self.feature_pairs
-
-    def compute_bin_edges(self, X: torch.Tensor) -> List[List[torch.Tensor]]:
-        # Ensure X is on the correct device
-        if X.device != self.device:
-            X = X.to(self.device)
-
-        bin_edges = []
-
-        for f1, f2 in self.feature_pairs:
-            pair_data = X[:, [f1, f2]]
-
-            mins = torch.min(pair_data, dim=0)[0]
-            maxs = torch.max(pair_data, dim=0)[0]
-            padding = (maxs - mins) * 0.01
-
-            edges_dim0 = torch.linspace(
-                mins[0] - padding[0], maxs[0] + padding[0],
-                self.n_bins_per_dim + 1, device=self.device
-            )
-            edges_dim1 = torch.linspace(
-                mins[1] - padding[1], maxs[1] + padding[1],
-                self.n_bins_per_dim + 1, device=self.device
-            )
-
-            bin_edges.append([edges_dim0, edges_dim1])
-
-        return bin_edges
-
     def compute_likelihoods(self, X: torch.Tensor, y: torch.Tensor) -> Dict:
+        """
+        Compute likelihoods using the DEFINITIVE feature order and feature pairs.
+        """
+        # Ensure classes is set
+        if self.classes is None:
+            unique_classes = torch.unique(y)
+            self.classes = unique_classes
+            print(f"{Colors.GREEN}✓ Set classes from data: {self.classes}{Colors.ENDC}")
+
         n_classes = len(self.classes)
         n_pairs = len(self.feature_pairs)
 
-        # Ensure X is on the correct device
         if X.device != self.device:
             X = X.to(self.device)
-
-        # Ensure y is on the correct device
         if y.device != self.device:
             y = y.to(self.device)
 
@@ -8672,7 +9089,6 @@ class OptimizedDBNN(ExternalToolsMixin):
         for pair_idx, (f1, f2) in enumerate(self.feature_pairs):
             edges0, edges1 = self.bin_edges[pair_idx]
 
-            # Ensure bin edges are on the correct device
             if edges0.device != self.device:
                 edges0 = edges0.to(self.device)
             if edges1.device != self.device:
@@ -8721,29 +9137,6 @@ class OptimizedDBNN(ExternalToolsMixin):
                 self.weight_updater.weights, self.n_bins_per_dim, len(self.classes)
             )
             return posteriors, (bin_indices if return_bin_indices else None)
-
-    def predict(self, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        n_samples = len(X)
-        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
-
-        all_predictions = []
-        all_posteriors = []
-
-        for i in range(0, n_samples, self.batch_size):
-            batch_X = X[i:min(i + self.batch_size, n_samples)]
-
-            # Move batch to the correct device for computation
-            if batch_X.device != self.device:
-                batch_X = batch_X.to(self.device)
-
-            posteriors, _ = self._compute_batch_posterior(batch_X, return_bin_indices=False)
-            predictions = torch.argmax(posteriors, dim=1)
-
-            # Return to CPU immediately after computation
-            all_predictions.append(predictions.cpu())
-            all_posteriors.append(posteriors.cpu())
-
-        return torch.cat(all_predictions), torch.cat(all_posteriors)
 
     def train_epoch(self, X_train: torch.Tensor, y_train: torch.Tensor) -> Tuple[float, List]:
         n_samples = len(X_train)
@@ -8995,276 +9388,603 @@ class OptimizedDBNN(ExternalToolsMixin):
         torch.save(checkpoint, f'checkpoints/best_model_{self.dataset_name}.pt')
 
     def save_model(self, path: str):
+        """Save model with ALL components needed for prediction"""
+        # First, verify we have weights to save
+        if self.weight_updater is None or self.weight_updater.weights is None:
+            print(f"{Colors.RED}❌ ERROR: No weights to save! Model has not been trained.{Colors.ENDC}")
+            print(f"{Colors.YELLOW}   Please train the model first before saving.{Colors.ENDC}")
+            return False
+
+        # Print weight statistics to verify they're meaningful
+        weights_np = self.weight_updater.weights.cpu().numpy()
+        print(f"{Colors.CYAN}📊 Saving model with weights shape: {weights_np.shape}{Colors.ENDC}")
+        print(f"   Weight range: [{weights_np.min():.6f}, {weights_np.max():.6f}]")
+        print(f"   Weight mean: {weights_np.mean():.6f}, std: {weights_np.std():.6f}")
+
+        # Get column_names from config or create from feature_names
+        column_names = self.config.get('column_names', [])
+        if not column_names and self.feature_names:
+            # Create column_names from feature_names + target
+            column_names = self.feature_names.copy()
+            if self.target_column and self.target_column not in column_names:
+                column_names.append(self.target_column)
+            print(f"{Colors.YELLOW}⚠️ No column_names in config. Creating from feature_names: {len(column_names)} columns{Colors.ENDC}")
+            self.config['column_names'] = column_names
+
         model_state = {
             'config': self.config,
             'dataset_name': self.dataset_name,
             'model_type': self.model_type,
             'n_bins_per_dim': self.n_bins_per_dim,
             'feature_pairs': self.feature_pairs,
-            'bin_edges': [[edge.cpu().tolist() for edge in pair] for pair in self.bin_edges],
-            'bin_probs': [prob.cpu().tolist() for prob in self.bin_probs],
-            'weight_updater': self.weight_updater,
-            'classes': self.classes.cpu().tolist() if torch.is_tensor(self.classes) else self.classes,
-            'label_encoder': self.label_encoder,
-            'evolution_history': self.evolution_tracker.get_history(),
             'feature_names': self.feature_names,
+            'selected_features': getattr(self, 'selected_features', []),
             'target_column': self.target_column,
+
+            # CRITICAL: Save label encoder properly
+            'label_encoder': self.label_encoder if hasattr(self, 'label_encoder') else {},
+
+            # CRITICAL: Save weights as flattened list with shape
+            'weights': self.weight_updater.weights.cpu().numpy().tolist(),
+            'weights_shape': self.weight_updater.weights.shape,
+
+            # Save bin_edges
+            'bin_edges': [],
+
+            # Save bin_probs
+            'bin_probs': [],
+
+            # Save classes
+            'classes': self.classes.cpu().tolist() if torch.is_tensor(self.classes) else self.classes,
+
+            # Save preprocessor stats
             'preprocessor_stats': {
                 'feature_stats': self.preprocessor.feature_stats if self.preprocessor else {},
                 'categorical_encoders': self.preprocessor.categorical_encoders if self.preprocessor else {},
-                'label_encoder': self.preprocessor.label_encoder if self.preprocessor else {}
-            }
+                'label_encoder': self.label_encoder if hasattr(self, 'label_encoder') else {}
+            },
+
+            'evolution_history': self.evolution_tracker.get_history(),
+            'training_history': self.training_history,
+
+            'version': '3.5'
         }
+
+        # Save bin_edges as lists
+        if self.bin_edges:
+            for pair_edges in self.bin_edges:
+                pair_edges_list = []
+                for edge_tensor in pair_edges:
+                    if torch.is_tensor(edge_tensor):
+                        pair_edges_list.append(edge_tensor.cpu().tolist())
+                    else:
+                        pair_edges_list.append(edge_tensor)
+                model_state['bin_edges'].append(pair_edges_list)
+
+        # Save bin_probs
+        if self.bin_probs:
+            for prob_tensor in self.bin_probs:
+                if torch.is_tensor(prob_tensor):
+                    prob_np = prob_tensor.cpu().numpy()
+                    prob_np = np.where(prob_np < 1e-10, 1.0, prob_np)
+                    model_state['bin_probs'].append(prob_np.tolist())
+                else:
+                    model_state['bin_probs'].append(prob_tensor)
+
+        # Save with pickle
         with open(path, 'wb') as f:
-            pickle.dump(model_state, f)
-        print(f"✅ Model saved to {path}")
+            pickle.dump(model_state, f, protocol=4)
+
+        file_size = os.path.getsize(path) / (1024 * 1024)
+        print(f"{Colors.GREEN}✅ Model saved to {path} ({file_size:.2f} MB){Colors.ENDC}")
+        print(f"   - Label encoder: {len(model_state['label_encoder'])} entries")
+        print(f"   - Weights shape: {model_state['weights_shape']}")
+        print(f"   - Bin edges: {len(model_state['bin_edges'])} pairs")
+        print(f"   - Bin probs: {len(model_state['bin_probs'])} pairs")
+
+        return True
 
     def load_model(self, path: str):
+        """Load model with ALL components needed for prediction"""
         with open(path, 'rb') as f:
             model_state = pickle.load(f)
 
+        # Restore basic attributes
         self.config = model_state['config']
         self.dataset_name = model_state['dataset_name']
         self.model_type = model_state['model_type']
         self.n_bins_per_dim = model_state['n_bins_per_dim']
         self.feature_pairs = model_state['feature_pairs']
-
-        # CRITICAL: Load feature names from saved model
         self.feature_names = model_state.get('feature_names', [])
         self.selected_features = model_state.get('selected_features', [])
         self.target_column = model_state.get('target_column', self.target_column)
 
-        # Also load the all_columns from config if available
-        self.all_columns = self.config.get('column_names', [])
+        # CRITICAL: Restore label encoder
+        label_encoder = model_state.get('label_encoder', {})
+        if isinstance(label_encoder, list):
+            self.label_encoder = {str(label): i for i, label in enumerate(label_encoder)}
+        elif isinstance(label_encoder, dict):
+            self.label_encoder = label_encoder
+        else:
+            self.label_encoder = {}
 
+        self.label_decoder = {v: k for k, v in self.label_encoder.items()}
+        print(f"{Colors.GREEN}✓ Restored label encoder: {self.label_encoder}{Colors.ENDC}")
+
+        # Restore classes
+        classes = model_state.get('classes', [])
+        if classes:
+            self.classes = torch.tensor(classes, device=self.device)
+        elif self.label_encoder:
+            self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)
+
+        # Restore bin_edges
         self.bin_edges = []
-        for pair in model_state['bin_edges']:
+        for pair_edges_list in model_state.get('bin_edges', []):
             pair_edges = []
-            for edge in pair:
-                edge_tensor = torch.tensor(edge, device=self.device)
+            for edge_list in pair_edges_list:
+                edge_tensor = torch.tensor(edge_list, dtype=torch.float64, device=self.device)
                 pair_edges.append(edge_tensor)
             self.bin_edges.append(pair_edges)
 
+        # Restore bin_probs
         self.bin_probs = []
-        for prob in model_state['bin_probs']:
-            prob_tensor = torch.tensor(prob, device=self.device)
+        for prob_list in model_state.get('bin_probs', []):
+            prob_array = np.array(prob_list, dtype=np.float64)
+            prob_array = np.where(prob_array < 1e-10, 1e-10, prob_array)
+            prob_tensor = torch.tensor(prob_array, dtype=torch.float64, device=self.device)
             self.bin_probs.append(prob_tensor)
 
-        self.weight_updater = model_state['weight_updater']
+        # CRITICAL: Restore weights
+        weights_list = model_state.get('weights')
+        weights_shape = model_state.get('weights_shape')
 
-        if isinstance(model_state['classes'], list):
-            self.classes = torch.tensor(model_state['classes'], device=self.device)
+        if weights_list is not None and weights_shape is not None:
+            # Convert list back to tensor
+            weights_array = np.array(weights_list, dtype=np.float64)
+            weights_tensor = torch.tensor(weights_array, device=self.device, dtype=torch.float64)
+            weights_tensor = weights_tensor.reshape(weights_shape)
+
+            # Get dimensions
+            if len(weights_tensor.shape) == 4:
+                n_classes = weights_tensor.shape[0]
+                n_pairs = weights_tensor.shape[1]
+                n_bins = weights_tensor.shape[2]
+            else:
+                n_classes = len(self.label_encoder) if self.label_encoder else 2
+                n_pairs = len(self.feature_pairs) if self.feature_pairs else 1
+                n_bins = self.n_bins_per_dim
+
+            # Recreate weight_updater
+            self.weight_updater = OptimizedWeightUpdater(n_classes, n_pairs, n_bins, self.device)
+            self.weight_updater.weights = weights_tensor
+
+            print(f"{Colors.GREEN}✓ Restored weights: {weights_shape}{Colors.ENDC}")
+            print(f"   Weight stats - mean: {weights_tensor.mean().item():.6f}, std: {weights_tensor.std().item():.6f}")
         else:
-            self.classes = model_state['classes'].to(self.device) if torch.is_tensor(model_state['classes']) else torch.tensor(model_state['classes'], device=self.device)
+            # Try alternative key 'weight_updater_weights' for backward compatibility
+            weight_weights = model_state.get('weight_updater_weights')
+            weight_shape = model_state.get('weight_updater_shape')
 
-        self.label_encoder = model_state.get('label_encoder', {})
+            if weight_weights and weight_shape:
+                n_classes, n_pairs, n_bins, _ = weight_shape
+                self.weight_updater = OptimizedWeightUpdater(n_classes, n_pairs, n_bins, self.device)
+                weight_array = np.array(weight_weights, dtype=np.float64)
+                weight_array = np.where(weight_array < 1e-10, 1e-10, weight_array)
+                self.weight_updater.weights = torch.tensor(weight_array, dtype=torch.float64, device=self.device)
+                print(f"{Colors.GREEN}✓ Restored weights (from weight_updater_weights): {weight_shape}{Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}❌ No weights found in saved model!{Colors.ENDC}")
+                print(f"   The model file may be corrupted or was saved before training.")
+                self.weight_updater = None
 
+        # Restore preprocessor stats
+        if not hasattr(self, 'preprocessor') or self.preprocessor is None:
+            self.preprocessor = OptimizedDatasetProcessor(self.config, self.device)
+
+        preproc_stats = model_state.get('preprocessor_stats', {})
+        if preproc_stats:
+            self.preprocessor.feature_stats = preproc_stats.get('feature_stats', {})
+            self.preprocessor.categorical_encoders = preproc_stats.get('categorical_encoders', {})
+            self.preprocessor.label_encoder = self.label_encoder.copy()
+
+        # Restore evolution history
         if 'evolution_history' in model_state:
             self.evolution_tracker.tensor_evolution_history = model_state['evolution_history']
 
-        # Restore preprocessor stats if available
-        if 'preprocessor_stats' in model_state:
-            if not hasattr(self, 'preprocessor') or self.preprocessor is None:
-                self.preprocessor = OptimizedDatasetProcessor(self.config, self.device)
-            self.preprocessor.feature_stats = model_state['preprocessor_stats'].get('feature_stats', {})
-            self.preprocessor.categorical_encoders = model_state['preprocessor_stats'].get('categorical_encoders', {})
-            self.preprocessor.label_encoder = model_state['preprocessor_stats'].get('label_encoder', {})
+        # Restore training history
+        if 'training_history' in model_state:
+            self.training_history = model_state['training_history']
 
         print(f"✅ Model loaded from {path}")
         print(f"   Dataset: {self.dataset_name}")
-        print(f"   Classes: {len(self.classes) if self.classes is not None else 0}")
+        print(f"   Classes: {len(self.label_encoder)} - {list(self.label_encoder.keys())}")
         print(f"   Features: {len(self.feature_names) if self.feature_names else 0}")
-        if self.feature_names:
-            print(f"   First 5 features: {self.feature_names[:5]}")
+        print(f"   Weights: {'✓' if self.weight_updater else '✗'}")
 
-    def predict_from_file(self, input_csv: str, output_path: str = None, **kwargs) -> Dict:
+        return self.weight_updater is not None
+
+    def predict(self, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Predict from a new CSV file.
-        Preserves all original data including metadata columns.
-        Only uses numeric features from training for prediction.
+        Make predictions with proper error checking.
         """
+        # Check if model is properly initialized
+        if self.weight_updater is None:
+            raise ValueError("Model not initialized. No weight updater found.")
+
+        if self.weight_updater.weights is None:
+            raise ValueError("Model not trained. No weights found.")
+
+        if self.bin_edges is None:
+            raise ValueError("Model not initialized. No bin edges found.")
+
+        if self.bin_probs is None:
+            raise ValueError("Model not initialized. No bin probabilities found.")
+
+        if self.feature_pairs is None:
+            raise ValueError("Model not initialized. No feature pairs found.")
+
+        # Ensure X is on correct device
+        if X.device != self.device:
+            X = X.to(self.device)
+
+        n_samples = len(X)
+        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
+
+        all_predictions = []
+        all_posteriors = []
+
+        for i in range(0, n_samples, self.batch_size):
+            batch_X = X[i:min(i + self.batch_size, n_samples)]
+
+            posteriors, _ = self._compute_batch_posterior(batch_X, return_bin_indices=False)
+            predictions = torch.argmax(posteriors, dim=1)
+
+            all_predictions.append(predictions.cpu())
+            all_posteriors.append(posteriors.cpu())
+
+        return torch.cat(all_predictions), torch.cat(all_posteriors)
+
+    def compress_bin_probs(self, bin_probs: List[torch.Tensor]) -> List[List]:
+        """
+        Compress bin probabilities to reduce memory footprint.
+        Only store non-zero values and their indices for sparse representation.
+        """
+        compressed = []
+        for prob in bin_probs:
+            if torch.is_tensor(prob):
+                # For sparse tensors, store only non-zero values
+                non_zero_mask = prob > 1e-10
+                if non_zero_mask.sum() < prob.numel() * 0.5:  # More than 50% zeros? Use sparse
+                    indices = torch.nonzero(non_zero_mask).cpu().tolist()
+                    values = prob[non_zero_mask].cpu().tolist()
+                    compressed.append({
+                        'type': 'sparse',
+                        'indices': indices,
+                        'values': values,
+                        'shape': prob.shape
+                    })
+                else:
+                    # Dense tensor - store as list
+                    compressed.append({
+                        'type': 'dense',
+                        'data': prob.cpu().tolist(),
+                        'shape': prob.shape
+                    })
+            else:
+                compressed.append(prob)
+        return compressed
+
+    def decompress_bin_probs(self, compressed: List) -> List[torch.Tensor]:
+        """
+        Decompress bin probabilities back to tensors.
+        """
+        decompressed = []
+        for item in compressed:
+            if isinstance(item, dict):
+                if item.get('type') == 'sparse':
+                    # Reconstruct sparse tensor
+                    indices = torch.tensor(item['indices'], device=self.device)
+                    values = torch.tensor(item['values'], device=self.device)
+                    shape = item['shape']
+                    prob = torch.zeros(shape, device=self.device)
+                    prob[indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]] = values
+                    decompressed.append(prob)
+                elif item.get('type') == 'dense':
+                    # Reconstruct dense tensor
+                    prob = torch.tensor(item['data'], device=self.device, dtype=torch.float64)
+                    prob = prob.reshape(item['shape'])
+                    decompressed.append(prob)
+            else:
+                decompressed.append(item)
+        return decompressed
+
+    def decode_predictions(self, predictions: torch.Tensor) -> List[str]:
+        """
+        Decode numeric predictions back to original class labels.
+        """
+        if not self.label_decoder:
+            # Build decoder from label encoder
+            if self.label_encoder:
+                self.label_decoder = {int(v): str(k) for k, v in self.label_encoder.items()}
+                print(f"{Colors.GREEN}✓ Built label decoder: {self.label_decoder}{Colors.ENDC}")
+            else:
+                return [str(p.item()) for p in predictions]
+
+        decoded = []
+        for p in predictions:
+            p_val = p.item()
+            if p_val in self.label_decoder:
+                decoded.append(self.label_decoder[p_val])
+            else:
+                # Try to convert to int
+                try:
+                    int_val = int(p_val)
+                    if int_val in self.label_decoder:
+                        decoded.append(self.label_decoder[int_val])
+                    else:
+                        decoded.append(f"unknown_{p_val}")
+                except:
+                    decoded.append(f"unknown_{p_val}")
+
+        return decoded
+
+    def encode_labels(self, labels: List[str]) -> torch.Tensor:
+        """
+        Encode string labels to numeric values using list-based encoder.
+        """
+        if not self.label_encoder:
+            raise ValueError("No label encoder available. Model must be trained first.")
+
+        encoded = []
+        unknown_labels = []
+
+        for label in labels:
+            label_str = str(label)
+            if label_str in self.label_encoder:
+                encoded.append(self.label_encoder[label_str])
+            else:
+                unknown_labels.append(label_str)
+                # For unknown labels, use -1
+                encoded.append(-1)
+
+        if unknown_labels:
+            print(f"{Colors.YELLOW}⚠️ Unknown labels found: {set(unknown_labels)}{Colors.ENDC}")
+            print(f"   These will be encoded as -1 (will cause prediction errors)")
+
+        return torch.tensor(encoded, dtype=torch.long, device=self.device)
+
+    def predict(self, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Make predictions with proper error handling for missing components.
+        """
+        # CRITICAL: Check if model is properly initialized
+        if self.weight_updater is None:
+            raise ValueError("Model not initialized. No weight updater found.")
+
+        if self.weight_updater.weights is None:
+            raise ValueError("Model not trained. No weights found.")
+
+        if self.bin_edges is None:
+            raise ValueError("Model not initialized. No bin edges found.")
+
+        if self.bin_probs is None:
+            raise ValueError("Model not initialized. No bin probabilities found.")
+
+        if self.feature_pairs is None:
+            raise ValueError("Model not initialized. No feature pairs found.")
+
+        n_samples = len(X)
+        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
+
+        all_predictions = []
+        all_posteriors = []
+
+        for i in range(0, n_samples, self.batch_size):
+            batch_X = X[i:min(i + self.batch_size, n_samples)]
+
+            # Move batch to the correct device for computation
+            if batch_X.device != self.device:
+                batch_X = batch_X.to(self.device)
+
+            posteriors, _ = self._compute_batch_posterior(batch_X, return_bin_indices=False)
+            predictions = torch.argmax(posteriors, dim=1)
+
+            # Return to CPU immediately after computation
+            all_predictions.append(predictions.cpu())
+            all_posteriors.append(posteriors.cpu())
+
+        return torch.cat(all_predictions), torch.cat(all_posteriors)
+
+
+    def decode_predictions(self, predictions: torch.Tensor) -> List[str]:
+        """
+        Decode numeric predictions back to original class labels.
+
+        Args:
+            predictions: Tensor of predicted class indices
+
+        Returns:
+            List of original class label strings
+        """
+        if not self.label_decoder:
+            # Build reverse mapping if not available
+            if self.label_encoder:
+                self.label_decoder = {v: k for k, v in self.label_encoder.items()}
+            else:
+                # No mapping available - return as strings
+                return [str(p.item()) for p in predictions]
+
+        predictions_np = predictions.cpu().numpy() if torch.is_tensor(predictions) else predictions
+
+        decoded = []
+        for p in predictions_np:
+            if p in self.label_decoder:
+                decoded.append(self.label_decoder[p])
+            else:
+                # Unknown class - use encoded value as string
+                decoded.append(f"unknown_{p}")
+
+        return decoded
+
+
+    def encode_labels(self, labels: List[str]) -> torch.Tensor:
+        """
+        Encode string labels to numeric values using saved label encoder.
+
+        Args:
+            labels: List of original class label strings
+
+        Returns:
+            Tensor of encoded class indices
+        """
+        if not self.label_encoder:
+            raise ValueError("No label encoder available. Model must be trained first.")
+
+        encoded = []
+        unknown_labels = []
+
+        for label in labels:
+            if label in self.label_encoder:
+                encoded.append(self.label_encoder[label])
+            else:
+                unknown_labels.append(label)
+                # For unknown labels, use -1 or raise error
+                encoded.append(-1)
+
+        if unknown_labels:
+            print(f"{Colors.YELLOW}⚠️ Unknown labels found: {set(unknown_labels)}{Colors.ENDC}")
+            print(f"   These will be encoded as -1 (will cause prediction errors)")
+
+        return torch.tensor(encoded, dtype=torch.long, device=self.device)
+
+    def predict_from_file(self, input_csv: str, output_path: str = None, append_to_original: bool = True, **kwargs) -> Dict:
+        """
+        Predict from a new CSV file with config-based filtering.
+        Preserves the label encoder from the loaded model.
+        """
+        # Ensure output_path is a directory, not a file
         if output_path:
+            if os.path.isfile(output_path):
+                output_path = os.path.dirname(output_path)
             os.makedirs(output_path, exist_ok=True)
+            print(f"{Colors.CYAN}📁 Output directory: {output_path}{Colors.ENDC}")
 
         print(f"{Colors.CYAN}📖 Reading prediction file: {input_csv}{Colors.ENDC}")
 
-        # Read CSV with comment skipping - preserve all data
+        # CRITICAL: Save the existing label encoder before creating preprocessor
+        saved_label_encoder = None
+        if hasattr(self, 'label_encoder') and self.label_encoder:
+            saved_label_encoder = self.label_encoder.copy()
+            print(f"{Colors.CYAN}   Preserving label encoder from model: {saved_label_encoder}{Colors.ENDC}")
+
+        # Create a temporary preprocessor for prediction
+        pred_preprocessor = OptimizedDatasetProcessor(self.config, self.device)
+
+        # Restore training feature stats from model
+        if hasattr(self.preprocessor, 'feature_stats') and self.preprocessor.feature_stats:
+            pred_preprocessor.feature_stats = self.preprocessor.feature_stats.copy()
+        if hasattr(self.preprocessor, 'categorical_encoders') and self.preprocessor.categorical_encoders:
+            pred_preprocessor.categorical_encoders = self.preprocessor.categorical_encoders.copy()
+
+        # CRITICAL: Restore the saved label encoder
+        if saved_label_encoder:
+            pred_preprocessor.label_encoder = saved_label_encoder.copy()
+            self.label_encoder = saved_label_encoder.copy()
+            self.label_decoder = {v: k for k, v in saved_label_encoder.items()}
+            print(f"{Colors.GREEN}✓ Restored label encoder: {self.label_encoder}{Colors.ENDC}")
+
+        # Load prediction data with config-based filtering
         try:
-            df_original = pd.read_csv(input_csv, comment='#')
-            print(f"{Colors.GREEN}✓ Loaded {len(df_original)} rows, {len(df_original.columns)} columns{Colors.ENDC}")
+            X_tensor, y_tensor = pred_preprocessor.load_and_preprocess(
+                file_path=input_csv,
+                is_training=False
+            )
         except Exception as e:
-            print(f"{Colors.RED}❌ Failed to read file: {e}{Colors.ENDC}")
+            print(f"{Colors.RED}❌ Failed to load prediction file: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
             return {'predictions': None, 'error': str(e)}
 
-        # CRITICAL: Use ONLY the feature_names from the trained model
-        if not self.feature_names:
-            print(f"{Colors.RED}❌ No feature names available from trained model{Colors.ENDC}")
-            return {'predictions': None, 'error': 'Model not properly trained'}
-
-        print(f"{Colors.CYAN}📊 Model was trained with {len(self.feature_names)} numeric features:{Colors.ENDC}")
-        print(f"{Colors.CYAN}   {self.feature_names[:5]}... (total {len(self.feature_names)}){Colors.ENDC}")
-
-        # Build feature dataframe with ONLY the numeric features from training
-        # This is separate from the original data - we only use these for prediction
-        X = pd.DataFrame(index=df_original.index)
-        missing_features = []
-        non_numeric_features = []
-
-        for feat in self.feature_names:
-            if feat in df_original.columns:
-                # Try to convert to numeric
-                try:
-                    X[feat] = pd.to_numeric(df_original[feat], errors='coerce')
-                    # Check if conversion resulted in all NaN (completely non-numeric column)
-                    if X[feat].isna().all():
-                        non_numeric_features.append(feat)
-                        X[feat] = 0.0
-                except:
-                    non_numeric_features.append(feat)
-                    X[feat] = 0.0
-            else:
-                missing_features.append(feat)
-                X[feat] = 0.0
-
-        if missing_features:
-            print(f"{Colors.YELLOW}⚠️ Missing {len(missing_features)} feature columns in prediction file:{Colors.ENDC}")
-            print(f"{Colors.YELLOW}   {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}{Colors.ENDC}")
-            print(f"{Colors.YELLOW}   These will be filled with 0{Colors.ENDC}")
-
-        if non_numeric_features:
-            print(f"{Colors.YELLOW}⚠️ {len(non_numeric_features)} feature columns contain non-numeric data:{Colors.ENDC}")
-            print(f"{Colors.YELLOW}   {non_numeric_features[:10]}{'...' if len(non_numeric_features) > 10 else ''}{Colors.ENDC}")
-            print(f"{Colors.YELLOW}   These will be filled with 0{Colors.ENDC}")
-
-        # Handle any NaN values
-        X = X.fillna(0)
-
-        # Verify all features are numeric
-        for col in X.columns:
-            if not pd.api.types.is_numeric_dtype(X[col]):
-                X[col] = 0.0
-
-        print(f"{Colors.GREEN}✓ Prepared {len(X)} rows with {len(X.columns)} numeric features for prediction{Colors.ENDC}")
-
-        # Convert to tensor
-        X_np = X.values.astype(np.float64)
-        X_tensor = torch.tensor(X_np, dtype=torch.float64, device=self.device)
-
-        print(f"{Colors.CYAN}🔮 Making predictions on {len(X_tensor)} samples...{Colors.ENDC}")
+        print(f"{Colors.GREEN}✓ Loaded {len(X_tensor)} samples for prediction{Colors.ENDC}")
 
         try:
+            # Make predictions
             predictions, posteriors = self.predict(X_tensor)
 
-            # Convert predictions to labels
+            # Convert predictions to labels using the saved label decoder
             inv_label_encoder = {v: k for k, v in self.label_encoder.items()}
-            pred_labels = [inv_label_encoder.get(p.item(), f"unknown_{p.item()}") for p in predictions]
+            pred_labels = [inv_label_encoder.get(p.item(), f"unknown_{p.item()}") for p in predictions.cpu()]
 
-            # Create results dataframe that preserves ALL original data
-            results = df_original.copy()
-
-            # Add prediction columns
-            results['predicted_class'] = pred_labels
-            results['confidence'] = posteriors.max(dim=1)[0].cpu().numpy()
+            # Create predictions dataframe
+            pred_df = pd.DataFrame({
+                'predicted_class': pred_labels,
+                'confidence': posteriors.max(dim=1)[0].cpu().numpy()
+            })
 
             # Add probability columns for each class
+            posteriors_np = posteriors.cpu().numpy()
             for i, (label, idx) in enumerate(self.label_encoder.items()):
-                results[f'prob_{label}'] = posteriors[:, i].cpu().numpy()
+                pred_df[f'prob_{label}'] = posteriors_np[:, i]
 
-            # Add uncertainty
-            results['uncertainty'] = 1.0 - results['confidence']
+            pred_df['uncertainty'] = 1.0 - pred_df['confidence']
 
-            # Add a flag for rows that had issues (missing features or non-numeric)
-            results['has_missing_features'] = False
-            results['has_non_numeric_features'] = False
+            # Get the original dataframe from preprocessor
+            original_df = pred_preprocessor.prediction_original_df if hasattr(pred_preprocessor, 'prediction_original_df') else None
 
-            # Mark rows with issues (if any)
-            if missing_features or non_numeric_features:
-                # For simplicity, mark all rows if any features were missing
-                # You could make this more granular if needed
-                if missing_features:
-                    results['has_missing_features'] = True
-                if non_numeric_features:
-                    results['has_non_numeric_features'] = True
+            output_file = None
 
-            # If true labels exist, add them and calculate metrics
-            target_column = self.target_column
-            has_target = target_column in df_original.columns
+            # Append predictions to original file if requested
+            if append_to_original and original_df is not None:
+                if len(original_df) == len(pred_df):
+                    result_df = original_df.copy()
+                    for col in pred_df.columns:
+                        result_df[col] = pred_df[col].values
 
-            if has_target:
-                y_true = df_original[target_column].astype(str)
-                results['true_class'] = y_true
-
-                # Calculate accuracy only on rows where true class is known to the model
-                known_true_mask = y_true.isin(self.label_encoder.keys())
-                if known_true_mask.any():
-                    known_true = y_true[known_true_mask]
-                    known_pred = results.loc[known_true_mask, 'predicted_class']
-                    accuracy = (known_true == known_pred).mean()
-                    print(f"{Colors.GREEN}✓ Accuracy on known classes: {accuracy:.4f} ({known_true_mask.sum()} samples){Colors.ENDC}")
+                    output_file = RobustCSVReader.append_predictions_to_original(
+                        input_csv, result_df, output_dir=output_path
+                    )
+                    if output_file:
+                        print(f"{Colors.GREEN}✅ Complete predictions saved to: {output_file}{Colors.ENDC}")
                 else:
-                    print(f"{Colors.YELLOW}⚠️ No samples with known classes for evaluation{Colors.ENDC}")
-
-                # Report unknown classes found
-                unknown_true_mask = ~known_true_mask
-                if unknown_true_mask.any():
-                    unknown_classes = y_true[unknown_true_mask].unique()
-                    print(f"{Colors.YELLOW}⚠️ Found {unknown_true_mask.sum()} samples with unknown classes: {unknown_classes[:5]}{Colors.ENDC}")
-
-            # Save complete results (all original data + predictions)
-            if output_path:
+                    print(f"{Colors.YELLOW}⚠️ Row count mismatch: original={len(original_df)}, predictions={len(pred_df)}{Colors.ENDC}")
+                    if output_path:
+                        csv_path = os.path.join(output_path, 'predictions.csv')
+                        pred_df.to_csv(csv_path, index=False)
+                        print(f"{Colors.GREEN}✅ Predictions saved to: {csv_path}{Colors.ENDC}")
+                        output_file = csv_path
+            elif output_path:
                 csv_path = os.path.join(output_path, 'predictions.csv')
-                results.to_csv(csv_path, index=False)
-                print(f"{Colors.GREEN}✅ Complete predictions saved to: {csv_path}{Colors.ENDC}")
+                pred_df.to_csv(csv_path, index=False)
+                print(f"{Colors.GREEN}✅ Predictions saved to: {csv_path}{Colors.ENDC}")
+                output_file = csv_path
 
-                # Save a compact version with just predictions and key columns
-                summary_cols = ['predicted_class', 'confidence', 'uncertainty']
-                if has_target:
-                    summary_cols.insert(0, 'true_class')
-
-                # Also include any identifier columns if they exist
-                id_cols = ['id', 'ID', 'filename', 'filepath', 'name', 'Name']
-                for id_col in id_cols:
-                    if id_col in results.columns:
-                        summary_cols.insert(0, id_col)
-
-                summary = results[summary_cols]
-                summary_path = os.path.join(output_path, 'predictions_summary.csv')
-                summary.to_csv(summary_path, index=False)
-                print(f"{Colors.GREEN}✅ Summary saved to: {summary_path}{Colors.ENDC}")
-
-                # Save predictions with probabilities for each class
-                prob_cols = ['predicted_class', 'confidence', 'uncertainty'] + \
-                           [f'prob_{label}' for label in self.label_encoder.keys()]
-                if has_target:
-                    prob_cols.insert(0, 'true_class')
-                if any(col in results.columns for col in id_cols):
-                    for id_col in id_cols:
-                        if id_col in results.columns:
-                            prob_cols.insert(0, id_col)
+            # Calculate accuracy if true labels were provided
+            if y_tensor is not None:
+                true_labels = []
+                y_np = y_tensor.cpu().numpy()
+                for t in y_np:
+                    # Find class name for this encoded value using saved label encoder
+                    found = False
+                    for name, code in self.label_encoder.items():
+                        if code == t:
+                            true_labels.append(name)
+                            found = True
                             break
+                    if not found:
+                        true_labels.append(f"unknown_{t}")
 
-                prob_df = results[prob_cols]
-                prob_path = os.path.join(output_path, 'predictions_with_probs.csv')
-                prob_df.to_csv(prob_path, index=False)
-                print(f"{Colors.GREEN}✅ Probabilities saved to: {prob_path}{Colors.ENDC}")
-
-                # Also save a debug file showing which features were used
-                feature_info = pd.DataFrame({
-                    'feature_name': self.feature_names,
-                    'present_in_prediction': [f in df_original.columns for f in self.feature_names],
-                    'is_numeric': [not pd.api.types.is_numeric_dtype(df_original[f]) if f in df_original.columns else False for f in self.feature_names]
-                })
-                feature_info_path = os.path.join(output_path, 'feature_analysis.csv')
-                feature_info.to_csv(feature_info_path, index=False)
-                print(f"{Colors.GREEN}✅ Feature analysis saved to: {feature_info_path}{Colors.ENDC}")
+                accuracy = (np.array(true_labels) == np.array(pred_labels)).mean()
+                print(f"{Colors.GREEN}✓ Accuracy on prediction file: {accuracy:.4f}{Colors.ENDC}")
+                pred_df['true_class'] = true_labels
 
             return {
-                'predictions': results,
-                'n_samples': len(results),
-                'has_target': has_target,
+                'predictions': pred_df,
+                'n_samples': len(pred_df),
                 'features_used': self.feature_names,
-                'missing_features': missing_features,
-                'non_numeric_features': non_numeric_features
+                'output_file': output_file,
+                'label_encoder': self.label_encoder,
+                'label_decoder': self.label_decoder
             }
 
         except Exception as e:
@@ -9272,6 +9992,61 @@ class OptimizedDBNN(ExternalToolsMixin):
             import traceback
             traceback.print_exc()
             return {'predictions': None, 'error': str(e)}
+
+    def verify_model_state(self) -> Dict:
+        """
+        Verify that all critical components of the model state are intact.
+        """
+        issues = []
+
+        # Check feature names
+        if not self.feature_names:
+            issues.append("No feature names found")
+        elif len(self.feature_names) == 0:
+            issues.append("Feature names list is empty")
+
+        # Check feature pairs
+        if not self.feature_pairs:
+            issues.append("No feature pairs found")
+        elif len(self.feature_pairs) == 0:
+            issues.append("Feature pairs list is empty")
+
+        # Check label encoder
+        if not self.label_encoder:
+            issues.append("No label encoder found")
+        elif len(self.label_encoder) == 0:
+            issues.append("Label encoder is empty")
+
+        # Check label decoder (should be consistent with encoder)
+        if not self.label_decoder:
+            issues.append("No label decoder found")
+        elif len(self.label_decoder) != len(self.label_encoder):
+            issues.append(f"Label decoder size ({len(self.label_decoder)}) != label encoder size ({len(self.label_encoder)})")
+
+        # Check weights
+        if not self.weight_updater or self.weight_updater.weights is None:
+            issues.append("No weights found")
+
+        # Check bin edges
+        if not self.bin_edges:
+            issues.append("No bin edges found")
+
+        # Check bin probabilities
+        if not self.bin_probs:
+            issues.append("No bin probabilities found")
+
+        # Return verification report
+        return {
+            'is_valid': len(issues) == 0,
+            'issues': issues,
+            'feature_count': len(self.feature_names) if self.feature_names else 0,
+            'feature_pair_count': len(self.feature_pairs) if self.feature_pairs else 0,
+            'class_count': len(self.label_encoder) if self.label_encoder else 0,
+            'has_label_decoder': bool(self.label_decoder),
+            'has_weights': bool(self.weight_updater and self.weight_updater.weights is not None),
+            'has_bin_edges': bool(self.bin_edges),
+            'has_bin_probs': bool(self.bin_probs)
+        }
 
     def _format_class_distribution(self, indices):
         if not indices:
@@ -9624,15 +10399,30 @@ class OptimizedDBNN(ExternalToolsMixin):
             if self.X_tensor is None:
                 self.load_data()
 
+            # CRITICAL FIX: Check if data_original exists
+            if self.data_original is None:
+                print(f"{Colors.RED}❌ No data loaded. Please load data first.{Colors.ENDC}")
+                return {'error': 'No data loaded'}
+
             X = self.data_original.drop(columns=[self.target_column])
             y = self.data_original[self.target_column].astype(str)
 
+            # CRITICAL FIX: Initialize label encoder and classes if not set
             if self.label_encoder is None or len(self.label_encoder) == 0:
                 unique_classes = y.unique()
                 self.label_encoder = {v: i for i, v in enumerate(unique_classes)}
-                self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)  # Move to device
+                print(f"{Colors.CYAN}📊 Initialized label encoder: {self.label_encoder}{Colors.ENDC}")
+
+            # CRITICAL FIX: Ensure classes is properly set from label encoder
+            if self.classes is None:
+                self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)
+                print(f"{Colors.GREEN}✓ Initialized classes: {self.classes}{Colors.ENDC}")
+
+            # CRITICAL FIX: Ensure y_tensor is encoded properly
+            if self.y_tensor is None:
                 y_encoded = y.map(self.label_encoder).values
-                self.y_tensor = torch.tensor(y_encoded, dtype=torch.long, device=self.device)  # Move to device
+                self.y_tensor = torch.tensor(y_encoded, dtype=torch.long, device=self.device)
+                print(f"{Colors.GREEN}✓ Encoded target variable{Colors.ENDC}")
 
             model_loaded = False
             if self.config.get('use_previous_model', True):
@@ -9665,7 +10455,8 @@ class OptimizedDBNN(ExternalToolsMixin):
                 test_indices = list(range(len(X)))
 
             if len(train_indices) == 0:
-                n_classes = len(self.classes)
+                # CRITICAL FIX: Use classes from label encoder, not self.classes (which might be None)
+                n_classes = len(self.label_encoder)
                 target_per_class = max(1, self.initial_samples // n_classes)
                 print(f"\n{Colors.CYAN}Initializing with {target_per_class} samples PER CLASS{Colors.ENDC}")
 
@@ -9673,7 +10464,7 @@ class OptimizedDBNN(ExternalToolsMixin):
                 class_sample_counts = {}
 
                 # Get y_tensor as numpy on CPU for comparison
-                y_numpy = self.y_tensor.cpu().numpy()  # Move to CPU for numpy operations
+                y_numpy = self.y_tensor.cpu().numpy()
 
                 for class_label, class_id in self.label_encoder.items():
                     # Use numpy array for indexing
@@ -9848,7 +10639,7 @@ class OptimizedDBNN(ExternalToolsMixin):
 
                 if test_indices:
                     test_predictions, _ = self.predict(self.X_tensor[test_indices])
-                    y_test_np = self.y_tensor[test_indices].cpu().numpy()  # Move to CPU
+                    y_test_np = self.y_tensor[test_indices].cpu().numpy()
 
                     new_train_indices = self._select_samples_from_failed_classes(
                         test_predictions, y_test_np, test_indices, results
@@ -14686,6 +15477,20 @@ def main():
     parser.add_argument('--skip-comments', action='store_true', default=True,
                        help='Skip lines starting with # (default: True)')
     parser.add_argument('--verbose', action='store_true', help='Print verbose output')
+
+    # Add missing training arguments
+    parser.add_argument('--model-type', type=str, default='Histogram',
+                       choices=['Histogram', 'Gaussian'], help='Model type')
+    parser.add_argument('--device', type=str, default='auto',
+                       choices=['auto', 'cuda', 'cpu'], help='Compute device')
+    parser.add_argument('--learning-rate', type=float, default=0.1, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--bins', type=int, default=128, help='Number of bins per dimension')
+    parser.add_argument('--test-size', type=float, default=0.2, help='Test set fraction')
+    parser.add_argument('--adaptive-rounds', type=int, default=10, help='Number of adaptive rounds')
+    parser.add_argument('--initial-samples', type=int, default=50, help='Initial samples per class')
+    parser.add_argument('--max-samples-round', type=int, default=500, help='Max samples per round')
+
     args = parser.parse_args()
 
     print(f"""
@@ -14713,54 +15518,6 @@ def main():
         interactive_mode()
         return
 
-    # Helper function to load CSV with comment skipping
-    def load_csv_with_comments(file_path, skip_comments=True):
-        """Load CSV file, skipping comment lines starting with #"""
-        if not os.path.exists(file_path):
-            return None
-
-        if args.verbose:
-            print(f"{Colors.CYAN}   Reading file: {file_path}{Colors.ENDC}")
-
-        if skip_comments:
-            # Read all lines and filter out comments
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-
-            # Filter out lines that start with # (after stripping whitespace)
-            data_lines = [line for line in lines if not line.strip().startswith('#')]
-
-            if not data_lines:
-                print(f"{Colors.RED}❌ No non-comment lines found in {file_path}{Colors.ENDC}")
-                return None
-
-            if args.verbose:
-                print(f"{Colors.CYAN}   Found {len(data_lines)} data lines (skipped {len(lines) - len(data_lines)} comment lines){Colors.ENDC}")
-
-            # Write filtered lines to a temporary file
-            import tempfile
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
-            temp_file.writelines(data_lines)
-            temp_file.close()
-
-            # Read the temporary file with pandas
-            try:
-                df = pd.read_csv(temp_file.name)
-                # Clean up temp file
-                os.unlink(temp_file.name)
-                return df
-            except Exception as e:
-                os.unlink(temp_file.name)
-                print(f"{Colors.RED}❌ Error reading CSV after filtering comments: {e}{Colors.ENDC}")
-                return None
-        else:
-            # Read normally
-            try:
-                return pd.read_csv(file_path)
-            except Exception as e:
-                print(f"{Colors.RED}❌ Error reading CSV: {e}{Colors.ENDC}")
-                return None
-
     # If no dataset specified, show help
     if not args.dataset:
         print(f"{Colors.YELLOW}No dataset specified. Please use --dataset to specify a dataset.{Colors.ENDC}")
@@ -14780,11 +15537,7 @@ def main():
     print(f"{Colors.BOLD}{Colors.CYAN}📁 Locating dataset files...{Colors.ENDC}")
     print(f"{'='*60}")
 
-    # Determine file paths with priority:
-    # 1. Explicit command-line arguments (--input-path, --config-file, --csv-file)
-    # 2. Standard location: data/<dataset>/<dataset>.conf and data/<dataset>/<dataset>.csv
-    # 3. Local files: <dataset>.conf and <dataset>.csv in current directory
-
+    # Determine file paths with priority
     config_path = None
     csv_path = None
     dataset_name = args.dataset
@@ -14802,7 +15555,6 @@ def main():
                 config_path = inferred_config
                 print(f"{Colors.GREEN}✓ Found config file: {config_path}{Colors.ENDC}")
             else:
-                # Also try with dataset name
                 dataset_config = os.path.join(csv_dir, f"{args.dataset}.conf")
                 if os.path.exists(dataset_config):
                     config_path = dataset_config
@@ -14853,22 +15605,199 @@ def main():
             csv_path = local_csv
             print(f"{Colors.GREEN}✓ Found local CSV file: {csv_path}{Colors.ENDC}")
 
-    # Check if we found the CSV file
     if not csv_path:
         print(f"{Colors.RED}❌ Could not find data file for '{args.dataset}'{Colors.ENDC}")
-        print(f"{Colors.YELLOW}Searched locations:{Colors.ENDC}")
-        print(f"   1. Explicit: --input-path, --csv-file")
-        print(f"   2. Standard: {args.data_dir}/{args.dataset}/{args.dataset}.csv")
-        print(f"   3. Local: {args.dataset}.csv")
-        print(f"\n{Colors.CYAN}Please ensure your data file exists or use --input-path{Colors.ENDC}")
         return
 
-    # Load the CSV file (skipping comments)
+    # =========================================================================
+    # Load the COMPLETE config from the config file
+    # =========================================================================
+    config_dict = {}
+
+    if config_path and os.path.exists(config_path):
+        print(f"\n{Colors.CYAN}📖 Loading configuration from: {config_path}{Colors.ENDC}")
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Try to parse as JSON
+            try:
+                config_dict = json.loads(content)
+                print(f"{Colors.GREEN}✓ Loaded JSON config from: {config_path}{Colors.ENDC}")
+            except json.JSONDecodeError:
+                # Parse as key=value format
+                print(f"{Colors.YELLOW}   Config not JSON, parsing as key=value format{Colors.ENDC}")
+                config_dict = {}
+
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip()
+
+                        # Handle quoted strings
+                        if (value.startswith('"') and value.endswith('"')) or \
+                           (value.startswith("'") and value.endswith("'")):
+                            value = value[1:-1]
+
+                        # Handle lists
+                        if value.startswith('[') and value.endswith(']'):
+                            try:
+                                import ast
+                                value = ast.literal_eval(value)
+                            except:
+                                value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(',')]
+
+                        # Handle booleans
+                        elif value.lower() == 'true':
+                            value = True
+                        elif value.lower() == 'false':
+                            value = False
+                        # Handle numbers
+                        elif value.isdigit():
+                            value = int(value)
+                        elif value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                            try:
+                                value = float(value)
+                            except:
+                                pass
+
+                        config_dict[key] = value
+
+            # Parse column_names if it's a string
+            if 'column_names' in config_dict:
+                col_names = config_dict['column_names']
+                if isinstance(col_names, str):
+                    try:
+                        import ast
+                        col_names = ast.literal_eval(col_names)
+                        config_dict['column_names'] = col_names
+                        print(f"{Colors.GREEN}✓ Parsed column_names from string: {len(col_names)} columns{Colors.ENDC}")
+                    except:
+                        col_names = [c.strip().strip('"').strip("'") for c in col_names.strip('[]').split(',')]
+                        config_dict['column_names'] = col_names
+                        print(f"{Colors.GREEN}✓ Split column_names: {len(col_names)} columns{Colors.ENDC}")
+
+            # Parse class_info if present
+            if 'class_info' in config_dict:
+                class_info = config_dict['class_info']
+                if isinstance(class_info, str):
+                    try:
+                        import ast
+                        config_dict['class_info'] = ast.literal_eval(class_info)
+                    except:
+                        pass
+
+            print(f"{Colors.GREEN}✓ Loaded complete config with {len(config_dict)} keys{Colors.ENDC}")
+
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error loading config file: {e}{Colors.ENDC}")
+            import traceback
+            traceback.print_exc()
+            return
+    else:
+        print(f"{Colors.YELLOW}⚠️ No config file found, using defaults{Colors.ENDC}")
+        config_dict = {}
+
+    # =========================================================================
+    # Override config with command-line arguments (command-line takes precedence)
+    # =========================================================================
+    config_dict['file_path'] = csv_path
+
+    if args.input_path:
+        config_dict['input_path'] = args.input_path
+
+    # Check if args has model_type before accessing
+    if hasattr(args, 'model_type') and args.model_type:
+        config_dict['model_type'] = args.model_type
+    elif 'model_type' not in config_dict:
+        config_dict['model_type'] = 'Histogram'
+
+    if hasattr(args, 'device') and args.device:
+        config_dict['compute_device'] = args.device
+    elif 'compute_device' not in config_dict:
+        config_dict['compute_device'] = 'auto'
+
+    # Set training parameters from command line if provided
+    if 'training_params' not in config_dict:
+        config_dict['training_params'] = {}
+
+    # Learning rate
+    if hasattr(args, 'learning_rate') and args.learning_rate:
+        config_dict['training_params']['learning_rate'] = args.learning_rate
+    elif 'learning_rate' in config_dict:
+        config_dict['training_params']['learning_rate'] = config_dict['learning_rate']
+    else:
+        config_dict['training_params']['learning_rate'] = 0.1
+
+    # Epochs
+    if hasattr(args, 'epochs') and args.epochs:
+        config_dict['training_params']['epochs'] = args.epochs
+    elif 'epochs' in config_dict:
+        config_dict['training_params']['epochs'] = config_dict['epochs']
+    else:
+        config_dict['training_params']['epochs'] = 100
+
+    # Number of bins
+    if hasattr(args, 'bins') and args.bins:
+        config_dict['training_params']['n_bins_per_dim'] = args.bins
+    elif 'feature_dims' in config_dict:
+        config_dict['training_params']['n_bins_per_dim'] = config_dict['feature_dims']
+    else:
+        config_dict['training_params']['n_bins_per_dim'] = 128
+
+    # Test fraction
+    if hasattr(args, 'test_size') and args.test_size:
+        config_dict['training_params']['test_fraction'] = args.test_size
+    elif 'test_fraction' in config_dict:
+        config_dict['training_params']['test_fraction'] = config_dict['test_fraction']
+    else:
+        config_dict['training_params']['test_fraction'] = 0.2
+
+    # CRITICAL FIX: Set enable_adaptive based on mode, NOT from config
+    # This ensures that --mode adaptive always runs adaptive training
+    if args.mode == 'adaptive':
+        config_dict['training_params']['enable_adaptive'] = True
+    else:
+        # For other modes, use config value or default to False
+        config_dict['training_params']['enable_adaptive'] = config_dict.get('training_params', {}).get('enable_adaptive', False)
+
+    # Adaptive rounds
+    if hasattr(args, 'adaptive_rounds') and args.adaptive_rounds:
+        config_dict['training_params']['adaptive_rounds'] = args.adaptive_rounds
+    elif 'adaptive_rounds' in config_dict:
+        config_dict['training_params']['adaptive_rounds'] = config_dict['adaptive_rounds']
+    else:
+        config_dict['training_params']['adaptive_rounds'] = 10
+
+    # Initial samples
+    if hasattr(args, 'initial_samples') and args.initial_samples:
+        config_dict['training_params']['initial_samples'] = args.initial_samples
+    elif 'initial_samples' in config_dict:
+        config_dict['training_params']['initial_samples'] = config_dict['initial_samples']
+    else:
+        config_dict['training_params']['initial_samples'] = 50
+
+    # Max samples per round
+    if hasattr(args, 'max_samples_round') and args.max_samples_round:
+        config_dict['training_params']['max_samples_per_round'] = args.max_samples_round
+    elif 'max_samples_per_round' in config_dict:
+        config_dict['training_params']['max_samples_per_round'] = config_dict['max_samples_per_round']
+    else:
+        config_dict['training_params']['max_samples_per_round'] = 500
+
+    # =========================================================================
+    # Load CSV data to auto-detect target if not in config
+    # =========================================================================
     print(f"\n{Colors.CYAN}📖 Loading data from: {csv_path}{Colors.ENDC}")
     if args.skip_comments:
         print(f"{Colors.CYAN}   Skipping comment lines (starting with #){Colors.ENDC}")
 
-    df = load_csv_with_comments(csv_path, skip_comments=args.skip_comments)
+    df = load_csv_with_comments(csv_path, skip_comments=args.skip_comments, verbose=args.verbose)
 
     if df is None:
         print(f"{Colors.RED}❌ Failed to load data from {csv_path}{Colors.ENDC}")
@@ -14876,37 +15805,42 @@ def main():
 
     print(f"{Colors.GREEN}✓ Loaded {len(df)} rows, {len(df.columns)} columns{Colors.ENDC}")
     if args.verbose:
-        print(f"   Columns: {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}")
+        print(f"   Columns: {', '.join(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}{Colors.ENDC}")
 
-    # If we have a config file, load it
-    target_column = None
-    if config_path and os.path.exists(config_path):
-        try:
-            with open(config_path, 'r') as f:
-                saved_config = json.load(f)
-                target_column = saved_config.get('target_column')
-                print(f"{Colors.GREEN}✓ Loaded config from: {config_path}{Colors.ENDC}")
-                if target_column:
-                    print(f"   Target column: {target_column}")
-        except Exception as e:
-            print(f"{Colors.YELLOW}⚠️ Could not load config file: {e}{Colors.ENDC}")
-
-    # If no target column in config, try to detect it
-    if not target_column:
-        # Look for common target column names
+    # Set target column from config or auto-detect
+    if 'target_column' not in config_dict or not config_dict['target_column']:
         target_candidates = ['target', 'class', 'label', 'y', 'prediction', 'type', 'diagnosis', 'class_label', 'true_class']
+        target_column = None
         for candidate in target_candidates:
             if candidate in df.columns:
                 target_column = candidate
                 print(f"{Colors.GREEN}✓ Auto-detected target column: {target_column}{Colors.ENDC}")
                 break
 
-        # If still not found, use last column
         if not target_column:
             target_column = df.columns[-1]
             print(f"{Colors.YELLOW}⚠️ Using last column as target: {target_column}{Colors.ENDC}")
 
-    # Check if this is a prediction-only mode
+        config_dict['target_column'] = target_column
+    else:
+        target_column = config_dict['target_column']
+        print(f"{Colors.GREEN}✓ Using target column from config: {target_column}{Colors.ENDC}")
+
+    # =========================================================================
+    # Print config summary for debugging
+    # =========================================================================
+    print(f"\n{Colors.CYAN}📋 Final config summary:{Colors.ENDC}")
+    print(f"   column_names: {config_dict.get('column_names', 'NOT SET')[:5] if config_dict.get('column_names') else 'NOT SET'}...")
+    print(f"   target_column: {config_dict.get('target_column', 'NOT SET')}")
+    print(f"   model_type: {config_dict.get('model_type', 'Histogram')}")
+    print(f"   enable_adaptive: {config_dict.get('training_params', {}).get('enable_adaptive', False)}")
+    print(f"   mode: {args.mode}")
+    print(f"   training_params keys: {list(config_dict.get('training_params', {}).keys())}")
+    print(f"   Total config keys: {len(config_dict)}")
+
+    # =========================================================================
+    # PREDICTION MODE
+    # =========================================================================
     if args.mode == 'predict':
         print(f"\n{Colors.BOLD}{Colors.CYAN}🔮 PREDICTION MODE - Using Existing Model{Colors.ENDC}")
         print(f"{'='*60}")
@@ -14921,12 +15855,10 @@ def main():
 
         if not dataset_models:
             print(f"{Colors.RED}❌ No saved models found for dataset '{args.dataset}'{Colors.ENDC}")
-            print(f"{Colors.YELLOW}Please train a model first using: python adbnn.py --dataset {args.dataset} --mode train{Colors.ENDC}")
             return
 
         # Select model
         if args.model_file:
-            # Use specified model file
             model_file = args.model_file
             if not model_file.endswith('.pkl'):
                 model_file += '.pkl'
@@ -14936,14 +15868,12 @@ def main():
                 return
             print(f"{Colors.CYAN}📥 Using specified model: {model_file}{Colors.ENDC}")
         else:
-            # Use the most recent model
             model_file = sorted(dataset_models)[-1]
             model_path = os.path.join(models_dir, model_file)
             print(f"{Colors.CYAN}📥 Using most recent model: {model_file}{Colors.ENDC}")
 
-        # Check if prediction file is specified
         if not args.predict_file:
-            print(f"{Colors.RED}❌ No prediction file specified. Use --predict-file to specify input file.{Colors.ENDC}")
+            print(f"{Colors.RED}❌ No prediction file specified.{Colors.ENDC}")
             return
 
         if not os.path.exists(args.predict_file):
@@ -14953,34 +15883,10 @@ def main():
         # Load model and make predictions
         try:
             print(f"{Colors.CYAN}📥 Loading model...{Colors.ENDC}")
-            config = {
-                'file_path': csv_path,
-                'target_column': target_column,
-                'model_type': 'Histogram',
-                'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu'
-            }
-            model = OptimizedDBNN(dataset_name=args.dataset, config=config)
+            model = OptimizedDBNN(dataset_name=args.dataset, config=config_dict)
             model.load_model(model_path)
             print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.ENDC}")
 
-            # Load dataset to reconstruct preprocessing structures
-            print(f"{Colors.CYAN}📥 Loading dataset to reconstruct preprocessing...{Colors.ENDC}")
-            model.target_column = target_column
-
-            # Save filtered data to temp file
-            import tempfile
-            temp_csv = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
-            df.to_csv(temp_csv.name, index=False)
-            temp_csv.close()
-
-            try:
-                model.load_data(file_path=temp_csv.name)
-            finally:
-                os.unlink(temp_csv.name)
-
-            print(f"{Colors.GREEN}✓ Dataset loaded: {len(model.X_tensor)} samples, {len(model.classes)} classes{Colors.ENDC}")
-
-            # Make predictions
             output_dir = os.path.join(args.output_dir, f"{args.dataset}_predictions")
             os.makedirs(output_dir, exist_ok=True)
 
@@ -14991,165 +15897,32 @@ def main():
                 pred_df = pred_results['predictions']
                 print(f"\n{Colors.GREEN}✅ Predictions completed successfully!{Colors.ENDC}")
                 print(f"   Output directory: {output_dir}")
-                print(f"   Predictions file: {output_dir}/predictions.csv")
                 print(f"   Number of predictions: {len(pred_df)}")
 
-                # Show sample predictions
-                print(f"\n{Colors.CYAN}Sample predictions (first 10):{Colors.ENDC}")
-                sample_cols = ['predicted_class', 'confidence']
-                if 'true_class' in pred_df.columns:
-                    sample_cols.insert(0, 'true_class')
-                print(pred_df[sample_cols].head(10).to_string(index=False))
-
-                # Calculate and display confusion matrix if true labels exist
                 if 'true_class' in pred_df.columns and not args.no_confusion:
-                    print(f"\n{Colors.BOLD}📈 CONFUSION MATRIX - Prediction Performance{Colors.ENDC}")
-                    print(f"{'='*60}")
-
-                    # Get unique classes
-                    true_classes = pred_df['true_class'].astype(str)
-                    pred_classes = pred_df['predicted_class'].astype(str)
-                    unique_classes = sorted(set(true_classes) | set(pred_classes))
-
-                    # Create confusion matrix
-                    from sklearn.metrics import confusion_matrix
-                    cm = confusion_matrix(true_classes, pred_classes, labels=unique_classes)
-
-                    # Calculate per-class accuracy
-                    class_accuracies = {}
-                    for i, cls in enumerate(unique_classes):
-                        total = cm[i].sum()
-                        if total > 0:
-                            acc = cm[i, i] / total
-                            class_accuracies[cls] = acc
-
-                    # Overall accuracy
-                    total_correct = np.diag(cm).sum()
-                    total_samples = cm.sum()
-                    overall_acc = total_correct / total_samples if total_samples > 0 else 0
-
-                    # Determine column widths
-                    max_class_len = max(len(str(cls)) for cls in unique_classes)
-                    col_width = max(8, max_class_len + 2)
-
-                    # Print header
-                    print(f"\n{'True\\Pred':<{col_width}}", end='')
-                    for cls in unique_classes:
-                        print(f"{str(cls):<{col_width}}", end='')
-                    print(f"{'Class Acc':<12}")
-                    print("-" * (col_width + len(unique_classes) * col_width + 12))
-
-                    # Print each row
-                    for i, true_cls in enumerate(unique_classes):
-                        print(f"{Colors.BOLD}{str(true_cls):<{col_width}}{Colors.ENDC}", end='')
-
-                        for j, pred_cls in enumerate(unique_classes):
-                            count = cm[i, j]
-                            if i == j:
-                                if count > 0:
-                                    color = Colors.GREEN
-                                else:
-                                    color = Colors.RED
-                                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
-                            else:
-                                if count > 0:
-                                    color = Colors.RED
-                                else:
-                                    color = Colors.WHITE
-                                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
-
-                        acc = class_accuracies.get(true_cls, 0)
-                        if acc >= 0.9:
-                            acc_color = Colors.GREEN
-                        elif acc >= 0.7:
-                            acc_color = Colors.YELLOW
-                        else:
-                            acc_color = Colors.RED
-                        print(f"{acc_color}{acc:>6.2%}{Colors.ENDC}")
-
-                    print("-" * (col_width + len(unique_classes) * col_width + 12))
-                    if overall_acc >= 0.9:
-                        acc_color = Colors.GREEN
-                    elif overall_acc >= 0.7:
-                        acc_color = Colors.YELLOW
-                    else:
-                        acc_color = Colors.RED
-                    print(f"{Colors.BOLD}Overall Accuracy:{Colors.ENDC} {acc_color}{overall_acc:.2%}{Colors.ENDC}")
-                    print(f"{Colors.BOLD}Total Samples:{Colors.ENDC} {total_samples}")
-
-                    # Save confusion matrix as image
-                    try:
-                        import matplotlib.pyplot as plt
-                        import seaborn as sns
-
-                        plt.figure(figsize=(10, 8))
-                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                                   xticklabels=unique_classes, yticklabels=unique_classes,
-                                   annot_kws={'size': 12})
-                        plt.xlabel('Predicted Class', fontsize=12, fontweight='bold')
-                        plt.ylabel('True Class', fontsize=12, fontweight='bold')
-                        plt.title(f'Confusion Matrix - {args.dataset}\nPredictions on {os.path.basename(args.predict_file)}',
-                                 fontsize=14, fontweight='bold')
-
-                        cm_path = os.path.join(output_dir, 'confusion_matrix.png')
-                        plt.tight_layout()
-                        plt.savefig(cm_path, dpi=150, bbox_inches='tight')
-                        plt.close()
-                        print(f"\n{Colors.GREEN}✓ Confusion matrix saved to: {cm_path}{Colors.ENDC}")
-                    except Exception as e:
-                        print(f"{Colors.YELLOW}⚠️ Could not save confusion matrix image: {e}{Colors.ENDC}")
-
-                    # Show classification report
-                    print(f"\n{Colors.CYAN}📊 Classification Report:{Colors.ENDC}")
-                    from sklearn.metrics import classification_report
-                    report = classification_report(true_classes, pred_classes,
-                                                  target_names=unique_classes,
-                                                  digits=4)
-                    print(report)
-
-                    # Save classification report
-                    report_path = os.path.join(output_dir, 'classification_report.txt')
-                    with open(report_path, 'w') as f:
-                        f.write(f"Classification Report - {args.dataset}\n")
-                        f.write(f"Predictions on: {args.predict_file}\n")
-                        f.write(f"{'='*60}\n\n")
-                        f.write(report)
-                    print(f"{Colors.GREEN}✓ Classification report saved to: {report_path}{Colors.ENDC}")
-
-                print(f"\n{Colors.GREEN}🎉 Prediction complete!{Colors.ENDC}")
-            else:
-                print(f"{Colors.RED}❌ Prediction failed{Colors.ENDC}")
+                    display_confusion_matrix(pred_df['true_class'], pred_df['predicted_class'],
+                                            f"Predictions on {os.path.basename(args.predict_file)}", output_dir)
 
         except Exception as e:
             print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
             import traceback
             traceback.print_exc()
-            return
-
         return
 
-    # Training modes
+    # =========================================================================
+    # TRAINING MODES - ONLY ONE BRANCH EXECUTES HERE
+    # =========================================================================
     print(f"\n{Colors.BOLD}{Colors.BLUE}🏋️ TRAINING MODE - {args.mode.upper()}{Colors.ENDC}")
     print(f"{'='*60}")
 
-    # Create config with the found paths and target column
-    config = {
-        'file_path': csv_path,
-        'target_column': target_column,
-        'model_type': 'Histogram',
-        'compute_device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'training_params': {
-            'enable_adaptive': args.mode == 'adaptive'
-        }
-    }
-
-    # Create model
-    model = OptimizedDBNN(dataset_name=args.dataset, config=config)
+    # Create model with COMPLETE config
+    print(f"{Colors.CYAN}🚀 Creating model with complete config...{Colors.ENDC}")
+    model = OptimizedDBNN(dataset_name=args.dataset, config=config_dict)
 
     if args.track_evolution:
         model.enable_evolution_tracking()
 
-    # Load data (save filtered data to temp file for model loading)
+    # Load data into model
     print(f"{Colors.CYAN}📥 Loading data into model...{Colors.ENDC}")
     import tempfile
     temp_csv = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
@@ -15159,36 +15932,258 @@ def main():
     try:
         model.load_data(file_path=temp_csv.name)
     finally:
-        # Clean up temp file
         os.unlink(temp_csv.name)
 
+    # =========================================================================
+    # CRITICAL FIX: Single training execution - NO DUPLICATION
+    # =========================================================================
+
+    # Branch 1: Explicit adaptive mode
     if args.mode == 'adaptive':
         print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
         results = model.adaptive_fit_predict()
+
+    # Branch 2: Explicit train mode
     elif args.mode == 'train':
         print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
         model.split_data()
         results = model.fit_predict()
-    else:  # train_predict (default)
-        if model.enable_adaptive:
-            print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training...{Colors.ENDC}")
+
+    # Branch 3: train_predict mode - only if NOT adaptive
+    elif args.mode == 'train_predict':
+        # Check if adaptive is enabled in config
+        if config_dict.get('training_params', {}).get('enable_adaptive', False):
+            print(f"{Colors.CYAN}🚀 Starting ADAPTIVE training (from config)...{Colors.ENDC}")
             results = model.adaptive_fit_predict()
         else:
             print(f"{Colors.CYAN}🚀 Starting STANDARD training...{Colors.ENDC}")
             model.split_data()
             results = model.fit_predict()
 
-    # Save model
+    # Save model (only after training completes)
     os.makedirs("models", exist_ok=True)
-    model_path = f'models/{args.dataset}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+    model_path = f'models/{args.dataset}.pkl'
     model.save_model(model_path)
     print(f"\n{Colors.GREEN}✅ Training complete! Best accuracy: {results['best_accuracy']:.4f}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Model saved to: {model_path}{Colors.ENDC}")
 
-    # If in train_predict mode, optionally make predictions
-    if args.mode == 'train_predict':
-        print(f"\n{Colors.CYAN}🔮 Model trained and saved. Use --mode predict for future predictions.{Colors.ENDC}")
+def load_csv_with_comments(file_path, skip_comments=True, verbose=False):
+    """Load CSV file, skipping comment lines starting with #"""
+    if not os.path.exists(file_path):
+        return None
 
+    if verbose:
+        print(f"{Colors.CYAN}   Reading file: {file_path}{Colors.ENDC}")
+
+    if skip_comments:
+        # Read all lines and filter out comments
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+
+        # Filter out lines that start with # (after stripping whitespace)
+        data_lines = [line for line in lines if not line.strip().startswith('#')]
+
+        if not data_lines:
+            print(f"{Colors.RED}❌ No non-comment lines found in {file_path}{Colors.ENDC}")
+            return None
+
+        if verbose:
+            print(f"{Colors.CYAN}   Found {len(data_lines)} data lines (skipped {len(lines) - len(data_lines)} comment lines){Colors.ENDC}")
+
+        # Write filtered lines to a temporary file
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
+        temp_file.writelines(data_lines)
+        temp_file.close()
+
+        # Read the temporary file with pandas
+        try:
+            df = pd.read_csv(temp_file.name)
+            # Clean up temp file
+            os.unlink(temp_file.name)
+            return df
+        except Exception as e:
+            os.unlink(temp_file.name)
+            print(f"{Colors.RED}❌ Error reading CSV after filtering comments: {e}{Colors.ENDC}")
+            return None
+    else:
+        # Read normally
+        try:
+            return pd.read_csv(file_path)
+        except Exception as e:
+            print(f"{Colors.RED}❌ Error reading CSV: {e}{Colors.ENDC}")
+            return None
+
+
+def display_confusion_matrix(true_labels, pred_labels, title, output_dir):
+    """Display and save confusion matrix"""
+    from sklearn.metrics import confusion_matrix, classification_report
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    true_labels = true_labels.astype(str)
+    pred_labels = pred_labels.astype(str)
+    unique_classes = sorted(set(true_labels) | set(pred_labels))
+
+    cm = confusion_matrix(true_labels, pred_labels, labels=unique_classes)
+
+    # Calculate per-class accuracy
+    class_accuracies = {}
+    for i, cls in enumerate(unique_classes):
+        total = cm[i].sum()
+        if total > 0:
+            acc = cm[i, i] / total
+            class_accuracies[cls] = acc
+
+    # Overall accuracy
+    total_correct = np.diag(cm).sum()
+    total_samples = cm.sum()
+    overall_acc = total_correct / total_samples if total_samples > 0 else 0
+
+    # Determine column widths
+    max_class_len = max(len(str(cls)) for cls in unique_classes)
+    col_width = max(8, max_class_len + 2)
+
+    # Print header
+    print(f"\n{Colors.BOLD}📈 CONFUSION MATRIX - {title}{Colors.ENDC}")
+    print(f"{'='*60}")
+    print(f"\n{'True\\Pred':<{col_width}}", end='')
+    for cls in unique_classes:
+        print(f"{str(cls):<{col_width}}", end='')
+    print(f"{'Class Acc':<12}")
+    print("-" * (col_width + len(unique_classes) * col_width + 12))
+
+    # Print each row
+    for i, true_cls in enumerate(unique_classes):
+        print(f"{Colors.BOLD}{str(true_cls):<{col_width}}{Colors.ENDC}", end='')
+
+        for j, pred_cls in enumerate(unique_classes):
+            count = cm[i, j]
+            if i == j:
+                if count > 0:
+                    color = Colors.GREEN
+                else:
+                    color = Colors.RED
+                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
+            else:
+                if count > 0:
+                    color = Colors.RED
+                else:
+                    color = Colors.WHITE
+                print(f"{color}{count:<{col_width}}{Colors.ENDC}", end='')
+
+        acc = class_accuracies.get(true_cls, 0)
+        if acc >= 0.9:
+            acc_color = Colors.GREEN
+        elif acc >= 0.7:
+            acc_color = Colors.YELLOW
+        else:
+            acc_color = Colors.RED
+        print(f"{acc_color}{acc:>6.2%}{Colors.ENDC}")
+
+    print("-" * (col_width + len(unique_classes) * col_width + 12))
+    if overall_acc >= 0.9:
+        acc_color = Colors.GREEN
+    elif overall_acc >= 0.7:
+        acc_color = Colors.YELLOW
+    else:
+        acc_color = Colors.RED
+    print(f"{Colors.BOLD}Overall Accuracy:{Colors.ENDC} {acc_color}{overall_acc:.2%}{Colors.ENDC}")
+    print(f"{Colors.BOLD}Total Samples:{Colors.ENDC} {total_samples}")
+
+    # Save confusion matrix as image
+    try:
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=unique_classes, yticklabels=unique_classes,
+                   annot_kws={'size': 12})
+        plt.xlabel('Predicted Class', fontsize=12, fontweight='bold')
+        plt.ylabel('True Class', fontsize=12, fontweight='bold')
+        plt.title(f'Confusion Matrix - {title}', fontsize=14, fontweight='bold')
+
+        cm_path = os.path.join(output_dir, 'confusion_matrix.png')
+        plt.tight_layout()
+        plt.savefig(cm_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"\n{Colors.GREEN}✓ Confusion matrix saved to: {cm_path}{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}⚠️ Could not save confusion matrix image: {e}{Colors.ENDC}")
+
+    # Show classification report
+    print(f"\n{Colors.CYAN}📊 Classification Report:{Colors.ENDC}")
+    report = classification_report(true_labels, pred_labels,
+                                  target_names=unique_classes,
+                                  digits=4)
+    print(report)
+
+    # Save classification report
+    report_path = os.path.join(output_dir, 'classification_report.txt')
+    with open(report_path, 'w') as f:
+        f.write(f"Classification Report - {title}\n")
+        f.write(f"{'='*60}\n\n")
+        f.write(report)
+    print(f"{Colors.GREEN}✓ Classification report saved to: {report_path}{Colors.ENDC}")
+
+
+# Also need to fix the OptimizedDatasetProcessor to properly handle the config:
+
+def fix_optimized_dataset_processor():
+    """Fix for OptimizedDatasetProcessor.__init__ to properly handle column_names"""
+
+    # This is the fixed __init__ method for OptimizedDatasetProcessor
+    # Add this to the OptimizedDatasetProcessor class in the code
+
+    """
+    def __init__(self, config: Dict, device: str):
+        self.config = config
+        self.device = device
+        self.categorical_encoders = {}
+        self.feature_stats = {}
+        self.label_encoder = config.get('label_encoder', {})
+        self.prediction_original_df = None
+
+        # CRITICAL FIX: Get column order from config
+        self.column_order = config.get('column_names', [])
+        self.target_column = config.get('target_column')
+
+        # CRITICAL FIX: Parse column_order if it's a string
+        if isinstance(self.column_order, str):
+            try:
+                import ast
+                self.column_order = ast.literal_eval(self.column_order)
+                print(f"{Colors.GREEN}✓ Parsed column_names from string: {len(self.column_order)} columns{Colors.ENDC}")
+            except:
+                # Try simple comma splitting
+                self.column_order = [c.strip().strip('"').strip("'") for c in self.column_order.strip('[]').split(',')]
+                print(f"{Colors.GREEN}✓ Split column_names: {len(self.column_order)} columns{Colors.ENDC}")
+
+        # Extract feature names (all columns except target, in config order)
+        if self.column_order:
+            if self.target_column and self.target_column in self.column_order:
+                self.ordered_feature_names = [col for col in self.column_order if col != self.target_column]
+            else:
+                self.ordered_feature_names = self.column_order.copy()
+
+            print(f"{Colors.GREEN}✓ Loaded {len(self.ordered_feature_names)} feature names from config{Colors.ENDC}")
+            if self.ordered_feature_names:
+                print(f"{Colors.CYAN}   First 5 features: {self.ordered_feature_names[:5]}{'...' if len(self.ordered_feature_names) > 5 else ''}{Colors.ENDC}")
+        else:
+            self.ordered_feature_names = []
+            print(f"{Colors.YELLOW}⚠️ No column_names in config{Colors.ENDC}")
+            print(f"{Colors.CYAN}   Config keys: {list(self.config.keys())}{Colors.ENDC}")
+    """
+    pass
+
+
+if __name__ == "__main__":
+    print("""
+Example Usage:
+python adbnn.py --dataset breast_cancer --mode adaptive --input-path data/breast_cancer/breast_cancer.csv --config-file data/breast_cancer/breast_cancer.conf
+
+python adbnn.py --dataset breast_cancer --mode predict --predict-file data/breast_cancer/new_data.csv
+
+    """)
+    main()
 def interactive_mode():
     """
     Enhanced interactive mode with ALL GUI features for headless GPU servers
@@ -15860,7 +16855,7 @@ def interactive_mode():
 
         save_model = input(f"{Colors.CYAN}Save trained model? (y/n) [y]: {Colors.ENDC}").strip().lower()
         if save_model != 'n':
-            model_path = f"models/{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+            model_path = f"models/{dataset_name}.pkl"
             os.makedirs("models", exist_ok=True)
             model.save_model(model_path)
             print(f"{Colors.GREEN}✓ Model saved to: {model_path}{Colors.ENDC}")
