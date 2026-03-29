@@ -16174,16 +16174,6 @@ def fix_optimized_dataset_processor():
     """
     pass
 
-
-if __name__ == "__main__":
-    print("""
-Example Usage:
-python adbnn.py --dataset breast_cancer --mode adaptive --input-path data/breast_cancer/breast_cancer.csv --config-file data/breast_cancer/breast_cancer.conf
-
-python adbnn.py --dataset breast_cancer --mode predict --predict-file data/breast_cancer/new_data.csv
-
-    """)
-    main()
 def interactive_mode():
     """
     Enhanced interactive mode with ALL GUI features for headless GPU servers
