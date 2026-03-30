@@ -1856,49 +1856,50 @@ class PredictionManager:
             else:
                 predictions_numpy[key] = np.array(values)
 
-        # Determine the output directory and filename correctly
-        output_dir = os.path.dirname(output_csv)
-        if not output_dir:
-            output_dir = os.path.join('data', self.config['dataset']['name'].lower(), 'predictions')
+        # Determine the base output directory and filename
+        dataset_name = self.config['dataset']['name'].lower()
+        base_dir = os.path.join('data', dataset_name)
+        base_filename = f"{dataset_name}.csv"
 
-        # Create the output directory (not the file!)
-        os.makedirs(output_dir, exist_ok=True)
+        # Check if file exists and create versioned directory if needed
+        final_csv_path = output_csv
+        versioned_dir = None
 
-        # Check if the CSV file already exists and ask user what to do
         if os.path.exists(output_csv):
-            print(f"\n⚠️  File already exists: {output_csv}")
-            print("Options:")
-            print("  [o] Overwrite")
-            print("  [r] Rename (add timestamp)")
-            print("  [s] Skip saving CSV")
-            print("  [q] Quit prediction")
+            # Find the next available version number
+            version = 1
+            while True:
+                versioned_dir = os.path.join(base_dir, f"data{version}")
+                versioned_csv = os.path.join(versioned_dir, base_filename)
+                if not os.path.exists(versioned_csv):
+                    break
+                version += 1
 
-            choice = input("Choose option [o/r/s/q]: ").strip().lower()
+            # Create the versioned directory
+            os.makedirs(versioned_dir, exist_ok=True)
+            final_csv_path = versioned_csv
 
-            if choice == 'q':
-                logger.info("User chose to quit prediction")
-                return
-            elif choice == 's':
-                logger.info("User chose to skip saving CSV")
-                return
-            elif choice == 'r':
-                # Rename with timestamp
-                base, ext = os.path.splitext(output_csv)
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                output_csv = f"{base}_{timestamp}{ext}"
-                logger.info(f"Will save to: {output_csv}")
-            elif choice == 'o':
-                # Overwrite - will replace
-                logger.info(f"Will overwrite: {output_csv}")
-            else:
-                logger.info(f"Invalid choice, defaulting to overwrite")
+            logger.info(f"📁 File already exists at {output_csv}")
+            logger.info(f"📁 Creating new version in: {versioned_dir}/")
+            logger.info(f"📁 Saving to: {final_csv_path}")
 
-        # Use the comprehensive save method - pass the CSV path, not directory
+        # Create output directory for the final CSV path
+        output_dir = os.path.dirname(final_csv_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        # Use the comprehensive save method
         reconstruction_manager = ReconstructionManager(self.config)
-        reconstruction_manager._save_predictions(predictions_numpy, output_csv)
+        reconstruction_manager._save_predictions(predictions_numpy, final_csv_path)
 
         # Also save the simplified CSV version for backward compatibility
-        self._save_simple_csv(predictions_numpy, output_csv)
+        self._save_simple_csv(predictions_numpy, final_csv_path)
+
+        # Log the final location
+        if versioned_dir:
+            logger.info(f"✅ Predictions saved to versioned directory: {versioned_dir}/")
+            logger.info(f"   Main CSV: {os.path.basename(final_csv_path)}")
+            logger.info(f"   Full path: {final_csv_path}")
 
     def _save_simple_csv(self, predictions: Dict[str, np.ndarray], output_csv: str):
         """Save simplified CSV with main prediction columns"""
@@ -8331,8 +8332,8 @@ class ReconstructionManager:
 
             # Save the CSV file
             df.to_csv(output_csv, index=False)
-            logger.info(f"✓ Predictions CSV saved to {output_csv}")
-            logger.info(f"  CSV shape: {df.shape}")
+            logger.info(f"✅ Predictions CSV saved to {output_csv}")
+            logger.info(f"   CSV shape: {df.shape}")
 
             # Also save feature selection metadata if available
             if hasattr(self, 'config') and self.config:
@@ -8343,11 +8344,12 @@ class ReconstructionManager:
                         'num_features': len(feature_columns),
                         'feature_columns': feature_columns,
                         'num_samples': len(df),
-                        'timestamp': datetime.now().isoformat()
+                        'timestamp': datetime.now().isoformat(),
+                        'versioned_directory': os.path.basename(os.path.dirname(output_csv)) if os.path.dirname(output_csv) != 'data' else None
                     }
                     with open(metadata_path, 'w') as f:
                         json.dump(metadata, f, indent=2)
-                    logger.info(f"✓ Metadata saved to {metadata_path}")
+                    logger.info(f"✅ Metadata saved to {metadata_path}")
         else:
             logger.warning("No valid data to save to CSV")
 
