@@ -150,6 +150,26 @@ except ImportError:
 if ASTROPY_AVAILABLE:
     print(f"{Colors.GREEN}✓ Astropy available for FITS/VOTable export{Colors.ENDC}")
 
+#=======================Mosaic creation ================================
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, Image as ReportLabImage
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    print(f"{Colors.YELLOW}⚠️ reportlab not available. PDF generation disabled. Install: pip install reportlab{Colors.ENDC}")
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print(f"{Colors.YELLOW}⚠️ PIL not available. Image grid generation disabled. Install: pip install Pillow{Colors.ENDC}")
+#=======================Mosaic creation ================================
+
 class RobustCSVReader:
     """
     Robust CSV reader that handles:
@@ -9980,6 +10000,7 @@ class OptimizedDBNN(ExternalToolsMixin):
         Preserves ALL original columns and comment lines.
         Creates unique folders for each prediction run.
         Generates confusion matrix if true labels are available.
+        Generates PDF mosaics and analysis files if image paths are detected.
         Uses DECODED class labels (strings) in all output files.
         """
         print(f"{Colors.CYAN}📖 Reading prediction file: {input_csv}{Colors.ENDC}")
@@ -10037,6 +10058,19 @@ class OptimizedDBNN(ExternalToolsMixin):
             return {'predictions': None, 'error': str(e)}
 
         print(f"{Colors.GREEN}✓ Loaded {len(X_tensor)} samples for prediction{Colors.ENDC}")
+
+        # Initialize result_dict early
+        result_dict = {
+            'predictions': None,
+            'n_samples': 0,
+            'features_used': self.feature_names,
+            'output_folder': pred_folder,
+            'label_encoder': self.label_encoder,
+            'label_decoder': self.label_decoder,
+            'class_labels': list(self.label_encoder.keys()),
+            'accuracy': None,
+            'confusion_matrix_file': None
+        }
 
         try:
             # Make predictions
@@ -10157,6 +10191,7 @@ class OptimizedDBNN(ExternalToolsMixin):
             target_column = self.config.get('target_column')
             has_true_labels = False
             true_labels = None
+            accuracy = None
 
             if target_column and target_column in header:
                 try:
@@ -10199,35 +10234,147 @@ class OptimizedDBNN(ExternalToolsMixin):
                                 pred_folder,
                                 f"{base_name}_confusion_matrix"
                             )
+                            result_dict['confusion_matrix_file'] = os.path.join(pred_folder, f"{base_name}_confusion_matrix.png")
                 except Exception as e:
                     print(f"{Colors.YELLOW}⚠️ Could not extract true labels: {e}{Colors.ENDC}")
+
+            # =========================================================================
+            # GENERATE ANALYSIS FILES AND PDF MOSAICS
+            # =========================================================================
+
+            # Find image columns in the original data (from the original CSV, not pred_df)
+            original_df = None
+            try:
+                # Read original CSV to find image columns
+                original_df = pd.read_csv(input_csv, comment='#')
+                image_columns = self._find_image_columns(original_df)
+
+                if image_columns:
+                    print(f"\n{Colors.CYAN}{'='*60}{Colors.ENDC}")
+                    print(f"{Colors.CYAN}📸 IMAGE DETECTION{Colors.ENDC}")
+                    print(f"{Colors.CYAN}{'='*60}{Colors.ENDC}")
+                    print(f"{Colors.CYAN}   Detected {len(image_columns)} image columns: {image_columns}{Colors.ENDC}")
+
+                    # Add filepath column to pred_df for PDF generation
+                    # Use the first image column as the primary filepath
+                    primary_img_col = image_columns[0]
+
+                    # Ensure the image paths are properly aligned with predictions
+                    # Read the original data rows (excluding comments)
+                    img_paths = []
+                    for line in data_lines[1:]:  # Skip header
+                        try:
+                            row = next(csv.reader([line]))
+                            if primary_img_col in header:
+                                col_idx = header.index(primary_img_col)
+                                if col_idx < len(row):
+                                    img_paths.append(row[col_idx].strip())
+                                else:
+                                    img_paths.append('')
+                            else:
+                                img_paths.append('')
+                        except:
+                            img_paths.append('')
+
+                    # Trim to match predictions length
+                    img_paths = img_paths[:len(pred_df)]
+                    pred_df['filepath'] = img_paths
+
+                    # Also add any other image columns
+                    for img_col in image_columns[1:]:
+                        if img_col in header:
+                            col_idx = header.index(img_col)
+                            col_values = []
+                            for line in data_lines[1:]:
+                                try:
+                                    row = next(csv.reader([line]))
+                                    if col_idx < len(row):
+                                        col_values.append(row[col_idx].strip())
+                                    else:
+                                        col_values.append('')
+                                except:
+                                    col_values.append('')
+                            col_values = col_values[:len(pred_df)]
+                            pred_df[img_col] = col_values
+
+                    # Generate analysis files (CSV splits for failed/correct predictions)
+                    analysis_results = self._generate_prediction_analysis_files(
+                        pred_df,
+                        true_labels=true_labels if has_true_labels else None,
+                        output_dir=pred_folder
+                    )
+
+                    if analysis_results:
+                        print(f"\n{Colors.GREEN}✅ Analysis files generated:{Colors.ENDC}")
+                        if 'all_predictions' in analysis_results:
+                            print(f"   • All predictions: {os.path.basename(analysis_results['all_predictions'])}")
+                        if 'correct_predictions' in analysis_results:
+                            print(f"   • Correct predictions: {os.path.basename(analysis_results['correct_predictions'])}")
+                        if 'failed_predictions' in analysis_results:
+                            print(f"   • Failed predictions: {os.path.basename(analysis_results['failed_predictions'])}")
+
+                        result_dict['analysis_files'] = analysis_results
+
+                    # Generate PDF mosaics if reportlab and PIL are available
+                    if REPORTLAB_AVAILABLE and PIL_AVAILABLE:
+                        print(f"\n{Colors.CYAN}📄 Generating PDF mosaics...{Colors.ENDC}")
+                        self._generate_class_pdf_mosaics(
+                            pred_df,
+                            pred_folder,
+                            image_columns,
+                            true_labels=true_labels if has_true_labels else None
+                        )
+                        print(f"{Colors.GREEN}✅ PDF mosaics saved to: {pred_folder}/pdf_mosaics/{Colors.ENDC}")
+                        result_dict['pdf_mosaics_dir'] = os.path.join(pred_folder, 'pdf_mosaics')
+                    else:
+                        missing = []
+                        if not REPORTLAB_AVAILABLE:
+                            missing.append("reportlab")
+                        if not PIL_AVAILABLE:
+                            missing.append("Pillow")
+                        print(f"{Colors.YELLOW}⚠️ PDF mosaic generation skipped (missing: {', '.join(missing)}){Colors.ENDC}")
+                        print(f"{Colors.YELLOW}   Install with: pip install {' '.join(missing)}{Colors.ENDC}")
+
+                else:
+                    print(f"{Colors.CYAN}📸 No image columns detected in input file{Colors.ENDC}")
+
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️ Could not detect image columns: {e}{Colors.ENDC}")
+
+            # =========================================================================
+            # END OF ANALYSIS CODE
+            # =========================================================================
 
             # Print a sample of predictions to verify
             print(f"\n{Colors.CYAN}Sample predictions (first 5):{Colors.ENDC}")
             sample_cols = ['predicted_class', 'confidence']
             if 'true_class' in pred_df.columns:
                 sample_cols.insert(0, 'true_class')
+            if 'filepath' in pred_df.columns:
+                sample_cols.append('filepath')
             print(pred_df[sample_cols].head(5).to_string(index=False))
 
-            return {
+            # Update result_dict with final values
+            result_dict.update({
                 'predictions': pred_df,
                 'n_samples': len(pred_df),
                 'features_used': self.feature_names,
                 'output_file': output_file,
                 'predictions_file': pred_file,
-                'output_folder': pred_folder,
+                'accuracy': accuracy if has_true_labels else None,
                 'label_encoder': self.label_encoder,
                 'label_decoder': self.label_decoder,
-                'class_labels': list(self.label_encoder.keys()),
-                'accuracy': accuracy if has_true_labels else None,
-                'confusion_matrix_file': os.path.join(pred_folder, f"{base_name}_confusion_matrix.png") if has_true_labels else None
-            }
+                'class_labels': list(self.label_encoder.keys())
+            })
+
+            return result_dict
 
         except Exception as e:
             print(f"{Colors.RED}❌ Error during prediction: {e}{Colors.ENDC}")
             import traceback
             traceback.print_exc()
-            return {'predictions': None, 'error': str(e)}
+            result_dict['error'] = str(e)
+            return result_dict
 
     def _generate_confusion_matrix_for_predictions(self, true_labels, pred_labels, label_encoder, output_folder, base_name):
         """
@@ -11065,6 +11212,499 @@ class OptimizedDBNN(ExternalToolsMixin):
             traceback.print_exc()
             self.in_adaptive_fit = False
             raise
+
+    def cleanup_temp_files(self):
+        """Clean up temporary files created during PDF generation."""
+        if hasattr(self, '_temp_files'):
+            for f in self._temp_files:
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except:
+                    pass
+            self._temp_files = []
+
+    def _find_image_columns(self, df):
+        """
+        Find columns in DataFrame that contain image file paths.
+
+        Args:
+            df: pandas DataFrame to search
+
+        Returns:
+            List of column names that likely contain image paths
+        """
+        image_columns = []
+        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
+
+        for col in df.columns:
+            col_lower = col.lower()
+            # Check column name patterns
+            if any(keyword in col_lower for keyword in ['path', 'file', 'image', 'filename', 'img', 'url']):
+                # Check sample values
+                sample = df[col].dropna().iloc[0] if len(df) > 0 else None
+                if sample and isinstance(sample, str):
+                    sample_lower = sample.lower()
+                    if any(ext in sample_lower for ext in image_extensions):
+                        image_columns.append(col)
+                    elif '/' in sample or '\\' in sample:
+                        # Might be a path, check if it exists
+                        if os.path.exists(sample):
+                            image_columns.append(col)
+
+        return image_columns
+
+    def _generate_prediction_analysis_files(self, predictions_df, true_labels=None, output_dir=None):
+        """
+        Generate CSV files for failed and correct predictions with image path tracking.
+
+        Args:
+            predictions_df: DataFrame with predictions (includes 'predicted_class' and confidence)
+            true_labels: Optional true labels for accuracy analysis
+            output_dir: Directory to save analysis files
+
+        Returns:
+            Dictionary with paths to generated files
+        """
+        if output_dir is None:
+            output_dir = f"data/{self.dataset_name}/Predictions/"
+        os.makedirs(output_dir, exist_ok=True)
+
+        results = {}
+
+        # Save all predictions
+        all_path = os.path.join(output_dir, f"{self.dataset_name}_all_predictions.csv")
+        predictions_df.to_csv(all_path, index=False)
+        results['all_predictions'] = all_path
+        print(f"{Colors.GREEN}✓ All predictions saved to: {os.path.basename(all_path)}{Colors.ENDC}")
+
+        # Only generate failure/success files if we have true labels
+        if true_labels is not None:
+            # Add true labels to dataframe if not already present
+            if 'true_class' not in predictions_df.columns:
+                predictions_df['true_class'] = true_labels
+
+            # Create failed predictions CSV
+            failed_predictions = predictions_df[predictions_df['predicted_class'] != predictions_df['true_class']]
+            if len(failed_predictions) > 0:
+                failed_path = os.path.join(output_dir, f"{self.dataset_name}_failed_predictions.csv")
+                failed_predictions.to_csv(failed_path, index=False)
+                results['failed_predictions'] = failed_path
+                print(f"{Colors.GREEN}✓ Failed predictions ({len(failed_predictions)}) saved to: {os.path.basename(failed_path)}{Colors.ENDC}")
+            else:
+                print(f"{Colors.GREEN}✓ No failed predictions! All predictions correct.{Colors.ENDC}")
+
+            # Create correct predictions CSV
+            correct_predictions = predictions_df[predictions_df['predicted_class'] == predictions_df['true_class']]
+            if len(correct_predictions) > 0:
+                correct_path = os.path.join(output_dir, f"{self.dataset_name}_correct_predictions.csv")
+                correct_predictions.to_csv(correct_path, index=False)
+                results['correct_predictions'] = correct_path
+                print(f"{Colors.GREEN}✓ Correct predictions ({len(correct_predictions)}) saved to: {os.path.basename(correct_path)}{Colors.ENDC}")
+
+        return results
+
+    def _generate_class_pdf_mosaics(self, predictions_df, output_dir, image_columns, true_labels=None,
+                                     images_per_row=4, images_per_column=4):
+        """
+        Generate PDF mosaics with images for each predicted class.
+        Also generates separate PDFs for passed and failed predictions per class.
+
+        Args:
+            predictions_df: DataFrame with predictions and image paths
+            output_dir: Output directory for PDF files
+            image_columns: List of column names containing image paths
+            true_labels: Optional true labels for pass/fail classification
+            images_per_row: Number of images per row (default: 4)
+            images_per_column: Number of images per column (default: 4)
+        """
+        if not REPORTLAB_AVAILABLE or not PIL_AVAILABLE:
+            missing = []
+            if not REPORTLAB_AVAILABLE:
+                missing.append("reportlab")
+            if not PIL_AVAILABLE:
+                missing.append("Pillow")
+            print(f"{Colors.YELLOW}⚠️ PDF generation skipped (missing: {', '.join(missing)}){Colors.ENDC}")
+            print(f"{Colors.YELLOW}   Install with: pip install {' '.join(missing)}{Colors.ENDC}")
+            return
+
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, Image as ReportLabImage
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+
+        # Create subdirectories for different PDF types
+        pdf_dir = os.path.join(output_dir, 'pdf_mosaics')
+        os.makedirs(pdf_dir, exist_ok=True)
+
+        # Determine which image column to use (prefer the one with most valid paths)
+        best_image_col = None
+        max_valid = 0
+        for col in image_columns:
+            if col in predictions_df.columns:
+                valid_count = predictions_df[col].dropna().apply(
+                    lambda x: os.path.exists(str(x)) if isinstance(x, str) else False
+                ).sum()
+                if valid_count > max_valid:
+                    max_valid = valid_count
+                    best_image_col = col
+
+        if best_image_col is None:
+            print(f"{Colors.YELLOW}⚠️ No valid image paths found in any column{Colors.ENDC}")
+            return
+
+        print(f"{Colors.CYAN}📸 Using image column: {best_image_col}{Colors.ENDC}")
+
+        # Filter to rows with valid images
+        valid_mask = predictions_df[best_image_col].apply(
+            lambda x: isinstance(x, str) and os.path.exists(str(x))
+        )
+        valid_df = predictions_df[valid_mask].copy()
+
+        if len(valid_df) == 0:
+            print(f"{Colors.YELLOW}⚠️ No valid images found for PDF generation{Colors.ENDC}")
+            return
+
+        print(f"{Colors.CYAN}📄 Generating PDF mosaics for {len(valid_df)} valid images...{Colors.ENDC}")
+        print(f"{Colors.CYAN}   Grid layout: {images_per_row} x {images_per_column} = {images_per_row * images_per_column} images per page{Colors.ENDC}")
+
+        # Create PDFs for each class
+        class_groups = valid_df.groupby('predicted_class')
+
+        # Define styles - FIXED: Check if styles exist before adding
+        styles = getSampleStyleSheet()
+
+        # Check if 'Caption' style already exists
+        if 'Caption' not in styles:
+            caption_style = ParagraphStyle(
+                name='Caption',
+                parent=styles['Normal'],
+                fontSize=8,
+                leading=9,
+                spaceBefore=2,
+                spaceAfter=2,
+                alignment=1  # Center
+            )
+            styles.add(caption_style)
+        else:
+            caption_style = styles['Caption']
+
+        # Check if 'Hyperlink' style already exists
+        if 'Hyperlink' not in styles:
+            hyperlink_style = ParagraphStyle(
+                name='Hyperlink',
+                parent=styles['Normal'],
+                textColor=colors.blue,
+                underline=1,
+                fontSize=8
+            )
+            styles.add(hyperlink_style)
+        else:
+            hyperlink_style = styles['Hyperlink']
+
+        # Use existing Title style
+        title_style = styles['Title']
+        title_style.fontSize = 14
+        title_style.alignment = 1  # Center
+
+        # PDF generation parameters
+        columns = images_per_row
+        rows = images_per_column
+        images_per_page = columns * rows
+
+        for class_name, group_df in class_groups:
+            safe_name = "".join(c if c.isalnum() else "_" for c in str(class_name))
+
+            # Sort by confidence (highest first)
+            sorted_df = group_df.sort_values('confidence', ascending=False)
+            n_images = len(sorted_df)
+
+            if n_images == 0:
+                continue
+
+            print(f"   Processing class {class_name}: {n_images} images")
+
+            # ========== PDF 1: All predictions for this class ==========
+            all_pdf_path = os.path.join(pdf_dir, f"{safe_name}_all_mosaic.pdf")
+            self._create_pdf_mosaic(
+                sorted_df, best_image_col, all_pdf_path,
+                f"Class: {class_name} - All Predictions (Sorted by Confidence)",
+                columns, rows, images_per_page, styles, caption_style, hyperlink_style, title_style
+            )
+
+            # ========== PDF 2: Correct predictions for this class (if true labels available) ==========
+            if true_labels is not None and 'true_class' in group_df.columns:
+                correct_df = group_df[group_df['predicted_class'] == group_df['true_class']]
+                if len(correct_df) > 0:
+                    correct_sorted = correct_df.sort_values('confidence', ascending=False)
+                    correct_pdf_path = os.path.join(pdf_dir, f"{safe_name}_correct_mosaic.pdf")
+                    self._create_pdf_mosaic(
+                        correct_sorted, best_image_col, correct_pdf_path,
+                        f"Class: {class_name} - CORRECT Predictions (Sorted by Confidence)",
+                        columns, rows, images_per_page, styles, caption_style, hyperlink_style, title_style
+                    )
+
+                # ========== PDF 3: Failed predictions for this class ==========
+                failed_df = group_df[group_df['predicted_class'] != group_df['true_class']]
+                if len(failed_df) > 0:
+                    failed_sorted = failed_df.sort_values('confidence', ascending=False)
+                    failed_pdf_path = os.path.join(pdf_dir, f"{safe_name}_failed_mosaic.pdf")
+                    self._create_pdf_mosaic(
+                        failed_sorted, best_image_col, failed_pdf_path,
+                        f"Class: {class_name} - FAILED Predictions (Sorted by Confidence)",
+                        columns, rows, images_per_page, styles, caption_style, hyperlink_style, title_style
+                    )
+
+            # ========== PDF 4: Per-image PDFs (one image per page for detailed view) ==========
+            # Skip per-image PDFs if there are too many images (to avoid file system overload)
+            if n_images <= 1000:
+                per_image_dir = os.path.join(pdf_dir, f"{safe_name}_per_image")
+                os.makedirs(per_image_dir, exist_ok=True)
+
+                for idx, (_, row) in enumerate(sorted_df.iterrows()):
+                    img_path = str(row[best_image_col])
+                    img_name = os.path.basename(img_path)
+
+                    # Determine if this is correct or failed
+                    status = ""
+                    if true_labels is not None and 'true_class' in row:
+                        if row['predicted_class'] == row['true_class']:
+                            status = "CORRECT"
+                        else:
+                            status = f"FAILED_True_{row['true_class']}"
+
+                    per_img_pdf = os.path.join(per_image_dir, f"{idx+1:04d}_{status}_{safe_name}_{img_name}.pdf")
+                    self._create_single_image_pdf(
+                        img_path, per_img_pdf, row, status, best_image_col,
+                        styles, caption_style, hyperlink_style, title_style
+                    )
+            else:
+                print(f"   Skipping per-image PDFs for {class_name} ({n_images} images > 1000 limit)")
+
+            print(f"   ✓ Generated PDFs for class {class_name}")
+
+    def _create_pdf_mosaic(self, df, img_col, pdf_path, title, columns, rows, images_per_page,
+                            styles, caption_style, hyperlink_style, title_style):
+        """
+        Create a PDF mosaic with images arranged in a grid.
+        """
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, Image as ReportLabImage
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+
+        if len(df) == 0:
+            return
+
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=letter,
+            rightMargin=0.4*inch,
+            leftMargin=0.4*inch,
+            topMargin=0.4*inch,
+            bottomMargin=0.4*inch
+        )
+
+        elements = []
+
+        # Add title
+        elements.append(Paragraph(title, title_style))
+        elements.append(Spacer(1, 0.2*inch))
+
+        # Calculate dimensions
+        usable_width = letter[0] - 0.8*inch
+        cell_width = usable_width / columns
+        img_width = cell_width * 0.85
+        caption_height = 0.15*inch
+
+        n_images = len(df)
+        n_pages = (n_images + images_per_page - 1) // images_per_page
+
+        for page_num in range(n_pages):
+            start_idx = page_num * images_per_page
+            end_idx = min(start_idx + images_per_page, n_images)
+            page_images = df.iloc[start_idx:end_idx]
+
+            if len(page_images) == 0:
+                continue
+
+            # Build table data for this page
+            table_data = []
+            current_row = []
+
+            for _, row in page_images.iterrows():
+                try:
+                    img_path = str(row[img_col])
+                    if not os.path.exists(img_path):
+                        continue
+
+                    # Create image element
+                    img = ReportLabImage(img_path, width=img_width, height=img_width)
+
+                    # Build caption with file path and confidence
+                    img_name = os.path.basename(img_path)
+                    confidence = row.get('confidence', 0)
+
+                    # Determine status
+                    status = ""
+                    if 'true_class' in row and 'predicted_class' in row:
+                        if str(row['predicted_class']) == str(row.get('true_class', '')):
+                            status = "✓"
+                        else:
+                            status = "✗"
+
+                    # Truncate long filenames
+                    display_name = img_name[:25] + "..." if len(img_name) > 25 else img_name
+                    caption_text = f'<link href="{img_path}">{status} {display_name}</link><br/>Conf: {confidence:.2%}'
+                    if 'predicted_class' in row:
+                        caption_text += f'<br/>Pred: {row["predicted_class"]}'
+                    if 'true_class' in row:
+                        caption_text += f'<br/>True: {row["true_class"]}'
+
+                    caption = Paragraph(caption_text, hyperlink_style)
+
+                    # Create cell content
+                    cell_content = [[img], [Spacer(1, 2)], [caption]]
+                    cell_table = Table(cell_content, colWidths=[cell_width])
+                    cell_table.setStyle(TableStyle([
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ]))
+
+                    current_row.append(cell_table)
+
+                    if len(current_row) == columns:
+                        table_data.append(current_row)
+                        current_row = []
+
+                except Exception as e:
+                    print(f"⚠️ Error processing image: {e}")
+                    continue
+
+            # Add remaining cells in current row
+            if current_row:
+                while len(current_row) < columns:
+                    current_row.append(Paragraph("", styles['Normal']))
+                table_data.append(current_row)
+
+            if table_data:
+                # Create main table
+                main_table = Table(table_data, colWidths=[cell_width] * columns)
+                main_table.setStyle(TableStyle([
+                    ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('PADDING', (0,0), (-1,-1), 4),
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)
+                ]))
+                elements.append(main_table)
+
+            # Add page number footer
+            footer_text = f"Page {page_num + 1} of {n_pages} | {title}"
+            elements.append(Spacer(1, 0.1*inch))
+            elements.append(Paragraph(footer_text, styles['Normal']))
+
+            if page_num < n_pages - 1:
+                elements.append(PageBreak())
+
+        if elements:
+            try:
+                doc.build(elements)
+                print(f"{Colors.GREEN}   ✓ PDF saved: {os.path.basename(pdf_path)}{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.RED}   ❌ Failed to build PDF: {e}{Colors.ENDC}")
+
+    def _create_single_image_pdf(self, img_path, pdf_path, row_data, status, img_col,
+                                  styles, caption_style, hyperlink_style, title_style):
+        """
+        Create a single-page PDF with one large image and detailed information.
+
+        Args:
+            img_path: Path to the image file
+            pdf_path: Output PDF path
+            row_data: DataFrame row with prediction data
+            status: Status string (CORRECT/FAILED)
+            img_col: Name of the image column (for skipping in info table)
+            styles: ReportLab styles
+            caption_style: Caption style
+            hyperlink_style: Hyperlink style
+            title_style: Title style
+        """
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as ReportLabImage
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+
+        # Check if we should skip (if file already exists)
+        if os.path.exists(pdf_path):
+            return
+
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=letter,
+            rightMargin=0.5*inch,
+            leftMargin=0.5*inch,
+            topMargin=0.5*inch,
+            bottomMargin=0.5*inch
+        )
+
+        elements = []
+
+        # Title with status
+        status_color = "green" if "CORRECT" in status else "red" if "FAILED" in status else "black"
+        title_text = f'<font color="{status_color}">{status}</font> - {os.path.basename(img_path)}'
+        elements.append(Paragraph(title_text, title_style))
+        elements.append(Spacer(1, 0.2*inch))
+
+        # Image
+        try:
+            img = ReportLabImage(img_path, width=5*inch, height=5*inch)
+            elements.append(img)
+        except Exception as e:
+            elements.append(Paragraph(f"Error loading image: {e}", styles['Normal']))
+
+        elements.append(Spacer(1, 0.2*inch))
+
+        # Detailed information table
+        info_data = []
+        info_data.append(["Property", "Value"])
+
+        for key, value in row_data.items():
+            # Skip the image column (already shown)
+            if key == img_col:
+                continue
+            # Skip filepath column if it exists
+            if key == 'filepath':
+                continue
+            # Format the value nicely
+            if isinstance(value, float):
+                value_str = f"{value:.6f}"
+            else:
+                value_str = str(value)
+            info_data.append([key, value_str])
+
+        info_table = Table(info_data, colWidths=[1.5*inch, 4*inch])
+        info_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 10),
+            ('BOTTOMPADDING', (0,0), (-1,0), 12),
+            ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+            ('GRID', (0,0), (-1,-1), 1, colors.black)
+        ]))
+        elements.append(info_table)
+
+        # Add file path as clickable link
+        elements.append(Spacer(1, 0.1*inch))
+        elements.append(Paragraph(f'<link href="{img_path}">Open Image File: {img_path}</link>', hyperlink_style))
+
+        # Build PDF
+        try:
+            doc.build(elements)
+        except Exception as e:
+            print(f"⚠️ Could not create PDF for {os.path.basename(img_path)}: {e}")
 
 
 # =============================================================================
