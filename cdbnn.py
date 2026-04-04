@@ -863,6 +863,307 @@ class AstronomyDomainProcessor:
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
         return self._compute_quality_metrics_optimized(gray)
 
+
+class AstronomyFeatureExtractor:
+    """Feature extractor for astronomical images"""
+
+    def __init__(self, config):
+        self.config = config
+        self.pixel_scale = getattr(config, 'pixel_scale', 1.0) if hasattr(config, 'pixel_scale') else 1.0
+
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract astronomical features from image"""
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+
+        features = {}
+
+        # Basic statistics
+        features.update(self._extract_basic_stats(gray))
+
+        # Shape features
+        features.update(self._extract_shape_features(gray))
+
+        # Source detection
+        sources = self._detect_sources(gray)
+        features.update(self._extract_source_features(sources, gray))
+
+        # Quality metrics
+        features.update(self._compute_quality_metrics(gray))
+
+        return features
+
+    def _extract_basic_stats(self, gray):
+        return {
+            'astronomy_mean': float(np.mean(gray)),
+            'astronomy_median': float(np.median(gray)),
+            'astronomy_std': float(np.std(gray)),
+            'astronomy_skew': float(self._fast_skewness(gray)),
+            'astronomy_kurtosis': float(self._fast_kurtosis(gray))
+        }
+
+    def _fast_skewness(self, x):
+        mean = np.mean(x)
+        std = np.std(x)
+        if std < 1e-8:
+            return 0.0
+        return np.mean(((x - mean) / std) ** 3)
+
+    def _fast_kurtosis(self, x):
+        mean = np.mean(x)
+        std = np.std(x)
+        if std < 1e-8:
+            return 0.0
+        return np.mean(((x - mean) / std) ** 4) - 3
+
+    def _extract_shape_features(self, gray):
+        y, x = np.mgrid[:gray.shape[0], :gray.shape[1]]
+        total_flux = np.sum(gray)
+
+        if total_flux < 1e-8:
+            return {'astronomy_ellipticity': 0, 'astronomy_size_fwhm': 0}
+
+        x_c = np.sum(x * gray) / total_flux
+        y_c = np.sum(y * gray) / total_flux
+
+        dx = x - x_c
+        dy = y - y_c
+
+        mxx = np.sum(dx * dx * gray) / total_flux
+        myy = np.sum(dy * dy * gray) / total_flux
+        mxy = np.sum(dx * dy * gray) / total_flux
+
+        discriminant = np.sqrt((mxx - myy)**2 + 4 * mxy**2)
+        ellipticity = discriminant / (mxx + myy + 1e-8)
+
+        sigma_estimate = np.sqrt((mxx + myy) / 2)
+        fwhm_estimate = 2.355 * sigma_estimate
+
+        return {
+            'astronomy_ellipticity': float(ellipticity),
+            'astronomy_size_fwhm': float(fwhm_estimate * self.pixel_scale)
+        }
+
+    def _detect_sources(self, gray):
+        threshold = np.percentile(gray, 98)
+        binary = gray > threshold
+
+        from scipy.ndimage import label, find_objects
+        labeled, num_features = label(binary)
+
+        sources = []
+        slices = find_objects(labeled)
+        for i, sl in enumerate(slices, 1):
+            if sl and np.sum(labeled[sl] == i) >= 5:
+                mask = labeled == i
+                from scipy.ndimage import center_of_mass
+                com = center_of_mass(mask)
+                sources.append({
+                    'centroid': (com[1], com[0]),
+                    'area': int(np.sum(mask)),
+                    'intensity': float(np.mean(gray[mask]))
+                })
+
+        return sources
+
+    def _extract_source_features(self, sources, gray):
+        if not sources:
+            return {
+                'astronomy_num_sources': 0,
+                'astronomy_source_density': 0,
+                'astronomy_mean_source_intensity': 0
+            }
+
+        intensities = np.array([s.get('intensity', 0) for s in sources])
+        source_density = len(sources) / (gray.size / 1000.0)
+
+        return {
+            'astronomy_num_sources': len(sources),
+            'astronomy_source_density': float(source_density),
+            'astronomy_mean_source_intensity': float(np.mean(intensities)),
+            'astronomy_max_source_intensity': float(np.max(intensities))
+        }
+
+    def _compute_quality_metrics(self, gray):
+        background_pixels = gray[gray < np.percentile(gray, 20)]
+        background_noise = np.std(background_pixels) if len(background_pixels) > 0 else 0
+
+        peak = np.max(gray)
+        signal = peak - np.median(gray)
+        snr = signal / (background_noise + 1e-8)
+
+        from scipy.ndimage import sobel
+        gradient_x = sobel(gray, axis=0)
+        gradient_y = sobel(gray, axis=1)
+        gradient_magnitude = np.sqrt(gradient_x**2 + gradient_y**2)
+        sharpness = np.mean(gradient_magnitude)
+
+        return {
+            'astronomy_snr': float(snr),
+            'astronomy_sharpness': float(sharpness),
+            'astronomy_background_noise': float(background_noise)
+        }
+
+    def get_quality_metrics(self, image):
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        return self._compute_quality_metrics(gray)
+
+
+class MedicalFeatureExtractor:
+    """Feature extractor for medical images"""
+
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+
+        features = {}
+
+        # Tissue texture
+        features.update(self._compute_tissue_texture(gray))
+
+        # Contrast and sharpness
+        features.update(self._compute_medical_contrast(gray))
+        features.update(self._compute_medical_sharpness(gray))
+
+        # Tumor detection
+        features.update(self._detect_tumor(gray))
+
+        return features
+
+    def _compute_tissue_texture(self, gray):
+        from skimage.feature import graycomatrix, graycoprops
+        gray_uint8 = (gray * 255).astype(np.uint8)
+
+        glcm = graycomatrix(gray_uint8, distances=[1], angles=[0], levels=256, symmetric=True)
+
+        return {
+            'medical_tissue_contrast': float(graycoprops(glcm, 'contrast')[0, 0]),
+            'medical_tissue_homogeneity': float(graycoprops(glcm, 'homogeneity')[0, 0]),
+            'medical_tissue_energy': float(graycoprops(glcm, 'energy')[0, 0])
+        }
+
+    def _compute_medical_contrast(self, gray):
+        return {
+            'medical_contrast_ratio': float((np.percentile(gray, 95) - np.percentile(gray, 5)) /
+                                           (np.percentile(gray, 95) + np.percentile(gray, 5) + 1e-8))
+        }
+
+    def _compute_medical_sharpness(self, gray):
+        from skimage.filters import sobel
+        edges = sobel(gray)
+        return {'medical_sharpness_index': float(np.mean(edges))}
+
+    def _detect_tumor(self, gray):
+        from skimage.feature import local_binary_pattern
+        lbp = local_binary_pattern(gray, P=8, R=1, method='uniform')
+        threshold = np.percentile(lbp, 95)
+        abnormal = lbp > threshold
+
+        return {
+            'medical_tumor_suspicion': float(np.mean(abnormal)),
+            'medical_abnormal_texture_score': float(np.std(lbp[abnormal])) if np.any(abnormal) else 0
+        }
+
+    def get_quality_metrics(self, image):
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        signal = np.mean(gray)
+        noise = np.std(gray)
+
+        return {
+            'medical_snr': signal / (noise + 1e-8),
+            'medical_contrast': np.std(gray),
+            'medical_sharpness': np.std(gray)
+        }
+
+
+class AgricultureFeatureExtractor:
+    """Feature extractor for agricultural images"""
+
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        features = {}
+
+        # Vegetation indices
+        features.update(self._compute_ndvi(image))
+        features.update(self._compute_ndwi(image))
+
+        # Plant health
+        features.update(self._compute_chlorophyll_content(image))
+        features.update(self._compute_water_stress(image))
+
+        # Disease detection
+        features.update(self._detect_leaf_disease(image))
+
+        return features
+
+    def _compute_ndvi(self, image):
+        if len(image.shape) >= 3:
+            nir = image[:, :, 2]
+            red = image[:, :, 0]
+            ndvi = (nir - red) / (nir + red + 1e-8)
+
+            return {
+                'agriculture_ndvi_mean': float(np.mean(ndvi)),
+                'agriculture_vegetation_fraction': float(np.mean(ndvi > 0.3))
+            }
+        return {'agriculture_ndvi_mean': 0, 'agriculture_vegetation_fraction': 0}
+
+    def _compute_ndwi(self, image):
+        if len(image.shape) >= 3:
+            green = image[:, :, 1]
+            nir = image[:, :, 2]
+            ndwi = (green - nir) / (green + nir + 1e-8)
+
+            return {
+                'agriculture_ndwi_mean': float(np.mean(ndwi)),
+                'agriculture_water_content': float(np.mean(ndwi > 0))
+            }
+        return {'agriculture_ndwi_mean': 0, 'agriculture_water_content': 0}
+
+    def _compute_chlorophyll_content(self, image):
+        if len(image.shape) >= 3:
+            green = image[:, :, 1]
+            red = image[:, :, 0]
+            chlorophyll = green / (red + 1e-8)
+
+            return {
+                'agriculture_chlorophyll_index': float(np.mean(chlorophyll)),
+                'agriculture_green_percentage': float(np.mean(green > 0.3))
+            }
+        return {'agriculture_chlorophyll_index': 0, 'agriculture_green_percentage': 0}
+
+    def _compute_water_stress(self, image):
+        if len(image.shape) >= 3:
+            lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+            lab = lab.astype(np.float32) / 255.0
+
+            return {
+                'agriculture_water_stress_index': float(np.mean(lab[:, :, 1] + lab[:, :, 2]) / 2),
+                'agriculture_wilting_score': float(np.mean(lab[:, :, 1] < 0.3))
+            }
+        return {'agriculture_water_stress_index': 0, 'agriculture_wilting_score': 0}
+
+    def _detect_leaf_disease(self, image):
+        if len(image.shape) >= 3:
+            lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+            lab = lab.astype(np.float32) / 255.0
+
+            spots = (lab[:, :, 0] < 0.4) & (lab[:, :, 1] < 0.4) & (lab[:, :, 2] < 0.4)
+
+            return {
+                'agriculture_disease_spots': float(np.mean(spots)),
+                'agriculture_disease_severity': float(np.mean(spots) * 2)
+            }
+        return {'agriculture_disease_spots': 0, 'agriculture_disease_severity': 0}
+
+    def get_quality_metrics(self, image):
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        from skimage.filters import sobel
+
+        return {
+            'agriculture_sharpness': float(np.std(sobel(gray))),
+            'agriculture_contrast': float(np.std(gray)),
+            'agriculture_plant_visibility': float(np.mean(image[:, :, 1] > 0.3)) if len(image.shape) == 3 else 0
+        }
+
+
 # =============================================================================
 # FIXED DATASET STATISTICS CALCULATOR (Correct normalization)
 # =============================================================================
@@ -1169,6 +1470,77 @@ class ImageProcessor:
         new_img.paste(image, (paste_x, paste_y))
         return new_img
 
+    @staticmethod
+    def load_fits_image(path: str, hdu: int = 0, normalization: str = 'zscale') -> Optional[np.ndarray]:
+        """Load FITS astronomical image with proper normalization"""
+        try:
+            from astropy.io import fits
+
+            with fits.open(path) as hdul:
+                if hdu >= len(hdul):
+                    logger.warning(f"HDU {hdu} not found in {path}, using HDU 0")
+                    hdu = 0
+                data = hdul[hdu].data.astype(np.float32)
+
+                # Handle NaN and infinite values
+                data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+
+                # Normalize based on method
+                if normalization == 'zscale':
+                    data = ImageProcessor._zscale_normalization(data)
+                elif normalization == 'percent':
+                    p1, p99 = np.percentile(data, [1, 99])
+                    data = (data - p1) / (p99 - p1 + 1e-8)
+                elif normalization == 'asinh':
+                    median = np.median(data)
+                    data = np.arcsinh(data - median)
+                    data = (data - data.min()) / (data.max() - data.min() + 1e-8)
+                else:  # minmax
+                    data = (data - data.min()) / (data.max() - data.min() + 1e-8)
+
+                # Clip to valid range
+                data = np.clip(data, 0, 1)
+
+                # Convert to 3-channel RGB by stacking (grayscale to RGB)
+                if len(data.shape) == 2:
+                    data = np.stack([data, data, data], axis=2)
+                elif len(data.shape) == 3 and data.shape[2] == 1:
+                    data = np.concatenate([data, data, data], axis=2)
+
+                return data
+
+        except ImportError:
+            logger.error("astropy.io.fits not available. Install astropy for FITS support.")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load FITS image {path}: {e}")
+            return None
+
+    @staticmethod
+    def _zscale_normalization(data: np.ndarray, contrast: float = 0.25, samples: int = 1000) -> np.ndarray:
+        """Z-scale normalization for astronomical images"""
+        # Flatten and sample
+        flat = data.flatten()
+        if len(flat) > samples:
+            idx = np.random.choice(len(flat), samples, replace=False)
+            flat = flat[idx]
+
+        # Sort and compute percentiles
+        flat.sort()
+
+        # Find median and compute scale
+        n = len(flat)
+        center = flat[n // 2]
+
+        # Use contrast to determine range
+        half_range = contrast * (flat[-1] - flat[0])
+        zmin = center - half_range
+        zmax = center + half_range
+
+        # Normalize
+        normalized = (data - zmin) / (zmax - zmin + 1e-8)
+        return np.clip(normalized, 0, 1)
+
 class ArchiveHandler:
     SUPPORTED_FORMATS = {'.zip', '.tar', '.tar.gz', '.tgz', '.gz', '.bz2', '.xz'}
 
@@ -1273,13 +1645,20 @@ class DistanceCorrelationFeatureSelector:
             selected_indices = list(top_indices)
             logger.info(f"Relaxed threshold: selected top {self.min_features} features")
 
-        selected_indices.sort(key=lambda i: -label_corrs[i])
-        final_indices = self._remove_redundant_features(features, selected_indices, label_corrs)
+        # CRITICAL FIX: Sort selected_indices deterministically
+        selected_indices.sort()  # Sort by index value, not by correlation
+
+        # Now sort by correlation for importance ranking, but maintain index reference
+        sorted_by_corr = sorted(selected_indices, key=lambda i: -label_corrs[i])
+        final_indices = self._remove_redundant_features(features, sorted_by_corr, label_corrs)
 
         if len(final_indices) > self.max_features:
             final_indices = final_indices[:self.max_features]
 
-        logger.info(f"Final feature selection: {len(final_indices)} features")
+        # Final deterministic sort
+        final_indices.sort()
+
+        logger.info(f"Final feature selection (deterministic order): {len(final_indices)} features")
         return final_indices, label_corrs
 
     def _remove_redundant_features(self, features, candidate_indices, corr_values):
@@ -1327,6 +1706,12 @@ class CustomImageDataset(Dataset):
         logger.info(f"Dataset: {len(self.samples)} images, {len(self.classes)} classes")
 
     def _scan_directory(self):
+        supported_formats = ImageProcessor.SUPPORTED_FORMATS
+        # Add FITS formats if domain is astronomy
+        if hasattr(self.config, 'domain') and self.config.domain == 'astronomy' and getattr(self.config, 'use_fits', False):
+            fits_formats = ('.fits', '.fit', '.fits.gz', '.fit.gz')
+            supported_formats = supported_formats + fits_formats
+
         for class_dir in sorted(self.data_dir.iterdir()):
             if not class_dir.is_dir():
                 continue
@@ -1338,7 +1723,7 @@ class CustomImageDataset(Dataset):
                 self.classes.append(class_name)
 
             for img_path in class_dir.glob('*'):
-                if img_path.suffix.lower() in ImageProcessor.SUPPORTED_FORMATS:
+                if img_path.suffix.lower() in supported_formats or img_path.name.lower().endswith('.fits.gz'):
                     self.samples.append((str(img_path), self.class_to_idx[class_name]))
                     self.image_files.append(str(img_path))
                     self.full_paths.append(str(img_path))
@@ -1350,9 +1735,23 @@ class CustomImageDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         img_path, label = self.samples[idx]
-        img = ImageProcessor.load_image(img_path)
-        if img is None:
-            img = PILImage.new('RGB', (256, 256), (0, 0, 0))
+
+        # Check if FITS file
+        is_fits = img_path.lower().endswith(('.fits', '.fit', '.fits.gz', '.fit.gz'))
+
+        if is_fits and hasattr(self.config, 'domain') and self.config.domain == 'astronomy':
+            fits_hdu = getattr(self.config, 'fits_hdu', 0)
+            fits_norm = getattr(self.config, 'fits_normalization', 'zscale')
+            img_array = ImageProcessor.load_fits_image(img_path, hdu=fits_hdu, normalization=fits_norm)
+            if img_array is None:
+                img = PILImage.new('RGB', (256, 256), (0, 0, 0))
+            else:
+                img = PILImage.fromarray((img_array * 255).astype(np.uint8))
+        else:
+            img = ImageProcessor.load_image(img_path)
+            if img is None:
+                img = PILImage.new('RGB', (256, 256), (0, 0, 0))
+
         if img.mode != 'RGB':
             img = img.convert('RGB')
         if self.transform:
@@ -1440,6 +1839,7 @@ class BaseAutoencoder(nn.Module):
         super().__init__()
         self.config = config
         self.device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
+        self._feature_order_deterministic = True  # Ensure deterministic feature order
 
         self.in_channels = config.in_channels
         self.feature_dims = config.feature_dims
@@ -1608,11 +2008,16 @@ class BaseAutoencoder(nn.Module):
         return embeddings[:, self._selected_feature_indices]
 
     def freeze_feature_selection(self, indices: np.ndarray, scores: np.ndarray, metadata: Dict = None):
+        # Sort indices to ensure deterministic order across runs
+        sorted_order = np.argsort(indices)  # Sort by index value
+        indices = indices[sorted_order]
+        scores = scores[sorted_order] if scores is not None else None
+
         self._selected_feature_indices = torch.tensor(indices, dtype=torch.long, device=self.device)
-        self._feature_importance_scores = torch.tensor(scores, device=self.device)
+        self._feature_importance_scores = torch.tensor(scores, device=self.device) if scores is not None else None
         self._feature_selection_metadata = metadata or {}
         self._is_feature_selection_frozen = True
-        logger.info(f"Frozen feature selection: {len(indices)} features")
+        logger.info(f"Frozen feature selection (deterministic order): {len(indices)} features")
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.encoder_layers:
@@ -1779,18 +2184,6 @@ class BaseAutoencoder(nn.Module):
         df.to_csv(output_path, index=False)
         logger.info(f"Features saved to {output_path}")
 
-
-# =============================================================================
-# PREDICTION MANAGER
-# =============================================================================
-
-# =============================================================================
-# PREDICTION MANAGER - FIXED VERSION
-# =============================================================================
-
-# =============================================================================
-# PREDICTION MANAGER - FIXED VERSION
-# =============================================================================
 
 # =============================================================================
 # MODIFIED PREDICTION MANAGER (with dataset statistics support)
@@ -2266,6 +2659,13 @@ class PredictionManager:
         domain_features_list = []
         quality_metrics_list = []
 
+        # Check what outputs the model provides
+        has_classifier = hasattr(self.model, 'classifier') and self.model.classifier is not None
+        has_clustering = hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None
+        model_phase = getattr(self.model, 'training_phase', 1)
+
+        logger.info(f"Model phase: {model_phase}, has_classifier: {has_classifier}, has_clustering: {has_clustering}")
+
         for batch_idx, (batch_data, _) in enumerate(tqdm(dataloader, desc="Predicting")):
             batch_tensor = batch_data.to(self.device)
 
@@ -2279,7 +2679,7 @@ class PredictionManager:
             # The model applies dataset-wide normalization automatically in forward pass
             output = self.model(batch_tensor)
 
-            # Extract features
+            # Extract features - this should always be available
             if self.model._is_feature_selection_frozen and self.model._selected_feature_indices is not None:
                 features = output['selected_embedding'].float().cpu().numpy()
             else:
@@ -2298,7 +2698,7 @@ class PredictionManager:
                     batch_np = np.transpose(batch_np, (0, 2, 3, 1))
 
                 for i in range(original_batch_size):
-                    img_np = batch_np[i]
+                    img_np = batch_np[i] if i < len(batch_np) else batch_np[0]
 
                     try:
                         domain_feat = self.domain_processor.extract_features(img_np)
@@ -2314,7 +2714,7 @@ class PredictionManager:
                         logger.warning(f"Error extracting quality metrics for sample {i}: {e}")
                         quality_metrics_list.append({})
 
-            # Collect targets and filenames
+            # Collect targets and filenames for ALL samples in batch
             start_idx = batch_idx * batch_size
             for i in range(original_batch_size):
                 actual_idx = start_idx + i
@@ -2324,34 +2724,54 @@ class PredictionManager:
                     collected_filepaths.append(image_files[actual_idx])
                     processed_count += 1
 
-            # Add predictions - ensure we only add for actual samples
-            if 'class_predictions' in output:
-                preds = output['class_predictions'].float().cpu().numpy()
+            # Add predictions - ONLY if they exist in output
+            if 'class_predictions' in output and output['class_predictions'] is not None:
+                preds = output['class_predictions']
+                if hasattr(preds, 'float'):
+                    preds = preds.float().cpu().numpy()
                 if duplicated:
                     preds = preds[:original_batch_size]
-                # Only add up to the number of actual samples
                 all_predictions['predictions'].extend(preds[:original_batch_size])
+            else:
+                # No classifier predictions - extend with placeholder
+                all_predictions['predictions'].extend([-1] * original_batch_size)
 
             # Add probabilities
-            if 'class_probabilities' in output:
-                probs = output['class_probabilities'].float().cpu().numpy()
+            if 'class_probabilities' in output and output['class_probabilities'] is not None:
+                probs = output['class_probabilities']
+                if hasattr(probs, 'float'):
+                    probs = probs.float().cpu().numpy()
                 if duplicated:
                     probs = probs[:original_batch_size]
                 all_predictions['probabilities'].extend(probs[:original_batch_size])
+            else:
+                # No probabilities - extend with placeholder
+                num_classes = self.config.num_classes if self.config.num_classes else 2
+                all_predictions['probabilities'].extend([[0.0] * num_classes] * original_batch_size)
 
             # Add cluster assignments
-            if 'cluster_assignments' in output:
-                clusters = output['cluster_assignments'].float().cpu().numpy()
+            if 'cluster_assignments' in output and output['cluster_assignments'] is not None:
+                clusters = output['cluster_assignments']
+                if hasattr(clusters, 'float'):
+                    clusters = clusters.float().cpu().numpy()
                 if duplicated:
                     clusters = clusters[:original_batch_size]
                 all_predictions['cluster_assignments'].extend(clusters[:original_batch_size])
+            else:
+                # No clusters - extend with placeholder
+                all_predictions['cluster_assignments'].extend([-1] * original_batch_size)
 
             # Add cluster confidence
-            if 'cluster_confidence' in output:
-                conf = output['cluster_confidence'].float().cpu().numpy()
+            if 'cluster_confidence' in output and output['cluster_confidence'] is not None:
+                conf = output['cluster_confidence']
+                if hasattr(conf, 'float'):
+                    conf = conf.float().cpu().numpy()
                 if duplicated:
                     conf = conf[:original_batch_size]
                 all_predictions['cluster_confidence'].extend(conf[:original_batch_size])
+            else:
+                # No confidence - extend with placeholder
+                all_predictions['cluster_confidence'].extend([0.0] * original_batch_size)
 
         # Stack features
         if all_features:
@@ -2359,25 +2779,23 @@ class PredictionManager:
 
         # Add domain features and quality metrics to predictions
         if domain_features_list:
-            if domain_features_list:
-                # Get all unique keys from domain features
-                all_keys = set()
-                for feat in domain_features_list:
-                    all_keys.update(feat.keys())
+            # Get all unique keys from domain features
+            all_keys = set()
+            for feat in domain_features_list:
+                all_keys.update(feat.keys())
 
-                for key in all_keys:
-                    all_predictions[f'domain_{key}'] = [feat.get(key, np.nan) for feat in domain_features_list]
-                logger.info(f"Added {len(all_keys)} domain-specific features")
+            for key in all_keys:
+                all_predictions[f'domain_{key}'] = [feat.get(key, np.nan) for feat in domain_features_list]
+            logger.info(f"Added {len(all_keys)} domain-specific features")
 
         if quality_metrics_list:
-            if quality_metrics_list:
-                all_keys = set()
-                for metrics in quality_metrics_list:
-                    all_keys.update(metrics.keys())
+            all_keys = set()
+            for metrics in quality_metrics_list:
+                all_keys.update(metrics.keys())
 
-                for key in all_keys:
-                    all_predictions[f'quality_{key}'] = [metrics.get(key, np.nan) for metrics in quality_metrics_list]
-                logger.info(f"Added {len(all_keys)} quality metrics")
+            for key in all_keys:
+                all_predictions[f'quality_{key}'] = [metrics.get(key, np.nan) for metrics in quality_metrics_list]
+            logger.info(f"Added {len(all_keys)} quality metrics")
 
         # CRITICAL FIX: Trim all prediction arrays to match processed_count
         n_samples = processed_count
@@ -2391,15 +2809,16 @@ class PredictionManager:
             if key in all_predictions and len(all_predictions[key]) > n_samples:
                 all_predictions[key] = all_predictions[key][:n_samples]
             elif key in all_predictions and len(all_predictions[key]) < n_samples:
-                # Pad with default values if too short
+                # This should not happen now, but keep as safety
                 logger.warning(f"Padding {key}: had {len(all_predictions[key])}, need {n_samples}")
                 while len(all_predictions[key]) < n_samples:
                     if key == 'predictions':
-                        all_predictions[key].append(0)
+                        all_predictions[key].append(-1)
                     elif key == 'probabilities':
-                        all_predictions[key].append([0.0] * self.config.num_classes if self.config.num_classes else [0.0])
+                        num_classes = self.config.num_classes if self.config.num_classes else 2
+                        all_predictions[key].append([0.0] * num_classes)
                     elif key == 'cluster_assignments':
-                        all_predictions[key].append(0)
+                        all_predictions[key].append(-1)
                     elif key == 'cluster_confidence':
                         all_predictions[key].append(0.0)
 
@@ -2474,18 +2893,22 @@ class PredictionManager:
                 padding = np.zeros((n_samples - len(features), features.shape[1]))
                 features = np.vstack([features, padding])
 
+            # CRITICAL FIX: Sort feature columns deterministically
+            # Features are always indexed from 0 to n-1, but we need to ensure
+            # the same image always produces the same feature values at the same index
             for i in range(features.shape[1]):
                 data[f'feature_{i}'] = features[:, i]
 
         # Domain-specific features (prefix with domain_ or quality_)
-        for key, values in predictions.items():
-            if (key.startswith('domain_') or key.startswith('quality_')) and values is not None:
-                # Ensure correct length
-                if len(values) > n_samples:
-                    values = values[:n_samples]
-                elif len(values) < n_samples:
-                    values = list(values) + [np.nan] * (n_samples - len(values))
-                data[key] = values
+        # CRITICAL FIX: Sort domain feature keys alphabetically for consistency
+        domain_keys = [k for k in predictions.keys() if (k.startswith('domain_') or k.startswith('quality_')) and predictions[k] is not None]
+        for key in sorted(domain_keys):  # Sort alphabetically for deterministic order
+            values = predictions[key]
+            if len(values) > n_samples:
+                values = values[:n_samples]
+            elif len(values) < n_samples:
+                values = list(values) + [np.nan] * (n_samples - len(values))
+            data[key] = values
 
         # Predictions and probabilities
         if 'predictions' in predictions and predictions['predictions'] is not None:
@@ -2509,7 +2932,7 @@ class PredictionManager:
             # Convert to numpy array for processing
             probs_array = np.array(probs)
             if probs_array.ndim == 2:
-                # Add per-class probabilities
+                # Add per-class probabilities (sorted by class index for consistency)
                 for i in range(probs_array.shape[1]):
                     data[f'prob_class_{i}'] = probs_array[:, i]
 
@@ -2555,8 +2978,13 @@ class PredictionManager:
                 filenames = list(filenames) + [f'unknown_{i}' for i in range(n_samples - len(filenames))]
             data['filename'] = filenames
 
-        # Create DataFrame
-        df = pd.DataFrame(data)
+        # CRITICAL FIX: Sort all column keys deterministically before creating DataFrame
+        # This ensures the same columns always appear in the same order
+        sorted_keys = sorted(data.keys())
+        sorted_data = {key: data[key] for key in sorted_keys}
+
+        # Create DataFrame with sorted columns
+        df = pd.DataFrame(sorted_data)
 
         # Add metadata comment if domain processor exists
         if self.domain_processor:
@@ -2582,9 +3010,28 @@ class PredictionManager:
             df.to_csv(output_csv, index=False)
             logger.info(f"Predictions saved to {output_csv}")
 
-        logger.info(f"CSV columns ({len(data.keys())}): {', '.join(list(data.keys())[:10])}{'...' if len(data) > 10 else ''}")
+        logger.info(f"CSV columns ({len(sorted_data.keys())}): {', '.join(list(sorted_data.keys())[:10])}{'...' if len(sorted_data) > 10 else ''}")
 
+    def _extract_domain_features(self, image_path: str, image_array: np.ndarray) -> Dict[str, float]:
+        """Extract domain-specific features from image"""
+        domain = self.config.get('dataset', {}).get('domain', 'general')
 
+        if domain == 'astronomy':
+            if not hasattr(self, '_astronomy_extractor'):
+                self._astronomy_extractor = AstronomyFeatureExtractor(self.config)
+            return self._astronomy_extractor.extract_features(image_array)
+
+        elif domain == 'medical':
+            if not hasattr(self, '_medical_extractor'):
+                self._medical_extractor = MedicalFeatureExtractor()
+            return self._medical_extractor.extract_features(image_array)
+
+        elif domain == 'agriculture':
+            if not hasattr(self, '_agriculture_extractor'):
+                self._agriculture_extractor = AgricultureFeatureExtractor()
+            return self._agriculture_extractor.extract_features(image_array)
+
+        return {}
 
 # =============================================================================
 # COMPLETE TRAINER - All original functionality preserved
@@ -3495,7 +3942,6 @@ import sys
 import json
 from pathlib import Path
 
-# Add this function at the beginning of the main() function or in the CDBNNApplication class
 
 def normalize_dataset_name(data_name: str) -> str:
     """Convert dataset name to lowercase for consistent file naming"""
@@ -3922,10 +4368,17 @@ class CDBNNApplication:
         except Exception as e:
             logger.error(f"Failed to load configuration from {conf_path}: {e}")
             return None
+    # =============================================================================
+    # UPDATE CDBNNApplication to use ModelFactory
+    # =============================================================================
+
+    def _create_model(self) -> BaseAutoencoder:
+        """Create model using ModelFactory"""
+        return ModelFactory.create_model(self.config)
 
 
 # =============================================================================
-# DOMAIN-AWARE CDBNN
+# UPDATED DOMAIN-AWARE CDBNN (Replace the existing class)
 # =============================================================================
 
 class DomainAwareCDBNN(CDBNNApplication):
@@ -3942,7 +4395,7 @@ class DomainAwareCDBNN(CDBNNApplication):
             logger.info(f"Initialized {self.domain} domain processor")
 
     def _init_domain_processor(self):
-        """Initialize the appropriate domain processor"""
+        """Initialize the appropriate domain processor with full features"""
         if self.domain == 'agriculture':
             self.domain_processor = AgricultureDomainProcessor(self.config)
         elif self.domain == 'medical':
@@ -3957,6 +4410,9 @@ class DomainAwareCDBNN(CDBNNApplication):
             self.domain_processor = IndustrialDomainProcessor(self.config)
         elif self.domain == 'astronomy':
             self.domain_processor = AstronomyDomainProcessor(self.config)
+        else:
+            logger.warning(f"Unknown domain: {self.domain}, using general processor")
+            self.domain_processor = None
 
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """Apply domain-specific preprocessing"""
@@ -3964,11 +4420,41 @@ class DomainAwareCDBNN(CDBNNApplication):
             return self.domain_processor.preprocess(image)
         return image
 
+    def preprocess_batch(self, images: np.ndarray) -> np.ndarray:
+        """Apply domain-specific preprocessing to batch"""
+        if self.domain_processor and hasattr(self.domain_processor, 'preprocess_batch'):
+            return self.domain_processor.preprocess_batch(images)
+        elif self.domain_processor:
+            # Fallback to per-image processing
+            if len(images.shape) == 3:
+                return self.domain_processor.preprocess(images)
+            batch_size = images.shape[0]
+            processed = np.zeros_like(images)
+            for i in range(batch_size):
+                processed[i] = self.domain_processor.preprocess(images[i])
+            return processed
+        return images
+
     def extract_domain_features(self, image: np.ndarray) -> Dict[str, float]:
         """Extract domain-specific features"""
         if self.domain_processor:
             return self.domain_processor.extract_features(image)
         return {}
+
+    def extract_domain_features_batch(self, images: np.ndarray) -> List[Dict[str, float]]:
+        """Extract domain-specific features for batch"""
+        if self.domain_processor and hasattr(self.domain_processor, 'extract_features_batch'):
+            return self.domain_processor.extract_features_batch(images)
+        elif self.domain_processor:
+            # Fallback to per-image extraction
+            if len(images.shape) == 3:
+                return [self.domain_processor.extract_features(images)]
+            batch_size = images.shape[0]
+            features_list = []
+            for i in range(batch_size):
+                features_list.append(self.domain_processor.extract_features(images[i]))
+            return features_list
+        return [{}] * (images.shape[0] if len(images.shape) > 2 else 1)
 
     def get_domain_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Get domain-specific quality metrics"""
@@ -3976,191 +4462,690 @@ class DomainAwareCDBNN(CDBNNApplication):
             return self.domain_processor.get_quality_metrics(image)
         return {}
 
+    def get_domain_quality_metrics_batch(self, images: np.ndarray) -> List[Dict[str, float]]:
+        """Get domain-specific quality metrics for batch"""
+        if self.domain_processor and hasattr(self.domain_processor, 'get_quality_metrics_batch'):
+            return self.domain_processor.get_quality_metrics_batch(images)
+        elif self.domain_processor:
+            if len(images.shape) == 3:
+                return [self.domain_processor.get_quality_metrics(images)]
+            batch_size = images.shape[0]
+            metrics_list = []
+            for i in range(batch_size):
+                metrics_list.append(self.domain_processor.get_quality_metrics(images[i]))
+            return metrics_list
+        return [{}] * (images.shape[0] if len(images.shape) > 2 else 1)
+
 # =============================================================================
 # AGRICULTURE DOMAIN PROCESSOR
 # =============================================================================
 
 class AgricultureDomainProcessor:
-    """Agriculture-specific image processor"""
+    """Complete Agriculture-specific image processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
+        self.detect_chlorophyll = getattr(config, 'detect_chlorophyll', True)
+        self.detect_water_stress = getattr(config, 'detect_water_stress', True)
+        self.detect_nutrient_deficiency = getattr(config, 'detect_nutrient_deficiency', True)
+        self.detect_leaf_disease = getattr(config, 'detect_leaf_disease', True)
+        self.detect_fruit_disease = getattr(config, 'detect_fruit_disease', True)
+        self.detect_pest_damage = getattr(config, 'detect_pest_damage', True)
+        self.compute_ndvi = getattr(config, 'compute_ndvi', True)
+        self.compute_evi = getattr(config, 'compute_evi', True)
+        self.compute_ndwi = getattr(config, 'compute_ndwi', True)
+        self.compute_gci = getattr(config, 'compute_gci', True)
+        self.compute_leaf_texture = getattr(config, 'compute_leaf_texture', True)
+        self.compute_canopy_structure = getattr(config, 'compute_canopy_structure', True)
+        self.estimate_growth_stage = getattr(config, 'estimate_growth_stage', True)
+        self.compute_biomass = getattr(config, 'compute_biomass', True)
+        self.has_nir_band = getattr(config, 'has_nir_band', False)
+        self.nir_band_index = getattr(config, 'nir_band_index', 3)
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess agricultural images"""
         img_float = image.astype(np.float32) / 255.0
 
-        # Apply vegetation enhancement
+        # Illumination normalization
         img_float = self._normalize_illumination(img_float)
+
+        # Shadow removal
+        img_float = self._remove_shadows(img_float)
 
         return img_float
 
+    def _normalize_illumination(self, image: np.ndarray) -> np.ndarray:
+        """Normalize illumination across the field"""
+        if len(image.shape) == 3:
+            for i in range(min(3, image.shape[2])):
+                image[:, :, i] = exposure.equalize_adapthist(image[:, :, i])
+        else:
+            image = exposure.equalize_adapthist(image)
+        return image
+
+    def _remove_shadows(self, image: np.ndarray) -> np.ndarray:
+        """Remove shadows from agricultural images"""
+        if len(image.shape) == 3:
+            # Convert to HSV for shadow detection
+            hsv = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2HSV)
+            hsv = hsv.astype(np.float32) / 255.0
+
+            # Shadow detection based on low value and saturation
+            shadow_mask = (hsv[:, :, 2] < 0.3) & (hsv[:, :, 1] < 0.3)
+
+            # Inpaint shadows
+            if np.any(shadow_mask):
+                shadow_mask_uint8 = (shadow_mask * 255).astype(np.uint8)
+                image_uint8 = (image * 255).astype(np.uint8)
+                image_uint8 = cv2.inpaint(image_uint8, shadow_mask_uint8, 3, cv2.INPAINT_TELEA)
+                image = image_uint8.astype(np.float32) / 255.0
+
+        return image
+
     def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract agriculture-specific features"""
+        """Extract comprehensive agriculture-specific features"""
         features = {}
 
         # Vegetation indices
-        features.update(self._compute_ndvi(image))
-        features.update(self._compute_ndwi(image))
+        if self.compute_ndvi:
+            features.update(self._compute_ndvi(image))
+        if self.compute_evi:
+            features.update(self._compute_evi(image))
+        if self.compute_ndwi:
+            features.update(self._compute_ndwi(image))
+        if self.compute_gci:
+            features.update(self._compute_gci(image))
 
         # Plant health metrics
-        features.update(self._compute_chlorophyll_content(image))
-        features.update(self._compute_water_stress(image))
+        if self.detect_chlorophyll:
+            features.update(self._compute_chlorophyll_content(image))
+        if self.detect_water_stress:
+            features.update(self._compute_water_stress(image))
+        if self.detect_nutrient_deficiency:
+            features.update(self._detect_nutrient_deficiency(image))
 
-        # Disease detection
-        features.update(self._detect_leaf_disease(image))
+        # Disease and pest detection
+        if self.detect_leaf_disease:
+            features.update(self._detect_leaf_disease(image))
+        if self.detect_fruit_disease:
+            features.update(self._detect_fruit_disease(image))
+        if self.detect_pest_damage:
+            features.update(self._detect_pest_damage(image))
 
-        # Texture analysis
-        features.update(self._compute_leaf_texture(image))
+        # Structural analysis
+        if self.compute_leaf_texture:
+            features.update(self._compute_leaf_texture(image))
+        if self.compute_canopy_structure:
+            features.update(self._compute_canopy_structure(image))
+
+        # Growth and biomass
+        if self.estimate_growth_stage:
+            features.update(self._estimate_growth_stage(image))
+        if self.compute_biomass:
+            features.update(self._compute_biomass(image))
 
         return features
 
     def _compute_ndvi(self, image: np.ndarray) -> Dict[str, float]:
         """Compute Normalized Difference Vegetation Index"""
-        if image.shape[2] >= 3:
-            # Approximate NIR from RGB (simplified)
-            nir = image[:, :, 2]  # Approximate NIR as red channel
+        if self.has_nir_band and image.shape[2] > self.nir_band_index:
+            nir = image[:, :, self.nir_band_index]
+            red = image[:, :, 0]
+        else:
+            # Approximate NIR from RGB (normalized difference)
+            nir = (image[:, :, 1] + image[:, :, 2]) / 2  # Green+Blue as proxy
             red = image[:, :, 0]
 
-            ndvi = (nir - red) / (nir + red + 1e-8)
+        ndvi = (nir - red) / (nir + red + 1e-8)
 
-            return {
-                'ndvi_mean': np.mean(ndvi),
-                'ndvi_std': np.std(ndvi),
-                'vegetation_fraction': np.mean(ndvi > 0.3)
-            }
-        return {'ndvi_mean': 0, 'ndvi_std': 0, 'vegetation_fraction': 0}
+        return {
+            'ndvi_mean': float(np.mean(ndvi)),
+            'ndvi_std': float(np.std(ndvi)),
+            'ndvi_max': float(np.max(ndvi)),
+            'ndvi_min': float(np.min(ndvi)),
+            'vegetation_fraction': float(np.mean(ndvi > 0.3)),
+            'dense_vegetation_fraction': float(np.mean(ndvi > 0.6)),
+            'sparse_vegetation_fraction': float(np.mean((ndvi > 0.1) & (ndvi <= 0.3)))
+        }
+
+    def _compute_evi(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Enhanced Vegetation Index"""
+        if self.has_nir_band and image.shape[2] > self.nir_band_index:
+            nir = image[:, :, self.nir_band_index]
+            red = image[:, :, 0]
+            blue = image[:, :, 2]
+        else:
+            nir = (image[:, :, 1] + image[:, :, 2]) / 2
+            red = image[:, :, 0]
+            blue = image[:, :, 2]
+
+        # EVI = 2.5 * (NIR - Red) / (NIR + 6*Red - 7.5*Blue + 1)
+        evi = 2.5 * (nir - red) / (nir + 6 * red - 7.5 * blue + 1 + 1e-8)
+
+        return {
+            'evi_mean': float(np.mean(evi)),
+            'evi_std': float(np.std(evi)),
+            'evi_max': float(np.max(evi))
+        }
 
     def _compute_ndwi(self, image: np.ndarray) -> Dict[str, float]:
         """Compute Normalized Difference Water Index"""
-        if image.shape[2] >= 3:
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
             green = image[:, :, 1]
-            nir = image[:, :, 2]
+            if self.has_nir_band and image.shape[2] > self.nir_band_index:
+                nir = image[:, :, self.nir_band_index]
+            else:
+                nir = (image[:, :, 0] + image[:, :, 2]) / 2
 
             ndwi = (green - nir) / (green + nir + 1e-8)
 
             return {
-                'ndwi_mean': np.mean(ndwi),
-                'water_content': np.mean(ndwi > 0)
+                'ndwi_mean': float(np.mean(ndwi)),
+                'water_content': float(np.mean(ndwi > 0)),
+                'water_stress_index': float(1 - np.mean(ndwi))
             }
-        return {'ndwi_mean': 0, 'water_content': 0}
+        return {'ndwi_mean': 0, 'water_content': 0, 'water_stress_index': 0}
+
+    def _compute_gci(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Green Chlorophyll Index"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            if self.has_nir_band and image.shape[2] > self.nir_band_index:
+                nir = image[:, :, self.nir_band_index]
+            else:
+                nir = (image[:, :, 0] + image[:, :, 2]) / 2
+
+            green = image[:, :, 1]
+            gci = (nir / green) - 1
+
+            return {
+                'gci_mean': float(np.mean(gci)),
+                'chlorophyll_estimate': float(np.mean(np.clip(gci, 0, 10)))
+            }
+        return {'gci_mean': 0, 'chlorophyll_estimate': 0}
 
     def _compute_chlorophyll_content(self, image: np.ndarray) -> Dict[str, float]:
-        """Estimate chlorophyll content"""
-        if image.shape[2] >= 3:
-            # Simple chlorophyll index
+        """Estimate chlorophyll content using multiple indices"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Simple chlorophyll index (green/red)
             green = image[:, :, 1]
             red = image[:, :, 0]
+            chlorophyll_simple = green / (red + 1e-8)
 
-            chlorophyll = green / (red + 1e-8)
+            # More accurate chlorophyll using normalized difference
+            chlorophyll_nd = (green - red) / (green + red + 1e-8)
+
+            # CCI (Canopy Chlorophyll Index) approximation
+            cci = (green - red) / (green + red) * 100
 
             return {
-                'chlorophyll_index': np.mean(chlorophyll),
-                'green_percentage': np.mean(green > 0.3)
+                'chlorophyll_index': float(np.mean(chlorophyll_simple)),
+                'chlorophyll_ndvi': float(np.mean(chlorophyll_nd)),
+                'cci_estimate': float(np.mean(cci)),
+                'green_percentage': float(np.mean(green > 0.3)),
+                'chlorophyll_variability': float(np.std(chlorophyll_simple))
             }
-        return {'chlorophyll_index': 0, 'green_percentage': 0}
+        return {'chlorophyll_index': 0, 'chlorophyll_ndvi': 0, 'cci_estimate': 0,
+                'green_percentage': 0, 'chlorophyll_variability': 0}
 
     def _compute_water_stress(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect water stress"""
-        if image.shape[2] >= 3:
-            # Convert to LAB
+        """Detect water stress using multiple indicators"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Convert to LAB color space for better water stress detection
             lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
             lab = lab.astype(np.float32) / 255.0
 
-            water_stress = {
-                'water_stress_index': np.mean(lab[:, :, 1] + lab[:, :, 2]) / 2,
-                'wilting_score': np.mean(lab[:, :, 1] < 0.3)
-            }
-            return water_stress
-        return {'water_stress_index': 0, 'wilting_score': 0}
+            # Water stress manifests as lower b* (yellowing) and lower a* (less green)
+            water_stress_score = (1 - lab[:, :, 1]) * (1 - lab[:, :, 2])
 
-    def _detect_leaf_disease(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect leaf diseases"""
-        if image.shape[2] >= 3:
-            # Convert to LAB for disease spot detection
-            lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
-            lab = lab.astype(np.float32) / 255.0
-
-            # Disease spots appear as dark/brown regions
-            spots = (lab[:, :, 0] < 0.4) & (lab[:, :, 1] < 0.4) & (lab[:, :, 2] < 0.4)
+            # Wilting detection (drooping leaves - approximated by edge analysis)
+            gray = np.mean(image, axis=2)
+            edges = sobel(gray)
+            wilting_indicator = np.std(edges[edges > np.percentile(edges, 90)])
 
             return {
-                'disease_spots': np.mean(spots),
-                'disease_severity': np.mean(spots) * 2
+                'water_stress_index': float(np.mean(water_stress_score)),
+                'wilting_score': float(np.minimum(1.0, wilting_indicator / 0.5)),
+                'stress_severity': float(np.mean(water_stress_score > 0.6)),
+                'turgor_pressure': float(1 - np.mean(water_stress_score))
             }
-        return {'disease_spots': 0, 'disease_severity': 0}
+        return {'water_stress_index': 0, 'wilting_score': 0, 'stress_severity': 0, 'turgor_pressure': 0}
+
+    def _detect_nutrient_deficiency(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect nutrient deficiencies (N, P, K)"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Nitrogen deficiency: pale green/yellow
+            # Phosphorus deficiency: dark green/purplish
+            # Potassium deficiency: yellowing at leaf edges
+
+            # Convert to HSV
+            hsv = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2HSV)
+            hsv = hsv.astype(np.float32) / 255.0
+
+            # Nitrogen deficiency indicator (low green intensity, high yellow hue)
+            n_deficiency = (image[:, :, 1] < 0.3) & (hsv[:, :, 0] > 0.15) & (hsv[:, :, 0] < 0.2)
+
+            # Phosphorus deficiency indicator (purplish hue)
+            p_deficiency = (hsv[:, :, 0] > 0.7) & (hsv[:, :, 0] < 0.9) & (image[:, :, 1] < 0.4)
+
+            # Potassium deficiency (edge yellowing)
+            gray = np.mean(image, axis=2)
+            edges = sobel(gray)
+            edge_regions = edges > np.percentile(edges, 85)
+            edge_yellowing = np.mean(image[edge_regions, 1] < image[edge_regions, 0])
+
+            return {
+                'nitrogen_deficiency_risk': float(np.mean(n_deficiency)),
+                'phosphorus_deficiency_risk': float(np.mean(p_deficiency)),
+                'potassium_deficiency_risk': float(edge_yellowing),
+                'overall_nutrient_stress': float((np.mean(n_deficiency) + np.mean(p_deficiency) + edge_yellowing) / 3)
+            }
+        return {'nitrogen_deficiency_risk': 0, 'phosphorus_deficiency_risk': 0,
+                'potassium_deficiency_risk': 0, 'overall_nutrient_stress': 0}
+
+    def _detect_leaf_disease(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect leaf diseases using color and texture analysis"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Convert to LAB for better disease spot detection
+            lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+            lab = lab.astype(np.float32) / 255.0
+
+            # Disease spots appear as dark/brown/necrotic regions
+            # In LAB: low L (dark), moderate a (reddish), low b (blueish)
+            disease_spots = (lab[:, :, 0] < 0.4) & (lab[:, :, 1] > 0.3) & (lab[:, :, 1] < 0.6) & (lab[:, :, 2] < 0.4)
+
+            # Morphological analysis of spots
+            if np.any(disease_spots):
+                labeled, num_features = ndimage_label(disease_spots)
+                spot_sizes = np.bincount(labeled.ravel())[1:]
+                avg_spot_size = np.mean(spot_sizes) if len(spot_sizes) > 0 else 0
+                num_spots = num_features
+            else:
+                avg_spot_size = 0
+                num_spots = 0
+
+            # Texture analysis for disease patterns
+            gray = np.mean(image, axis=2)
+            glcm = graycomatrix((gray * 255).astype(np.uint8), distances=[1], angles=[0], levels=256, symmetric=True)
+
+            return {
+                'disease_spots_fraction': float(np.mean(disease_spots)),
+                'disease_severity': float(np.minimum(1.0, np.mean(disease_spots) * 2)),
+                'num_disease_spots': float(num_spots),
+                'avg_spot_size': float(avg_spot_size),
+                'disease_texture_contrast': float(graycoprops(glcm, 'contrast')[0, 0]),
+                'lesion_density': float(np.mean(disease_spots) * 100)
+            }
+        return {'disease_spots_fraction': 0, 'disease_severity': 0, 'num_disease_spots': 0,
+                'avg_spot_size': 0, 'disease_texture_contrast': 0, 'lesion_density': 0}
+
+    def _detect_fruit_disease(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect fruit diseases"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Fruit detection (circular/elliptical regions)
+            gray = np.mean(image, axis=2)
+
+            # Look for circular blobs (potential fruits)
+            blobs = blob_log(gray, max_sigma=30, num_sigma=10, threshold=0.05)
+
+            fruit_count = len(blobs)
+
+            # Analyze each fruit region for disease
+            diseased_fruits = 0
+            for blob in blobs[:min(20, len(blobs))]:
+                y, x, r = blob
+                y, x, r = int(y), int(x), int(r)
+                y_min, y_max = max(0, y - r), min(gray.shape[0], y + r)
+                x_min, x_max = max(0, x - r), min(gray.shape[1], x + r)
+
+                fruit_region = image[y_min:y_max, x_min:x_max]
+                if fruit_region.size > 0:
+                    # Check for rot/discoloration
+                    rot_score = np.mean(fruit_region[:, :, 0] > fruit_region[:, :, 1]) if fruit_region.shape[2] >= 2 else 0
+                    if rot_score > 0.6:
+                        diseased_fruits += 1
+
+            return {
+                'fruit_count': float(fruit_count),
+                'diseased_fruit_count': float(diseased_fruits),
+                'disease_incidence': float(diseased_fruits / (fruit_count + 1e-8)),
+                'fruit_health_index': float(1 - diseased_fruits / (fruit_count + 1e-8))
+            }
+        return {'fruit_count': 0, 'diseased_fruit_count': 0, 'disease_incidence': 0, 'fruit_health_index': 1}
+
+    def _detect_pest_damage(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect pest damage on leaves"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Pest damage: irregular holes, skeletonization, discoloration
+            gray = np.mean(image, axis=2)
+
+            # Edge detection to find damaged areas
+            edges = sobel(gray)
+
+            # Skeletonization (holes) detection
+            _, binary = cv2.threshold((gray * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            holes = cv2.bitwise_not(binary)
+
+            # Pest damage indicator
+            pest_damage = (edges > np.percentile(edges, 95)) & (gray < np.percentile(gray, 30))
+
+            # Chewed leaf margins (high edge density near leaf boundaries)
+            leaf_mask = gray > np.percentile(gray, 20)
+            if np.any(leaf_mask):
+                boundary = morphology.binary_dilation(leaf_mask) ^ leaf_mask
+                edge_density_on_boundary = np.mean(edges[boundary]) if np.any(boundary) else 0
+            else:
+                edge_density_on_boundary = 0
+
+            return {
+                'pest_damage_fraction': float(np.mean(pest_damage)),
+                'hole_density': float(np.mean(holes > 0)),
+                'defoliation_index': float(np.mean(gray < 0.2)),
+                'edge_damage_score': float(edge_density_on_boundary),
+                'pest_severity': float((np.mean(pest_damage) + np.mean(holes > 0)) / 2)
+            }
+        return {'pest_damage_fraction': 0, 'hole_density': 0, 'defoliation_index': 0,
+                'edge_damage_score': 0, 'pest_severity': 0}
 
     def _compute_leaf_texture(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute leaf texture features"""
-        if image.shape[2] >= 3:
+        """Compute leaf texture features using GLCM and Gabor filters"""
+        if len(image.shape) >= 3:
             gray = np.mean(image, axis=2)
-            gray_uint8 = (gray * 255).astype(np.uint8)
+        else:
+            gray = image
 
-            glcm = graycomatrix(gray_uint8, distances=[1], angles=[0], levels=256, symmetric=True)
+        gray_uint8 = (gray * 255).astype(np.uint8)
 
-            texture = {
+        # GLCM features at multiple angles
+        angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+        glcm_features = []
+
+        for angle in angles:
+            glcm = graycomatrix(gray_uint8, distances=[1], angles=[angle], levels=256, symmetric=True)
+            glcm_features.append({
                 'contrast': graycoprops(glcm, 'contrast')[0, 0],
+                'dissimilarity': graycoprops(glcm, 'dissimilarity')[0, 0],
                 'homogeneity': graycoprops(glcm, 'homogeneity')[0, 0],
-                'energy': graycoprops(glcm, 'energy')[0, 0]
-            }
-            return texture
-        return {'contrast': 0, 'homogeneity': 0, 'energy': 0}
+                'energy': graycoprops(glcm, 'energy')[0, 0],
+                'correlation': graycoprops(glcm, 'correlation')[0, 0]
+            })
 
-    def _normalize_illumination(self, image: np.ndarray) -> np.ndarray:
-        """Normalize illumination"""
-        for i in range(image.shape[2]):
-            image[:, :, i] = exposure.equalize_adapthist(image[:, :, i])
-        return image
+        # Gabor filter responses for texture orientation
+        gabor_responses = []
+        for theta in [0, np.pi/4, np.pi/2, 3*np.pi/4]:
+            gabor = filters.gabor(gray, frequency=0.1, theta=theta)[0]
+            gabor_responses.append(np.mean(np.abs(gabor)))
+
+        return {
+            'leaf_texture_contrast': float(np.mean([f['contrast'] for f in glcm_features])),
+            'leaf_texture_homogeneity': float(np.mean([f['homogeneity'] for f in glcm_features])),
+            'leaf_texture_energy': float(np.mean([f['energy'] for f in glcm_features])),
+            'leaf_texture_correlation': float(np.mean([f['correlation'] for f in glcm_features])),
+            'texture_directionality': float(np.std(gabor_responses)),
+            'leaf_smoothness': float(1 - np.std(gray))
+        }
+
+    def _compute_canopy_structure(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute canopy structure metrics"""
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Vegetation fraction
+        vegetation_mask = gray > np.percentile(gray, 30)
+        vegetation_fraction = np.mean(vegetation_mask)
+
+        if vegetation_fraction > 0:
+            # Compute canopy gaps and structure
+            labeled, num_patches = ndimage_label(vegetation_mask)
+            patch_sizes = np.bincount(labeled.ravel())[1:]
+
+            # Canopy height proxy (using gradient information)
+            gradient_x = np.abs(np.gradient(gray, axis=1))
+            gradient_y = np.abs(np.gradient(gray, axis=0))
+            canopy_roughness = np.mean(gradient_x[vegetation_mask] + gradient_y[vegetation_mask])
+
+            # Gap fraction (non-vegetated areas)
+            gap_fraction = 1 - vegetation_fraction
+
+            # Patch size distribution
+            avg_patch_size = np.mean(patch_sizes) if len(patch_sizes) > 0 else 0
+
+            return {
+                'canopy_cover': float(vegetation_fraction),
+                'gap_fraction': float(gap_fraction),
+                'canopy_roughness': float(canopy_roughness),
+                'num_canopy_patches': float(num_patches),
+                'avg_patch_size': float(avg_patch_size),
+                'canopy_density': float(vegetation_fraction * (1 - gap_fraction))
+            }
+
+        return {'canopy_cover': 0, 'gap_fraction': 1, 'canopy_roughness': 0,
+                'num_canopy_patches': 0, 'avg_patch_size': 0, 'canopy_density': 0}
+
+    def _estimate_growth_stage(self, image: np.ndarray) -> Dict[str, float]:
+        """Estimate plant growth stage"""
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Growth indicators
+        vegetation_fraction = np.mean(gray > np.percentile(gray, 30))
+
+        # Greenness intensity (proxy for chlorophyll)
+        if len(image.shape) >= 3:
+            greenness = np.mean(image[:, :, 1])
+        else:
+            greenness = np.mean(gray)
+
+        # Canopy complexity (edge density)
+        edges = sobel(gray)
+        edge_density = np.mean(edges[edges > np.percentile(edges, 80)])
+
+        # Growth stage estimation (0-4 scale: seedling, vegetative, flowering, fruiting, maturity)
+        if vegetation_fraction < 0.2:
+            growth_stage = 0  # Seedling
+        elif vegetation_fraction < 0.5:
+            growth_stage = 1  # Vegetative
+        elif edge_density > 0.3:
+            growth_stage = 2  # Flowering (more complex structure)
+        elif greenness > 0.4:
+            growth_stage = 3  # Fruiting
+        else:
+            growth_stage = 4  # Maturity/Senescence
+
+        return {
+            'growth_stage': float(growth_stage),
+            'growth_stage_progress': float(vegetation_fraction),
+            'canopy_development': float(vegetation_fraction),
+            'senescence_index': float(1 - greenness if greenness < 0.3 else 0)
+        }
+
+    def _compute_biomass(self, image: np.ndarray) -> Dict[str, float]:
+        """Estimate above-ground biomass"""
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Vegetation indices as biomass proxies
+        if len(image.shape) >= 3:
+            # Use NDVI-like calculation
+            if self.has_nir_band and image.shape[2] > self.nir_band_index:
+                nir = image[:, :, self.nir_band_index]
+                red = image[:, :, 0]
+            else:
+                nir = (image[:, :, 1] + image[:, :, 2]) / 2
+                red = image[:, :, 0]
+
+            ndvi_like = (nir - red) / (nir + red + 1e-8)
+
+            # Biomass estimation using multiple indices
+            biomass_ndvi = np.mean(ndvi_like) * 2  # Scale to 0-2 range
+            biomass_cover = np.mean(gray > np.percentile(gray, 30))
+
+            # Combined biomass estimate
+            estimated_biomass = (biomass_ndvi * 0.6 + biomass_cover * 0.4)
+        else:
+            # Grayscale-based estimation
+            biomass_cover = np.mean(gray > np.percentile(gray, 30))
+            estimated_biomass = biomass_cover
+
+        return {
+            'biomass_index': float(estimated_biomass),
+            'biomass_cover': float(biomass_cover),
+            'biomass_density': float(np.mean(gray > np.percentile(gray, 60))),
+            'estimated_yield': float(estimated_biomass * 0.8)  # Simple yield proxy
+        }
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute agriculture-specific quality metrics"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
 
-        metrics = {
-            'sharpness': np.std(filters.sobel(gray)),
-            'contrast': np.std(gray),
-            'plant_visibility': np.mean(image[:, :, 1] > 0.3) if len(image.shape) == 3 else 0
+        # Illumination uniformity
+        illumination_uniformity = 1 - np.std(gray) / (np.mean(gray) + 1e-8)
+
+        # Shadow presence
+        shadow_fraction = np.mean(gray < 0.2)
+
+        # Focus quality (sharpness)
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        sharpness = np.var(laplacian) / 1000
+
+        # Cloud cover (if present)
+        cloud_fraction = np.mean(gray > 0.95)
+
+        return {
+            'illumination_uniformity': float(illumination_uniformity),
+            'shadow_fraction': float(shadow_fraction),
+            'image_sharpness': float(min(1.0, sharpness / 500)),
+            'cloud_cover_fraction': float(cloud_fraction),
+            'image_quality_score': float((illumination_uniformity + (1 - shadow_fraction) + min(1.0, sharpness / 500)) / 3)
         }
 
-        return metrics
-
 # =============================================================================
-# MEDICAL DOMAIN PROCESSOR
+# COMPLETE MEDICAL DOMAIN PROCESSOR
 # =============================================================================
 
 class MedicalDomainProcessor:
-    """Medical imaging processor"""
+    """Complete Medical imaging processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
+        self.modality = getattr(config, 'modality', 'general')
+        self.detect_tumor = getattr(config, 'detect_tumor', True)
+        self.detect_lesion = getattr(config, 'detect_lesion', True)
+        self.detect_hemorrhage = getattr(config, 'detect_hemorrhage', True)
+        self.detect_calcification = getattr(config, 'detect_calcification', True)
+        self.segment_organs = getattr(config, 'segment_organs', True)
+        self.segment_vessels = getattr(config, 'segment_vessels', True)
+        self.segment_tissues = getattr(config, 'segment_tissues', True)
+        self.compute_tissue_texture = getattr(config, 'compute_tissue_texture', True)
+        self.compute_boundary_regularity = getattr(config, 'compute_boundary_regularity', True)
+        self.compute_contrast = getattr(config, 'compute_contrast', True)
+        self.compute_sharpness = getattr(config, 'compute_sharpness', True)
+        self.detect_artifacts = getattr(config, 'detect_artifacts', True)
+        self.estimate_tumor_size = getattr(config, 'estimate_tumor_size', True)
+        self.compute_tumor_heterogeneity = getattr(config, 'compute_tumor_heterogeneity', True)
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess medical images"""
+        """Preprocess medical images based on modality"""
         img_float = image.astype(np.float32) / 255.0
 
-        # Denoise
-        img_float = self._denoise_medical(img_float)
+        # Modality-specific preprocessing
+        if self.modality == 'ct':
+            img_float = self._preprocess_ct(img_float)
+        elif self.modality == 'mri':
+            img_float = self._preprocess_mri(img_float)
+        elif self.modality == 'xray':
+            img_float = self._preprocess_xray(img_float)
+        elif self.modality == 'ultrasound':
+            img_float = self._preprocess_ultrasound(img_float)
+        elif self.modality == 'histology':
+            img_float = self._preprocess_histology(img_float)
+        else:
+            # General medical preprocessing
+            img_float = self._denoise_medical(img_float)
+            img_float = self._enhance_contrast(img_float)
 
-        # Enhance contrast
-        img_float = self._enhance_contrast(img_float)
+        # Normalize intensity
+        img_float = (img_float - img_float.min()) / (img_float.max() - img_float.min() + 1e-8)
 
         return img_float
 
-    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract medical-specific features"""
-        features = {}
+    def _preprocess_ct(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess CT images (bone/soft tissue windowing)"""
+        # Simulate windowing for CT
+        if len(image.shape) == 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
 
-        # Tumor detection
-        features.update(self._detect_tumor(image))
+        # Bone window (high contrast)
+        bone_window = np.clip((gray - 0.3) / 0.5, 0, 1)
+        # Soft tissue window
+        soft_window = np.clip((gray - 0.2) / 0.4, 0, 1)
 
-        # Texture analysis
-        features.update(self._compute_tissue_texture(image))
+        # Combine
+        return np.stack([bone_window, soft_window, gray], axis=2) if len(image.shape) == 3 else gray
 
-        # Quality metrics
-        features.update(self._compute_medical_contrast(image))
-        features.update(self._compute_medical_sharpness(image))
+    def _preprocess_mri(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess MRI images (bias field correction)"""
+        # Simple bias field correction using Gaussian filtering
+        if len(image.shape) == 3:
+            for i in range(3):
+                blurred = cv2.GaussianBlur(image[:, :, i], (51, 51), 0)
+                image[:, :, i] = image[:, :, i] / (blurred + 1e-8)
+        else:
+            blurred = cv2.GaussianBlur(image, (51, 51), 0)
+            image = image / (blurred + 1e-8)
 
-        return features
+        return np.clip(image, 0, 1)
+
+    def _preprocess_xray(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess X-ray images (contrast enhancement)"""
+        if len(image.shape) == 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # CLAHE for X-ray
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply((gray * 255).astype(np.uint8)) / 255.0
+
+        if len(image.shape) == 3:
+            return np.stack([enhanced, enhanced, enhanced], axis=2)
+        return enhanced
+
+    def _preprocess_ultrasound(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess ultrasound images (speckle reduction)"""
+        if len(image.shape) == 3:
+            for i in range(3):
+                image[:, :, i] = restoration.denoise_bilateral(image[:, :, i], sigma_color=0.05, sigma_spatial=5)
+        else:
+            image = restoration.denoise_bilateral(image, sigma_color=0.05, sigma_spatial=5)
+        return image
+
+    def _preprocess_histology(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess histology images (color normalization)"""
+        # Stain normalization using Macenko method approximation
+        if len(image.shape) == 3:
+            # Convert to LAB and normalize
+            lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+            lab = lab.astype(np.float32) / 255.0
+
+            # Normalize L channel
+            lab[:, :, 0] = exposure.equalize_adapthist(lab[:, :, 0])
+
+            # Convert back
+            lab = (lab * 255).astype(np.uint8)
+            image = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB) / 255.0
+
+        return image
 
     def _denoise_medical(self, image: np.ndarray) -> np.ndarray:
         """Denoise medical images"""
@@ -4172,304 +5157,1450 @@ class MedicalDomainProcessor:
         return image
 
     def _enhance_contrast(self, image: np.ndarray) -> np.ndarray:
-        """Enhance contrast"""
+        """Enhance contrast using CLAHE"""
         if len(image.shape) == 3:
             for i in range(image.shape[2]):
-                image[:, :, i] = exposure.equalize_adapthist(image[:, :, i])
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                image[:, :, i] = clahe.apply((image[:, :, i] * 255).astype(np.uint8)) / 255.0
         else:
-            image = exposure.equalize_adapthist(image)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            image = clahe.apply((image * 255).astype(np.uint8)) / 255.0
         return image
 
-    def _detect_tumor(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect tumors"""
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract comprehensive medical-specific features"""
+        features = {}
+
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
-        # Look for abnormal regions with different texture
+        # Tumor detection
+        if self.detect_tumor:
+            features.update(self._detect_tumor(image, gray))
+
+        # Lesion detection
+        if self.detect_lesion:
+            features.update(self._detect_lesion(image, gray))
+
+        # Hemorrhage detection
+        if self.detect_hemorrhage:
+            features.update(self._detect_hemorrhage(image, gray))
+
+        # Calcification detection
+        if self.detect_calcification:
+            features.update(self._detect_calcification(image, gray))
+
+        # Segmentation features
+        if self.segment_organs:
+            features.update(self._segment_organs(image, gray))
+        if self.segment_vessels:
+            features.update(self._segment_vessels(image, gray))
+        if self.segment_tissues:
+            features.update(self._segment_tissues(image, gray))
+
+        # Texture analysis
+        if self.compute_tissue_texture:
+            features.update(self._compute_tissue_texture(image, gray))
+
+        # Boundary analysis
+        if self.compute_boundary_regularity:
+            features.update(self._compute_boundary_regularity(gray))
+
+        # Quality metrics
+        if self.compute_contrast:
+            features.update(self._compute_medical_contrast(gray))
+        if self.compute_sharpness:
+            features.update(self._compute_medical_sharpness(gray))
+        if self.detect_artifacts:
+            features.update(self._detect_artifacts(gray))
+
+        # Tumor characterization
+        if self.estimate_tumor_size:
+            features.update(self._estimate_tumor_size(gray))
+        if self.compute_tumor_heterogeneity:
+            features.update(self._compute_tumor_heterogeneity(image, gray))
+
+        return features
+
+    def _detect_tumor(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect tumors using multiple criteria"""
+        # Look for abnormal regions with different texture and intensity
         lbp = feature.local_binary_pattern(gray, P=8, R=1, method='uniform')
-        threshold = np.percentile(lbp, 95)
-        abnormal = lbp > threshold
+
+        # Compute local statistics
+        from scipy.ndimage import uniform_filter
+
+        local_mean = uniform_filter(gray, size=11)
+        local_std = np.sqrt(uniform_filter(gray**2, size=11) - local_mean**2)
+
+        # Abnormal regions: high LBP variation, different intensity
+        lbp_std = uniform_filter(lbp**2, size=11) - uniform_filter(lbp, size=11)**2
+
+        abnormality_score = (local_std / (local_mean + 1e-8)) * lbp_std
+        abnormality_score = abnormality_score / (abnormality_score.max() + 1e-8)
+
+        # Threshold for tumor suspicion
+        threshold = np.percentile(abnormality_score, 95)
+        tumor_mask = abnormality_score > threshold
+
+        if np.any(tumor_mask):
+            tumor_area = np.sum(tumor_mask) / tumor_mask.size
+            tumor_intensity = np.mean(gray[tumor_mask])
+            tumor_std = np.std(gray[tumor_mask])
+        else:
+            tumor_area = 0
+            tumor_intensity = 0
+            tumor_std = 0
 
         return {
-            'tumor_suspicion': np.mean(abnormal),
-            'abnormal_texture_score': np.std(lbp[abnormal]) if np.any(abnormal) else 0
+            'tumor_suspicion': float(np.mean(abnormality_score > np.percentile(abnormality_score, 90))),
+            'tumor_area_fraction': float(tumor_area),
+            'tumor_intensity': float(tumor_intensity),
+            'tumor_texture_abnormality': float(np.mean(lbp[tumor_mask]) if np.any(tumor_mask) else 0),
+            'tumor_heterogeneity': float(tumor_std),
+            'malignancy_risk': float(min(1.0, tumor_area * 2 + tumor_std * 2))
         }
 
-    def _compute_tissue_texture(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute tissue texture features"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+    def _detect_lesion(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect lesions (focal abnormalities)"""
+        # Use blob detection for potential lesions
+        blobs = blob_log(gray, max_sigma=10, num_sigma=10, threshold=0.05)
+
+        if len(blobs) > 0:
+            lesion_count = len(blobs)
+            avg_lesion_size = np.mean([b[2] for b in blobs])
+            max_lesion_size = np.max([b[2] for b in blobs])
+
+            # Analyze lesion intensities
+            lesion_intensities = []
+            for blob in blobs[:min(20, len(blobs))]:
+                y, x, r = int(blob[0]), int(blob[1]), int(blob[2])
+                y_min, y_max = max(0, y - r), min(gray.shape[0], y + r)
+                x_min, x_max = max(0, x - r), min(gray.shape[1], x + r)
+                lesion_intensities.append(np.mean(gray[y_min:y_max, x_min:x_max]))
+
+            return {
+                'lesion_count': float(lesion_count),
+                'avg_lesion_size': float(avg_lesion_size),
+                'max_lesion_size': float(max_lesion_size),
+                'lesion_intensity_mean': float(np.mean(lesion_intensities)),
+                'lesion_density': float(lesion_count / (gray.size / 10000))
+            }
+
+        return {'lesion_count': 0, 'avg_lesion_size': 0, 'max_lesion_size': 0,
+                'lesion_intensity_mean': 0, 'lesion_density': 0}
+
+    def _detect_hemorrhage(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect hemorrhage (bleeding) in medical images"""
+        if len(image.shape) >= 3:
+            # Hemorrhage appears as hyperdense/hyperintense regions
+            # In CT: bright, in MRI: varies by sequence
+            if self.modality == 'ct':
+                # Hyperdense regions
+                hemorrhage_mask = gray > np.percentile(gray, 95)
+            elif self.modality == 'mri':
+                # T1 hyperintense or T2 hypointense (approximated)
+                hemorrhage_mask = (gray > np.percentile(gray, 90)) | (gray < np.percentile(gray, 10))
+            else:
+                hemorrhage_mask = gray > np.percentile(gray, 97)
+        else:
+            hemorrhage_mask = gray > np.percentile(gray, 97)
+
+        # Morphological analysis
+        if np.any(hemorrhage_mask):
+            labeled, num_hemorrhages = ndimage_label(hemorrhage_mask)
+            hemorrhage_areas = np.bincount(labeled.ravel())[1:]
+            total_hemorrhage_area = np.sum(hemorrhage_areas)
+
+            return {
+                'hemorrhage_present': float(1 if num_hemorrhages > 0 else 0),
+                'hemorrhage_count': float(num_hemorrhages),
+                'hemorrhage_area_fraction': float(total_hemorrhage_area / hemorrhage_mask.size),
+                'max_hemorrhage_size': float(np.max(hemorrhage_areas) if len(hemorrhage_areas) > 0 else 0),
+                'hemorrhage_severity': float(min(1.0, total_hemorrhage_area / (hemorrhage_mask.size * 0.1)))
+            }
+
+        return {'hemorrhage_present': 0, 'hemorrhage_count': 0, 'hemorrhage_area_fraction': 0,
+                'max_hemorrhage_size': 0, 'hemorrhage_severity': 0}
+
+    def _detect_calcification(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect calcifications (small bright spots)"""
+        # Calcifications are small, bright, well-defined spots
+        from skimage.feature import blob_log
+
+        blobs = blob_log(gray, max_sigma=3, num_sigma=10, threshold=0.1)
+
+        # Filter for small blobs (calcifications are typically small)
+        calcifications = [b for b in blobs if b[2] < 3]
+
+        if len(calcifications) > 0:
+            return {
+                'calcification_count': float(len(calcifications)),
+                'calcification_density': float(len(calcifications) / (gray.size / 10000)),
+                'avg_calcification_size': float(np.mean([b[2] for b in calcifications])),
+                'microcalcification_clusters': float(len([b for b in calcifications if b[2] < 1.5]))
+            }
+
+        return {'calcification_count': 0, 'calcification_density': 0,
+                'avg_calcification_size': 0, 'microcalcification_clusters': 0}
+
+    def _segment_organs(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Segment and analyze organ regions"""
+        # Use thresholding and morphological operations
+        threshold = np.percentile(gray, 70)
+        organ_mask = gray > threshold
+
+        if np.any(organ_mask):
+            # Clean up mask
+            organ_mask = morphology.binary_closing(organ_mask, morphology.disk(5))
+            organ_mask = morphology.binary_opening(organ_mask, morphology.disk(3))
+
+            labeled, num_organs = ndimage_label(organ_mask)
+            organ_areas = np.bincount(labeled.ravel())[1:]
+
+            # Find largest organ (primary)
+            if len(organ_areas) > 0:
+                primary_organ_area = np.max(organ_areas)
+                organ_area_fraction = primary_organ_area / organ_mask.size
+
+                # Organ shape analysis
+                props = regionprops(labeled)
+                if props:
+                    major_axis = np.mean([p.major_axis_length for p in props])
+                    minor_axis = np.mean([p.minor_axis_length for p in props])
+                    eccentricity = np.mean([p.eccentricity for p in props])
+                else:
+                    major_axis, minor_axis, eccentricity = 0, 0, 0
+
+                return {
+                    'organ_area_fraction': float(organ_area_fraction),
+                    'organ_count': float(num_organs),
+                    'organ_elongation': float(major_axis / (minor_axis + 1e-8)),
+                    'organ_eccentricity': float(eccentricity),
+                    'organ_compactness': float(4 * np.pi * primary_organ_area / (props[0].perimeter**2) if props else 0)
+                }
+
+        return {'organ_area_fraction': 0, 'organ_count': 0, 'organ_elongation': 0,
+                'organ_eccentricity': 0, 'organ_compactness': 0}
+
+    def _segment_vessels(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Segment and analyze blood vessels"""
+        # Use Frangi filter for vessel enhancement
+        vessels = frangi(gray, scale_range=(1, 5), scale_step=1)
+
+        # Threshold for vessel segmentation
+        threshold = np.percentile(vessels, 90)
+        vessel_mask = vessels > threshold
+
+        if np.any(vessel_mask):
+            vessel_density = np.mean(vessel_mask)
+
+            # Skeletonize for length estimation
+            skeleton = morphology.skeletonize(vessel_mask)
+            vessel_length = np.sum(skeleton)
+
+            # Branching points
+            from skimage.morphology import branch_points
+            branches = branch_points(skeleton)
+            num_branches = np.sum(branches)
+
+            return {
+                'vessel_density': float(vessel_density),
+                'vessel_length': float(vessel_length / vessel_mask.size),
+                'vessel_branch_count': float(num_branches),
+                'vessel_complexity': float(vessel_length / (vessel_mask.size + 1e-8)),
+                'vascular_tortuosity': float(np.std(vessels[vessel_mask]) if np.any(vessel_mask) else 0)
+            }
+
+        return {'vessel_density': 0, 'vessel_length': 0, 'vessel_branch_count': 0,
+                'vessel_complexity': 0, 'vascular_tortuosity': 0}
+
+    def _segment_tissues(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Segment different tissue types"""
+        # Use K-means clustering for tissue segmentation
+        from sklearn.cluster import KMeans
+
+        # Reshape for clustering
+        pixels = gray.reshape(-1, 1)
+
+        # Segment into 3 tissue types (e.g., fat, muscle, bone/other)
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(pixels)
+        tissue_map = labels.reshape(gray.shape)
+
+        # Calculate tissue fractions
+        unique, counts = np.unique(tissue_map, return_counts=True)
+        tissue_fractions = counts / counts.sum()
+
+        # Sort by intensity (darker to brighter)
+        tissue_means = [np.mean(gray[tissue_map == i]) for i in range(3)]
+        sorted_indices = np.argsort(tissue_means)
+
+        tissue_fractions_sorted = tissue_fractions[sorted_indices]
+
+        return {
+            'tissue_1_fraction': float(tissue_fractions_sorted[0]) if len(tissue_fractions_sorted) > 0 else 0,  # Darkest
+            'tissue_2_fraction': float(tissue_fractions_sorted[1]) if len(tissue_fractions_sorted) > 1 else 0,
+            'tissue_3_fraction': float(tissue_fractions_sorted[2]) if len(tissue_fractions_sorted) > 2 else 0,
+            'tissue_heterogeneity': float(np.std([tissue_fractions_sorted[i] for i in range(min(3, len(tissue_fractions_sorted)))])),
+            'tissue_contrast': float(np.max(tissue_means) - np.min(tissue_means)) if len(tissue_means) > 1 else 0
+        }
+
+    def _compute_tissue_texture(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Compute comprehensive tissue texture features"""
         gray_uint8 = (gray * 255).astype(np.uint8)
 
-        glcm = graycomatrix(gray_uint8, distances=[1], angles=[0], levels=256, symmetric=True)
+        # GLCM features
+        glcm = graycomatrix(gray_uint8, distances=[1, 2, 3], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
+                           levels=256, symmetric=True)
 
-        return {
-            'tissue_contrast': graycoprops(glcm, 'contrast')[0, 0],
-            'tissue_homogeneity': graycoprops(glcm, 'homogeneity')[0, 0],
-            'tissue_energy': graycoprops(glcm, 'energy')[0, 0]
+        textures = {
+            'tissue_contrast': float(np.mean([graycoprops(glcm, 'contrast')[0, i] for i in range(3)])),
+            'tissue_homogeneity': float(np.mean([graycoprops(glcm, 'homogeneity')[0, i] for i in range(3)])),
+            'tissue_energy': float(np.mean([graycoprops(glcm, 'energy')[0, i] for i in range(3)])),
+            'tissue_correlation': float(np.mean([graycoprops(glcm, 'correlation')[0, i] for i in range(3)])),
+            'tissue_dissimilarity': float(np.mean([graycoprops(glcm, 'dissimilarity')[0, i] for i in range(3)]))
         }
 
-    def _compute_medical_contrast(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute contrast metric"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        # Add Laws' texture energy measures
+        from scipy.ndimage import convolve
 
-        return {
-            'contrast_ratio': (np.percentile(gray, 95) - np.percentile(gray, 5)) / (np.percentile(gray, 95) + np.percentile(gray, 5) + 1e-8)
+        # Laws' filters
+        L5 = np.array([1, 4, 6, 4, 1])  # Level
+        E5 = np.array([-1, -2, 0, 2, 1])  # Edge
+        S5 = np.array([-1, 0, 2, 0, -1])  # Spot
+        R5 = np.array([1, -4, 6, -4, 1])  # Ripple
+
+        filters = {
+            'L5E5': np.outer(L5, E5),
+            'E5L5': np.outer(E5, L5),
+            'E5E5': np.outer(E5, E5),
+            'S5S5': np.outer(S5, S5),
+            'R5R5': np.outer(R5, R5)
         }
 
-    def _compute_medical_sharpness(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute sharpness metric"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
-        edges = filters.sobel(gray)
+        for name, kernel in filters.items():
+            filtered = convolve(gray, kernel)
+            textures[f'texture_energy_{name.lower()}'] = float(np.mean(np.abs(filtered)))
 
-        return {'sharpness_index': np.mean(edges)}
+        return textures
+
+    def _compute_boundary_regularity(self, gray: np.ndarray) -> Dict[str, float]:
+        """Compute boundary regularity metrics for lesions/organs"""
+        # Segment main object
+        threshold = np.percentile(gray, 70)
+        binary = gray > threshold
+
+        if np.any(binary):
+            # Find contours
+            contours, _ = cv2.findContours((binary * 255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if contours:
+                # Get largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+
+                # Perimeter and area
+                perimeter = cv2.arcLength(largest_contour, True)
+                area = cv2.contourArea(largest_contour)
+
+                # Circularity (1 = perfect circle)
+                circularity = 4 * np.pi * area / (perimeter**2 + 1e-8)
+
+                # Convexity
+                hull = cv2.convexHull(largest_contour)
+                hull_area = cv2.contourArea(hull)
+                convexity = area / (hull_area + 1e-8)
+
+                # Boundary smoothness (using curvature)
+                # Approximate with polygon
+                epsilon = 0.01 * perimeter
+                approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+                num_vertices = len(approx)
+
+                return {
+                    'boundary_regularity': float(circularity),
+                    'boundary_convexity': float(convexity),
+                    'boundary_complexity': float(num_vertices / 20),  # Normalized
+                    'boundary_smoothness': float(1 - (num_vertices - 4) / 100)  # Less vertices = smoother
+                }
+
+        return {'boundary_regularity': 0, 'boundary_convexity': 0, 'boundary_complexity': 0, 'boundary_smoothness': 0}
+
+    def _compute_medical_contrast(self, gray: np.ndarray) -> Dict[str, float]:
+        """Compute medical-specific contrast metrics"""
+        # Michelson contrast
+        max_val = np.percentile(gray, 99)
+        min_val = np.percentile(gray, 1)
+        michelson_contrast = (max_val - min_val) / (max_val + min_val + 1e-8)
+
+        # RMS contrast
+        rms_contrast = np.std(gray)
+
+        # Local contrast
+        from scipy.ndimage import uniform_filter
+        local_mean = uniform_filter(gray, size=11)
+        local_contrast = np.std(gray - local_mean)
+
+        return {
+            'contrast_ratio': float(michelson_contrast),
+            'rms_contrast': float(rms_contrast),
+            'local_contrast': float(local_contrast),
+            'contrast_to_noise': float(michelson_contrast / (np.std(gray[gray < np.percentile(gray, 20)]) + 1e-8))
+        }
+
+    def _compute_medical_sharpness(self, gray: np.ndarray) -> Dict[str, float]:
+        """Compute medical-specific sharpness metrics"""
+        # Gradient-based sharpness
+        grad_x = np.gradient(gray, axis=1)
+        grad_y = np.gradient(gray, axis=0)
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+
+        # Laplacian-based sharpness
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        laplacian_variance = np.var(laplacian) / 1000
+
+        # Edge-based sharpness
+        edges = sobel(gray)
+        edge_sharpness = np.percentile(edges, 95)
+
+        return {
+            'sharpness_index': float(np.mean(gradient_magnitude)),
+            'laplacian_sharpness': float(min(1.0, laplacian_variance / 500)),
+            'edge_sharpness': float(edge_sharpness),
+            'overall_sharpness': float((np.mean(gradient_magnitude) + min(1.0, laplacian_variance / 500) + edge_sharpness) / 3)
+        }
+
+    def _detect_artifacts(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect common medical imaging artifacts"""
+        # Motion artifact (blurring in one direction)
+        grad_x = np.abs(np.gradient(gray, axis=1))
+        grad_y = np.abs(np.gradient(gray, axis=0))
+        motion_artifact = np.abs(np.mean(grad_x) - np.mean(grad_y)) / (np.mean(grad_x) + np.mean(grad_y) + 1e-8)
+
+        # Ringing artifact (Gibbs phenomenon)
+        # Detect by looking for oscillations near edges
+        edges = sobel(gray)
+        edge_locations = edges > np.percentile(edges, 95)
+        if np.any(edge_locations):
+            # Look for oscillations perpendicular to edges
+            ringing_score = np.std(gray[edge_locations]) / (np.mean(gray[edge_locations]) + 1e-8)
+        else:
+            ringing_score = 0
+
+        # Noise artifact
+        from scipy.ndimage import uniform_filter
+        smooth = uniform_filter(gray, size=5)
+        noise_level = np.std(gray - smooth)
+
+        return {
+            'motion_artifact_score': float(motion_artifact),
+            'ringing_artifact_score': float(min(1.0, ringing_score)),
+            'noise_artifact_level': float(noise_level),
+            'artifact_presence': float((motion_artifact > 0.3) or (ringing_score > 0.5) or (noise_level > 0.1))
+        }
+
+    def _estimate_tumor_size(self, gray: np.ndarray) -> Dict[str, float]:
+        """Estimate tumor size based on segmentation"""
+        # Use adaptive thresholding for tumor segmentation
+        from skimage.filters import threshold_local
+
+        threshold = threshold_local(gray, block_size=51, offset=0.1)
+        tumor_candidate = gray > threshold
+
+        if np.any(tumor_candidate):
+            labeled, num_tumors = ndimage_label(tumor_candidate)
+            tumor_sizes = np.bincount(labeled.ravel())[1:]
+
+            if len(tumor_sizes) > 0:
+                largest_tumor = np.max(tumor_sizes)
+                total_tumor_area = np.sum(tumor_sizes)
+
+                # Estimate diameter (assuming circular)
+                estimated_diameter = 2 * np.sqrt(largest_tumor / np.pi)
+
+                return {
+                    'tumor_size_pixels': float(largest_tumor),
+                    'tumor_estimated_diameter': float(estimated_diameter),
+                    'total_tumor_burden': float(total_tumor_area / gray.size),
+                    'tumor_stage_proxy': float(min(3, total_tumor_area / (gray.size * 0.1)))
+                }
+
+        return {'tumor_size_pixels': 0, 'tumor_estimated_diameter': 0, 'total_tumor_burden': 0, 'tumor_stage_proxy': 0}
+
+    def _compute_tumor_heterogeneity(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Compute tumor heterogeneity metrics"""
+        # Segment potential tumor region
+        threshold = np.percentile(gray, 85)
+        tumor_mask = gray > threshold
+
+        if np.any(tumor_mask):
+            # Intensity heterogeneity
+            tumor_intensities = gray[tumor_mask]
+            intensity_heterogeneity = np.std(tumor_intensities) / (np.mean(tumor_intensities) + 1e-8)
+
+            # Texture heterogeneity within tumor
+            if len(tumor_intensities) > 100:
+                # Local binary patterns within tumor
+                lbp = feature.local_binary_pattern(gray, P=8, R=1, method='uniform')
+                lbp_tumor = lbp[tumor_mask]
+                texture_heterogeneity = np.std(lbp_tumor)
+
+                # Entropy as heterogeneity measure
+                hist, _ = np.histogram(tumor_intensities, bins=20, density=True)
+                hist = hist[hist > 0]
+                entropy = -np.sum(hist * np.log(hist + 1e-10))
+            else:
+                texture_heterogeneity = 0
+                entropy = 0
+
+            # Spatial heterogeneity (clumpiness)
+            from scipy.ndimage import uniform_filter
+            local_mean = uniform_filter(gray, size=11)
+            local_var = uniform_filter(gray**2, size=11) - local_mean**2
+            spatial_heterogeneity = np.std(local_var[tumor_mask]) if np.any(tumor_mask) else 0
+
+            return {
+                'tumor_intensity_heterogeneity': float(intensity_heterogeneity),
+                'tumor_texture_heterogeneity': float(texture_heterogeneity),
+                'tumor_entropy': float(entropy),
+                'tumor_spatial_heterogeneity': float(spatial_heterogeneity),
+                'overall_heterogeneity': float((intensity_heterogeneity + texture_heterogeneity + spatial_heterogeneity) / 3)
+            }
+
+        return {'tumor_intensity_heterogeneity': 0, 'tumor_texture_heterogeneity': 0,
+                'tumor_entropy': 0, 'tumor_spatial_heterogeneity': 0, 'overall_heterogeneity': 0}
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute medical-specific quality metrics"""
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
-        signal = np.mean(gray)
-        noise = np.std(gray)
+        # SNR estimate
+        signal_region = gray > np.percentile(gray, 90)
+        noise_region = gray < np.percentile(gray, 10)
+        signal = np.mean(gray[signal_region]) if np.any(signal_region) else np.mean(gray)
+        noise = np.std(gray[noise_region]) if np.any(noise_region) else np.std(gray)
+        snr = signal / (noise + 1e-8)
 
-        metrics = {
-            'snr': signal / (noise + 1e-8),
-            'contrast': np.std(gray),
-            'sharpness': np.std(filters.sobel(gray))
+        # Contrast-to-noise ratio
+        contrast = np.percentile(gray, 95) - np.percentile(gray, 5)
+        cnr = contrast / (noise + 1e-8)
+
+        # Sharpness
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        sharpness = np.var(laplacian) / 1000
+
+        return {
+            'snr': float(snr),
+            'contrast_to_noise_ratio': float(cnr),
+            'sharpness': float(min(1.0, sharpness / 500)),
+            'diagnostic_quality': float((snr / 10 + cnr / 20 + min(1.0, sharpness / 500)) / 3),
+            'noise_level': float(noise)
         }
 
-        return metrics
-
 # =============================================================================
-# SATELLITE DOMAIN PROCESSOR
+# COMPLETE SATELLITE DOMAIN PROCESSOR
 # =============================================================================
 
 class SatelliteDomainProcessor:
-    """Satellite/Remote sensing processor"""
+    """Complete Satellite/Remote sensing processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
+        self.satellite_type = getattr(config, 'satellite_type', 'general')
+        self.num_bands = getattr(config, 'num_bands', 4)
+        self.band_assignments = getattr(config, 'band_assignments', {
+            'red': 0, 'green': 1, 'blue': 2, 'nir': 3
+        })
+        self.classify_land_cover = getattr(config, 'classify_land_cover', True)
+        self.detect_urban_area = getattr(config, 'detect_urban_area', True)
+        self.detect_forest_cover = getattr(config, 'detect_forest_cover', True)
+        self.detect_water_body = getattr(config, 'detect_water_body', True)
+        self.detect_agriculture = getattr(config, 'detect_agriculture', True)
+        self.detect_change = getattr(config, 'detect_change', True)
+        self.detect_deforestation = getattr(config, 'detect_deforestation', True)
+        self.detect_urban_sprawl = getattr(config, 'detect_urban_sprawl', True)
+        self.compute_ndvi = getattr(config, 'compute_ndvi', True)
+        self.compute_ndwi = getattr(config, 'compute_ndwi', True)
+        self.compute_ndbi = getattr(config, 'compute_ndbi', True)
+        self.compute_mndwi = getattr(config, 'compute_mndwi', True)
+        self.compute_glcm = getattr(config, 'compute_glcm', True)
+        self.compute_pansharpening = getattr(config, 'compute_pansharpening', True)
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess satellite images"""
         img_float = image.astype(np.float32) / 255.0
 
-        # Radiometric correction
-        for i in range(img_float.shape[2]):
-            img_float[:, :, i] = exposure.equalize_adapthist(img_float[:, :, i])
+        # Satellite-specific preprocessing
+        if self.satellite_type == 'sentinel':
+            img_float = self._preprocess_sentinel(img_float)
+        elif self.satellite_type == 'landsat':
+            img_float = self._preprocess_landsat(img_float)
+        elif self.satellite_type == 'modis':
+            img_float = self._preprocess_modis(img_float)
+        else:
+            # General satellite preprocessing
+            img_float = self._radiometric_correction(img_float)
+            img_float = self._atmospheric_correction(img_float)
 
         return img_float
 
+    def _preprocess_sentinel(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess Sentinel satellite imagery"""
+        # Apply atmospheric correction approximation
+        return self._atmospheric_correction(image)
+
+    def _preprocess_landsat(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess Landsat satellite imagery"""
+        # Apply TOA reflectance approximation
+        return self._radiometric_correction(image)
+
+    def _preprocess_modis(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess MODIS satellite imagery"""
+        # Apply cloud masking
+        return self._cloud_masking(image)
+
+    def _radiometric_correction(self, image: np.ndarray) -> np.ndarray:
+        """Apply radiometric correction"""
+        for i in range(min(3, image.shape[2])):
+            # Simple histogram matching
+            image[:, :, i] = exposure.equalize_hist(image[:, :, i])
+        return image
+
+    def _atmospheric_correction(self, image: np.ndarray) -> np.ndarray:
+        """Apply atmospheric correction (dark object subtraction)"""
+        for i in range(min(3, image.shape[2])):
+            # Find dark object (5th percentile)
+            dark_pixel = np.percentile(image[:, :, i], 5)
+            image[:, :, i] = np.clip(image[:, :, i] - dark_pixel, 0, 1)
+        return image
+
+    def _cloud_masking(self, image: np.ndarray) -> np.ndarray:
+        """Mask clouds in satellite imagery"""
+        if len(image.shape) >= 3 and image.shape[2] >= 3:
+            # Simple cloud detection (bright and white)
+            blue = image[:, :, 2] if len(image.shape) > 2 else image
+            cloud_score = blue > 0.8
+
+            # Inpaint clouds
+            if np.any(cloud_score):
+                cloud_mask = (cloud_score * 255).astype(np.uint8)
+                image_uint8 = (image * 255).astype(np.uint8)
+                for i in range(min(3, image.shape[2])):
+                    image_uint8[:, :, i] = cv2.inpaint(image_uint8[:, :, i], cloud_mask, 5, cv2.INPAINT_TELEA)
+                image = image_uint8.astype(np.float32) / 255.0
+
+        return image
+
     def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract satellite-specific features"""
+        """Extract comprehensive satellite-specific features"""
         features = {}
 
         # Spectral indices
-        features.update(self._compute_sat_ndvi(image))
-        features.update(self._compute_sat_ndwi(image))
+        if self.compute_ndvi:
+            features.update(self._compute_ndvi(image))
+        if self.compute_ndwi:
+            features.update(self._compute_ndwi(image))
+        if self.compute_ndbi:
+            features.update(self._compute_ndbi(image))
+        if self.compute_mndwi:
+            features.update(self._compute_mndwi(image))
 
-        # Land cover
-        features.update(self._classify_land_cover(image))
+        # Land cover classification
+        if self.classify_land_cover:
+            features.update(self._classify_land_cover(image))
+
+        # Specific class detection
+        if self.detect_urban_area:
+            features.update(self._detect_urban_area(image))
+        if self.detect_forest_cover:
+            features.update(self._detect_forest_cover(image))
+        if self.detect_water_body:
+            features.update(self._detect_water_body(image))
+        if self.detect_agriculture:
+            features.update(self._detect_agriculture(image))
+
+        # GLCM texture features
+        if self.compute_glcm:
+            features.update(self._compute_glcm_features(image))
+
+        # Change detection features
+        if self.detect_change:
+            features.update(self._detect_change_features(image))
 
         return features
 
-    def _compute_sat_ndvi(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute NDVI"""
-        if image.shape[2] >= 3:
-            nir = image[:, :, 2]
-            red = image[:, :, 0]
+    def _compute_ndvi(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Normalized Difference Vegetation Index"""
+        red_idx = self.band_assignments.get('red', 0)
+        nir_idx = self.band_assignments.get('nir', min(3, image.shape[2] - 1))
+
+        if image.shape[2] > max(red_idx, nir_idx):
+            red = image[:, :, red_idx]
+            nir = image[:, :, nir_idx]
+
             ndvi = (nir - red) / (nir + red + 1e-8)
 
             return {
-                'sat_ndvi_mean': np.mean(ndvi),
-                'vegetation_fraction': np.mean(ndvi > 0.3)
+                'ndvi_mean': float(np.mean(ndvi)),
+                'ndvi_std': float(np.std(ndvi)),
+                'ndvi_max': float(np.max(ndvi)),
+                'ndvi_min': float(np.min(ndvi)),
+                'vegetation_fraction': float(np.mean(ndvi > 0.3)),
+                'dense_vegetation': float(np.mean(ndvi > 0.6)),
+                'sparse_vegetation': float(np.mean((ndvi > 0.1) & (ndvi <= 0.3))),
+                'barren_land': float(np.mean(ndvi <= 0.1))
             }
-        return {'sat_ndvi_mean': 0, 'vegetation_fraction': 0}
 
-    def _compute_sat_ndwi(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute NDWI"""
-        if image.shape[2] >= 3:
-            green = image[:, :, 1]
-            nir = image[:, :, 2]
+        return {'ndvi_mean': 0, 'ndvi_std': 0, 'ndvi_max': 0, 'ndvi_min': 0,
+                'vegetation_fraction': 0, 'dense_vegetation': 0, 'sparse_vegetation': 0, 'barren_land': 0}
+
+    def _compute_ndwi(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Normalized Difference Water Index"""
+        green_idx = self.band_assignments.get('green', 1)
+        nir_idx = self.band_assignments.get('nir', min(3, image.shape[2] - 1))
+
+        if image.shape[2] > max(green_idx, nir_idx):
+            green = image[:, :, green_idx]
+            nir = image[:, :, nir_idx]
+
             ndwi = (green - nir) / (green + nir + 1e-8)
 
             return {
-                'sat_ndwi_mean': np.mean(ndwi),
-                'water_fraction': np.mean(ndwi > 0)
+                'ndwi_mean': float(np.mean(ndwi)),
+                'water_fraction': float(np.mean(ndwi > 0)),
+                'open_water': float(np.mean(ndwi > 0.3)),
+                'wetland': float(np.mean((ndwi > 0) & (ndwi <= 0.3)))
             }
-        return {'sat_ndwi_mean': 0, 'water_fraction': 0}
+
+        return {'ndwi_mean': 0, 'water_fraction': 0, 'open_water': 0, 'wetland': 0}
+
+    def _compute_ndbi(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Normalized Difference Built-up Index"""
+        swir_idx = min(2, image.shape[2] - 1)  # Approximate SWIR
+        nir_idx = self.band_assignments.get('nir', min(3, image.shape[2] - 1))
+
+        if image.shape[2] > max(swir_idx, nir_idx):
+            swir = image[:, :, swir_idx]
+            nir = image[:, :, nir_idx]
+
+            ndbi = (swir - nir) / (swir + nir + 1e-8)
+
+            return {
+                'ndbi_mean': float(np.mean(ndbi)),
+                'built_up_fraction': float(np.mean(ndbi > 0)),
+                'urban_density': float(np.mean(ndbi > 0.2)),
+                'impervious_surface': float(np.mean(ndbi > 0.1))
+            }
+
+        return {'ndbi_mean': 0, 'built_up_fraction': 0, 'urban_density': 0, 'impervious_surface': 0}
+
+    def _compute_mndwi(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute Modified Normalized Difference Water Index"""
+        green_idx = self.band_assignments.get('green', 1)
+        swir_idx = min(2, image.shape[2] - 1)  # Approximate SWIR
+
+        if image.shape[2] > max(green_idx, swir_idx):
+            green = image[:, :, green_idx]
+            swir = image[:, :, swir_idx]
+
+            mndwi = (green - swir) / (green + swir + 1e-8)
+
+            return {
+                'mndwi_mean': float(np.mean(mndwi)),
+                'water_improved_fraction': float(np.mean(mndwi > 0)),
+                'water_quality_proxy': float(np.mean(mndwi))
+            }
+
+        return {'mndwi_mean': 0, 'water_improved_fraction': 0, 'water_quality_proxy': 0}
 
     def _classify_land_cover(self, image: np.ndarray) -> Dict[str, float]:
-        """Classify land cover"""
-        ndvi = self._compute_sat_ndvi(image)
-        ndwi = self._compute_sat_ndwi(image)
+        """Classify land cover types using spectral indices"""
+        ndvi = self._compute_ndvi(image)
+        ndwi = self._compute_ndwi(image)
+        ndbi = self._compute_ndbi(image)
+
+        # Simple classification based on indices
+        vegetation = ndvi.get('vegetation_fraction', 0)
+        water = ndwi.get('water_fraction', 0)
+        urban = ndbi.get('built_up_fraction', 0)
+
+        # Remaining is barren/other
+        barren = max(0, 1 - (vegetation + water + urban))
 
         return {
-            'forest_cover': ndvi.get('vegetation_fraction', 0),
-            'water_cover': ndwi.get('water_fraction', 0),
-            'urban_cover': 1 - (ndvi.get('vegetation_fraction', 0) + ndwi.get('water_fraction', 0))
+            'vegetation_cover': float(vegetation),
+            'water_cover': float(water),
+            'urban_cover': float(urban),
+            'barren_cover': float(barren),
+            'land_cover_diversity': float(1 - (vegetation**2 + water**2 + urban**2 + barren**2))  # Simpson diversity
+        }
+
+    def _detect_urban_area(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze urban areas"""
+        ndbi = self._compute_ndbi(image)
+        urban_fraction = ndbi.get('urban_density', 0)
+
+        # Texture analysis for urban areas (high contrast, regular patterns)
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Urban areas typically have high local contrast
+        from scipy.ndimage import uniform_filter
+        local_contrast = uniform_filter(gray**2, size=11) - uniform_filter(gray, size=11)**2
+
+        urban_texture = np.mean(local_contrast[local_contrast > np.percentile(local_contrast, 90)])
+
+        return {
+            'urban_fraction': float(urban_fraction),
+            'urban_texture_index': float(urban_texture),
+            'urban_sprawl_index': float(urban_fraction * (1 - urban_fraction)),
+            'urban_compactness': float(1 - np.std(local_contrast[local_contrast > 0]) if np.any(local_contrast > 0) else 0)
+        }
+
+    def _detect_forest_cover(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze forest cover"""
+        ndvi = self._compute_ndvi(image)
+        dense_forest = ndvi.get('dense_vegetation', 0)
+
+        # Forest texture (rough, high variability)
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Forest canopy roughness
+        edges = sobel(gray)
+        forest_roughness = np.mean(edges[edges > np.percentile(edges, 80)])
+
+        return {
+            'forest_cover_fraction': float(dense_forest),
+            'forest_canopy_roughness': float(forest_roughness),
+            'forest_health_index': float(ndvi.get('ndvi_mean', 0)),
+            'forest_fragmentation': float(1 - (dense_forest / (dense_forest + 0.1)))
+        }
+
+    def _detect_water_body(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze water bodies"""
+        ndwi = self._compute_ndwi(image)
+        mndwi = self._compute_mndwi(image)
+
+        water_fraction = ndwi.get('open_water', 0)
+
+        # Water body smoothness (low texture)
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        water_mask = gray < np.percentile(gray, 20)
+        water_smoothness = 1 - np.std(gray[water_mask]) if np.any(water_mask) else 0
+
+        return {
+            'water_body_fraction': float(water_fraction),
+            'water_quality_index': float(mndwi.get('water_quality_proxy', 0)),
+            'water_smoothness': float(water_smoothness),
+            'water_turbidity_proxy': float(1 - water_smoothness)
+        }
+
+    def _detect_agriculture(self, image: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze agricultural areas"""
+        ndvi = self._compute_ndvi(image)
+        vegetation = ndvi.get('vegetation_fraction', 0)
+
+        # Agricultural areas have regular patterns (field boundaries)
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Detect field boundaries using edge detection
+        edges = sobel(gray)
+
+        # Agricultural fields show regular edge patterns
+        from scipy.ndimage import convolve
+        edge_orientation = np.arctan2(np.gradient(gray, axis=0), np.gradient(gray, axis=1))
+        orientation_hist, _ = np.histogram(edge_orientation[edges > np.percentile(edges, 90)], bins=36)
+        orientation_regularity = np.max(orientation_hist) / (np.sum(orientation_hist) + 1e-8)
+
+        return {
+            'agriculture_fraction': float(vegetation * 0.8),  # Approximate
+            'field_regularity': float(orientation_regularity),
+            'crop_health': float(ndvi.get('ndvi_mean', 0)),
+            'agricultural_intensity': float(vegetation * orientation_regularity)
+        }
+
+    def _compute_glcm_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Compute GLCM features for satellite imagery"""
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        gray_uint8 = (gray * 255).astype(np.uint8)
+
+        # Multi-scale GLCM
+        glcm_features = {}
+
+        for distance in [1, 3, 5]:
+            glcm = graycomatrix(gray_uint8, distances=[distance], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
+                               levels=256, symmetric=True)
+
+            glcm_features[f'contrast_d{distance}'] = float(np.mean([graycoprops(glcm, 'contrast')[0, i] for i in range(4)]))
+            glcm_features[f'homogeneity_d{distance}'] = float(np.mean([graycoprops(glcm, 'homogeneity')[0, i] for i in range(4)]))
+            glcm_features[f'energy_d{distance}'] = float(np.mean([graycoprops(glcm, 'energy')[0, i] for i in range(4)]))
+            glcm_features[f'correlation_d{distance}'] = float(np.mean([graycoprops(glcm, 'correlation')[0, i] for i in range(4)]))
+
+        return glcm_features
+
+    def _detect_change_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract features for change detection (single image features)"""
+        # These are static features that would be compared with temporal data
+        # For now, extract baseline features
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
+
+        # Land cover stability proxy (texture uniformity)
+        texture_uniformity = 1 - np.std(gray) / (np.mean(gray) + 1e-8)
+
+        # Edge density as proxy for landscape fragmentation
+        edges = sobel(gray)
+        edge_density = np.mean(edges > np.percentile(edges, 85))
+
+        return {
+            'change_susceptibility': float(1 - texture_uniformity),
+            'landscape_fragmentation': float(edge_density),
+            'disturbance_proxy': float((1 - texture_uniformity) * edge_density)
         }
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute satellite-specific quality metrics"""
-        gray = np.mean(image, axis=2)
-        edges = filters.sobel(gray)
+        if len(image.shape) >= 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
 
-        metrics = {
-            'sharpness': np.mean(edges),
-            'contrast': np.std(gray),
-            'cloud_coverage': np.mean(gray > 0.9)
+        # Cloud cover estimation
+        cloud_fraction = np.mean(gray > 0.95)
+
+        # Sharpness (spatial resolution proxy)
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        sharpness = np.var(laplacian) / 1000
+
+        # Radiometric quality (dynamic range)
+        dynamic_range = np.percentile(gray, 99) - np.percentile(gray, 1)
+
+        return {
+            'cloud_cover_fraction': float(cloud_fraction),
+            'spatial_sharpness': float(min(1.0, sharpness / 500)),
+            'radiometric_dynamic_range': float(dynamic_range),
+            'radiometric_quality': float(dynamic_range),
+            'image_usability': float(1 - cloud_fraction)
         }
 
-        return metrics
-
 # =============================================================================
-# SURVEILLANCE DOMAIN PROCESSOR
+# COMPLETE SURVEILLANCE DOMAIN PROCESSOR
 # =============================================================================
 
 class SurveillanceDomainProcessor:
-    """Surveillance/CCTV processor"""
+    """Complete Surveillance/CCTV processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2()
+        self.detect_person = getattr(config, 'detect_person', True)
+        self.detect_vehicle = getattr(config, 'detect_vehicle', True)
+        self.detect_animal = getattr(config, 'detect_animal', True)
+        self.detect_face = getattr(config, 'detect_face', True)
+        self.detect_motion = getattr(config, 'detect_motion', True)
+        self.detect_anomaly = getattr(config, 'detect_anomaly', True)
+        self.track_objects = getattr(config, 'track_objects', True)
+        self.classify_scene_type = getattr(config, 'classify_scene_type', True)
+        self.estimate_crowd_density = getattr(config, 'estimate_crowd_density', True)
+        self.enhance_low_light = getattr(config, 'enhance_low_light', True)
+        self.reduce_noise = getattr(config, 'reduce_noise', True)
+        self.dehaze = getattr(config, 'dehaze', True)
+        self.super_resolution = getattr(config, 'super_resolution', True)
+        self.blur_faces = getattr(config, 'blur_faces', False)
+        self.anonymize = getattr(config, 'anonymize', False)
+
+        # Background subtractor for motion detection
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
+        self.previous_frame = None
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess surveillance images"""
         img_float = image.astype(np.float32) / 255.0
 
-        # Low-light enhancement
-        img_float = self._enhance_low_light(img_float)
+        # Apply enhancements in sequence
+        if self.enhance_low_light:
+            img_float = self._enhance_low_light(img_float)
 
-        # Noise reduction
-        img_float = self._reduce_noise(img_float)
+        if self.reduce_noise:
+            img_float = self._reduce_noise(img_float)
+
+        if self.dehaze:
+            img_float = self._dehaze(img_float)
+
+        # Apply privacy features if enabled
+        if self.blur_faces or self.anonymize:
+            img_float = self._apply_privacy(img_float)
 
         return img_float
 
-    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract surveillance-specific features"""
-        features = {}
-
-        # Person detection
-        features.update(self._detect_person(image))
-
-        # Motion detection
-        features.update(self._detect_motion(image))
-
-        # Scene understanding
-        features.update(self._classify_scene_type(image))
-
-        return features
-
     def _enhance_low_light(self, image: np.ndarray) -> np.ndarray:
-        """Enhance low-light images"""
+        """Enhance low-light surveillance images"""
         if len(image.shape) == 3:
+            # Convert to LAB
             lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
             lab = lab.astype(np.float32) / 255.0
+
+            # Enhance L channel
             l_channel = lab[:, :, 0]
-            l_enhanced = exposure.equalize_adapthist(l_channel)
+
+            # Adaptive gamma correction
+            mean_l = np.mean(l_channel)
+            gamma = 0.5 if mean_l < 0.3 else 1.0
+            l_enhanced = np.power(l_channel, gamma)
+
+            # CLAHE for local contrast
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l_enhanced = clahe.apply((l_enhanced * 255).astype(np.uint8)) / 255.0
+
             lab[:, :, 0] = l_enhanced
+
+            # Convert back
             lab = (lab * 255).astype(np.uint8)
             image = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB) / 255.0
+        else:
+            # Grayscale enhancement
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            image = clahe.apply((image * 255).astype(np.uint8)) / 255.0
+
         return image
 
     def _reduce_noise(self, image: np.ndarray) -> np.ndarray:
-        """Reduce noise"""
+        """Reduce noise in surveillance images"""
         if len(image.shape) == 3:
-            for i in range(image.shape[2]):
+            # Bilateral filter for edge-preserving denoising
+            for i in range(3):
                 image[:, :, i] = cv2.bilateralFilter((image[:, :, i] * 255).astype(np.uint8), 9, 75, 75) / 255.0
         else:
             image = cv2.bilateralFilter((image * 255).astype(np.uint8), 9, 75, 75) / 255.0
         return image
 
-    def _detect_person(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect persons"""
+    def _dehaze(self, image: np.ndarray) -> np.ndarray:
+        """Remove haze from surveillance images"""
+        if len(image.shape) == 3:
+            img_uint8 = (image * 255).astype(np.uint8)
+            # Dark channel prior dehazing (simplified)
+            dark_channel = np.min(img_uint8, axis=2)
+            atmospheric_light = np.percentile(dark_channel[dark_channel > 0], 99)
+
+            # Estimate transmission
+            transmission = 1 - 0.95 * (dark_channel / (atmospheric_light + 1e-8))
+            transmission = np.clip(transmission, 0.1, 1)
+
+            # Recover image
+            dehazed = np.zeros_like(img_uint8, dtype=np.float32)
+            for i in range(3):
+                dehazed[:, :, i] = (img_uint8[:, :, i] - atmospheric_light) / (transmission + 1e-8) + atmospheric_light
+
+            image = np.clip(dehazed / 255.0, 0, 1)
+
+        return image
+
+    def _apply_privacy(self, image: np.ndarray) -> np.ndarray:
+        """Apply privacy features (face blurring)"""
+        if len(image.shape) == 3:
+            img_uint8 = (image * 255).astype(np.uint8)
+
+            # Face detection using Haar cascades
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            gray = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+            # Blur faces
+            for (x, y, w, h) in faces:
+                roi = img_uint8[y:y+h, x:x+w]
+                roi = cv2.GaussianBlur(roi, (51, 51), 30)
+                img_uint8[y:y+h, x:x+w] = roi
+
+            image = img_uint8 / 255.0
+
+        return image
+
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract comprehensive surveillance-specific features"""
+        features = {}
+
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+
+        # Object detection
+        if self.detect_person:
+            features.update(self._detect_person(image, gray))
+
+        if self.detect_vehicle:
+            features.update(self._detect_vehicle(image, gray))
+
+        if self.detect_animal:
+            features.update(self._detect_animal(image, gray))
+
+        if self.detect_face:
+            features.update(self._detect_face(image, gray))
+
+        # Motion detection
+        if self.detect_motion:
+            features.update(self._detect_motion(image, gray))
+
+        # Anomaly detection
+        if self.detect_anomaly:
+            features.update(self._detect_anomaly(image, gray))
+
+        # Scene understanding
+        if self.classify_scene_type:
+            features.update(self._classify_scene_type(image, gray))
+
+        # Crowd analysis
+        if self.estimate_crowd_density:
+            features.update(self._estimate_crowd_density(image, gray))
+
+        return features
+
+    def _detect_person(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect persons using HOG descriptor"""
+        # HOG person detector
         hog = cv2.HOGDescriptor()
         hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-        img_uint8 = (image * 255).astype(np.uint8)
-        if len(img_uint8.shape) == 3:
-            img_uint8 = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2GRAY)
-
+        img_uint8 = (gray * 255).astype(np.uint8)
         persons, _ = hog.detectMultiScale(img_uint8, winStride=(4, 4), padding=(8, 8), scale=1.05)
 
+        if len(persons) > 0:
+            person_areas = [w * h for (x, y, w, h) in persons]
+
+            return {
+                'person_count': float(len(persons)),
+                'person_density': float(len(persons) / (gray.size / 10000)),
+                'avg_person_size': float(np.mean(person_areas) if person_areas else 0),
+                'person_coverage': float(np.sum(person_areas) / gray.size),
+                'crowdedness': float(min(1.0, len(persons) / 20))
+            }
+
+        return {'person_count': 0, 'person_density': 0, 'avg_person_size': 0, 'person_coverage': 0, 'crowdedness': 0}
+
+    def _detect_vehicle(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect vehicles using contour analysis"""
+        # Use background subtraction for vehicle detection
+        fgmask = self.background_subtractor.apply((gray * 255).astype(np.uint8))
+
+        # Find contours
+        contours, _ = cv2.findContours(fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Filter for vehicle-sized objects
+        vehicles = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if 500 < area < 10000:  # Vehicle size range
+                vehicles.append(contour)
+
+        if len(vehicles) > 0:
+            vehicle_areas = [cv2.contourArea(v) for v in vehicles]
+
+            return {
+                'vehicle_count': float(len(vehicles)),
+                'vehicle_density': float(len(vehicles) / (gray.size / 10000)),
+                'avg_vehicle_size': float(np.mean(vehicle_areas)),
+                'traffic_density': float(min(1.0, len(vehicles) / 30))
+            }
+
+        return {'vehicle_count': 0, 'vehicle_density': 0, 'avg_vehicle_size': 0, 'traffic_density': 0}
+
+    def _detect_animal(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect animals using texture and shape analysis"""
+        # Animals often have irregular textures
+        edges = sobel(gray)
+        edge_density = np.mean(edges > np.percentile(edges, 90))
+
+        # Look for regions with high edge density and specific sizes
+        if edge_density > 0.05:
+            # Segment candidate regions
+            _, binary = cv2.threshold((edges * 255).astype(np.uint8), 50, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            animal_candidates = []
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if 200 < area < 5000:  # Animal size range
+                    # Check shape complexity
+                    perimeter = cv2.arcLength(contour, True)
+                    circularity = 4 * np.pi * area / (perimeter**2 + 1e-8)
+                    if circularity < 0.5:  # Non-circular (animal-like)
+                        animal_candidates.append(contour)
+
+            return {
+                'animal_count': float(len(animal_candidates)),
+                'animal_detection_score': float(min(1.0, len(animal_candidates) / 10)),
+                'wildlife_activity': float(edge_density)
+            }
+
+        return {'animal_count': 0, 'animal_detection_score': 0, 'wildlife_activity': 0}
+
+    def _detect_face(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect faces in surveillance images"""
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        img_uint8 = (gray * 255).astype(np.uint8)
+        faces = face_cascade.detectMultiScale(img_uint8, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+        if len(faces) > 0:
+            face_areas = [w * h for (x, y, w, h) in faces]
+
+            return {
+                'face_count': float(len(faces)),
+                'face_density': float(len(faces) / (gray.size / 10000)),
+                'avg_face_size': float(np.mean(face_areas)),
+                'face_detection_confidence': float(min(1.0, len(faces) / 20))
+            }
+
+        return {'face_count': 0, 'face_density': 0, 'avg_face_size': 0, 'face_detection_confidence': 0}
+
+    def _detect_motion(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect motion between frames"""
+        if self.previous_frame is not None:
+            # Compute frame difference
+            diff = cv2.absdiff(self.previous_frame, (gray * 255).astype(np.uint8))
+            _, motion_mask = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+
+            motion_fraction = np.sum(motion_mask > 0) / motion_mask.size
+
+            # Motion intensity
+            motion_intensity = np.mean(diff[diff > 0]) / 255.0 if np.any(diff > 0) else 0
+
+            # Motion direction (using optical flow approximation)
+            flow = cv2.calcOpticalFlowFarneback(self.previous_frame, (gray * 255).astype(np.uint8),
+                                                None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            avg_motion_magnitude = np.mean(magnitude)
+            motion_coherence = np.std(angle) / (2 * np.pi)  # Lower = more coherent
+
+            self.previous_frame = (gray * 255).astype(np.uint8)
+
+            return {
+                'motion_fraction': float(motion_fraction),
+                'motion_intensity': float(motion_intensity),
+                'avg_motion_magnitude': float(avg_motion_magnitude),
+                'motion_coherence': float(motion_coherence),
+                'activity_level': float(motion_fraction * motion_intensity)
+            }
+        else:
+            self.previous_frame = (gray * 255).astype(np.uint8)
+            return {'motion_fraction': 0, 'motion_intensity': 0, 'avg_motion_magnitude': 0,
+                    'motion_coherence': 1, 'activity_level': 0}
+
+    def _detect_anomaly(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect anomalies in surveillance footage"""
+        # Anomaly indicators: sudden changes, unusual objects, abnormal motion
+
+        # Texture anomaly (unusual patterns)
+        lbp = feature.local_binary_pattern(gray, P=8, R=1, method='uniform')
+        texture_anomaly = np.std(lbp) / 10  # Normalized
+
+        # Intensity anomaly (sudden brightness changes)
+        intensity_mean = np.mean(gray)
+        intensity_std = np.std(gray)
+        intensity_anomaly = intensity_std / (intensity_mean + 1e-8)
+
+        # Edge anomaly (unusual edge density)
+        edges = sobel(gray)
+        edge_density = np.mean(edges > np.percentile(edges, 90))
+        edge_anomaly = edge_density / 0.1  # Normalized to typical edge density
+
+        # Combined anomaly score
+        anomaly_score = (texture_anomaly + intensity_anomaly + edge_anomaly) / 3
+        anomaly_score = min(1.0, anomaly_score)
+
         return {
-            'num_persons': len(persons),
-            'person_density': len(persons) / (image.shape[0] * image.shape[1]) * 100000
+            'texture_anomaly': float(texture_anomaly),
+            'intensity_anomaly': float(intensity_anomaly),
+            'edge_anomaly': float(edge_anomaly),
+            'anomaly_score': float(anomaly_score),
+            'alert_level': float(anomaly_score * 100)
         }
 
-    def _detect_motion(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect motion"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
-        gray_uint8 = (gray * 255).astype(np.uint8)
-        fgmask = self.background_subtractor.apply(gray_uint8)
+    def _classify_scene_type(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Classify scene type (indoor/outdoor, day/night, etc.)"""
+        # Day/Night classification
+        mean_intensity = np.mean(gray)
+        is_night = mean_intensity < 0.3
+
+        # Indoor/Outdoor classification using color and texture
+        if len(image.shape) >= 3:
+            # Outdoor tends to have more sky (blue) and vegetation (green)
+            blue_ratio = np.mean(image[:, :, 2] / (np.mean(image, axis=2) + 1e-8))
+            green_ratio = np.mean(image[:, :, 1] / (np.mean(image, axis=2) + 1e-8))
+
+            is_outdoor = (blue_ratio > 0.35) or (green_ratio > 0.4)
+            outdoor_prob = float(min(1.0, (blue_ratio + green_ratio)))
+        else:
+            is_outdoor = False
+            outdoor_prob = 0
+
+        # Scene complexity
+        edges = sobel(gray)
+        scene_complexity = np.mean(edges > np.percentile(edges, 85))
 
         return {
-            'motion_intensity': np.mean(fgmask) / 255.0,
-            'motion_area': np.sum(fgmask > 0) / (fgmask.shape[0] * fgmask.shape[1])
+            'is_night': float(1 if is_night else 0),
+            'night_probability': float(1 - mean_intensity * 3),
+            'is_outdoor': float(1 if is_outdoor else 0),
+            'outdoor_probability': float(outdoor_prob),
+            'scene_complexity': float(scene_complexity)
         }
 
-    def _classify_scene_type(self, image: np.ndarray) -> Dict[str, float]:
-        """Classify scene type"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+    def _estimate_crowd_density(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Estimate crowd density using texture analysis"""
+        # Crowd density estimation using texture energy
+        from scipy.ndimage import uniform_filter
 
-        # Simple classification using color and texture
-        sky_likelihood = np.mean(image[:, :, 2] > 0.5) if len(image.shape) == 3 else 0
-        vegetation = np.mean(image[:, :, 1] > 0.4) if len(image.shape) == 3 else 0
+        # High crowd density = high frequency texture
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        high_freq_energy = np.var(laplacian) / 1000
+
+        # Local binary patterns for crowd texture
+        lbp = feature.local_binary_pattern(gray, P=8, R=1, method='uniform')
+        lbp_entropy = -np.sum(np.bincount(lbp.astype(int).ravel()) / lbp.size *
+                             np.log(np.bincount(lbp.astype(int).ravel()) / lbp.size + 1e-10))
+
+        # Estimate crowd density (0-5 scale)
+        if high_freq_energy < 50:
+            crowd_density = 0  # Empty
+        elif high_freq_energy < 150:
+            crowd_density = 1  # Very low
+        elif high_freq_energy < 300:
+            crowd_density = 2  # Low
+        elif high_freq_energy < 500:
+            crowd_density = 3  # Medium
+        elif high_freq_energy < 800:
+            crowd_density = 4  # High
+        else:
+            crowd_density = 5  # Very high
 
         return {
-            'outdoor_prob': min(1, sky_likelihood + vegetation),
-            'indoor_prob': 1 - min(1, sky_likelihood + vegetation)
+            'crowd_density_level': float(crowd_density),
+            'crowd_density_score': float(min(1.0, high_freq_energy / 1000)),
+            'crowd_texture_entropy': float(lbp_entropy),
+            'crowd_activity': float(high_freq_energy / 500),
+            'social_distancing_score': float(1 - min(1.0, high_freq_energy / 800))
         }
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute surveillance-specific quality metrics"""
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
-        metrics = {
-            'brightness': np.mean(gray),
-            'contrast': np.std(gray),
-            'noise_level': np.std(gray - cv2.GaussianBlur(gray, (5, 5), 0))
+        # Brightness
+        brightness = np.mean(gray)
+
+        # Contrast
+        contrast = np.std(gray)
+
+        # Sharpness
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        sharpness = np.var(laplacian) / 1000
+
+        # Noise level
+        from scipy.ndimage import uniform_filter
+        smooth = uniform_filter(gray, size=5)
+        noise_level = np.std(gray - smooth)
+
+        # Usability score for surveillance
+        usability = (brightness * 0.3 + contrast * 0.3 + min(1.0, sharpness / 500) * 0.4)
+
+        return {
+            'brightness': float(brightness),
+            'contrast': float(contrast),
+            'sharpness': float(min(1.0, sharpness / 500)),
+            'noise_level': float(noise_level),
+            'surveillance_usability': float(usability)
         }
 
-        return metrics
-
 # =============================================================================
-# MICROSCOPY DOMAIN PROCESSOR
+# COMPLETE MICROSCOPY DOMAIN PROCESSOR
 # =============================================================================
 
 class MicroscopyDomainProcessor:
-    """Microscopy imaging processor"""
+    """Complete Microscopy imaging processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
+        self.microscopy_type = getattr(config, 'microscopy_type', 'general')
+        self.detect_cells = getattr(config, 'detect_cells', True)
+        self.count_cells = getattr(config, 'count_cells', True)
+        self.segment_nucleus = getattr(config, 'segment_nucleus', True)
+        self.detect_mitosis = getattr(config, 'detect_mitosis', True)
+        self.detect_mitochondria = getattr(config, 'detect_mitochondria', True)
+        self.detect_nucleoli = getattr(config, 'detect_nucleoli', True)
+        self.detect_fluorescent_signal = getattr(config, 'detect_fluorescent_signal', True)
+        self.compute_intensity_distribution = getattr(config, 'compute_intensity_distribution', True)
+        self.compute_resolution = getattr(config, 'compute_resolution', True)
+        self.detect_out_of_focus = getattr(config, 'detect_out_of_focus', True)
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess microscopy images"""
         img_float = image.astype(np.float32) / 255.0
 
-        # Background subtraction
-        img_float = self._subtract_background(img_float)
-
-        # Contrast enhancement
-        img_float = self._enhance_contrast(img_float)
+        # Microscopy type-specific preprocessing
+        if self.microscopy_type == 'fluorescence':
+            img_float = self._preprocess_fluorescence(img_float)
+        elif self.microscopy_type == 'phase_contrast':
+            img_float = self._preprocess_phase_contrast(img_float)
+        elif self.microscopy_type == 'electron':
+            img_float = self._preprocess_electron(img_float)
+        else:
+            # General microscopy preprocessing
+            img_float = self._subtract_background(img_float)
+            img_float = self._enhance_contrast(img_float)
 
         return img_float
 
-    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract microscopy-specific features"""
-        features = {}
+    def _preprocess_fluorescence(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess fluorescence microscopy images"""
+        # Denoise while preserving signal
+        if len(image.shape) == 3:
+            for i in range(image.shape[2]):
+                image[:, :, i] = restoration.denoise_nl_means(image[:, :, i], patch_size=5, patch_distance=6)
+        else:
+            image = restoration.denoise_nl_means(image, patch_size=5, patch_distance=6)
+        return image
 
-        # Cell detection
-        features.update(self._detect_cells(image))
+    def _preprocess_phase_contrast(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess phase contrast microscopy images"""
+        # Remove halo artifacts
+        if len(image.shape) == 3:
+            gray = np.mean(image, axis=2)
+        else:
+            gray = image
 
-        # Intensity distribution
-        features.update(self._compute_intensity_distribution(image))
+        # Background removal using rolling ball
+        from skimage import morphology
+        selem = morphology.disk(20)
+        background = morphology.opening(gray, selem)
+        image = gray - background
 
-        # Focus quality
-        features.update(self._detect_out_of_focus(image))
+        return np.clip(image, 0, 1)
 
-        return features
+    def _preprocess_electron(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess electron microscopy images"""
+        # Enhance edges and reduce noise
+        if len(image.shape) == 3:
+            for i in range(image.shape[2]):
+                image[:, :, i] = cv2.bilateralFilter((image[:, :, i] * 255).astype(np.uint8), 5, 50, 50) / 255.0
+        else:
+            image = cv2.bilateralFilter((image * 255).astype(np.uint8), 5, 50, 50) / 255.0
+        return image
 
     def _subtract_background(self, image: np.ndarray) -> np.ndarray:
-        """Subtract background"""
+        """Subtract background from microscopy images"""
         from skimage import morphology
 
         if len(image.shape) == 3:
@@ -4487,7 +6618,7 @@ class MicroscopyDomainProcessor:
         return image
 
     def _enhance_contrast(self, image: np.ndarray) -> np.ndarray:
-        """Enhance contrast"""
+        """Enhance contrast for microscopy"""
         if len(image.shape) == 3:
             for i in range(image.shape[2]):
                 image[:, :, i] = exposure.equalize_adapthist(image[:, :, i])
@@ -4495,63 +6626,430 @@ class MicroscopyDomainProcessor:
             image = exposure.equalize_adapthist(image)
         return image
 
-    def _detect_cells(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect cells"""
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract comprehensive microscopy-specific features"""
+        features = {}
+
+        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+
+        # Cell analysis
+        if self.detect_cells:
+            features.update(self._detect_cells(image, gray))
+
+        if self.count_cells:
+            features.update(self._count_cells(gray))
+
+        # Nuclear features
+        if self.segment_nucleus:
+            features.update(self._segment_nucleus(image, gray))
+
+        # Mitosis detection
+        if self.detect_mitosis:
+            features.update(self._detect_mitosis(image, gray))
+
+        # Organelle detection
+        if self.detect_mitochondria:
+            features.update(self._detect_mitochondria(gray))
+
+        if self.detect_nucleoli:
+            features.update(self._detect_nucleoli(gray))
+
+        # Fluorescence features
+        if self.detect_fluorescent_signal:
+            features.update(self._detect_fluorescent_signal(image, gray))
+
+        # Intensity analysis
+        if self.compute_intensity_distribution:
+            features.update(self._compute_intensity_distribution(gray))
+
+        # Quality metrics
+        if self.compute_resolution:
+            features.update(self._compute_resolution(gray))
+
+        if self.detect_out_of_focus:
+            features.update(self._detect_out_of_focus(gray))
+
+        return features
+
+    def _detect_cells(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect cells using blob detection and watershed"""
         from skimage.feature import blob_log
 
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
-        blobs = blob_log(gray, max_sigma=30, num_sigma=10, threshold=0.1)
+        # Blob detection for cell bodies
+        blobs = blob_log(gray, max_sigma=30, num_sigma=10, threshold=0.05)
+
+        if len(blobs) > 0:
+            cell_count = len(blobs)
+            cell_sizes = [b[2] for b in blobs]
+            cell_intensities = []
+
+            for blob in blobs[:min(50, len(blobs))]:
+                y, x, r = int(blob[0]), int(blob[1]), int(blob[2])
+                y_min, y_max = max(0, y - r), min(gray.shape[0], y + r)
+                x_min, x_max = max(0, x - r), min(gray.shape[1], x + r)
+                cell_intensities.append(np.mean(gray[y_min:y_max, x_min:x_max]))
+
+            # Cell density
+            cell_density = cell_count / (gray.size / 1000000)  # Per million pixels
+
+            return {
+                'cell_count': float(cell_count),
+                'cell_density': float(cell_density),
+                'avg_cell_size': float(np.mean(cell_sizes)),
+                'avg_cell_intensity': float(np.mean(cell_intensities)),
+                'cell_size_variability': float(np.std(cell_sizes) / (np.mean(cell_sizes) + 1e-8)),
+                'cell_clustering': float(1 - (cell_count / (gray.size / 10000)) * 0.1)
+            }
+
+        return {'cell_count': 0, 'cell_density': 0, 'avg_cell_size': 0,
+                'avg_cell_intensity': 0, 'cell_size_variability': 0, 'cell_clustering': 0}
+
+    def _count_cells(self, gray: np.ndarray) -> Dict[str, float]:
+        """Count cells using thresholding and labeling"""
+        # Adaptive thresholding
+        from skimage.filters import threshold_otsu
+
+        threshold = threshold_otsu(gray)
+        binary = gray > threshold
+
+        # Morphological cleanup
+        binary = morphology.binary_closing(binary, morphology.disk(3))
+        binary = morphology.binary_opening(binary, morphology.disk(2))
+
+        # Label connected components
+        labeled, num_cells = ndimage_label(binary)
+
+        # Filter by size (remove small artifacts)
+        cell_sizes = np.bincount(labeled.ravel())[1:]
+        valid_cells = [size for size in cell_sizes if size > 20]  # Minimum cell size
 
         return {
-            'cell_count': len(blobs),
-            'cell_density': len(blobs) / (image.shape[0] * image.shape[1]) * 1000000
+            'total_cell_count': float(len(valid_cells)),
+            'cell_area_fraction': float(np.mean(binary)),
+            'estimated_confluence': float(min(1.0, np.mean(binary) * 2)),
+            'cell_density_estimate': float(len(valid_cells) / (gray.size / 1000000))
         }
 
-    def _compute_intensity_distribution(self, image: np.ndarray) -> Dict[str, float]:
+    def _segment_nucleus(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Segment and analyze cell nuclei"""
+        # Nuclei are typically darker in brightfield, brighter in fluorescence
+        if self.microscopy_type == 'fluorescence':
+            # Nuclei are bright in fluorescence
+            threshold = np.percentile(gray, 80)
+            nuclei_mask = gray > threshold
+        else:
+            # Nuclei are darker in brightfield
+            threshold = np.percentile(gray, 20)
+            nuclei_mask = gray < threshold
+
+        if np.any(nuclei_mask):
+            # Clean up
+            nuclei_mask = morphology.binary_opening(nuclei_mask, morphology.disk(2))
+            nuclei_mask = morphology.binary_closing(nuclei_mask, morphology.disk(3))
+
+            labeled, num_nuclei = ndimage_label(nuclei_mask)
+
+            # Nuclear features
+            nucleus_areas = np.bincount(labeled.ravel())[1:]
+            nucleus_intensities = [np.mean(gray[labeled == i]) for i in range(1, num_nuclei + 1)]
+
+            # Nuclear shape features
+            from skimage.measure import regionprops
+            props = regionprops(labeled)
+
+            if props:
+                avg_nuclear_area = np.mean([p.area for p in props])
+                avg_nuclear_compactness = np.mean([4 * np.pi * p.area / (p.perimeter**2) for p in props])
+                avg_nuclear_eccentricity = np.mean([p.eccentricity for p in props])
+            else:
+                avg_nuclear_area = 0
+                avg_nuclear_compactness = 0
+                avg_nuclear_eccentricity = 0
+
+            return {
+                'nucleus_count': float(num_nuclei),
+                'nucleus_area_fraction': float(np.mean(nuclei_mask)),
+                'avg_nucleus_size': float(avg_nuclear_area),
+                'nucleus_compactness': float(avg_nuclear_compactness),
+                'nucleus_eccentricity': float(avg_nuclear_eccentricity),
+                'nucleus_to_cell_ratio': float(avg_nuclear_area / (avg_nuclear_area + 100))  # Approximate
+            }
+
+        return {'nucleus_count': 0, 'nucleus_area_fraction': 0, 'avg_nucleus_size': 0,
+                'nucleus_compactness': 0, 'nucleus_eccentricity': 0, 'nucleus_to_cell_ratio': 0}
+
+    def _detect_mitosis(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect mitotic cells (dividing cells)"""
+        # Mitotic cells have distinct morphology: rounded, condensed chromatin
+        from skimage.feature import blob_log
+
+        # Look for small, bright, circular objects
+        blobs = blob_log(gray, max_sigma=10, num_sigma=10, threshold=0.08)
+
+        # Filter for mitotic-like features
+        mitotic_candidates = []
+        for blob in blobs:
+            if 3 < blob[2] < 10:  # Size range for mitotic cells
+                mitotic_candidates.append(blob)
+
+        # Additional texture analysis for mitosis
+        # Mitotic cells have higher local contrast
+        from scipy.ndimage import uniform_filter
+        local_std = np.sqrt(uniform_filter(gray**2, size=11) - uniform_filter(gray, size=11)**2)
+        mitotic_texture = np.mean(local_std[local_std > np.percentile(local_std, 95)])
+
+        return {
+            'mitotic_cell_count': float(len(mitotic_candidates)),
+            'mitotic_index': float(len(mitotic_candidates) / (len(blobs) + 1e-8)),
+            'mitotic_texture_score': float(mitotic_texture),
+            'proliferation_marker': float(min(1.0, len(mitotic_candidates) / 20))
+        }
+
+    def _detect_mitochondria(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze mitochondria"""
+        # Mitochondria appear as elongated, filamentous structures
+        # Enhance tubular structures
+        from skimage.filters import frangi
+
+        # Frangi filter for vessel/tubular enhancement
+        tubeness = frangi(gray, scale_range=(1, 5), scale_step=1)
+
+        # Threshold for mitochondrial regions
+        threshold = np.percentile(tubeness, 90)
+        mitochondria_mask = tubeness > threshold
+
+        if np.any(mitochondria_mask):
+            # Mitochondrial features
+            mitochondrial_fraction = np.mean(mitochondria_mask)
+
+            # Length estimation via skeletonization
+            skeleton = morphology.skeletonize(mitochondria_mask)
+            mitochondrial_length = np.sum(skeleton)
+
+            # Branching complexity
+            from skimage.morphology import branch_points
+            branches = branch_points(skeleton)
+            branch_count = np.sum(branches)
+
+            return {
+                'mitochondrial_fraction': float(mitochondrial_fraction),
+                'mitochondrial_length': float(mitochondrial_length / (gray.size / 1000)),
+                'mitochondrial_branching': float(branch_count),
+                'mitochondrial_network_complexity': float(mitochondrial_length / (mitochondrial_fraction * gray.size + 1e-8))
+            }
+
+        return {'mitochondrial_fraction': 0, 'mitochondrial_length': 0,
+                'mitochondrial_branching': 0, 'mitochondrial_network_complexity': 0}
+
+    def _detect_nucleoli(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect and analyze nucleoli"""
+        # Nucleoli are small, bright spots within nuclei
+        from skimage.feature import blob_log
+
+        # Look for small bright blobs
+        blobs = blob_log(gray, max_sigma=5, num_sigma=10, threshold=0.1)
+
+        # Filter for nucleolus-sized objects (1-3 pixels radius)
+        nucleoli = [b for b in blobs if 1 < b[2] < 4]
+
+        if len(nucleoli) > 0:
+            nucleolus_count = len(nucleoli)
+            nucleolus_sizes = [b[2] for b in nucleoli]
+            nucleolus_intensities = []
+
+            for blob in nucleoli:
+                y, x, r = int(blob[0]), int(blob[1]), int(blob[2])
+                y_min, y_max = max(0, y - r), min(gray.shape[0], y + r)
+                x_min, x_max = max(0, x - r), min(gray.shape[1], x + r)
+                nucleolus_intensities.append(np.mean(gray[y_min:y_max, x_min:x_max]))
+
+            return {
+                'nucleolus_count': float(nucleolus_count),
+                'nucleolus_density': float(nucleolus_count / (gray.size / 10000)),
+                'avg_nucleolus_size': float(np.mean(nucleolus_sizes)),
+                'avg_nucleolus_intensity': float(np.mean(nucleolus_intensities))
+            }
+
+        return {'nucleolus_count': 0, 'nucleolus_density': 0, 'avg_nucleolus_size': 0, 'avg_nucleolus_intensity': 0}
+
+    def _detect_fluorescent_signal(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect and quantify fluorescent signal"""
+        if len(image.shape) >= 3:
+            # Use the brightest channel as fluorescence
+            fluorescence = np.max(image, axis=2)
+        else:
+            fluorescence = gray
+
+        # Signal-to-noise ratio
+        signal_region = fluorescence > np.percentile(fluorescence, 90)
+        background_region = fluorescence < np.percentile(fluorescence, 10)
+
+        signal = np.mean(fluorescence[signal_region]) if np.any(signal_region) else 0
+        background = np.mean(fluorescence[background_region]) if np.any(background_region) else np.std(fluorescence)
+        snr = signal / (background + 1e-8)
+
+        # Fluorescence intensity distribution
+        intensity_hist, _ = np.histogram(fluorescence[fluorescence > 0], bins=50, density=True)
+        intensity_entropy = -np.sum(intensity_hist * np.log(intensity_hist + 1e-10))
+
+        # Fluorescent foci detection
+        from skimage.feature import blob_log
+        foci = blob_log(fluorescence, max_sigma=3, num_sigma=10, threshold=0.15)
+
+        return {
+            'fluorescence_snr': float(snr),
+            'fluorescence_intensity': float(signal),
+            'fluorescence_entropy': float(intensity_entropy),
+            'fluorescent_foci_count': float(len(foci)),
+            'fluorescence_quality': float(min(1.0, snr / 10))
+        }
+
+    def _compute_intensity_distribution(self, gray: np.ndarray) -> Dict[str, float]:
         """Compute intensity distribution features"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        # Basic statistics
+        mean_intensity = np.mean(gray)
+        std_intensity = np.std(gray)
+        skewness = np.mean(((gray - mean_intensity) / (std_intensity + 1e-8)) ** 3)
+        kurtosis = np.mean(((gray - mean_intensity) / (std_intensity + 1e-8)) ** 4) - 3
+
+        # Percentiles
+        percentiles = np.percentile(gray, [1, 5, 10, 25, 50, 75, 90, 95, 99])
+
+        # Intensity heterogeneity
+        from scipy.ndimage import uniform_filter
+        local_mean = uniform_filter(gray, size=11)
+        intensity_heterogeneity = np.std(local_mean) / (np.mean(local_mean) + 1e-8)
 
         return {
-            'intensity_mean': np.mean(gray),
-            'intensity_std': np.std(gray),
-            'intensity_skew': np.mean(((gray - np.mean(gray)) / (np.std(gray) + 1e-8)) ** 3)
+            'intensity_mean': float(mean_intensity),
+            'intensity_std': float(std_intensity),
+            'intensity_skewness': float(skewness),
+            'intensity_kurtosis': float(kurtosis),
+            'intensity_range': float(percentiles[8] - percentiles[0]),
+            'intensity_heterogeneity': float(intensity_heterogeneity),
+            'p1_intensity': float(percentiles[0]),
+            'p99_intensity': float(percentiles[8])
         }
 
-    def _detect_out_of_focus(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect if image is out of focus"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+    def _compute_resolution(self, gray: np.ndarray) -> Dict[str, float]:
+        """Estimate image resolution"""
+        # Estimate resolution from edge sharpness
+        edges = sobel(gray)
 
-        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
-        focus_measure = np.var(laplacian)
+        # Find the sharpest edge
+        edge_profile = edges[edges > np.percentile(edges, 99)]
+
+        if len(edge_profile) > 0:
+            # Resolution proxy (sharper edges = better resolution)
+            edge_sharpness = np.std(edge_profile)
+
+            # Measure point spread function (PSF) width
+            # Find brightest point and fit Gaussian
+            max_idx = np.unravel_index(np.argmax(gray), gray.shape)
+            y, x = max_idx
+
+            # Extract region around peak
+            y_min, y_max = max(0, y - 10), min(gray.shape[0], y + 10)
+            x_min, x_max = max(0, x - 10), min(gray.shape[1], x + 10)
+            roi = gray[y_min:y_max, x_min:x_max]
+
+            if roi.size > 0:
+                # Calculate FWHM
+                center = np.array(roi.shape) // 2
+                y_vals = roi[center[0], :]
+                x_vals = roi[:, center[1]]
+
+                # Find width at half maximum
+                max_val = np.max(roi)
+                half_max = max_val / 2
+
+                y_half_width = np.sum(y_vals > half_max)
+                x_half_width = np.sum(x_vals > half_max)
+                estimated_fwhm = (y_half_width + x_half_width) / 2
+            else:
+                estimated_fwhm = 0
+        else:
+            edge_sharpness = 0
+            estimated_fwhm = 0
 
         return {
-            'focus_score': focus_measure / 1000,
-            'is_out_of_focus': 1 if focus_measure < 100 else 0
+            'edge_sharpness': float(edge_sharpness),
+            'estimated_fwhm_pixels': float(estimated_fwhm),
+            'resolution_score': float(min(1.0, edge_sharpness / 0.5)),
+            'optical_resolution': float(1 / (estimated_fwhm + 1e-8))
+        }
+
+    def _detect_out_of_focus(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect if image is out of focus"""
+        # Laplacian variance is a good focus measure
+        laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        laplacian_variance = np.var(laplacian)
+
+        # Normalize for typical values
+        focus_score = min(1.0, laplacian_variance / 500)
+        is_out_of_focus = 1 if focus_score < 0.3 else 0
+
+        # Alternative focus measure using gradient
+        grad_x = np.gradient(gray, axis=1)
+        grad_y = np.gradient(gray, axis=0)
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        gradient_focus = np.mean(gradient_magnitude)
+
+        return {
+            'focus_score': float(focus_score),
+            'is_out_of_focus': float(is_out_of_focus),
+            'laplacian_variance': float(laplacian_variance),
+            'gradient_focus': float(gradient_focus),
+            'focus_confidence': float(1 - focus_score if focus_score < 0.5 else focus_score)
         }
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute microscopy-specific quality metrics"""
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
+        # Focus quality
         laplacian = cv2.Laplacian((gray * 255).astype(np.uint8), cv2.CV_64F)
+        focus_score = min(1.0, np.var(laplacian) / 500)
 
-        metrics = {
-            'focus_score': np.var(laplacian) / 1000,
-            'contrast': np.std(gray),
-            'signal_to_noise': np.mean(gray) / (np.std(gray) + 1e-8)
+        # Signal-to-noise ratio
+        signal_region = gray > np.percentile(gray, 90)
+        noise_region = gray < np.percentile(gray, 10)
+        signal = np.mean(gray[signal_region]) if np.any(signal_region) else np.mean(gray)
+        noise = np.std(gray[noise_region]) if np.any(noise_region) else np.std(gray)
+        snr = signal / (noise + 1e-8)
+
+        # Contrast
+        contrast = (np.percentile(gray, 95) - np.percentile(gray, 5)) / (np.percentile(gray, 95) + np.percentile(gray, 5) + 1e-8)
+
+        # Overall image quality
+        image_quality = (focus_score * 0.5 + min(1.0, snr / 10) * 0.3 + contrast * 0.2)
+
+        return {
+            'focus_quality': float(focus_score),
+            'signal_to_noise_ratio': float(snr),
+            'image_contrast': float(contrast),
+            'image_quality_score': float(image_quality),
+            'acquisition_quality': float(image_quality)
         }
 
-        return metrics
-
 # =============================================================================
-# INDUSTRIAL DOMAIN PROCESSOR
+# COMPLETE INDUSTRIAL DOMAIN PROCESSOR
 # =============================================================================
 
 class IndustrialDomainProcessor:
-    """Industrial inspection processor"""
+    """Complete Industrial inspection processor with all features"""
 
     def __init__(self, config: GlobalConfig):
         self.config = config
+        self.detect_crack = getattr(config, 'detect_crack', True)
+        self.detect_corrosion = getattr(config, 'detect_corrosion', True)
+        self.detect_dent = getattr(config, 'detect_dent', True)
+        self.detect_scratch = getattr(config, 'detect_scratch', True)
+        self.measure_dimensions = getattr(config, 'measure_dimensions', True)
+        self.detect_misalignment = getattr(config, 'detect_misalignment', True)
+        self.classify_defect_type = getattr(config, 'classify_defect_type', True)
+        self.compute_surface_roughness = getattr(config, 'compute_surface_roughness', True)
+        self.detect_uniformity = getattr(config, 'detect_uniformity', True)
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
         """Preprocess industrial images"""
@@ -4560,96 +7058,464 @@ class IndustrialDomainProcessor:
         # Illumination normalization
         img_float = self._normalize_illumination(img_float)
 
-        # Edge enhancement
+        # Edge enhancement for defect detection
         img_float = self._enhance_edges(img_float)
 
         return img_float
 
-    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract industrial-specific features"""
-        features = {}
-
-        # Defect detection
-        features.update(self._detect_crack(image))
-        features.update(self._detect_corrosion(image))
-
-        # Surface analysis
-        features.update(self._compute_surface_roughness(image))
-
-        return features
-
     def _normalize_illumination(self, image: np.ndarray) -> np.ndarray:
-        """Normalize illumination"""
+        """Normalize uneven illumination"""
         if len(image.shape) == 3:
-            for i in range(image.shape[2]):
-                image[:, :, i] = exposure.equalize_adapthist(image[:, :, i])
+            for i in range(min(3, image.shape[2])):
+                # Use homomorphic filtering approximation
+                log_img = np.log(image[:, :, i] + 1e-8)
+
+                # Low-pass filter for illumination component
+                low_pass = cv2.GaussianBlur(log_img, (51, 51), 0)
+
+                # High-pass for reflectance component
+                high_pass = log_img - low_pass
+
+                # Reconstruct
+                image[:, :, i] = np.exp(high_pass)
+                image[:, :, i] = np.clip(image[:, :, i], 0, 1)
         else:
-            image = exposure.equalize_adapthist(image)
+            log_img = np.log(image + 1e-8)
+            low_pass = cv2.GaussianBlur(log_img, (51, 51), 0)
+            high_pass = log_img - low_pass
+            image = np.exp(high_pass)
+            image = np.clip(image, 0, 1)
+
         return image
 
     def _enhance_edges(self, image: np.ndarray) -> np.ndarray:
-        """Enhance edges"""
+        """Enhance edges for defect detection"""
         if len(image.shape) == 3:
-            for i in range(image.shape[2]):
+            for i in range(3):
+                # Unsharp masking
                 blurred = cv2.GaussianBlur(image[:, :, i], (5, 5), 0)
-                image[:, :, i] = np.clip(image[:, :, i] + (image[:, :, i] - blurred), 0, 1)
+                image[:, :, i] = np.clip(image[:, :, i] + (image[:, :, i] - blurred) * 0.5, 0, 1)
         else:
             blurred = cv2.GaussianBlur(image, (5, 5), 0)
-            image = np.clip(image + (image - blurred), 0, 1)
+            image = np.clip(image + (image - blurred) * 0.5, 0, 1)
         return image
 
-    def _detect_crack(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect cracks"""
+    def extract_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract comprehensive industrial-specific features"""
+        features = {}
+
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
+        # Defect detection
+        if self.detect_crack:
+            features.update(self._detect_crack(image, gray))
+
+        if self.detect_corrosion:
+            features.update(self._detect_corrosion(image, gray))
+
+        if self.detect_dent:
+            features.update(self._detect_dent(gray))
+
+        if self.detect_scratch:
+            features.update(self._detect_scratch(gray))
+
+        # Dimensional analysis
+        if self.measure_dimensions:
+            features.update(self._measure_dimensions(gray))
+
+        # Alignment
+        if self.detect_misalignment:
+            features.update(self._detect_misalignment(gray))
+
+        # Surface analysis
+        if self.compute_surface_roughness:
+            features.update(self._compute_surface_roughness(gray))
+
+        if self.detect_uniformity:
+            features.update(self._detect_uniformity(gray))
+
+        # Defect classification
+        if self.classify_defect_type:
+            features.update(self._classify_defect_type(features))
+
+        return features
+
+    def _detect_crack(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect cracks in industrial surfaces"""
         # Enhance linear structures
-        ridges = frangi(gray)
+        from skimage.filters import frangi
+
+        # Frangi filter for line enhancement
+        ridges = frangi(gray, scale_range=(1, 5), scale_step=1)
+
+        # Threshold for crack detection
         threshold = np.percentile(ridges, 95)
-        cracks = ridges > threshold
+        crack_mask = ridges > threshold
 
-        return {
-            'crack_density': np.mean(cracks),
-            'crack_severity': np.mean(ridges[cracks]) if np.any(cracks) else 0
-        }
+        if np.any(crack_mask):
+            # Crack features
+            crack_fraction = np.mean(crack_mask)
 
-    def _detect_corrosion(self, image: np.ndarray) -> Dict[str, float]:
-        """Detect corrosion"""
-        if len(image.shape) == 3:
-            # Corrosion appears as reddish-brown spots
+            # Skeletonize for length estimation
+            skeleton = morphology.skeletonize(crack_mask)
+            crack_length = np.sum(skeleton)
+
+            # Crack width estimation
+            from scipy.ndimage import distance_transform_edt
+            distance = distance_transform_edt(~crack_mask)
+            crack_width = 2 * np.mean(distance[crack_mask]) if np.any(crack_mask) else 0
+
+            # Crack orientation
+            from skimage.measure import regionprops
+            labeled, _ = ndimage_label(crack_mask)
+            props = regionprops(labeled)
+
+            if props:
+                main_crack = max(props, key=lambda p: p.area)
+                orientation = main_crack.orientation
+            else:
+                orientation = 0
+
+            return {
+                'crack_fraction': float(crack_fraction),
+                'crack_length': float(crack_length / (gray.size / 1000)),
+                'crack_width': float(crack_width),
+                'crack_orientation': float(orientation),
+                'crack_severity': float(min(1.0, crack_fraction * 10)),
+                'crack_density': float(crack_length / (gray.size / 1000))
+            }
+
+        return {'crack_fraction': 0, 'crack_length': 0, 'crack_width': 0,
+                'crack_orientation': 0, 'crack_severity': 0, 'crack_density': 0}
+
+    def _detect_corrosion(self, image: np.ndarray, gray: np.ndarray) -> Dict[str, float]:
+        """Detect corrosion (rust, oxidation)"""
+        if len(image.shape) >= 3:
+            # Corrosion appears as reddish-brown
             red = image[:, :, 0]
             green = image[:, :, 1]
             blue = image[:, :, 2]
 
-            corrosion_mask = (red > 0.5) & (green < 0.4) & (blue < 0.4)
+            # Rust detection (reddish with low green/blue)
+            rust_mask = (red > 0.4) & (green < 0.3) & (blue < 0.3)
+
+            # Oxidation detection (dark spots)
+            oxidation_mask = (red < 0.3) & (green < 0.3) & (blue < 0.3) & (gray < 0.3)
+
+            corrosion_mask = rust_mask | oxidation_mask
+        else:
+            # Grayscale corrosion detection (dark irregular regions)
+            threshold = np.percentile(gray, 20)
+            corrosion_mask = gray < threshold
+
+        if np.any(corrosion_mask):
+            corrosion_fraction = np.mean(corrosion_mask)
+
+            # Corrosion texture (roughness)
+            corrosion_region = gray[corrosion_mask]
+            corrosion_roughness = np.std(corrosion_region) / (np.mean(corrosion_region) + 1e-8)
+
+            # Corrosion spread (number of connected components)
+            labeled, num_corrosion_areas = ndimage_label(corrosion_mask)
 
             return {
-                'corrosion_area': np.mean(corrosion_mask),
-                'corrosion_severity': np.mean(red[corrosion_mask]) if np.any(corrosion_mask) else 0
+                'corrosion_fraction': float(corrosion_fraction),
+                'corrosion_roughness': float(corrosion_roughness),
+                'corrosion_areas': float(num_corrosion_areas),
+                'corrosion_severity': float(min(1.0, corrosion_fraction * 5)),
+                'rust_intensity': float(np.mean(corrosion_region) if len(corrosion_region) > 0 else 0)
             }
-        return {'corrosion_area': 0, 'corrosion_severity': 0}
 
-    def _compute_surface_roughness(self, image: np.ndarray) -> Dict[str, float]:
-        """Compute surface roughness"""
-        gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
+        return {'corrosion_fraction': 0, 'corrosion_roughness': 0, 'corrosion_areas': 0,
+                'corrosion_severity': 0, 'rust_intensity': 0}
 
-        high_pass = gray - cv2.GaussianBlur(gray, (21, 21), 0)
+    def _detect_dent(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect dents (localized depressions)"""
+        # Detect local intensity variations
+        from scipy.ndimage import uniform_filter
+
+        local_mean = uniform_filter(gray, size=21)
+        local_deviation = gray - local_mean
+
+        # Dents appear as local minima
+        dent_mask = local_deviation < -np.std(local_deviation) * 2
+
+        if np.any(dent_mask):
+            dent_fraction = np.mean(dent_mask)
+
+            # Dent depth (intensity difference)
+            dent_depth = -np.mean(local_deviation[dent_mask]) if np.any(dent_mask) else 0
+
+            # Dent size
+            labeled, num_dents = ndimage_label(dent_mask)
+            dent_sizes = np.bincount(labeled.ravel())[1:]
+
+            return {
+                'dent_fraction': float(dent_fraction),
+                'dent_depth': float(dent_depth),
+                'dent_count': float(num_dents),
+                'avg_dent_size': float(np.mean(dent_sizes) if len(dent_sizes) > 0 else 0),
+                'dent_severity': float(min(1.0, dent_depth * 5))
+            }
+
+        return {'dent_fraction': 0, 'dent_depth': 0, 'dent_count': 0, 'avg_dent_size': 0, 'dent_severity': 0}
+
+    def _detect_scratch(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect scratches (thin linear defects)"""
+        # Enhance linear features
+        from skimage.filters import frangi
+
+        # Use small scale for thin scratches
+        lines = frangi(gray, scale_range=(1, 3), scale_step=0.5)
+
+        # Threshold for scratch detection
+        threshold = np.percentile(lines, 97)
+        scratch_mask = lines > threshold
+
+        if np.any(scratch_mask):
+            # Skeletonize for length measurement
+            skeleton = morphology.skeletonize(scratch_mask)
+            scratch_length = np.sum(skeleton)
+
+            # Scratch density
+            scratch_fraction = np.mean(scratch_mask)
+
+            # Scratch orientation distribution
+            from skimage.measure import regionprops
+            labeled, _ = ndimage_label(scratch_mask)
+            props = regionprops(labeled)
+
+            if props:
+                orientations = [p.orientation for p in props]
+                orientation_std = np.std(orientations)
+                primary_orientation = np.mean(orientations)
+            else:
+                orientation_std = 0
+                primary_orientation = 0
+
+            return {
+                'scratch_fraction': float(scratch_fraction),
+                'scratch_length': float(scratch_length / (gray.size / 1000)),
+                'scratch_count': float(len(props)),
+                'scratch_orientation_diversity': float(orientation_std),
+                'primary_scratch_orientation': float(primary_orientation),
+                'scratch_severity': float(min(1.0, scratch_fraction * 20))
+            }
+
+        return {'scratch_fraction': 0, 'scratch_length': 0, 'scratch_count': 0,
+                'scratch_orientation_diversity': 0, 'primary_scratch_orientation': 0, 'scratch_severity': 0}
+
+    def _measure_dimensions(self, gray: np.ndarray) -> Dict[str, float]:
+        """Measure object dimensions"""
+        # Segment the main object
+        threshold = np.percentile(gray, 70)
+        binary = gray > threshold
+
+        if np.any(binary):
+            # Clean up
+            binary = morphology.binary_closing(binary, morphology.disk(5))
+            binary = morphology.binary_opening(binary, morphology.disk(3))
+
+            # Find contours
+            contours, _ = cv2.findContours((binary * 255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if contours:
+                # Largest object
+                largest_contour = max(contours, key=cv2.contourArea)
+
+                # Bounding box
+                x, y, w, h = cv2.boundingRect(largest_contour)
+
+                # Minimum enclosing circle
+                (cx, cy), radius = cv2.minEnclosingCircle(largest_contour)
+
+                # Dimensions
+                aspect_ratio = w / (h + 1e-8)
+
+                # Feret diameters
+                rect = cv2.minAreaRect(largest_contour)
+                feret_x, feret_y = rect[1]
+                feret_ratio = max(feret_x, feret_y) / (min(feret_x, feret_y) + 1e-8)
+
+                return {
+                    'object_width': float(w),
+                    'object_height': float(h),
+                    'object_aspect_ratio': float(aspect_ratio),
+                    'object_area': float(cv2.contourArea(largest_contour)),
+                    'feret_diameter': float(max(feret_x, feret_y)),
+                    'circularity': float(4 * np.pi * cv2.contourArea(largest_contour) / (cv2.arcLength(largest_contour, True)**2 + 1e-8))
+                }
+
+        return {'object_width': 0, 'object_height': 0, 'object_aspect_ratio': 0,
+                'object_area': 0, 'feret_diameter': 0, 'circularity': 0}
+
+    def _detect_misalignment(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect misalignment in manufactured parts"""
+        # Find dominant edges for alignment reference
+        edges = sobel(gray)
+
+        # Hough transform for line detection
+        lines = cv2.HoughLinesP((edges * 255).astype(np.uint8), 1, np.pi/180, 100, minLineLength=50, maxLineGap=10)
+
+        if lines is not None and len(lines) > 0:
+            # Analyze line orientations
+            orientations = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = np.arctan2(y2 - y1, x2 - x1)
+                orientations.append(angle)
+
+            orientations = np.array(orientations)
+
+            # Expected orientation (0 for horizontal, pi/2 for vertical)
+            expected_horizontal = 0
+            expected_vertical = np.pi / 2
+
+            # Calculate deviation
+            horizontal_lines = orientations[np.abs(orientations) < np.pi/4]
+            vertical_lines = orientations[np.abs(np.abs(orientations) - np.pi/2) < np.pi/4]
+
+            horizontal_deviation = np.std(horizontal_lines) if len(horizontal_lines) > 0 else 0
+            vertical_deviation = np.std(vertical_lines) if len(vertical_lines) > 0 else 0
+
+            misalignment_score = (horizontal_deviation + vertical_deviation) / (np.pi/4)
+            misalignment_score = min(1.0, misalignment_score)
+
+            return {
+                'misalignment_score': float(misalignment_score),
+                'horizontal_alignment': float(1 - min(1.0, horizontal_deviation * 4 / np.pi)),
+                'vertical_alignment': float(1 - min(1.0, vertical_deviation * 4 / np.pi)),
+                'is_aligned': float(1 if misalignment_score < 0.1 else 0)
+            }
+
+        return {'misalignment_score': 0, 'horizontal_alignment': 1, 'vertical_alignment': 1, 'is_aligned': 1}
+
+    def _compute_surface_roughness(self, gray: np.ndarray) -> Dict[str, float]:
+        """Compute surface roughness metrics"""
+        # High-pass filter for surface texture
+        low_pass = cv2.GaussianBlur(gray, (21, 21), 0)
+        high_pass = gray - low_pass
+
+        # Roughness parameters
+        rms_roughness = np.std(high_pass)
+        mean_roughness = np.mean(np.abs(high_pass))
+
+        # Peak-to-valley
+        max_peak = np.max(high_pass)
+        max_valley = np.min(high_pass)
+        peak_to_valley = max_peak - max_valley
+
+        # Skewness and kurtosis of height distribution
+        skewness = np.mean(((high_pass - np.mean(high_pass)) / (np.std(high_pass) + 1e-8)) ** 3)
+        kurtosis = np.mean(((high_pass - np.mean(high_pass)) / (np.std(high_pass) + 1e-8)) ** 4) - 3
+
+        # Power spectral density slope (fractal dimension proxy)
+        fft = np.fft.fft2(high_pass)
+        power_spectrum = np.abs(fft)**2
+        radial_profile = np.mean(power_spectrum, axis=0)
+        radial_profile = radial_profile[:len(radial_profile)//2]
+
+        if len(radial_profile) > 10:
+            log_freq = np.log(np.arange(1, len(radial_profile) + 1))
+            log_power = np.log(radial_profile + 1e-8)
+            from scipy import stats
+            slope, _, _, _, _ = stats.linregress(log_freq[5:], log_power[5:])
+            fractal_dimension = 3 - slope/2
+        else:
+            fractal_dimension = 2.5
 
         return {
-            'roughness': np.std(high_pass),
-            'uniformity': 1 - np.std(gray) / (np.mean(gray) + 1e-8)
+            'surface_roughness_rms': float(rms_roughness),
+            'surface_roughness_ra': float(mean_roughness),
+            'peak_to_valley': float(peak_to_valley),
+            'roughness_skewness': float(skewness),
+            'roughness_kurtosis': float(kurtosis),
+            'fractal_dimension': float(fractal_dimension)
+        }
+
+    def _detect_uniformity(self, gray: np.ndarray) -> Dict[str, float]:
+        """Detect surface uniformity"""
+        # Local statistics
+        from scipy.ndimage import uniform_filter
+
+        local_mean = uniform_filter(gray, size=21)
+        local_std = np.sqrt(uniform_filter(gray**2, size=21) - local_mean**2)
+
+        # Uniformity metrics
+        mean_uniformity = 1 - np.std(local_mean) / (np.mean(local_mean) + 1e-8)
+        texture_uniformity = 1 - np.std(local_std) / (np.mean(local_std) + 1e-8)
+
+        # Defect-induced non-uniformity
+        non_uniform_regions = local_std > np.percentile(local_std, 95)
+        non_uniform_fraction = np.mean(non_uniform_regions)
+
+        return {
+            'intensity_uniformity': float(mean_uniformity),
+            'texture_uniformity': float(texture_uniformity),
+            'non_uniform_fraction': float(non_uniform_fraction),
+            'overall_uniformity': float((mean_uniformity + texture_uniformity) / 2),
+            'quality_grade': float(mean_uniformity * 100)  # Percentage grade
+        }
+
+    def _classify_defect_type(self, features: Dict[str, float]) -> Dict[str, float]:
+        """Classify the type of defect present"""
+        # Simple classification based on extracted features
+        crack_score = features.get('crack_fraction', 0)
+        corrosion_score = features.get('corrosion_fraction', 0)
+        dent_score = features.get('dent_fraction', 0)
+        scratch_score = features.get('scratch_fraction', 0)
+
+        # Determine dominant defect type
+        scores = {
+            'crack': crack_score,
+            'corrosion': corrosion_score,
+            'dent': dent_score,
+            'scratch': scratch_score
+        }
+
+        dominant_defect = max(scores, key=scores.get)
+        max_score = scores[dominant_defect]
+
+        # Defect severity based on combined score
+        total_defect_score = (crack_score + corrosion_score + dent_score + scratch_score)
+        severity = min(1.0, total_defect_score * 2)
+
+        return {
+            'dominant_defect_type': float(list(scores.keys()).index(dominant_defect)),
+            'crack_probability': float(crack_score),
+            'corrosion_probability': float(corrosion_score),
+            'dent_probability': float(dent_score),
+            'scratch_probability': float(scratch_score),
+            'defect_severity': float(severity),
+            'defect_present': float(1 if total_defect_score > 0.05 else 0)
         }
 
     def get_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
         """Compute industrial-specific quality metrics"""
         gray = np.mean(image, axis=2) if len(image.shape) == 3 else image
 
-        metrics = {
-            'sharpness': np.std(filters.sobel(gray)),
-            'contrast': np.std(gray),
-            'uniformity': 1 - np.std(gray) / (np.mean(gray) + 1e-8)
-        }
+        # Sharpness (edge definition)
+        edges = sobel(gray)
+        sharpness = np.mean(edges)
 
-        return metrics
+        # Contrast
+        contrast = np.std(gray)
+
+        # Illumination uniformity
+        from scipy.ndimage import uniform_filter
+        local_mean = uniform_filter(gray, size=51)
+        illumination_uniformity = 1 - np.std(local_mean) / (np.mean(local_mean) + 1e-8)
+
+        # Overall quality
+        overall_quality = (sharpness * 0.4 + contrast * 0.3 + illumination_uniformity * 0.3)
+
+        return {
+            'edge_sharpness': float(sharpness),
+            'image_contrast': float(contrast),
+            'illumination_uniformity': float(illumination_uniformity),
+            'inspection_quality': float(overall_quality),
+            'pass_fail_threshold': float(1 if overall_quality > 0.5 else 0)
+        }
 
 # =============================================================================
 # TORCHVISION DATASET ADAPTER
@@ -4704,6 +7570,604 @@ class TorchvisionDatasetAdapter(Dataset):
             targets = [self.dataset[i][1] for i in range(min(1000, len(self.dataset)))]
         counts = Counter(targets)
         return {self.idx_to_class[int(k)]: v for k, v in counts.items()}
+
+# =============================================================================
+# MODEL FACTORY - Creates appropriate model based on domain
+# =============================================================================
+
+class ModelFactory:
+    """Factory for creating appropriate model based on configuration"""
+
+    @staticmethod
+    def create_model(config: GlobalConfig) -> nn.Module:
+        """Create model with domain-specific enhancements"""
+        input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
+        feature_dims = config.feature_dims
+        compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
+        config.compressed_dims = compressed_dims
+
+        # Get domain from config
+        domain = getattr(config, 'domain', 'general')
+        image_type = getattr(config, 'image_type', 'general')
+
+        # Create domain-specific model if configured
+        if domain == 'astronomy' or image_type == 'astronomical':
+            logger.info("Creating Astronomical Structure Preserving Autoencoder")
+            return AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+
+        elif domain == 'medical' or image_type == 'medical':
+            logger.info("Creating Medical Structure Preserving Autoencoder")
+            return MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+
+        elif domain == 'agriculture' or image_type == 'agricultural':
+            logger.info("Creating Agricultural Pattern Autoencoder")
+            return AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
+
+        # Default to base autoencoder
+        logger.info(f"Creating base autoencoder with {feature_dims}D → {compressed_dims}D features")
+        return BaseAutoencoder(config)
+
+
+# =============================================================================
+# DOMAIN-SPECIFIC LOSS FUNCTIONS
+# =============================================================================
+
+class AstronomicalStructureLoss(nn.Module):
+    """Loss function specialized for astronomical imaging features"""
+    def __init__(self):
+        super().__init__()
+
+        # Edge detection filters
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                   dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Point source detection filter (for stars)
+        self.point_filter = torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]],
+                                       dtype=torch.float32).view(1, 1, 3, 3)
+
+        # Multi-scale structure filters
+        self.structure_filters = [
+            self._create_gaussian_kernel(sigma) for sigma in [0.5, 1.0, 2.0]
+        ]
+
+        # Scale-space filters for galaxy features
+        self.scale_filters = [
+            self._create_log_kernel(sigma) for sigma in [1.0, 2.0, 4.0]
+        ]
+
+    def _create_gaussian_kernel(self, sigma: float, kernel_size: int = 7) -> torch.Tensor:
+        """Create Gaussian kernel for smoothing"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        gaussian = torch.exp(-(x**2 + y**2)/(2*sigma**2))
+        return (gaussian / gaussian.sum()).view(1, 1, kernel_size, kernel_size)
+
+    def _create_log_kernel(self, sigma: float, kernel_size: int = 7) -> torch.Tensor:
+        """Create Laplacian of Gaussian kernel for blob detection"""
+        x = torch.linspace(-kernel_size//2, kernel_size//2, kernel_size)
+        x = x.view(-1, 1)
+        y = x.t()
+        r2 = x**2 + y**2
+        log = (1 - r2/(2*sigma**2)) * torch.exp(-r2/(2*sigma**2))
+        return (log / log.abs().sum()).view(1, 1, kernel_size, kernel_size)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate loss with astronomical feature preservation"""
+        device = reconstruction.device
+        self.sobel_x = self.sobel_x.to(device)
+        self.sobel_y = self.sobel_y.to(device)
+        self.point_filter = self.point_filter.to(device)
+        self.structure_filters = [f.to(device) for f in self.structure_filters]
+        self.scale_filters = [f.to(device) for f in self.scale_filters]
+
+        # Basic reconstruction loss with intensity weighting
+        intensity_weights = (target > target.mean()).float() * 2 + 1
+        recon_loss = F.mse_loss(reconstruction * intensity_weights,
+                               target * intensity_weights)
+
+        # Edge and gradient preservation
+        rec_grad_x = F.conv2d(reconstruction, self.sobel_x, padding=1)
+        rec_grad_y = F.conv2d(reconstruction, self.sobel_y, padding=1)
+        target_grad_x = F.conv2d(target, self.sobel_x, padding=1)
+        target_grad_y = F.conv2d(target, self.sobel_y, padding=1)
+
+        gradient_loss = F.mse_loss(rec_grad_x, target_grad_x) + \
+                       F.mse_loss(rec_grad_y, target_grad_y)
+
+        # Point source (star) preservation
+        rec_points = F.conv2d(reconstruction, self.point_filter, padding=1)
+        target_points = F.conv2d(target, self.point_filter, padding=1)
+        point_loss = F.mse_loss(rec_points, target_points)
+
+        # Multi-scale structure preservation
+        structure_loss = 0
+        for filter_kernel in self.structure_filters:
+            rec_struct = F.conv2d(reconstruction, filter_kernel, padding=filter_kernel.size(-1)//2)
+            target_struct = F.conv2d(target, filter_kernel, padding=filter_kernel.size(-1)//2)
+            structure_loss += F.mse_loss(rec_struct, target_struct)
+
+        # Scale-space feature preservation
+        scale_loss = 0
+        for filter_kernel in self.scale_filters:
+            rec_scale = F.conv2d(reconstruction, filter_kernel, padding=filter_kernel.size(-1)//2)
+            target_scale = F.conv2d(target, filter_kernel, padding=filter_kernel.size(-1)//2)
+            scale_loss += F.mse_loss(rec_scale, target_scale)
+
+        # Peak intensity preservation (for bright stars)
+        peak_loss = F.l1_loss(
+            torch.max_pool2d(reconstruction, kernel_size=3, stride=1, padding=1),
+            torch.max_pool2d(target, kernel_size=3, stride=1, padding=1)
+        )
+
+        # Combine losses with weights
+        total_loss = (recon_loss +
+                     2.0 * gradient_loss +
+                     1.5 * point_loss +
+                     1.0 * structure_loss +
+                     1.0 * scale_loss +
+                     2.0 * peak_loss)
+
+        return total_loss
+
+class MedicalStructureLoss(nn.Module):
+    """Loss function specialized for medical imaging features"""
+    def __init__(self):
+        super().__init__()
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                     dtype=torch.float32).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                     dtype=torch.float32).view(1, 1, 3, 3)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        device = reconstruction.device
+        sobel_x = self.sobel_x.to(device)
+        sobel_y = self.sobel_y.to(device)
+
+        # Tissue weighting
+        tissue_weights = (target > target.mean()).float() * 2 + 1
+        recon_loss = F.mse_loss(reconstruction * tissue_weights, target * tissue_weights)
+
+        # Boundary preservation
+        rec_grad_x = F.conv2d(reconstruction, sobel_x, padding=1)
+        rec_grad_y = F.conv2d(reconstruction, sobel_y, padding=1)
+        target_grad_x = F.conv2d(target, sobel_x, padding=1)
+        target_grad_y = F.conv2d(target, sobel_y, padding=1)
+
+        gradient_loss = F.mse_loss(rec_grad_x, target_grad_x) + \
+                       F.mse_loss(rec_grad_y, target_grad_y)
+
+        # Local contrast preservation
+        rec_std = torch.std(F.unfold(reconstruction, kernel_size=5), dim=1)
+        target_std = torch.std(F.unfold(target, kernel_size=5), dim=1)
+        contrast_loss = F.mse_loss(rec_std, target_std)
+
+        return recon_loss + 1.5 * gradient_loss + 1.0 * contrast_loss
+
+class AgriculturalPatternLoss(nn.Module):
+    """Loss function optimized for agricultural pest and disease detection"""
+    def __init__(self):
+        super().__init__()
+        self.texture_filters = None
+
+    def _create_gabor_kernel(self, frequency: float, angle: float, sigma: float = 3.0, size: int = 7):
+        angle_rad = angle * np.pi / 180
+        y_grid, x_grid = torch.meshgrid(
+            torch.linspace(-size//2, size//2, size),
+            torch.linspace(-size//2, size//2, size),
+            indexing='ij'
+        )
+        cos_angle = np.cos(angle_rad)
+        sin_angle = np.sin(angle_rad)
+        x_rot = x_grid * cos_angle + y_grid * sin_angle
+        y_rot = -x_grid * sin_angle + y_grid * cos_angle
+
+        gaussian = torch.exp(-(x_rot**2 + y_rot**2)/(2*sigma**2))
+        sinusoid = torch.cos(2 * np.pi * frequency * x_rot)
+        kernel = (gaussian * sinusoid).view(1, 1, size, size)
+        return kernel / (kernel.abs().sum() + 1e-8)
+
+    def forward(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        device = reconstruction.device
+
+        # Initialize filters on first use
+        if self.texture_filters is None:
+            self.texture_filters = [
+                self._create_gabor_kernel(frequency=f, angle=a).to(device)
+                for f in [0.1, 0.2, 0.3] for a in [0, 45, 90, 135]
+            ]
+
+        # Base reconstruction loss
+        recon_loss = F.mse_loss(reconstruction, target)
+
+        # Texture preservation loss
+        texture_loss = 0
+        for filter_kernel in self.texture_filters:
+            rec_texture = F.conv2d(reconstruction, filter_kernel, padding=filter_kernel.size(-1)//2)
+            target_texture = F.conv2d(target, filter_kernel, padding=filter_kernel.size(-1)//2)
+            texture_loss += F.mse_loss(rec_texture, target_texture)
+        texture_loss = texture_loss / len(self.texture_filters)
+
+        # Color preservation
+        color_loss = 0
+        if reconstruction.shape[1] >= 3:
+            rec_color = torch.mean(reconstruction, dim=1, keepdim=True)
+            target_color = torch.mean(target, dim=1, keepdim=True)
+            color_loss = F.mse_loss(rec_color, target_color)
+
+        return recon_loss + 2.0 * texture_loss + 0.5 * color_loss
+
+class EnhancedLossManager:
+    """Manager for handling specialized loss functions"""
+
+    def __init__(self, config: GlobalConfig):
+        self.config = config
+        self.loss_functions = {}
+        self.domain = getattr(config, 'domain', 'general')
+        self.initialize_loss_functions()
+
+    def initialize_loss_functions(self):
+        """Initialize appropriate loss functions based on domain"""
+        if self.domain == 'astronomy':
+            self.loss_functions['astronomical'] = AstronomicalStructureLoss()
+            logger.info("Initialized Astronomical Structure Loss")
+
+        elif self.domain == 'medical':
+            self.loss_functions['medical'] = MedicalStructureLoss()
+            logger.info("Initialized Medical Structure Loss")
+
+        elif self.domain == 'agriculture':
+            self.loss_functions['agricultural'] = AgriculturalPatternLoss()
+            logger.info("Initialized Agricultural Pattern Loss")
+
+    def get_loss_function(self) -> Optional[nn.Module]:
+        """Get appropriate loss function for current domain"""
+        if self.domain == 'astronomy':
+            return self.loss_functions.get('astronomical')
+        elif self.domain == 'medical':
+            return self.loss_functions.get('medical')
+        elif self.domain == 'agriculture':
+            return self.loss_functions.get('agricultural')
+        return None
+
+    def calculate_loss(self, reconstruction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Calculate loss with appropriate enhancements"""
+        loss_fn = self.get_loss_function()
+        if loss_fn is None:
+            return F.mse_loss(reconstruction, target)
+        return loss_fn(reconstruction, target)
+
+# =============================================================================
+# DOMAIN-SPECIFIC AUTOENCODERS
+# =============================================================================
+
+class AstronomicalStructurePreservingAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for astronomical imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: GlobalConfig):
+        # Store config for later use
+        self._domain_config = config
+        super().__init__(config)
+
+        # Get enhancement configurations
+        self.enhancement_config = {
+            'structure_preservation': True,
+            'detail_preservation': True,
+            'star_detection': True,
+            'galaxy_features': True
+        }
+
+        # Initial channel transformation layer
+        self.initial_transform = nn.Sequential(
+            nn.Conv2d(self.in_channels, self.encoder_channels[0], kernel_size=3, padding=1),
+            nn.GroupNorm(min(32, self.encoder_channels[0]), self.encoder_channels[0]),
+            nn.LeakyReLU(0.2)
+        )
+
+        # Detail preservation module with multiple scales
+        self.detail_preserving = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=k, padding=k//2),
+                nn.GroupNorm(min(32, self.encoder_channels[0]), self.encoder_channels[0]),
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=1)
+            ) for k in [3, 5, 7]
+        ])
+
+        # Star detection module
+        self.star_detector = nn.Sequential(
+            nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=3, padding=1),
+            nn.GroupNorm(min(32, self.encoder_channels[0]), self.encoder_channels[0]),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Galaxy feature enhancement
+        self.galaxy_enhancer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(size, size, kernel_size=3, padding=d, dilation=d),
+                nn.GroupNorm(min(32, size), size),
+                nn.LeakyReLU(0.2)
+            ) for size, d in zip(self.encoder_channels, [1, 2, 4])
+        ])
+
+        self._cached_features = {}
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhanced encoding with astronomical feature preservation"""
+        features = {}
+
+        # Apply dataset-wide normalization if available
+        if self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
+            x = self.dataset_statistics.normalize(x)
+
+        # Initial channel transformation
+        x = self.initial_transform(x)
+
+        if self.enhancement_config.get('detail_preservation', True):
+            # Multi-scale detail extraction
+            detail_features = [module(x) for module in self.detail_preserving]
+            features['details'] = sum(detail_features) / len(detail_features)
+            x = x + 0.1 * features['details']
+
+        if self.enhancement_config.get('star_detection', True):
+            # Star detection
+            features['stars'] = self.star_detector(x)
+            x = x * (1 + 0.1 * features['stars'])
+
+        # Regular encoding path with galaxy enhancement
+        for idx, layer in enumerate(self.encoder_layers):
+            x = layer(x)
+            if self.enhancement_config.get('galaxy_features', True):
+                if idx < len(self.galaxy_enhancer):
+                    galaxy_features = self.galaxy_enhancer[idx](x)
+                    x = x + 0.1 * galaxy_features
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        # Store features for use in decode
+        self._cached_features = features
+
+        return embedding
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Enhanced decoding with structure preservation"""
+        x = self.unembedder(z)
+        x = x.view(x.size(0), self.encoder_channels[-1],
+                  self.final_h, self.final_w)
+
+        for idx, layer in enumerate(self.decoder_layers):
+            x = layer(x)
+
+        # Add preserved features if available
+        if hasattr(self, '_cached_features') and self._cached_features:
+            features = self._cached_features
+            if self.enhancement_config.get('detail_preservation', True):
+                if 'details' in features:
+                    x = x + 0.1 * features['details']
+
+            if self.enhancement_config.get('star_detection', True):
+                if 'stars' in features:
+                    x = x * (1 + 0.1 * features['stars'])
+
+            # Clear cached features
+            self._cached_features = {}
+
+        # Final channel transformation back to input channels
+        x = nn.Conv2d(self.encoder_channels[0], self.in_channels, kernel_size=1).to(x.device)(x)
+
+        return x
+
+class MedicalStructurePreservingAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for medical imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: GlobalConfig):
+        super().__init__(config)
+
+        # Get enhancement configurations
+        self.enhancement_config = {
+            'tissue_boundary': True,
+            'lesion_detection': True,
+            'contrast_enhancement': True
+        }
+
+        # Tissue boundary detection
+        self.boundary_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1, groups=4),
+            nn.PReLU(),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Lesion detection module
+        self.lesion_detector = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(32, 32, kernel_size=3, padding=d, dilation=d),
+                nn.InstanceNorm2d(32),
+                nn.PReLU()
+            ) for d in [1, 2, 4]
+        ])
+
+        # Contrast enhancement module
+        self.contrast_enhancer = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=5, padding=2),
+            nn.InstanceNorm2d(32),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=1)
+        )
+
+        self._cached_features = {}
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhanced encoding with medical feature preservation"""
+        features = {}
+
+        # Apply dataset-wide normalization if available
+        if self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
+            x = self.dataset_statistics.normalize(x)
+
+        if self.enhancement_config.get('tissue_boundary', True):
+            features['boundaries'] = self.boundary_detector(x)
+            x = x * (1 + 0.1 * features['boundaries'])
+
+        # Regular encoding path with lesion detection
+        for idx, layer in enumerate(self.encoder_layers):
+            x = layer(x)
+            if self.enhancement_config.get('lesion_detection', True):
+                if idx < len(self.lesion_detector):
+                    lesion_features = self.lesion_detector[idx](x)
+                    x = x + 0.1 * lesion_features
+
+        if self.enhancement_config.get('contrast_enhancement', True):
+            features['contrast'] = self.contrast_enhancer(x)
+            x = x + 0.1 * features['contrast']
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        # Store features for use in decode
+        self._cached_features = features
+
+        return embedding
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Enhanced decoding with structure preservation"""
+        x = self.unembedder(z)
+        x = x.view(x.size(0), self.encoder_channels[-1],
+                  self.final_h, self.final_w)
+
+        for idx, layer in enumerate(self.decoder_layers):
+            x = layer(x)
+
+        # Add preserved features
+        if hasattr(self, '_cached_features') and self._cached_features:
+            features = self._cached_features
+            if self.enhancement_config.get('tissue_boundary', True):
+                x = x * (1 + 0.1 * features.get('boundaries', 0))
+
+            if self.enhancement_config.get('contrast_enhancement', True):
+                x = x + 0.1 * features.get('contrast', 0)
+
+            # Clear cached features
+            self._cached_features = {}
+
+        # Final channel transformation
+        x = nn.Conv2d(self.encoder_channels[0], self.in_channels, kernel_size=1).to(x.device)(x)
+
+        return x
+
+class AgriculturalPatternAutoencoder(BaseAutoencoder):
+    """Autoencoder specialized for agricultural imaging features"""
+
+    def __init__(self, input_shape: Tuple[int, ...], feature_dims: int, config: GlobalConfig):
+        super().__init__(config)
+
+        # Get enhancement configurations
+        self.enhancement_config = {
+            'texture_analysis': True,
+            'damage_detection': True,
+            'color_anomaly': True
+        }
+
+        # Ensure channel numbers are compatible with groups
+        texture_groups = min(4, self.in_channels)
+        intermediate_channels = 32 - (32 % texture_groups)
+
+        self.texture_analyzer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.in_channels, intermediate_channels, kernel_size=k, padding=k//2, groups=texture_groups),
+                nn.InstanceNorm2d(intermediate_channels),
+                nn.PReLU(),
+                nn.Conv2d(intermediate_channels, intermediate_channels, kernel_size=k, padding=k//2, groups=texture_groups)
+            ) for k in [3, 5, 7]
+        ])
+
+        # Damage pattern detector
+        damage_intermediate_channels = 32 - (32 % self.in_channels)
+        self.damage_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, damage_intermediate_channels, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(damage_intermediate_channels, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # Color anomaly detection
+        self.color_analyzer = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=1),
+            nn.PReLU(),
+            nn.Conv2d(32, self.in_channels, kernel_size=1)
+        )
+
+        self._cached_features = {}
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhanced encoding with pattern preservation"""
+        features = {}
+
+        # Apply dataset-wide normalization if available
+        if self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
+            x = self.dataset_statistics.normalize(x)
+
+        if self.enhancement_config.get('texture_analysis', True):
+            texture_features = [module(x) for module in self.texture_analyzer]
+            features['texture'] = sum(texture_features) / len(texture_features)
+            x = x + 0.1 * features['texture']
+
+        if self.enhancement_config.get('damage_detection', True):
+            features['damage'] = self.damage_detector(x)
+
+        if self.enhancement_config.get('color_anomaly', True):
+            features['color'] = self.color_analyzer(x)
+            x = x + 0.1 * features['color']
+
+        # Regular encoding path
+        for layer in self.encoder_layers:
+            x = layer(x)
+
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+
+        # Store features for use in decode
+        self._cached_features = features
+
+        return embedding
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Enhanced decoding with pattern preservation"""
+        x = self.unembedder(z)
+        x = x.view(x.size(0), self.encoder_channels[-1],
+                  self.final_h, self.final_w)
+
+        for layer in self.decoder_layers:
+            x = layer(x)
+
+        # Add preserved features
+        if hasattr(self, '_cached_features') and self._cached_features:
+            features = self._cached_features
+            if self.enhancement_config.get('texture_analysis', True):
+                x = x + 0.1 * features.get('texture', 0)
+
+            if self.enhancement_config.get('damage_detection', True):
+                damage_mask = features.get('damage', torch.zeros_like(x))
+                x = x * (1 + 0.2 * damage_mask)
+
+            if self.enhancement_config.get('color_anomaly', True):
+                x = x + 0.1 * features.get('color', 0)
+
+            # Clear cached features
+            self._cached_features = {}
+
+        # Final channel transformation
+        x = nn.Conv2d(self.encoder_channels[0], self.in_channels, kernel_size=1).to(x.device)(x)
+
+        return x
+
 
 # =============================================================================
 # MAIN FUNCTION

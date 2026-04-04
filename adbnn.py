@@ -307,9 +307,6 @@ class RobustCSVReader:
     def read_csv_with_preservation(file_path: str, config: Dict, is_training: bool = True) -> Tuple[pd.DataFrame, List[str], List[str], List[str], List[str]]:
         """
         Read CSV file, preserve original lines and comments.
-
-        Returns:
-            Tuple of (processed_dataframe, original_lines, data_lines, header, all_original_rows)
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -353,18 +350,24 @@ class RobustCSVReader:
                 all_original_rows.append([line.strip()])
 
         # Create dataframe from original data
+        # CRITICAL: Keep all columns as strings initially to prevent auto-conversion
         df = pd.DataFrame(all_original_rows, columns=header)
 
-        # Convert numeric columns
+        # CRITICAL: Do NOT auto-convert numeric columns yet
+        # Only convert feature columns to numeric, keep target as string
+        target_column = config.get('target_column')
+
+        # Convert feature columns to numeric, but leave target as string
         for col in df.columns:
-            try:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            except:
-                pass
+            if col != target_column:
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                except:
+                    pass  # Keep as is if conversion fails
+            # else: keep target column as string - DO NOT CONVERT
 
         # Now process with config-based filtering for feature extraction
         column_names = config.get('column_names', [])
-        target_column = config.get('target_column')
 
         if column_names:
             # Create processed dataframe with ordered columns for features
@@ -372,15 +375,16 @@ class RobustCSVReader:
 
             for config_col in column_names:
                 if config_col in df.columns:
-                    df_processed[config_col] = df[config_col]
+                    # For target column, keep as string
+                    if config_col == target_column:
+                        df_processed[config_col] = df[config_col].astype(str)
+                    else:
+                        # For features, convert to numeric
+                        df_processed[config_col] = pd.to_numeric(df[config_col], errors='coerce').fillna(0)
                 else:
                     if config_col == target_column:
                         raise ValueError(f"Target column '{target_column}' not found in CSV")
                     df_processed[config_col] = 0
-
-            # Convert to numeric
-            for col in df_processed.columns:
-                df_processed[col] = pd.to_numeric(df_processed[col], errors='coerce').fillna(0)
 
             # Store all original data for later merging
             df_processed.attrs['original_lines'] = original_lines
@@ -1155,8 +1159,7 @@ class MultiProjectionSphericalEvolution:
             rows=n_rows,
             cols=n_cols,
             specs=[[{'type': 'scene'} for _ in range(n_cols)] for _ in range(n_rows)],
-            subplot_titles=[f'<b>{method_metadata[method]["method"]}</b>'
-                          for method in projection_methods.keys()],
+            subplot_titles=[f"<b>{method_metadata[method]['method']}</b>" for method in projection_methods.keys()],
             horizontal_spacing=0.05,
             vertical_spacing=0.1
         )
@@ -4793,8 +4796,10 @@ class SphericalTensorEvolution:
 
         print(f"   ✅ Spherical evolution: {abs_output_path}")
         print(f"   Rounds: {[fd['round'] for fd in frames_data]}")
-        print(f"   Center orthogonality progression: {[f'{fd["angular_metrics"]["orthogonality_center"]:.3f}' for fd in frames_data]}")
-        print(f"   MARGIN orthogonality progression: {[f'{fd["angular_metrics"]["orthogonality_margin"]:.3f}' for fd in frames_data]}")
+        center_prog = [f"{fd['angular_metrics']['orthogonality_center']:.3f}" for fd in frames_data]
+        print(f"   Center orthogonality progression: {center_prog}")
+        margin_prog = [f"{fd['angular_metrics']['orthogonality_margin']:.3f}" for fd in frames_data]
+        print(f"   MARGIN orthogonality progression: {margin_prog}")
         print(f"   Data source: {frames_data[0]['data_source']}")
 
         return str(abs_output_path)
@@ -8561,7 +8566,13 @@ class OptimizedDatasetProcessor:
         self.device = device
         self.categorical_encoders = {}
         self.feature_stats = {}
-        self.label_encoder = config.get('label_encoder', {})
+
+        # CRITICAL FIX: Initialize label_encoder from config's class_info first
+        class_info = config.get('class_info', {})
+        self.label_encoder = class_info.get('class_to_idx', {})
+        if self.label_encoder:
+            print(f"{Colors.GREEN}✓ Initialized label_encoder from config: {self.label_encoder}{Colors.ENDC}")
+
         self.prediction_original_df = None
         self.original_lines = None
         self.data_lines = None
@@ -8569,6 +8580,16 @@ class OptimizedDatasetProcessor:
         # Get column order and target from config
         self.column_order = config.get('column_names', [])
         self.target_column = config.get('target_column')
+
+        # Parse column_order if it's a string
+        if isinstance(self.column_order, str):
+            try:
+                import ast
+                self.column_order = ast.literal_eval(self.column_order)
+                print(f"{Colors.GREEN}✓ Parsed column_names from string: {len(self.column_order)} columns{Colors.ENDC}")
+            except:
+                self.column_order = [c.strip().strip('"').strip("'") for c in self.column_order.strip('[]').split(',')]
+                print(f"{Colors.GREEN}✓ Split column_names: {len(self.column_order)} columns{Colors.ENDC}")
 
         # Extract feature names (all columns except target, in config order)
         if self.column_order:
@@ -8587,7 +8608,8 @@ class OptimizedDatasetProcessor:
     def load_and_preprocess(self, file_path: str, is_training: bool = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Load and preprocess data with config-based column filtering.
-        Preserves original lines for later merging.
+        column_names includes ALL columns to read (features + target)
+        target_column identifies which column is the label
         """
         # Use RobustCSVReader with config-based filtering and preservation
         df, self.original_lines, self.data_lines, self.original_header, self.original_rows = \
@@ -8614,10 +8636,12 @@ class OptimizedDatasetProcessor:
         # Separate features and target
         y = df[target_column].astype(str)
 
-        # Get feature columns (all columns except target, in config order)
+        # Get feature columns (ALL columns in column_names EXCEPT target)
+        # This preserves the order from config
         feature_columns = [col for col in self.ordered_feature_names if col != target_column]
 
-        # Select features in order from config by NAME
+        # Also include any other columns that are in column_names but not in df? No, just use what exists
+        # Select features in the order defined by config
         X = pd.DataFrame()
         for col in feature_columns:
             if col in df.columns:
@@ -8631,7 +8655,8 @@ class OptimizedDatasetProcessor:
         # Fill any NaN values that resulted from conversion
         X = X.fillna(0)
 
-        print(f"{Colors.CYAN}   Features extracted: {len(X.columns)} columns{Colors.ENDC}")
+        print(f"{Colors.CYAN}   Features extracted: {len(X.columns)} columns (from config){Colors.ENDC}")
+        print(f"{Colors.CYAN}   Target column: '{target_column}' with unique values: {y.unique()}{Colors.ENDC}")
 
         # Preprocess features
         X_processed = self._preprocess_features(X, is_training=is_training)
@@ -8639,7 +8664,7 @@ class OptimizedDatasetProcessor:
         # Convert to tensor
         X_tensor = torch.tensor(X_processed, dtype=torch.float64, device=self.device)
 
-        # Encode labels
+        # Encode labels (this will use the label encoder from config or create one)
         y_tensor = torch.tensor(self._encode_labels(y, is_training=is_training), dtype=torch.long, device=self.device)
 
         print(f"{Colors.GREEN}✓ Features shape: {X_tensor.shape}, Labels shape: {y_tensor.shape}{Colors.ENDC}")
@@ -8679,21 +8704,69 @@ class OptimizedDatasetProcessor:
         return X_scaled
 
     def _encode_labels(self, y: pd.Series, is_training: bool) -> np.ndarray:
-        """Encode labels with consistent mapping"""
+        """Encode labels - keep string labels as-is"""
         if isinstance(y, pd.DataFrame):
             if len(y.columns) == 1:
                 y = y.iloc[:, 0]
             else:
                 raise ValueError(f"Expected single column for labels, got {len(y.columns)} columns")
 
-        if is_training:
-            # Sort classes for consistent ordering
-            unique_classes = sorted(y.unique())
-            self.label_encoder = {v: i for i, v in enumerate(unique_classes)}
-            print(f"{Colors.GREEN}   Classes encoded: {list(self.label_encoder.keys())}{Colors.ENDC}")
+        # Convert to string and strip whitespace - but DO NOT modify the content
+        y_str = y.astype(str).str.strip()
 
-        # Map labels using trained encoder
-        return y.map(self.label_encoder).fillna(-1).values.astype(np.int64)
+        # DO NOT remove .0 suffix - that was corrupting 'Ring' to '0'!
+        # Keep the original string values
+
+        # Get unique values for debugging
+        unique_vals = y_str.unique()
+        print(f"{Colors.CYAN}   Unique label values in data: {unique_vals}{Colors.ENDC}")
+
+        if is_training:
+            # If we have a label encoder from config (ASCII labels like 'Ring', 'NonRings')
+            if self.label_encoder and len(self.label_encoder) > 0:
+                print(f"{Colors.GREEN}   Using label encoder from config: {self.label_encoder}{Colors.ENDC}")
+
+                encoded = []
+                unknown_labels = set()
+
+                for label in y_str:
+                    # Direct string matching - 'Ring' matches 'Ring'
+                    if label in self.label_encoder:
+                        encoded.append(self.label_encoder[label])
+                    else:
+                        encoded.append(-1)
+                        unknown_labels.add(label)
+
+                if unknown_labels:
+                    print(f"{Colors.YELLOW}   Warning: Unknown labels found: {unknown_labels}{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}   Expected labels from config: {list(self.label_encoder.keys())}{Colors.ENDC}")
+
+                encoded_array = np.array(encoded, dtype=np.int64)
+
+                # Log distribution
+                unique_encoded, counts = np.unique(encoded_array[encoded_array >= 0], return_counts=True)
+                print(f"{Colors.GREEN}   Encoded class distribution:{Colors.ENDC}")
+                for idx, count in zip(unique_encoded, counts):
+                    class_name = [k for k, v in self.label_encoder.items() if v == idx]
+                    if class_name:
+                        print(f"      '{class_name[0]}' -> {idx}: {count} samples")
+
+                return encoded_array
+
+            # Create NEW label encoder from data
+            unique_classes = sorted(y_str.unique())
+            self.label_encoder = {v: i for i, v in enumerate(unique_classes)}
+            print(f"{Colors.GREEN}   Created new label encoder from data: {self.label_encoder}{Colors.ENDC}")
+
+            encoded = [self.label_encoder[label] for label in y_str]
+            return np.array(encoded, dtype=np.int64)
+
+        # For prediction mode
+        if not self.label_encoder or len(self.label_encoder) == 0:
+            raise ValueError("No label encoder available for prediction")
+
+        encoded = [self.label_encoder.get(label, -1) for label in y_str]
+        return np.array(encoded, dtype=np.int64)
 
     def get_feature_info(self) -> Dict:
         """Return feature information for model saving"""
@@ -10419,7 +10492,7 @@ class OptimizedDBNN(ExternalToolsMixin):
         col_width = max(8, max_class_len + 2)
 
         # Print header
-        print(f"\n{'True\\Pred':<{col_width}}", end='')
+        print(f"\n{'True' + chr(92) + 'Pred':<{col_width}}", end='')
         for cls in all_classes:
             print(f"{str(cls):<{col_width}}", end='')
         print(f"{'Class Acc':<12}")
@@ -10776,7 +10849,7 @@ class OptimizedDBNN(ExternalToolsMixin):
         overall_acc = total_correct / total_samples if total_samples > 0 else 0
 
         print(f"\n{Colors.BOLD}{Colors.BLUE}Confusion Matrix - {header}{Colors.ENDC}")
-        print(f"{'True\\Pred':<12}", end='')
+        print(f"\n{'True' + chr(92) + 'Pred':<12}", end='')
         for label in class_labels:
             print(f"{str(label):<8}", end='')
         print(f"{'Class Acc':<10}")
@@ -17043,7 +17116,7 @@ def display_confusion_matrix(true_labels, pred_labels, title, output_dir):
     # Print header
     print(f"\n{Colors.BOLD}📈 CONFUSION MATRIX - {title}{Colors.ENDC}")
     print(f"{'='*60}")
-    print(f"\n{'True\\Pred':<{col_width}}", end='')
+    print(f"\n{'True' + chr(92) + 'Pred':<{col_width}}", end='')
     for cls in unique_classes:
         print(f"{str(cls):<{col_width}}", end='')
     print(f"{'Class Acc':<12}")
