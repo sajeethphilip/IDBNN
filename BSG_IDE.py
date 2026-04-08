@@ -10901,24 +10901,20 @@ Created by {self.__author__}
                 if media_masked:
                     media = ""
 
-                # Check if media is a valid image file (exists and not a placeholder)
+                # Check if media is a valid image file
                 has_valid_image = False
                 image_path = None
 
-                if media and media != "\\None":
+                if media and media != "\\None" and not media_masked:
                     if media.startswith('\\file'):
                         file_path = media.replace('\\file', '').strip()
-                        # Check if file exists and is an image (not a placeholder)
                         if file_path and 'example-image' not in file_path.lower():
-                            # Check in current directory and media_files directory
                             if os.path.exists(file_path):
                                 has_valid_image = True
                                 image_path = file_path
                             elif os.path.exists(f"media_files/{file_path}"):
                                 has_valid_image = True
                                 image_path = f"media_files/{file_path}"
-                            else:
-                                self.write(f"  ⚠ Warning: Image file not found: {file_path}\n", "yellow")
 
                 visible_content = []
                 for i, line in enumerate(slide.get('content', [])):
@@ -10946,24 +10942,20 @@ Created by {self.__author__}
                 if has_valid_image:
                     new_document_body += "\\begin{columns}[T]\n"
                     new_document_body += "\\column{0.45\\textwidth}\n"
-
-                    # Add image on left column
                     new_document_body += f"\\begin{{center}}\n"
                     new_document_body += f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{image_path}}}\n"
                     new_document_body += f"\\end{{center}}\n\n"
-
-                    # Right column for content
                     new_document_body += "\\column{0.5\\textwidth}\n"
                     content_col = new_document_body
                 else:
-                    # No image - use full width for content
                     content_col = new_document_body
 
-                # Process content with block environment support
+                # Process content with proper environment handling
                 i = 0
                 in_list = False
                 in_block = False
                 list_type = None
+                skip_next_end = False
 
                 while i < len(visible_content):
                     line = visible_content[i].rstrip()
@@ -10978,7 +10970,25 @@ Created by {self.__author__}
                         i += 1
                         continue
 
-                    # Check for block environment
+                    # Handle existing itemize/enumerate environments
+                    if '\\begin{itemize}' in line or '\\begin{enumerate}' in line:
+                        if in_list:
+                            content_col += f"\\end{{{list_type}}}\n\n"
+                        list_type = 'itemize' if 'itemize' in line else 'enumerate'
+                        content_col += f"\\begin{{{list_type}}}\n"
+                        in_list = True
+                        i += 1
+                        continue
+
+                    elif '\\end{itemize}' in line or '\\end{enumerate}' in line:
+                        if in_list:
+                            content_col += f"\\end{{{list_type}}}\n\n"
+                            in_list = False
+                            list_type = None
+                        i += 1
+                        continue
+
+                    # Handle block environments
                     if '\\begin{block}' in line:
                         if in_block:
                             content_col += "\\end{block}\n\n"
@@ -10999,83 +11009,54 @@ Created by {self.__author__}
                         i += 1
                         continue
 
-                    # Check for alertblock
-                    if '\\begin{alertblock}' in line:
-                        if in_block:
-                            content_col += "\\end{block}\n\n"
-                        block_match = re.search(r'\\begin{alertblock}\{([^}]*)\}', line)
-                        if block_match:
-                            block_title = block_match.group(1)
-                            content_col += f"\\begin{{alertblock}}{{{block_title}}}\n"
-                        else:
-                            content_col += "\\begin{alertblock}{}\n"
-                        in_block = True
+                    # Handle columns environments - pass through as-is
+                    if '\\begin{columns}' in line or '\\end{columns}' in line or '\\column' in line:
+                        content_col += f"{line}\n"
                         i += 1
                         continue
 
-                    elif '\\end{alertblock}' in line:
-                        if in_block:
-                            content_col += "\\end{alertblock}\n\n"
-                            in_block = False
-                        i += 1
-                        continue
-
-                    # Check for example block
-                    if '\\begin{example}' in line:
-                        if in_block:
-                            content_col += "\\end{block}\n\n"
-                        block_match = re.search(r'\\begin{example}\{([^}]*)\}', line)
-                        if block_match:
-                            block_title = block_match.group(1)
-                            content_col += f"\\begin{{example}}{{{block_title}}}\n"
-                        else:
-                            content_col += "\\begin{example}{}\n"
-                        in_block = True
-                        i += 1
-                        continue
-
-                    elif '\\end{example}' in line:
-                        if in_block:
-                            content_col += "\\end{example}\n\n"
-                            in_block = False
-                        i += 1
-                        continue
-
-                    # Handle item commands
+                    # Handle item commands or bullet points
                     if '\\item' in line:
                         if not in_list:
-                            if '\\begin{enumerate}' in line or 'enumerate' in line.lower():
-                                list_type = 'enumerate'
-                            else:
-                                list_type = 'itemize'
+                            list_type = 'itemize'
                             content_col += f"\\begin{{{list_type}}}\n"
                             in_list = True
-
-                        parts = line.split('\\item')
-                        for j, part in enumerate(parts):
-                            if j == 0 and not part.strip():
-                                continue
-                            if part.strip():
-                                content_col += f"\\item {part.strip()}\n"
+                        content_col += f"{line}\n"
                         i += 1
+                        continue
+
+                    # Handle bullet points (lines starting with - or •)
+                    if line.strip().startswith(('- ', '• ')):
+                        if not in_list:
+                            list_type = 'itemize'
+                            content_col += f"\\begin{{{list_type}}}\n"
+                            in_list = True
+                        # Convert bullet to \item
+                        bullet_content = re.sub(r'^[-•]\s*', '', line.strip())
+                        content_col += f"\\item {bullet_content}\n"
+                        i += 1
+                        continue
+
+                    # Handle plain text lines
+                    if in_list:
+                        # Close list before plain text
+                        content_col += f"\\end{{{list_type}}}\n\n"
+                        in_list = False
+                        list_type = None
+
+                    # Skip file directives in content
+                    if '\\file' in line:
+                        i += 1
+                        continue
+
+                    is_section_header = line.strip().startswith('\\textbf{')
+                    if is_section_header:
+                        content_col += f"\n{line}\n\n"
                     else:
-                        if in_list:
-                            content_col += f"\\end{{{list_type}}}\n\n"
-                            in_list = False
-                            list_type = None
+                        content_col += f"{line}\n"
+                    i += 1
 
-                        # Skip file directives in content (they should be handled as media)
-                        if '\\file' in line:
-                            i += 1
-                            continue
-
-                        is_section_header = line.strip().startswith('\\textbf{')
-                        if is_section_header:
-                            content_col += f"\n{line}\n\n"
-                        else:
-                            content_col += f"{line}\n"
-                        i += 1
-
+                # Close any open environments
                 if in_list:
                     content_col += f"\\end{{{list_type}}}\n\n"
                 if in_block:
