@@ -10876,14 +10876,7 @@ Created by {self.__author__}
             # Start building new document body
             new_document_body = "\\begin{document}\n\n"
 
-            # Create title page slide (always include if there's content)
-            title_text = self.presentation_info.get('title', '').strip()
-            subtitle_text = self.presentation_info.get('subtitle', '').strip()
-            author_text = self.presentation_info.get('author', '').strip()
-            institute_text = self.presentation_info.get('institution', 'Artificial Intelligence Research and Intelligent Systems (airis4D)')
-            date_text = self.presentation_info.get('date', '\\today')
-
-            # Build title page
+            # Create title page slide
             new_document_body += "\\begin{frame}[plain]\n"
             new_document_body += "\\titlepage\n"
             new_document_body += "\\end{frame}\n\n"
@@ -10892,169 +10885,207 @@ Created by {self.__author__}
             total_visible_slides = 0
             total_skipped_slides = 0
 
-            # Process each slide - ONLY include visible content
+            # Process each slide
             for idx, slide in enumerate(self.slides):
-                # Check if slide is fully masked
                 is_fully_masked = slide.get('_fully_masked', False)
 
-                # Skip fully masked slides entirely
                 if is_fully_masked:
                     total_skipped_slides += 1
                     continue
 
-                # Get hidden content indices
                 hidden_content_indices = set(slide.get('_hidden_content_indices', []))
                 hidden_note_indices = set(slide.get('_hidden_note_indices', []))
                 media_masked = slide.get('_media_masked', False)
 
-                # Skip media if masked
                 media = slide.get('media', '')
-                has_media = bool(media and media != "\\None" and not media_masked)
+                if media_masked:
+                    media = ""
 
-                # Filter out masked content lines
+                # Check if media is a valid image file (exists and not a placeholder)
+                has_valid_image = False
+                image_path = None
+
+                if media and media != "\\None":
+                    if media.startswith('\\file'):
+                        file_path = media.replace('\\file', '').strip()
+                        # Check if file exists and is an image (not a placeholder)
+                        if file_path and 'example-image' not in file_path.lower():
+                            # Check in current directory and media_files directory
+                            if os.path.exists(file_path):
+                                has_valid_image = True
+                                image_path = file_path
+                            elif os.path.exists(f"media_files/{file_path}"):
+                                has_valid_image = True
+                                image_path = f"media_files/{file_path}"
+                            else:
+                                self.write(f"  ⚠ Warning: Image file not found: {file_path}\n", "yellow")
+
                 visible_content = []
                 for i, line in enumerate(slide.get('content', [])):
                     if line.strip() and i not in hidden_content_indices:
                         visible_content.append(line)
 
-                # Filter out masked notes
                 visible_notes = []
                 for i, note in enumerate(slide.get('notes', [])):
                     if note.strip() and i not in hidden_note_indices:
                         visible_notes.append(note)
 
-                # Skip slide if nothing visible
-                if not visible_content and not has_media and not visible_notes:
+                if not visible_content and not has_valid_image and not visible_notes:
                     total_skipped_slides += 1
                     continue
 
                 total_visible_slides += 1
 
-                # Get clean title (remove [DELETED] prefix if present)
                 slide_title = slide.get('title', 'Untitled')
                 clean_title = re.sub(r'^\[DELETED\]\s*', '', slide_title)
 
-                # Write frame - use columns layout if there's media
                 new_document_body += f"\\begin{{frame}}{{{clean_title}}}\n"
                 new_document_body += f"\\frametitle{{{clean_title}}}\n\n"
 
-                if has_media:
-                    # Use two-column layout: image on left, content on right
+                # Only use two-column layout if we have a valid image
+                if has_valid_image:
                     new_document_body += "\\begin{columns}[T]\n"
                     new_document_body += "\\column{0.45\\textwidth}\n"
 
-                    # Add media (image) on left column
-                    if media.startswith('\\file'):
-                        file_path = media.replace('\\file', '').strip()
-                        new_document_body += f"\\begin{{center}}\n"
-                        new_document_body += f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{file_path}}}\n"
-                        new_document_body += f"\\end{{center}}\n\n"
-                    elif media.startswith('\\play'):
-                        if '\\file' in media:
-                            file_path = media.split('\\file')[-1].strip()
-                            new_document_body += f"\\movie[externalviewer]{{\\includegraphics[width=\\textwidth,keepaspectratio]{{{file_path}}}}}{{{file_path}}}\n\n"
-                        elif '\\url' in media:
-                            url = media.split('\\url')[-1].strip()
-                            new_document_body += f"\\href{{{url}}}{{\\textcolor{{blue}}{{\\underline{{Click to play video}}}}}}\n\n"
+                    # Add image on left column
+                    new_document_body += f"\\begin{{center}}\n"
+                    new_document_body += f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{image_path}}}\n"
+                    new_document_body += f"\\end{{center}}\n\n"
 
                     # Right column for content
                     new_document_body += "\\column{0.5\\textwidth}\n"
+                    content_col = new_document_body
+                else:
+                    # No image - use full width for content
+                    content_col = new_document_body
 
-                    # Process content for right column
-                    i = 0
-                    in_list = False
-                    list_type = None
+                # Process content with block environment support
+                i = 0
+                in_list = False
+                in_block = False
+                list_type = None
 
-                    while i < len(visible_content):
-                        line = visible_content[i].rstrip()
-                        if not line.strip():
-                            if in_list:
-                                new_document_body += f"\\end{{{list_type}}}\n\n"
-                                in_list = False
-                                list_type = None
+                while i < len(visible_content):
+                    line = visible_content[i].rstrip()
+                    if not line.strip():
+                        if in_list:
+                            content_col += f"\\end{{{list_type}}}\n\n"
+                            in_list = False
+                            list_type = None
+                        if in_block:
+                            content_col += "\\end{block}\n\n"
+                            in_block = False
+                        i += 1
+                        continue
+
+                    # Check for block environment
+                    if '\\begin{block}' in line:
+                        if in_block:
+                            content_col += "\\end{block}\n\n"
+                        block_match = re.search(r'\\begin{block}\{([^}]*)\}', line)
+                        if block_match:
+                            block_title = block_match.group(1)
+                            content_col += f"\\begin{{block}}{{{block_title}}}\n"
+                        else:
+                            content_col += "\\begin{block}{}\n"
+                        in_block = True
+                        i += 1
+                        continue
+
+                    elif '\\end{block}' in line:
+                        if in_block:
+                            content_col += "\\end{block}\n\n"
+                            in_block = False
+                        i += 1
+                        continue
+
+                    # Check for alertblock
+                    if '\\begin{alertblock}' in line:
+                        if in_block:
+                            content_col += "\\end{block}\n\n"
+                        block_match = re.search(r'\\begin{alertblock}\{([^}]*)\}', line)
+                        if block_match:
+                            block_title = block_match.group(1)
+                            content_col += f"\\begin{{alertblock}}{{{block_title}}}\n"
+                        else:
+                            content_col += "\\begin{alertblock}{}\n"
+                        in_block = True
+                        i += 1
+                        continue
+
+                    elif '\\end{alertblock}' in line:
+                        if in_block:
+                            content_col += "\\end{alertblock}\n\n"
+                            in_block = False
+                        i += 1
+                        continue
+
+                    # Check for example block
+                    if '\\begin{example}' in line:
+                        if in_block:
+                            content_col += "\\end{block}\n\n"
+                        block_match = re.search(r'\\begin{example}\{([^}]*)\}', line)
+                        if block_match:
+                            block_title = block_match.group(1)
+                            content_col += f"\\begin{{example}}{{{block_title}}}\n"
+                        else:
+                            content_col += "\\begin{example}{}\n"
+                        in_block = True
+                        i += 1
+                        continue
+
+                    elif '\\end{example}' in line:
+                        if in_block:
+                            content_col += "\\end{example}\n\n"
+                            in_block = False
+                        i += 1
+                        continue
+
+                    # Handle item commands
+                    if '\\item' in line:
+                        if not in_list:
+                            if '\\begin{enumerate}' in line or 'enumerate' in line.lower():
+                                list_type = 'enumerate'
+                            else:
+                                list_type = 'itemize'
+                            content_col += f"\\begin{{{list_type}}}\n"
+                            in_list = True
+
+                        parts = line.split('\\item')
+                        for j, part in enumerate(parts):
+                            if j == 0 and not part.strip():
+                                continue
+                            if part.strip():
+                                content_col += f"\\item {part.strip()}\n"
+                        i += 1
+                    else:
+                        if in_list:
+                            content_col += f"\\end{{{list_type}}}\n\n"
+                            in_list = False
+                            list_type = None
+
+                        # Skip file directives in content (they should be handled as media)
+                        if '\\file' in line:
                             i += 1
                             continue
 
-                        if '\\item' in line:
-                            if not in_list:
-                                if '\\begin{enumerate}' in line or 'enumerate' in line.lower():
-                                    list_type = 'enumerate'
-                                else:
-                                    list_type = 'itemize'
-                                new_document_body += f"\\begin{{{list_type}}}\n"
-                                in_list = True
-
-                            parts = line.split('\\item')
-                            for j, part in enumerate(parts):
-                                if j == 0 and not part.strip():
-                                    continue
-                                if part.strip():
-                                    new_document_body += f"\\item {part.strip()}\n"
-                            i += 1
+                        is_section_header = line.strip().startswith('\\textbf{')
+                        if is_section_header:
+                            content_col += f"\n{line}\n\n"
                         else:
-                            if in_list:
-                                new_document_body += f"\\end{{{list_type}}}\n\n"
-                                in_list = False
-                                list_type = None
+                            content_col += f"{line}\n"
+                        i += 1
 
-                            is_section_header = line.strip().startswith('\\textbf{')
-                            if is_section_header:
-                                new_document_body += f"\n{line}\n\n"
-                            else:
-                                new_document_body += f"{line}\n"
-                            i += 1
+                if in_list:
+                    content_col += f"\\end{{{list_type}}}\n\n"
+                if in_block:
+                    content_col += "\\end{block}\n\n"
 
-                    if in_list:
-                        new_document_body += f"\\end{{{list_type}}}\n\n"
-
+                if has_valid_image:
+                    new_document_body = content_col
                     new_document_body += "\\end{columns}\n\n"
                 else:
-                    # No media - use full width for content
-                    i = 0
-                    in_list = False
-                    list_type = None
-
-                    while i < len(visible_content):
-                        line = visible_content[i].rstrip()
-                        if not line.strip():
-                            if in_list:
-                                new_document_body += f"\\end{{{list_type}}}\n\n"
-                                in_list = False
-                                list_type = None
-                            i += 1
-                            continue
-
-                        if '\\item' in line:
-                            if not in_list:
-                                if '\\begin{enumerate}' in line or 'enumerate' in line.lower():
-                                    list_type = 'enumerate'
-                                else:
-                                    list_type = 'itemize'
-                                new_document_body += f"\\begin{{{list_type}}}\n"
-                                in_list = True
-
-                            parts = line.split('\\item')
-                            for j, part in enumerate(parts):
-                                if j == 0 and not part.strip():
-                                    continue
-                                if part.strip():
-                                    new_document_body += f"\\item {part.strip()}\n"
-                            i += 1
-                        else:
-                            if in_list:
-                                new_document_body += f"\\end{{{list_type}}}\n\n"
-                                in_list = False
-                                list_type = None
-
-                            is_section_header = line.strip().startswith('\\textbf{')
-                            if is_section_header:
-                                new_document_body += f"\n{line}\n\n"
-                            else:
-                                new_document_body += f"{line}\n"
-                            i += 1
-
-                    if in_list:
-                        new_document_body += f"\\end{{{list_type}}}\n\n"
+                    new_document_body = content_col
 
                 new_document_body += "\\end{frame}\n\n"
 
@@ -11076,16 +11107,13 @@ Created by {self.__author__}
 
             new_document_body += "\\end{document}\n"
 
-            # Combine preamble with new document body
             full_tex = preamble + new_document_body
 
-            # Log statistics
             self.write(f"\n📊 TeX Generation Statistics:\n", "cyan")
             self.write(f"  • Title page included\n", "green")
             self.write(f"  • Visible slides included: {total_visible_slides}\n", "green")
             if total_skipped_slides > 0:
                 self.write(f"  • Masked slides skipped: {total_skipped_slides}\n", "yellow")
-                self.write(f"\n💡 Tip: {total_skipped_slides} masked slide(s) were completely removed.\n", "cyan")
 
             return full_tex
 
