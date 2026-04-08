@@ -4269,6 +4269,133 @@ class BeamerSlideEditor(ctk.CTk):
         # Call this after loading a file to debug
         self.debug_slide_data()
 
+        self.create_line_context_menu()
+
+    def create_line_context_menu(self):
+        """Create context menu for line operations in editors"""
+        self.line_context_menu = tk.Menu(self, tearoff=0)
+        self.line_context_menu.add_command(label="Mask/Unmask Line (Ctrl+Delete)",
+                                            command=lambda: self.mask_line_in_editor())
+        self.line_context_menu.add_separator()
+        self.line_context_menu.add_command(label="Undo (Ctrl+Z)",
+                                            command=lambda: self.undo_line_in_content() if self.focus_get() == self.content_editor._textbox else self.undo_line_in_notes())
+        self.line_context_menu.add_command(label="Redo (Ctrl+Y)",
+                                            command=lambda: self.redo_line_in_content() if self.focus_get() == self.content_editor._textbox else self.redo_line_in_notes())
+        self.line_context_menu.add_separator()
+        self.line_context_menu.add_command(label="Restore All Lines in Slide",
+                                            command=self.unmask_all_lines_in_current_slide)
+
+        # Bind to editors
+        for editor in [self.content_editor._textbox, self.notes_editor._textbox]:
+            editor.bind("<Button-3>", self.show_line_context_menu)
+
+    def show_line_context_menu(self, event):
+        """Show line context menu"""
+        self.line_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def setup_line_undo_redo(self):
+        """Setup line-level undo/redo for content and notes editors"""
+
+        def save_content_state(event=None):
+            """Save current content editor state for undo"""
+            current_state = self.content_editor.get('1.0', 'end-1c')
+            if current_state != self.last_content_state:
+                if len(self.content_undo_stack) >= self.max_line_history:
+                    self.content_undo_stack.pop(0)
+                self.content_undo_stack.append(self.last_content_state)
+                self.content_redo_stack.clear()
+                self.last_content_state = current_state
+
+        def save_notes_state(event=None):
+            """Save current notes editor state for undo"""
+            current_state = self.notes_editor.get('1.0', 'end-1c')
+            if current_state != self.last_notes_state:
+                if len(self.notes_undo_stack) >= self.max_line_history:
+                    self.notes_undo_stack.pop(0)
+                self.notes_undo_stack.append(self.last_notes_state)
+                self.notes_redo_stack.clear()
+                self.last_notes_state = current_state
+
+        # Bind events to save state
+        self.content_editor._textbox.bind('<KeyRelease>', save_content_state)
+        self.notes_editor._textbox.bind('<KeyRelease>', save_notes_state)
+
+        # Also save on focus loss
+        self.content_editor._textbox.bind('<FocusOut>', save_content_state)
+        self.notes_editor._textbox.bind('<FocusOut>', save_notes_state)
+
+    def undo_line_in_content(self, event=None):
+        """Undo last change in content editor"""
+        if self.content_undo_stack:
+            # Save current state to redo stack
+            current_state = self.content_editor.get('1.0', 'end-1c')
+            self.content_redo_stack.append(current_state)
+
+            # Restore previous state
+            previous_state = self.content_undo_stack.pop()
+            self.content_editor.delete('1.0', 'end')
+            self.content_editor.insert('1.0', previous_state)
+            self.last_content_state = previous_state
+
+            self.write("↩ Undo in content editor\n", "cyan")
+            return "break"
+        else:
+            self.write("Nothing to undo in content editor\n", "yellow")
+            return "break"
+
+    def redo_line_in_content(self, event=None):
+        """Redo last undone change in content editor"""
+        if self.content_redo_stack:
+            # Save current state to undo stack
+            current_state = self.content_editor.get('1.0', 'end-1c')
+            self.content_undo_stack.append(current_state)
+
+            # Restore redone state
+            redone_state = self.content_redo_stack.pop()
+            self.content_editor.delete('1.0', 'end')
+            self.content_editor.insert('1.0', redone_state)
+            self.last_content_state = redone_state
+
+            self.write("↪ Redo in content editor\n", "cyan")
+            return "break"
+        else:
+            self.write("Nothing to redo in content editor\n", "yellow")
+            return "break"
+
+    def undo_line_in_notes(self, event=None):
+        """Undo last change in notes editor"""
+        if self.notes_undo_stack:
+            current_state = self.notes_editor.get('1.0', 'end-1c')
+            self.notes_redo_stack.append(current_state)
+
+            previous_state = self.notes_undo_stack.pop()
+            self.notes_editor.delete('1.0', 'end')
+            self.notes_editor.insert('1.0', previous_state)
+            self.last_notes_state = previous_state
+
+            self.write("↩ Undo in notes editor\n", "cyan")
+            return "break"
+        else:
+            self.write("Nothing to undo in notes editor\n", "yellow")
+            return "break"
+
+    def redo_line_in_notes(self, event=None):
+        """Redo last undone change in notes editor"""
+        if self.notes_redo_stack:
+            current_state = self.notes_editor.get('1.0', 'end-1c')
+            self.notes_undo_stack.append(current_state)
+
+            redone_state = self.notes_redo_stack.pop()
+            self.notes_editor.delete('1.0', 'end')
+            self.notes_editor.insert('1.0', redone_state)
+            self.last_notes_state = redone_state
+
+            self.write("↪ Redo in notes editor\n", "cyan")
+            return "break"
+        else:
+            self.write("Nothing to redo in notes editor\n", "yellow")
+            return "break"
+
     def mask_slide(self, slide_index: int) -> bool:
         """
         Mask a slide by prepending % to all its content items.
@@ -4678,20 +4805,22 @@ class BeamerSlideEditor(ctk.CTk):
                 print(f"Warning: Could not highlight current slide: {e}")
 
     def setup_keyboard_shortcuts(self) -> None:
-        """Enhanced keyboard shortcuts with undo/redo and line masking"""
-        # Existing shortcuts
+        """Enhanced keyboard shortcuts with context-aware undo/redo and line masking"""
+
+        # Slide-level operations (work globally but may be overridden by focused widgets)
         self.bind('<Control-n>', lambda e: self.new_slide())
         self.bind('<Control-i>', lambda e: self.insert_slide_below())
         self.bind('<Control-d>', lambda e: self.duplicate_slide())
         self.bind('<Control-s>', lambda e: self.save_file())
 
-        # Context-sensitive Ctrl+Delete
+        # Context-sensitive Ctrl+Delete (mask slide or mask line based on focus)
         self.bind('<Control-Delete>', self.handle_ctrl_delete)
 
-        # Undo/Redo shortcuts
-        self.bind('<Control-z>', lambda e: self.undo())
-        self.bind('<Control-y>', lambda e: self.redo())
-        self.bind('<Control-Shift-Z>', lambda e: self.redo())
+        # Context-sensitive Undo/Redo (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
+        # These check which widget has focus and act accordingly
+        self.bind('<Control-z>', self.handle_undo_redo)
+        self.bind('<Control-y>', self.handle_undo_redo)
+        self.bind('<Control-Shift-Z>', self.handle_undo_redo)
 
         # Restore deleted slide shortcut (Shift+Ctrl+R)
         self.bind('<Control-Shift-R>', lambda e: self.restore_deleted_slide())
@@ -4700,12 +4829,93 @@ class BeamerSlideEditor(ctk.CTk):
         self.bind('<Control-Up>', lambda e: self.move_slide(-1))
         self.bind('<Control-Down>', lambda e: self.move_slide(1))
 
-        # Quick navigation after masking (optional)
+        # Quick navigation between slides
         self.bind('<Control-Right>', lambda e: self.navigate_to_next_slide())
         self.bind('<Control-Left>', lambda e: self.navigate_to_previous_slide())
 
         # Delete key for slide deletion when in slide list
         self.bind('<Delete>', self.handle_delete_key)
+
+    def handle_undo_redo(self, event):
+        """Handle undo/redo based on which widget has focus"""
+        focused_widget = self.focus_get()
+
+        # Check if content editor has focus
+        if focused_widget == self.content_editor._textbox:
+            if event.keysym == 'z' and (event.state & 0x4):  # Ctrl+Z
+                return self.undo_line_in_content(event)
+            elif event.keysym in ('y', 'Z') and (event.state & 0x4):  # Ctrl+Y or Ctrl+Shift+Z
+                return self.redo_line_in_content(event)
+
+        # Check if notes editor has focus
+        elif focused_widget == self.notes_editor._textbox:
+            if event.keysym == 'z' and (event.state & 0x4):  # Ctrl+Z
+                return self.undo_line_in_notes(event)
+            elif event.keysym in ('y', 'Z') and (event.state & 0x4):  # Ctrl+Y or Ctrl+Shift+Z
+                return self.redo_line_in_notes(event)
+
+        # Check if media entry has focus
+        elif focused_widget == self.media_entry:
+            if event.keysym == 'z' and (event.state & 0x4):
+                self.undo_media_entry()
+                return "break"
+            elif event.keysym in ('y', 'Z') and (event.state & 0x4):
+                self.redo_media_entry()
+                return "break"
+
+        # Default: slide-level undo/redo (for slide operations)
+        else:
+            if event.keysym == 'z' and (event.state & 0x4):  # Ctrl+Z
+                self.undo()
+            elif event.keysym in ('y', 'Z') and (event.state & 0x4):  # Ctrl+Y or Ctrl+Shift+Z
+                self.redo()
+
+        return "break"
+
+    def undo_media_entry(self):
+        """Undo media entry change"""
+        if hasattr(self, '_media_undo_stack') and self._media_undo_stack:
+            current = self.media_entry.get()
+            self._media_redo_stack = getattr(self, '_media_redo_stack', [])
+            self._media_redo_stack.append(current)
+            previous = self._media_undo_stack.pop()
+            self.media_entry.delete(0, 'end')
+            self.media_entry.insert(0, previous)
+            self.write("↩ Undo in media entry\n", "cyan")
+        else:
+            self.write("Nothing to undo in media entry\n", "yellow")
+
+    def redo_media_entry(self):
+        """Redo media entry change"""
+        if hasattr(self, '_media_redo_stack') and self._media_redo_stack:
+            current = self.media_entry.get()
+            self._media_undo_stack = getattr(self, '_media_undo_stack', [])
+            self._media_undo_stack.append(current)
+            next_val = self._media_redo_stack.pop()
+            self.media_entry.delete(0, 'end')
+            self.media_entry.insert(0, next_val)
+            self.write("↪ Redo in media entry\n", "cyan")
+        else:
+            self.write("Nothing to redo in media entry\n", "yellow")
+
+    def setup_media_entry_undo(self):
+        """Setup undo/redo for media entry"""
+        self._media_undo_stack = []
+        self._media_redo_stack = []
+        self._last_media_state = ""
+
+        def save_media_state(event=None):
+            current = self.media_entry.get()
+            if current != self._last_media_state:
+                if len(self._media_undo_stack) >= 50:
+                    self._media_undo_stack.pop(0)
+                self._media_undo_stack.append(self._last_media_state)
+                self._media_redo_stack.clear()
+                self._last_media_state = current
+
+        self.media_entry.bind('<KeyRelease>', save_media_state)
+        self.media_entry.bind('<FocusOut>', save_media_state)
+
 
     def navigate_to_next_slide(self):
         """Navigate to next slide"""
@@ -10754,6 +10964,12 @@ Created by {self.__author__}
 
                 hidden_content_indices = set(slide.get('_hidden_content_indices', []))
                 hidden_note_indices = set(slide.get('_hidden_note_indices', []))
+                media_masked = slide.get('_media_masked', False)
+
+                # Get media from slide
+                media = slide.get('media', '')
+                if media_masked:
+                    media = ""
 
                 raw_content = slide.get('content', [])
                 visible_content = []
@@ -10767,7 +10983,26 @@ Created by {self.__author__}
                     if note.strip() and i not in hidden_note_indices:
                         visible_notes.append(note)
 
-                if not visible_content and not visible_notes:
+                # Check if slide has a valid image (not masked and not empty)
+                has_valid_image = False
+                image_path = None
+
+                if media and media != "\\None" and not media_masked:
+                    if media.startswith('\\file'):
+                        file_path = media.replace('\\file', '').strip()
+                        file_path = file_path.strip('{}')
+                        if file_path and 'example-image' not in file_path.lower():
+                            if os.path.exists(file_path):
+                                has_valid_image = True
+                                image_path = file_path
+                            elif os.path.exists(f"media_files/{file_path}"):
+                                has_valid_image = True
+                                image_path = f"media_files/{file_path}"
+
+                # Check if content already has columns
+                has_existing_columns = any('\\begin{columns}' in line for line in visible_content)
+
+                if not visible_content and not visible_notes and not has_valid_image:
                     total_skipped_slides += 1
                     continue
 
@@ -10781,97 +11016,239 @@ Created by {self.__author__}
                 frame_lines.append(f"\\frametitle{{{clean_title}}}")
                 frame_lines.append("")
 
-                # Process content
-                i = 0
-                in_list = False
-                list_type = None
-                in_columns = False
+                # If we have a valid image and no existing columns, create two-column layout
+                if has_valid_image and not has_existing_columns:
+                    frame_lines.append("\\begin{columns}[T]")
+                    frame_lines.append("\\column{0.45\\textwidth}")
+                    # Add image in left column
+                    frame_lines.append(f"\\begin{{center}}")
+                    frame_lines.append(f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{image_path}}}")
+                    frame_lines.append(f"\\end{{center}}")
+                    frame_lines.append("")
+                    frame_lines.append("\\column{0.5\\textwidth}")
 
-                while i < len(visible_content):
-                    line = visible_content[i]
-                    stripped = line.strip()
+                    # Process content for right column
+                    i = 0
+                    in_list = False
+                    list_type = None
 
-                    # Preserve column commands exactly
-                    if '\\begin{columns}' in line:
-                        in_columns = True
-                        frame_lines.append(line)
-                        i += 1
-                        continue
-                    elif '\\end{columns}' in line:
-                        in_columns = False
-                        frame_lines.append(line)
-                        i += 1
-                        continue
-                    elif '\\column' in line:
-                        frame_lines.append(line)
-                        i += 1
-                        continue
+                    while i < len(visible_content):
+                        line = visible_content[i]
+                        stripped = line.strip()
 
-                    # Handle enumerate/itemize environment boundaries
-                    if '\\begin{enumerate}' in line:
-                        in_list = True
-                        list_type = 'enumerate'
-                        frame_lines.append(line)
-                        i += 1
-                        continue
-                    elif '\\begin{itemize}' in line:
-                        in_list = True
-                        list_type = 'itemize'
-                        frame_lines.append(line)
-                        i += 1
-                        continue
-                    elif '\\end{enumerate}' in line or '\\end{itemize}' in line:
-                        in_list = False
-                        list_type = None
-                        frame_lines.append(line)
-                        i += 1
-                        continue
-
-                    # Handle media directives
-                    if is_valid_media_directive(line):
-                        if '\\file' in line:
-                            converted = convert_file_to_includegraphics(line)
-                            frame_lines.append(converted)
-                        else:
-                            frame_lines.append(line)
-                        i += 1
-                        continue
-
-                    # Handle bullet points (convert - to \item)
-                    if stripped.startswith(('- ', '• ')):
-                        bullet_content = re.sub(r'^[-•]\s*', '', stripped)
-                        if not in_list:
-                            # Start a new itemize if not already in a list
-                            frame_lines.append("\\begin{itemize}")
-                            frame_lines.append(f"\\item {bullet_content}")
-                            frame_lines.append("\\end{itemize}")
-                        else:
-                            frame_lines.append(f"\\item {bullet_content}")
-                        i += 1
-                        continue
-
-                    # Handle standalone \item commands (ensure they're in a list)
-                    if stripped.startswith('\\item'):
-                        if not in_list:
-                            # Wrap standalone item in itemize
-                            frame_lines.append("\\begin{itemize}")
-                            frame_lines.append(line)
-                            # Check if more items follow
-                            j = i + 1
-                            while j < len(visible_content) and visible_content[j].strip().startswith('\\item'):
-                                frame_lines.append(visible_content[j])
-                                j += 1
-                            i = j
-                            frame_lines.append("\\end{itemize}")
-                        else:
+                        # Handle enumerate/itemize environment boundaries
+                        if '\\begin{enumerate}' in line:
+                            in_list = True
+                            list_type = 'enumerate'
                             frame_lines.append(line)
                             i += 1
-                        continue
+                            continue
+                        elif '\\begin{itemize}' in line:
+                            in_list = True
+                            list_type = 'itemize'
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+                        elif '\\end{enumerate}' in line or '\\end{itemize}' in line:
+                            in_list = False
+                            list_type = None
+                            frame_lines.append(line)
+                            i += 1
+                            continue
 
-                    # Regular line - preserve as is
-                    if stripped or line == '':
-                        frame_lines.append(line)
-                    i += 1
+                        # Handle media directives (skip if already handled as main image)
+                        if is_valid_media_directive(line):
+                            i += 1
+                            continue
+
+                        # Handle bullet points (convert - to \item)
+                        if stripped.startswith(('- ', '• ')):
+                            bullet_content = re.sub(r'^[-•]\s*', '', stripped)
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(f"\\item {bullet_content}")
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(f"\\item {bullet_content}")
+                            i += 1
+                            continue
+
+                        # Handle standalone \item commands
+                        if stripped.startswith('\\item'):
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(line)
+                                j = i + 1
+                                while j < len(visible_content) and visible_content[j].strip().startswith('\\item'):
+                                    frame_lines.append(visible_content[j])
+                                    j += 1
+                                i = j
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(line)
+                                i += 1
+                            continue
+
+                        # Regular line
+                        if stripped or line == '':
+                            frame_lines.append(line)
+                        i += 1
+
+                    frame_lines.append("\\end{columns}")
+
+                elif has_existing_columns:
+                    # Content already has columns - preserve as-is
+                    i = 0
+                    in_list = False
+                    list_type = None
+
+                    while i < len(visible_content):
+                        line = visible_content[i]
+                        stripped = line.strip()
+
+                        # Preserve column commands exactly
+                        if '\\begin{columns}' in line or '\\end{columns}' in line or '\\column' in line:
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+
+                        # Handle enumerate/itemize environment boundaries
+                        if '\\begin{enumerate}' in line:
+                            in_list = True
+                            list_type = 'enumerate'
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+                        elif '\\begin{itemize}' in line:
+                            in_list = True
+                            list_type = 'itemize'
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+                        elif '\\end{enumerate}' in line or '\\end{itemize}' in line:
+                            in_list = False
+                            list_type = None
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+
+                        # Handle media directives inside columns
+                        if is_valid_media_directive(line):
+                            if '\\file' in line:
+                                converted = convert_file_to_includegraphics(line)
+                                frame_lines.append(converted)
+                            else:
+                                frame_lines.append(line)
+                            i += 1
+                            continue
+
+                        # Handle bullet points
+                        if stripped.startswith(('- ', '• ')):
+                            bullet_content = re.sub(r'^[-•]\s*', '', stripped)
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(f"\\item {bullet_content}")
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(f"\\item {bullet_content}")
+                            i += 1
+                            continue
+
+                        # Handle standalone \item commands
+                        if stripped.startswith('\\item'):
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(line)
+                                j = i + 1
+                                while j < len(visible_content) and visible_content[j].strip().startswith('\\item'):
+                                    frame_lines.append(visible_content[j])
+                                    j += 1
+                                i = j
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(line)
+                                i += 1
+                            continue
+
+                        # Regular line
+                        if stripped or line == '':
+                            frame_lines.append(line)
+                        i += 1
+
+                else:
+                    # No image and no columns - normal full-width content
+                    i = 0
+                    in_list = False
+                    list_type = None
+
+                    while i < len(visible_content):
+                        line = visible_content[i]
+                        stripped = line.strip()
+
+                        # Handle enumerate/itemize environment boundaries
+                        if '\\begin{enumerate}' in line:
+                            in_list = True
+                            list_type = 'enumerate'
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+                        elif '\\begin{itemize}' in line:
+                            in_list = True
+                            list_type = 'itemize'
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+                        elif '\\end{enumerate}' in line or '\\end{itemize}' in line:
+                            in_list = False
+                            list_type = None
+                            frame_lines.append(line)
+                            i += 1
+                            continue
+
+                        # Handle media directives
+                        if is_valid_media_directive(line):
+                            if '\\file' in line:
+                                converted = convert_file_to_includegraphics(line)
+                                frame_lines.append(f"\\begin{{center}}")
+                                frame_lines.append(converted)
+                                frame_lines.append(f"\\end{{center}}")
+                            else:
+                                frame_lines.append(line)
+                            i += 1
+                            continue
+
+                        # Handle bullet points
+                        if stripped.startswith(('- ', '• ')):
+                            bullet_content = re.sub(r'^[-•]\s*', '', stripped)
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(f"\\item {bullet_content}")
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(f"\\item {bullet_content}")
+                            i += 1
+                            continue
+
+                        # Handle standalone \item commands
+                        if stripped.startswith('\\item'):
+                            if not in_list:
+                                frame_lines.append("\\begin{itemize}")
+                                frame_lines.append(line)
+                                j = i + 1
+                                while j < len(visible_content) and visible_content[j].strip().startswith('\\item'):
+                                    frame_lines.append(visible_content[j])
+                                    j += 1
+                                i = j
+                                frame_lines.append("\\end{itemize}")
+                            else:
+                                frame_lines.append(line)
+                                i += 1
+                            continue
+
+                        # Regular line
+                        if stripped or line == '':
+                            frame_lines.append(line)
+                        i += 1
 
                 # Add notes
                 if visible_notes:
@@ -11984,46 +12361,70 @@ Created by {self.__author__}
         """Mask/unmask the current line in the focused editor (Ctrl+Delete in editors)"""
         focused_widget = self.focus_get()
 
-        # Determine which editor has focus
         editor = None
         editor_name = ""
+        is_content = False
+        is_notes = False
 
         if focused_widget == self.content_editor._textbox:
             editor = self.content_editor._textbox
             editor_name = "content"
+            is_content = True
+            # Save state before change
+            self.last_content_state = self.content_editor.get('1.0', 'end-1c')
+            if self.last_content_state:
+                self.content_undo_stack.append(self.last_content_state)
         elif focused_widget == self.notes_editor._textbox:
             editor = self.notes_editor._textbox
             editor_name = "notes"
+            is_notes = True
+            # Save state before change
+            self.last_notes_state = self.notes_editor.get('1.0', 'end-1c')
+            if self.last_notes_state:
+                self.notes_undo_stack.append(self.last_notes_state)
         else:
-            # Not in an editor - show status message
             self.write("Click in content or notes editor first to mask lines\n", "yellow")
             return "break"
 
         try:
-            # Get current cursor position
+            # Get current cursor position and line
             current_pos = editor.index("insert")
-            line_start = editor.index(f"{current_pos} linestart")
-            line_end = editor.index(f"{current_pos} lineend")
+            line_num = int(current_pos.split('.')[0])
+            line_start = editor.index(f"{line_num}.0")
+            line_end = editor.index(f"{line_num}.end")
 
             # Get the line content
             line_content = editor.get(line_start, line_end)
 
-            # Skip empty lines
             if not line_content.strip():
                 self.write("Cannot mask empty line\n", "yellow")
                 return "break"
 
             # Check if line is already masked
-            if line_content.lstrip().startswith('%'):
+            is_masked = line_content.lstrip().startswith('%')
+
+            if is_masked:
                 # Unmask: remove the % prefix
-                # Remove all leading % and spaces
-                cleaned_line = re.sub(r'^\s*%+\s*', '', line_content)
+                clean_line = re.sub(r'^\s*%\s*', '', line_content)
                 editor.delete(line_start, line_end)
-                editor.insert(line_start, cleaned_line)
+                editor.insert(line_start, clean_line)
                 self.write(f"✓ Unmasked line in {editor_name} editor\n", "green")
+
+                # Update the hidden indices for this slide
+                if 0 <= self.current_slide_index < len(self.slides):
+                    slide = self.slides[self.current_slide_index]
+                    if is_content:
+                        content_line_idx = line_num - 1
+                        if content_line_idx in slide.get('_hidden_content_indices', []):
+                            slide['_hidden_content_indices'].remove(content_line_idx)
+                            slide['_hidden_content_indices'].sort()
+                    elif is_notes:
+                        note_line_idx = line_num - 1
+                        if note_line_idx in slide.get('_hidden_note_indices', []):
+                            slide['_hidden_note_indices'].remove(note_line_idx)
+                            slide['_hidden_note_indices'].sort()
             else:
                 # Mask: add % at beginning
-                # Preserve indentation by adding % after spaces?
                 indent_match = re.match(r'^(\s*)', line_content)
                 indent = indent_match.group(1) if indent_match else ""
                 rest = line_content[len(indent):]
@@ -12032,16 +12433,38 @@ Created by {self.__author__}
                 editor.insert(line_start, masked_line)
                 self.write(f"✓ Masked line in {editor_name} editor\n", "yellow")
 
-            # Preserve cursor position approximately at same column
-            cursor_col = int(editor.index("insert").split('.')[1])
-            new_pos = f"{line_start}+{min(cursor_col, len(masked_line))}c"
-            editor.mark_set("insert", new_pos)
+                # Update the hidden indices for this slide
+                if 0 <= self.current_slide_index < len(self.slides):
+                    slide = self.slides[self.current_slide_index]
+                    if is_content:
+                        content_line_idx = line_num - 1
+                        if '_hidden_content_indices' not in slide:
+                            slide['_hidden_content_indices'] = []
+                        if content_line_idx not in slide['_hidden_content_indices']:
+                            slide['_hidden_content_indices'].append(content_line_idx)
+                            slide['_hidden_content_indices'].sort()
+                    elif is_notes:
+                        note_line_idx = line_num - 1
+                        if '_hidden_note_indices' not in slide:
+                            slide['_hidden_note_indices'] = []
+                        if note_line_idx not in slide['_hidden_note_indices']:
+                            slide['_hidden_note_indices'].append(note_line_idx)
+                            slide['_hidden_note_indices'].sort()
+
+            # Clear redo stacks after new action
+            if is_content:
+                self.content_redo_stack.clear()
+            else:
+                self.notes_redo_stack.clear()
+
+            # Preserve cursor position
+            editor.mark_set("insert", f"{line_num}.0")
 
             # Update syntax highlighting
             if hasattr(self, 'syntax_highlighter') and self.syntax_highlighter.active:
                 self.syntax_highlighter.highlight()
 
-            # Mark that changes need saving
+            # Save the changes
             self.save_current_slide()
 
         except Exception as e:
