@@ -10632,179 +10632,6 @@ Created by {self.__author__}
             self.terminal.set_working_directory(working_folder)
 
 #-----------------------------------------------------------------------------
-    def save_file(self) -> None:
-        """Save presentation preserving custom preamble and line-level masking"""
-        if not self.current_file:
-            filename = filedialog.asksaveasfilename(
-                defaultextension=".txt",
-                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-            )
-            if filename:
-                self.current_file = filename
-                global working_folder
-                # Change to text file directory
-                working_folder = os.path.dirname(filename) or '.'
-                os.chdir(working_folder)
-
-                # Update working directory in terminal
-                self.terminal.set_working_directory(working_folder)
-            else:
-                return
-
-        # Save current slide before generating content
-        self.save_current_slide()
-
-        try:
-            # Get custom preamble with logo
-            content = self.get_custom_preamble()
-
-            # Track counts
-            masked_count = 0
-            total_hidden_lines = 0
-
-            # Add slides in BeamerSlideGenerator's expected format
-            for idx, slide in enumerate(self.slides):
-                # Check if this slide is masked (deleted)
-                is_fully_masked = slide.get('_fully_masked', False) or self.is_slide_masked(idx)
-
-                # Get hidden line indices
-                hidden_content_indices = set(slide.get('_hidden_content_indices', []))
-                hidden_note_indices = set(slide.get('_hidden_note_indices', []))
-
-                if is_fully_masked:
-                    masked_count += 1
-                    # Add masked slide marker
-                    content += "\n\n% ========== MASKED SLIDE (DELETED) ==========\n"
-
-                content += "\n\n"  # Add two extra line break before new slide
-
-                # Handle title - comment if fully masked
-                if is_fully_masked:
-                    content += f"% \\title {slide['title']}\n"
-                    content += "% \\begin{Content}\n"
-                else:
-                    content += f"\\title {slide['title']}\n"
-                    content += "\\begin{Content}\n"
-
-                # Handle media/TikZ content with masking preservation
-                media = slide.get('media', '')
-                if media and media != "\\None":
-                    # Check if media is masked (starts with % in the stored value)
-                    is_media_masked = media.startswith('%') if media else False
-
-                    if is_fully_masked or is_media_masked:
-                        content += "% "
-                        # Check if it's TikZ code (multi-line)
-                        if "\\begin{tikzpicture}" in media:
-                            tikz_lines = media.split('\n')
-                            for i, line in enumerate(tikz_lines):
-                                # Remove any existing % prefix for consistent masking
-                                clean_line = line.lstrip('%').lstrip()
-                                if i == 0:
-                                    content += f"% {clean_line}\n"
-                                else:
-                                    content += f"% {clean_line}\n"
-                        else:
-                            # Remove any existing % prefix
-                            clean_media = media.lstrip('%').lstrip()
-                            content += f"% {clean_media}\n"
-                    else:
-                        content += "\n"
-                        # Check if it's TikZ code
-                        if "\\begin{tikzpicture}" in media:
-                            # For TikZ, write the complete code
-                            if "% TikZ Diagram:" in media:
-                                tikz_lines = media.split('\n')[1:]
-                                for line in tikz_lines:
-                                    content += f"{line}\n"
-                            else:
-                                content += f"{media}\n"
-                        else:
-                            content += f"{media}\n"
-
-                # Format content items - PRESERVE LINE-LEVEL MASKING
-                content_items = slide.get('content', [])
-                if content_items:
-                    if not is_fully_masked:
-                        content += "\n"  # Add separation between media and content
-
-                for i, item in enumerate(content_items):
-                    if item and item.strip():
-                        # Check if this specific line should be masked
-                        is_line_hidden = i in hidden_content_indices
-
-                        if is_fully_masked or is_line_hidden:
-                            # Ensure the line starts with % for masking
-                            if not item.strip().startswith('%'):
-                                content += f"% {item}\n"
-                                total_hidden_lines += 1
-                            else:
-                                content += f"{item}\n"
-                        else:
-                            content += f"{item}\n"
-
-                # End Content block
-                if is_fully_masked:
-                    content += "% \\end{Content}\n\n"
-                else:
-                    content += "\\end{Content}\n\n"
-
-                # Handle notes with line-level masking preservation
-                if is_fully_masked:
-                    content += "% \\begin{Notes}\n"
-                    if 'notes' in slide and slide['notes']:
-                        for i, note in enumerate(slide['notes']):
-                            if note and note.strip():
-                                is_note_hidden = i in hidden_note_indices
-                                if is_note_hidden:
-                                    if not note.strip().startswith('%'):
-                                        content += f"% {note}\n"
-                                        total_hidden_lines += 1
-                                    else:
-                                        content += f"{note}\n"
-                                else:
-                                    # Even for visible notes in masked slide, add comment
-                                    content += f"% {note}\n"
-                    content += "% \\end{Notes}\n"
-                else:
-                    if 'notes' in slide and slide['notes']:
-                        content += "\\begin{Notes}\n"
-                        for i, note in enumerate(slide['notes']):
-                            if note and note.strip():
-                                is_note_hidden = i in hidden_note_indices
-                                if is_note_hidden:
-                                    # Add % prefix for hidden notes
-                                    content += f"% {note}\n"
-                                    total_hidden_lines += 1
-                                else:
-                                    content += f"{note}\n"
-                        content += "\\end{Notes}\n"
-                    else:
-                        content += "\\begin{Notes}\n"
-                        content += "\n"
-                        content += "\\end{Notes}\n"
-
-            content += "\\end{document}"
-
-            # Save to text file
-            with open(self.current_file, 'w', encoding='utf-8') as f:
-                f.write(content)
-
-            self.write("✓ File saved successfully: " + self.current_file + "\n", "green")
-
-            # Show summary of masked content
-            summary_parts = []
-            if masked_count > 0:
-                summary_parts.append(f"{masked_count} fully masked slide(s)")
-            if total_hidden_lines > 0:
-                summary_parts.append(f"{total_hidden_lines} hidden line(s)")
-
-            if summary_parts:
-                self.write(f"ℹ Saved with: {', '.join(summary_parts)}\n", "yellow")
-
-        except Exception as e:
-            self.write(f"✗ Error saving file: {str(e)}\n", "red")
-            messagebox.showerror("Error", f"Error saving file:\n{str(e)}")
 
     def convert_media_to_latex(self, line: str) -> str:
         """Convert media directives to proper LaTeX commands"""
@@ -10862,16 +10689,19 @@ Created by {self.__author__}
         """Generate TeX content - remove masked content, preserve original styling"""
         try:
             # Get the original custom preamble (with all styling)
-            tex_content = self.get_custom_preamble()
+            full_tex_content = self.get_custom_preamble()
 
-            # Find where \begin{document} is
-            doc_pos = tex_content.find("\\begin{document}")
+            # Find the exact position of \begin{document}
+            doc_pos = full_tex_content.find("\\begin{document}")
             if doc_pos == -1:
                 self.write("Error: Could not find \\begin{document} in preamble\n", "red")
                 return None
 
-            # Split into preamble and document body
-            preamble = tex_content[:doc_pos]
+            # Extract preamble (everything before \begin{document})
+            preamble = full_tex_content[:doc_pos].strip()
+
+            if not preamble.endswith('\n'):
+                preamble += '\n'
 
             # Start building new document body
             new_document_body = "\\begin{document}\n\n"
@@ -10885,6 +10715,35 @@ Created by {self.__author__}
             total_visible_slides = 0
             total_skipped_slides = 0
 
+            # Valid media directives
+            valid_media_directives = ['\\file', '\\play', '\\url', '\\movie', '\\sound',
+                                       '\\includegraphics', '\\href']
+
+            def is_valid_media_directive(line):
+                if not line or not line.strip():
+                    return False
+                stripped = line.strip()
+                for directive in valid_media_directives:
+                    if stripped.startswith(directive):
+                        return True
+                return False
+
+            def convert_file_to_includegraphics(line):
+                if '\\file' in line:
+                    file_path = line.replace('\\file', '').strip()
+                    file_path = file_path.strip('{}')
+
+                    actual_path = None
+                    if os.path.exists(file_path):
+                        actual_path = file_path
+                    elif os.path.exists(f"media_files/{file_path}"):
+                        actual_path = f"media_files/{file_path}"
+                    else:
+                        return f"\\textcolor{{gray}}{{[Image not found: {os.path.basename(file_path)}]}}"
+
+                    return f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{actual_path}}}"
+                return line
+
             # Process each slide
             for idx, slide in enumerate(self.slides):
                 is_fully_masked = slide.get('_fully_masked', False)
@@ -10895,30 +10754,12 @@ Created by {self.__author__}
 
                 hidden_content_indices = set(slide.get('_hidden_content_indices', []))
                 hidden_note_indices = set(slide.get('_hidden_note_indices', []))
-                media_masked = slide.get('_media_masked', False)
 
-                media = slide.get('media', '')
-                if media_masked:
-                    media = ""
-
-                # Check if media is a valid image file
-                has_valid_image = False
-                image_path = None
-
-                if media and media != "\\None" and not media_masked:
-                    if media.startswith('\\file'):
-                        file_path = media.replace('\\file', '').strip()
-                        if file_path and 'example-image' not in file_path.lower():
-                            if os.path.exists(file_path):
-                                has_valid_image = True
-                                image_path = file_path
-                            elif os.path.exists(f"media_files/{file_path}"):
-                                has_valid_image = True
-                                image_path = f"media_files/{file_path}"
-
+                raw_content = slide.get('content', [])
                 visible_content = []
-                for i, line in enumerate(slide.get('content', [])):
-                    if line.strip() and i not in hidden_content_indices:
+
+                for i, line in enumerate(raw_content):
+                    if i not in hidden_content_indices:
                         visible_content.append(line)
 
                 visible_notes = []
@@ -10926,7 +10767,7 @@ Created by {self.__author__}
                     if note.strip() and i not in hidden_note_indices:
                         visible_notes.append(note)
 
-                if not visible_content and not has_valid_image and not visible_notes:
+                if not visible_content and not visible_notes:
                     total_skipped_slides += 1
                     continue
 
@@ -10935,142 +10776,104 @@ Created by {self.__author__}
                 slide_title = slide.get('title', 'Untitled')
                 clean_title = re.sub(r'^\[DELETED\]\s*', '', slide_title)
 
-                new_document_body += f"\\begin{{frame}}{{{clean_title}}}\n"
-                new_document_body += f"\\frametitle{{{clean_title}}}\n\n"
+                frame_lines = []
+                frame_lines.append(f"\\begin{{frame}}{{{clean_title}}}")
+                frame_lines.append(f"\\frametitle{{{clean_title}}}")
+                frame_lines.append("")
 
-                # Only use two-column layout if we have a valid image
-                if has_valid_image:
-                    new_document_body += "\\begin{columns}[T]\n"
-                    new_document_body += "\\column{0.45\\textwidth}\n"
-                    new_document_body += f"\\begin{{center}}\n"
-                    new_document_body += f"\\includegraphics[width=\\textwidth,keepaspectratio]{{{image_path}}}\n"
-                    new_document_body += f"\\end{{center}}\n\n"
-                    new_document_body += "\\column{0.5\\textwidth}\n"
-                    content_col = new_document_body
-                else:
-                    content_col = new_document_body
-
-                # Process content with proper environment handling
+                # Process content
                 i = 0
                 in_list = False
-                in_block = False
                 list_type = None
-                skip_next_end = False
+                in_columns = False
 
                 while i < len(visible_content):
-                    line = visible_content[i].rstrip()
-                    if not line.strip():
-                        if in_list:
-                            content_col += f"\\end{{{list_type}}}\n\n"
-                            in_list = False
-                            list_type = None
-                        if in_block:
-                            content_col += "\\end{block}\n\n"
-                            in_block = False
+                    line = visible_content[i]
+                    stripped = line.strip()
+
+                    # Preserve column commands exactly
+                    if '\\begin{columns}' in line:
+                        in_columns = True
+                        frame_lines.append(line)
+                        i += 1
+                        continue
+                    elif '\\end{columns}' in line:
+                        in_columns = False
+                        frame_lines.append(line)
+                        i += 1
+                        continue
+                    elif '\\column' in line:
+                        frame_lines.append(line)
                         i += 1
                         continue
 
-                    # Handle existing itemize/enumerate environments
-                    if '\\begin{itemize}' in line or '\\begin{enumerate}' in line:
-                        if in_list:
-                            content_col += f"\\end{{{list_type}}}\n\n"
-                        list_type = 'itemize' if 'itemize' in line else 'enumerate'
-                        content_col += f"\\begin{{{list_type}}}\n"
+                    # Handle enumerate/itemize environment boundaries
+                    if '\\begin{enumerate}' in line:
                         in_list = True
+                        list_type = 'enumerate'
+                        frame_lines.append(line)
                         i += 1
                         continue
-
-                    elif '\\end{itemize}' in line or '\\end{enumerate}' in line:
-                        if in_list:
-                            content_col += f"\\end{{{list_type}}}\n\n"
-                            in_list = False
-                            list_type = None
+                    elif '\\begin{itemize}' in line:
+                        in_list = True
+                        list_type = 'itemize'
+                        frame_lines.append(line)
                         i += 1
                         continue
-
-                    # Handle block environments
-                    if '\\begin{block}' in line:
-                        if in_block:
-                            content_col += "\\end{block}\n\n"
-                        block_match = re.search(r'\\begin{block}\{([^}]*)\}', line)
-                        if block_match:
-                            block_title = block_match.group(1)
-                            content_col += f"\\begin{{block}}{{{block_title}}}\n"
-                        else:
-                            content_col += "\\begin{block}{}\n"
-                        in_block = True
-                        i += 1
-                        continue
-
-                    elif '\\end{block}' in line:
-                        if in_block:
-                            content_col += "\\end{block}\n\n"
-                            in_block = False
-                        i += 1
-                        continue
-
-                    # Handle columns environments - pass through as-is
-                    if '\\begin{columns}' in line or '\\end{columns}' in line or '\\column' in line:
-                        content_col += f"{line}\n"
-                        i += 1
-                        continue
-
-                    # Handle item commands or bullet points
-                    if '\\item' in line:
-                        if not in_list:
-                            list_type = 'itemize'
-                            content_col += f"\\begin{{{list_type}}}\n"
-                            in_list = True
-                        content_col += f"{line}\n"
-                        i += 1
-                        continue
-
-                    # Handle bullet points (lines starting with - or •)
-                    if line.strip().startswith(('- ', '• ')):
-                        if not in_list:
-                            list_type = 'itemize'
-                            content_col += f"\\begin{{{list_type}}}\n"
-                            in_list = True
-                        # Convert bullet to \item
-                        bullet_content = re.sub(r'^[-•]\s*', '', line.strip())
-                        content_col += f"\\item {bullet_content}\n"
-                        i += 1
-                        continue
-
-                    # Handle plain text lines
-                    if in_list:
-                        # Close list before plain text
-                        content_col += f"\\end{{{list_type}}}\n\n"
+                    elif '\\end{enumerate}' in line or '\\end{itemize}' in line:
                         in_list = False
                         list_type = None
-
-                    # Skip file directives in content
-                    if '\\file' in line:
+                        frame_lines.append(line)
                         i += 1
                         continue
 
-                    is_section_header = line.strip().startswith('\\textbf{')
-                    if is_section_header:
-                        content_col += f"\n{line}\n\n"
-                    else:
-                        content_col += f"{line}\n"
+                    # Handle media directives
+                    if is_valid_media_directive(line):
+                        if '\\file' in line:
+                            converted = convert_file_to_includegraphics(line)
+                            frame_lines.append(converted)
+                        else:
+                            frame_lines.append(line)
+                        i += 1
+                        continue
+
+                    # Handle bullet points (convert - to \item)
+                    if stripped.startswith(('- ', '• ')):
+                        bullet_content = re.sub(r'^[-•]\s*', '', stripped)
+                        if not in_list:
+                            # Start a new itemize if not already in a list
+                            frame_lines.append("\\begin{itemize}")
+                            frame_lines.append(f"\\item {bullet_content}")
+                            frame_lines.append("\\end{itemize}")
+                        else:
+                            frame_lines.append(f"\\item {bullet_content}")
+                        i += 1
+                        continue
+
+                    # Handle standalone \item commands (ensure they're in a list)
+                    if stripped.startswith('\\item'):
+                        if not in_list:
+                            # Wrap standalone item in itemize
+                            frame_lines.append("\\begin{itemize}")
+                            frame_lines.append(line)
+                            # Check if more items follow
+                            j = i + 1
+                            while j < len(visible_content) and visible_content[j].strip().startswith('\\item'):
+                                frame_lines.append(visible_content[j])
+                                j += 1
+                            i = j
+                            frame_lines.append("\\end{itemize}")
+                        else:
+                            frame_lines.append(line)
+                            i += 1
+                        continue
+
+                    # Regular line - preserve as is
+                    if stripped or line == '':
+                        frame_lines.append(line)
                     i += 1
 
-                # Close any open environments
-                if in_list:
-                    content_col += f"\\end{{{list_type}}}\n\n"
-                if in_block:
-                    content_col += "\\end{block}\n\n"
-
-                if has_valid_image:
-                    new_document_body = content_col
-                    new_document_body += "\\end{columns}\n\n"
-                else:
-                    new_document_body = content_col
-
-                new_document_body += "\\end{frame}\n\n"
-
-                # Add visible notes
+                # Add notes
                 if visible_notes:
                     real_notes = []
                     for note in visible_notes:
@@ -11079,16 +10882,27 @@ Created by {self.__author__}
                             real_notes.append(clean_note)
 
                     if real_notes:
-                        new_document_body += "\\note{\n"
-                        new_document_body += "\\begin{itemize}\n"
+                        frame_lines.append("")
+                        frame_lines.append("\\note{")
+                        frame_lines.append("\\begin{itemize}")
                         for note in real_notes:
-                            new_document_body += f"    \\item {note}\n"
-                        new_document_body += "\\end{itemize}\n"
-                        new_document_body += "}\n\n"
+                            frame_lines.append(f"    \\item {note}")
+                        frame_lines.append("\\end{itemize}")
+                        frame_lines.append("}")
+
+                frame_lines.append("\\end{frame}")
+                frame_lines.append("")
+
+                new_document_body += "\n".join(frame_lines) + "\n\n"
 
             new_document_body += "\\end{document}\n"
 
-            full_tex = preamble + new_document_body
+            full_tex = preamble + "\n" + new_document_body
+
+            debug_file = "debug_output.tex"
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(full_tex)
+            self.write(f"  📝 Debug TeX saved to: {debug_file}\n", "cyan")
 
             self.write(f"\n📊 TeX Generation Statistics:\n", "cyan")
             self.write(f"  • Title page included\n", "green")
@@ -12355,6 +12169,153 @@ Created by {self.__author__}
 
         return tex_content
 
+    def save_file(self) -> None:
+        """Save presentation preserving custom preamble and line-level masking"""
+        if not self.current_file:
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            )
+            if filename:
+                self.current_file = filename
+                global working_folder
+                working_folder = os.path.dirname(filename) or '.'
+                os.chdir(working_folder)
+                self.terminal.set_working_directory(working_folder)
+            else:
+                return
+
+        # Save current slide before generating content
+        self.save_current_slide()
+
+        try:
+            # Get custom preamble with logo
+            content = self.get_custom_preamble()
+
+            # Track counts
+            masked_count = 0
+            total_hidden_lines = 0
+
+            # Add slides in BeamerSlideGenerator's expected format
+            for idx, slide in enumerate(self.slides):
+                # Check if this slide is masked (deleted)
+                is_fully_masked = slide.get('_fully_masked', False) or self.is_slide_masked(idx)
+
+                # Get hidden line indices
+                hidden_content_indices = set(slide.get('_hidden_content_indices', []))
+                hidden_note_indices = set(slide.get('_hidden_note_indices', []))
+                media_masked = slide.get('_media_masked', False)
+
+                if is_fully_masked:
+                    masked_count += 1
+                    content += "\n\n% ========== MASKED SLIDE (DELETED) ==========\n"
+
+                content += "\n\n"
+
+                # Handle title
+                title = slide.get('title', 'Untitled')
+                clean_title = re.sub(r'^\[DELETED\]\s*', '', title)
+
+                if is_fully_masked:
+                    content += f"% \\title {clean_title}\n"
+                    content += "% \\begin{Content}\n"
+                else:
+                    content += f"\\title {clean_title}\n"
+                    content += "\\begin{Content}\n"
+
+                # Handle media - ALWAYS write a media line (either actual media or \None)
+                media = slide.get('media', '')
+
+                # Determine what to write for media
+                if media and media != "\\None":
+                    # Has actual media content
+                    if is_fully_masked or media_masked:
+                        content += f"% {media}\n"
+                    else:
+                        content += f"{media}\n"
+                else:
+                    # No media - write \None to preserve structure
+                    if is_fully_masked:
+                        content += "% \\None\n"
+                    else:
+                        content += "\\None\n"
+
+                # Write content items - PRESERVE LINE-LEVEL MASKING
+                content_items = slide.get('content', [])
+
+                for i, item in enumerate(content_items):
+                    if item and item.strip():
+                        is_line_hidden = i in hidden_content_indices
+
+                        if is_fully_masked or is_line_hidden:
+                            if not item.strip().startswith('%'):
+                                content += f"% {item}\n"
+                                total_hidden_lines += 1
+                            else:
+                                content += f"{item}\n"
+                        else:
+                            content += f"{item}\n"
+
+                # End Content block
+                if is_fully_masked:
+                    content += "% \\end{Content}\n\n"
+                else:
+                    content += "\\end{Content}\n\n"
+
+                # Handle notes
+                if is_fully_masked:
+                    content += "% \\begin{Notes}\n"
+                    if 'notes' in slide and slide['notes']:
+                        for i, note in enumerate(slide['notes']):
+                            if note and note.strip():
+                                is_note_hidden = i in hidden_note_indices
+                                if is_note_hidden:
+                                    if not note.strip().startswith('%'):
+                                        content += f"% {note}\n"
+                                        total_hidden_lines += 1
+                                    else:
+                                        content += f"{note}\n"
+                                else:
+                                    content += f"% {note}\n"
+                    content += "% \\end{Notes}\n"
+                else:
+                    if 'notes' in slide and slide['notes']:
+                        content += "\\begin{Notes}\n"
+                        for i, note in enumerate(slide['notes']):
+                            if note and note.strip():
+                                is_note_hidden = i in hidden_note_indices
+                                if is_note_hidden:
+                                    content += f"% {note}\n"
+                                    total_hidden_lines += 1
+                                else:
+                                    content += f"{note}\n"
+                        content += "\\end{Notes}\n"
+                    else:
+                        content += "\\begin{Notes}\n"
+                        content += "\\end{Notes}\n"
+
+            content += "\\end{document}"
+
+            # Save to text file
+            with open(self.current_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            self.write("✓ File saved successfully: " + self.current_file + "\n", "green")
+
+            # Show summary
+            summary_parts = []
+            if masked_count > 0:
+                summary_parts.append(f"{masked_count} fully masked slide(s)")
+            if total_hidden_lines > 0:
+                summary_parts.append(f"{total_hidden_lines} hidden line(s)")
+
+            if summary_parts:
+                self.write(f"ℹ Saved with: {', '.join(summary_parts)}\n", "yellow")
+
+        except Exception as e:
+            self.write(f"✗ Error saving file: {str(e)}\n", "red")
+            messagebox.showerror("Error", f"Error saving file:\n{str(e)}")
+
     def load_file(self, filename: str) -> None:
         """Load presentation from file with full preservation of masked content"""
         try:
@@ -12374,14 +12335,13 @@ Created by {self.__author__}
                 if match:
                     self.presentation_info[key] = match.group(1)
 
-            # Split into slides by finding all title lines (including commented ones)
+            # Split into slides by finding all title lines
             lines = content.split('\n')
 
             slides_raw = []
             current_slide_lines = []
 
             for line in lines:
-                # Match both "\title" and "% \title" (with optional space after %)
                 if re.match(r'^%?\s*\\title\s+', line):
                     if current_slide_lines:
                         slides_raw.append(current_slide_lines)
@@ -12403,19 +12363,18 @@ Created by {self.__author__}
                 is_fully_masked = False
 
                 if non_empty:
-                    # Check first non-empty line - if it starts with % and contains \title
                     first_line = non_empty[0].strip()
                     if first_line.startswith('%') and '\\title' in first_line:
-                        # Check if ALL non-empty lines start with %
                         is_fully_masked = all(l.strip().startswith('%') for l in non_empty)
 
-                # Extract title - handle both commented and uncommented
+                # Extract title - preserve the original line including % if masked
                 title_line = None
+                title_raw = None
                 for line in slide_lines:
-                    # Match title even if preceded by % and optional spaces
-                    title_match = re.search(r'%?\s*\\title\s+(.+)$', line)
+                    title_match = re.search(r'(%?\s*\\title\s+)(.+)$', line)
                     if title_match:
-                        title_line = title_match.group(1).strip()
+                        title_raw = line  # Keep the raw line with potential %
+                        title_line = title_match.group(2).strip()
                         break
 
                 if title_line is None:
@@ -12428,7 +12387,7 @@ Created by {self.__author__}
                     title = f"[DELETED] {title}"
                     masked_slides_count += 1
 
-                # Parse content and notes blocks
+                # Parse content and notes blocks - PRESERVE ALL LINES INCLUDING MASKED ONES
                 in_content = False
                 in_notes = False
                 content_lines = []
@@ -12437,9 +12396,15 @@ Created by {self.__author__}
                 hidden_note_indices = []
                 media = ""
                 media_masked = False
+                found_media = False
+                content_line_index = 0
 
                 for line in slide_lines:
-                    # Check for Content block boundaries (handle possible spaces and %)
+                    # Skip the title line itself
+                    if line == title_raw:
+                        continue
+
+                    # Check for Content block boundaries
                     if re.match(r'^%?\s*\\begin{Content}\s*$', line):
                         in_content = True
                         in_notes = False
@@ -12457,38 +12422,57 @@ Created by {self.__author__}
                         in_notes = False
                         continue
 
-                    # Process content lines
-                    if in_content and line.strip():
+                    # Process content lines - PRESERVE EVERY LINE including masked ones
+                    if in_content:
+                        # Check if this line is masked (starts with % after optional whitespace)
                         is_masked = line.lstrip().startswith('%')
-                        # Remove leading % and spaces
-                        clean_line = re.sub(r'^\s*%\s*', '', line) if is_masked else line
 
-                        if clean_line.strip():
-                            # Check if this is a media directive (first line starting with \)
-                            if not media and clean_line.strip().startswith('\\'):
+                        # Clean the line for storage (remove the % prefix for masked lines)
+                        if is_masked:
+                            clean_line = re.sub(r'^\s*%\s*', '', line)
+                        else:
+                            clean_line = line
+
+                        # Store the line (even if empty, but skip completely empty)
+                        if clean_line.strip() or (is_masked and clean_line):
+                            # First non-empty line is media
+                            if not found_media:
+                                found_media = True
                                 media = clean_line.strip()
                                 media_masked = is_masked
-                                if is_masked:
+                                if is_masked and media != "\\None":
                                     total_masked_lines += 1
-                                logger.info(f"  Media found: {media[:50]} (masked={media_masked})")
+                                logger.info(f"  Media found: '{media}' (masked={media_masked})")
                             else:
+                                # Regular content line
                                 content_lines.append(clean_line.rstrip())
                                 if is_masked:
-                                    hidden_content_indices.append(len(content_lines) - 1)
+                                    hidden_content_indices.append(content_line_index)
                                     total_masked_lines += 1
-                                    logger.info(f"  Masked content line {len(content_lines)}: {clean_line[:50]}")
+                                    logger.info(f"  Masked content line {content_line_index + 1}: '{clean_line[:50]}'")
                                 else:
-                                    logger.info(f"  Visible content line {len(content_lines)}: {clean_line[:50]}")
+                                    logger.info(f"  Visible content line {content_line_index + 1}: '{clean_line[:50]}'")
+                                content_line_index += 1
 
-                    # Process notes lines
-                    if in_notes and line.strip():
+                    # Process notes lines - PRESERVE EVERY LINE including masked ones
+                    if in_notes:
                         is_masked = line.lstrip().startswith('%')
-                        clean_line = re.sub(r'^\s*%\s*', '', line) if is_masked else line
+
+                        if is_masked:
+                            clean_line = re.sub(r'^\s*%\s*', '', line)
+                        else:
+                            clean_line = line
+
                         if clean_line.strip():
                             notes_lines.append(clean_line.rstrip())
                             if is_masked:
                                 hidden_note_indices.append(len(notes_lines) - 1)
                                 total_masked_lines += 1
+                                logger.info(f"  Masked note line {len(notes_lines)}: '{clean_line[:50]}'")
+
+                # Clean up media - if it's "\\None", set to empty string
+                if media == "\\None":
+                    media = ""
 
                 # Create slide with preserved masking
                 slide = {
@@ -12503,7 +12487,9 @@ Created by {self.__author__}
                 }
 
                 self.slides.append(slide)
-                logger.info(f"Slide {len(self.slides)}: '{title[:50]}' (fully_masked={is_fully_masked}, content={len(content_lines)}, hidden={len(hidden_content_indices)})")
+                logger.info(f"Slide {len(self.slides)}: '{title[:50]}' (media={media[:30] if media else 'None'}, "
+                           f"fully_masked={is_fully_masked}, content_lines={len(content_lines)}, "
+                           f"hidden_content={len(hidden_content_indices)})")
 
             if self.slides:
                 self.current_slide_index = 0
