@@ -410,6 +410,114 @@ class AstronomyConfig(GlobalConfig):
     gain: float = 1.0  # e-/ADU
     read_noise: float = 0.0  # e-
 
+class NormalizationStatistics:
+    """
+    Stores normalization statistics from training data.
+    These statistics are used for ALL images (training, validation, test, prediction)
+    to ensure consistent normalization across the entire pipeline.
+    """
+
+    def __init__(self):
+        self.mean = None
+        self.std = None
+        self.per_channel_min = None
+        self.per_channel_max = None
+        self.n_samples = 0
+        self.is_fitted = False
+        self.channel_order = None
+
+    def fit(self, dataloader: DataLoader, max_samples: int = 10000000) -> 'NormalizationStatistics':
+        """Calculate statistics from training data only."""
+        logger.info("Computing normalization statistics from training data...")
+
+        all_pixels = []
+        total_pixels = 0
+
+        for batch_idx, (images, _) in enumerate(tqdm(dataloader, desc="Computing stats")):
+            images = images.cpu()
+            b, c, h, w = images.shape
+            pixels = images.permute(0, 2, 3, 1).reshape(-1, c)
+            all_pixels.append(pixels)
+            total_pixels += len(pixels)
+
+            if total_pixels >= max_samples:
+                logger.info(f"Sampled {total_pixels:,} pixels, stopping")
+                break
+
+        all_pixels = torch.cat(all_pixels, dim=0)
+
+        self.mean = all_pixels.mean(dim=0)
+        self.std = all_pixels.std(dim=0)
+        self.per_channel_min = all_pixels.min(dim=0)[0]
+        self.per_channel_max = all_pixels.max(dim=0)[0]
+        self.n_samples = len(all_pixels)
+        self.is_fitted = True
+
+        logger.info("=" * 60)
+        logger.info("Normalization statistics computed:")
+        logger.info(f"  Mean: {self.mean.tolist()}")
+        logger.info(f"  Std:  {self.std.tolist()}")
+        logger.info(f"  Total pixels: {self.n_samples:,}")
+        logger.info("=" * 60)
+
+        return self
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply training statistics to normalize ANY image."""
+        if not self.is_fitted:
+            raise ValueError("Must call fit() before normalize()")
+
+        if x.dim() == 4:
+            mean = self.mean.to(x.device).view(1, -1, 1, 1)
+            std = self.std.to(x.device).view(1, -1, 1, 1)
+            return (x - mean) / (std + 1e-8)
+        elif x.dim() == 3:
+            mean = self.mean.to(x.device).view(-1, 1, 1)
+            std = self.std.to(x.device).view(-1, 1, 1)
+            return (x - mean) / (std + 1e-8)
+        else:
+            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D")
+
+    def denormalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Reverse normalization using training statistics."""
+        if not self.is_fitted:
+            raise ValueError("Must call fit() before denormalize()")
+
+        if x.dim() == 4:
+            mean = self.mean.to(x.device).view(1, -1, 1, 1)
+            std = self.std.to(x.device).view(1, -1, 1, 1)
+            return x * std + mean
+        elif x.dim() == 3:
+            mean = self.mean.to(x.device).view(-1, 1, 1)
+            std = self.std.to(x.device).view(-1, 1, 1)
+            return x * std + mean
+        else:
+            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D")
+
+    def save(self, path: str):
+        """Save statistics to file."""
+        torch.save({
+            'mean': self.mean.cpu(),
+            'std': self.std.cpu(),
+            'per_channel_min': self.per_channel_min.cpu(),
+            'per_channel_max': self.per_channel_max.cpu(),
+            'n_samples': self.n_samples,
+            'is_fitted': self.is_fitted,
+            'timestamp': datetime.now().isoformat()
+        }, path)
+        logger.info(f"Normalization statistics saved to {path}")
+
+    def load(self, path: str):
+        """Load statistics from file."""
+        data = torch.load(path, map_location='cpu')
+        self.mean = data['mean']
+        self.std = data['std']
+        self.per_channel_min = data['per_channel_min']
+        self.per_channel_max = data['per_channel_max']
+        self.n_samples = data['n_samples']
+        self.is_fitted = data['is_fitted']
+        logger.info(f"Normalization statistics loaded from {path}")
+
 # =============================================================================
 # ASTRONOMY DOMAIN PROCESSOR
 # =============================================================================
@@ -3645,144 +3753,6 @@ class EnhancedBaseAutoencoder(BaseAutoencoder):
 
         return output
 
-class NormalizationStatistics:
-    """
-    Stores normalization statistics from training data.
-    These statistics are used for ALL images (training, validation, test, prediction)
-    to ensure consistent normalization across the entire pipeline.
-    """
-
-    def __init__(self):
-        self.mean = None
-        self.std = None
-        self.per_channel_min = None
-        self.per_channel_max = None
-        self.n_samples = 0
-        self.is_fitted = False
-        self.channel_order = None
-
-    def fit(self, dataloader: DataLoader, max_samples: int = 10000000) -> 'NormalizationStatistics':
-        """
-        Calculate statistics from training data only.
-
-        Args:
-            dataloader: DataLoader containing training images
-            max_samples: Maximum number of pixels to sample (prevents memory issues)
-        """
-        logger.info("Computing normalization statistics from training data...")
-
-        all_pixels = []
-        total_pixels = 0
-
-        for batch_idx, (images, _) in enumerate(tqdm(dataloader, desc="Computing stats")):
-            # Move to CPU for memory efficiency
-            images = images.cpu()
-            b, c, h, w = images.shape
-
-            # Reshape to [B*H*W, C]
-            pixels = images.permute(0, 2, 3, 1).reshape(-1, c)
-            all_pixels.append(pixels)
-            total_pixels += len(pixels)
-
-            # Stop if we've collected enough samples
-            if total_pixels >= max_samples:
-                logger.info(f"Sampled {total_pixels:,} pixels, stopping to avoid memory issues")
-                break
-
-        # Concatenate all pixels
-        all_pixels = torch.cat(all_pixels, dim=0)
-
-        # Calculate statistics
-        self.mean = all_pixels.mean(dim=0)
-        self.std = all_pixels.std(dim=0)
-        self.per_channel_min = all_pixels.min(dim=0)[0]
-        self.per_channel_max = all_pixels.max(dim=0)[0]
-        self.n_samples = len(all_pixels)
-        self.is_fitted = True
-
-        logger.info("=" * 60)
-        logger.info("Normalization statistics computed successfully:")
-        logger.info(f"  Mean per channel: {self.mean.tolist()}")
-        logger.info(f"  Std per channel:  {self.std.tolist()}")
-        logger.info(f"  Min per channel:  {self.per_channel_min.tolist()}")
-        logger.info(f"  Max per channel:  {self.per_channel_max.tolist()}")
-        logger.info(f"  Total pixels:     {self.n_samples:,}")
-        logger.info("=" * 60)
-
-        return self
-
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply training statistics to normalize ANY image.
-        This ensures consistent normalization across all images.
-        """
-        if not self.is_fitted:
-            raise ValueError("Must call fit() before normalize()")
-
-        # Handle different input dimensions
-        if x.dim() == 4:
-            mean = self.mean.to(x.device).view(1, -1, 1, 1)
-            std = self.std.to(x.device).view(1, -1, 1, 1)
-            return (x - mean) / (std + 1e-8)
-        elif x.dim() == 3:
-            mean = self.mean.to(x.device).view(-1, 1, 1)
-            std = self.std.to(x.device).view(-1, 1, 1)
-            return (x - mean) / (std + 1e-8)
-        else:
-            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D")
-
-    def denormalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Reverse normalization using training statistics"""
-        if not self.is_fitted:
-            raise ValueError("Must call fit() before denormalize()")
-
-        if x.dim() == 4:
-            mean = self.mean.to(x.device).view(1, -1, 1, 1)
-            std = self.std.to(x.device).view(1, -1, 1, 1)
-            return x * std + mean
-        elif x.dim() == 3:
-            mean = self.mean.to(x.device).view(-1, 1, 1)
-            std = self.std.to(x.device).view(-1, 1, 1)
-            return x * std + mean
-        else:
-            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D")
-
-    def save(self, path: str):
-        """Save statistics to file for later use in prediction"""
-        torch.save({
-            'mean': self.mean.cpu(),
-            'std': self.std.cpu(),
-            'per_channel_min': self.per_channel_min.cpu(),
-            'per_channel_max': self.per_channel_max.cpu(),
-            'n_samples': self.n_samples,
-            'is_fitted': self.is_fitted,
-            'timestamp': datetime.now().isoformat()
-        }, path)
-        logger.info(f"Normalization statistics saved to {path}")
-
-    def load(self, path: str):
-        """Load statistics from file"""
-        data = torch.load(path, map_location='cpu')
-        self.mean = data['mean']
-        self.std = data['std']
-        self.per_channel_min = data['per_channel_min']
-        self.per_channel_max = data['per_channel_max']
-        self.n_samples = data['n_samples']
-        self.is_fitted = data['is_fitted']
-        logger.info(f"Normalization statistics loaded from {path}")
-        logger.info(f"  Mean: {self.mean.tolist()}")
-        logger.info(f"  Std:  {self.std.tolist()}")
-
-    def get_statistics_summary(self) -> Dict:
-        """Get summary of statistics"""
-        return {
-            'is_fitted': self.is_fitted,
-            'n_samples': self.n_samples,
-            'mean': self.mean.tolist() if self.mean is not None else None,
-            'std': self.std.tolist() if self.std is not None else None,
-            'per_channel_min': self.per_channel_min.tolist() if self.per_channel_min is not None else None,
-            'per_channel_max': self.per_channel_max.tolist() if self.per_channel_max is not None else None,
-        }
 
 # =============================================================================
 # MODIFIED PREDICTION MANAGER with configurable normalization
@@ -5718,7 +5688,9 @@ def deterministic_train(
     history = defaultdict(list)
 
     def save_checkpoint(epoch, phase, loss, accuracy, is_best):
-        """Optimized checkpoint saving"""
+        """Save checkpoint with normalization mode and dataset statistics - COMPLETE FIX"""
+
+        # Create checkpoint dictionary
         checkpoint = {
             'epoch': epoch,
             'phase': phase,
@@ -5733,9 +5705,10 @@ def deterministic_train(
             'timestamp': datetime.now().isoformat(),
         }
 
-        # Save dataset statistics
+        # Save dataset statistics (both legacy and new format)
         if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
             if statistics_calculator.mean is not None and statistics_calculator.std is not None:
+                # Legacy format (for backward compatibility)
                 checkpoint['dataset_statistics'] = {
                     'mean': statistics_calculator.mean.cpu().tolist(),
                     'std': statistics_calculator.std.cpu().tolist(),
@@ -5747,6 +5720,49 @@ def deterministic_train(
                     'is_calculated': statistics_calculator.is_calculated
                 }
 
+                # NEW FORMAT: Save normalization statistics in the new format
+                dataset_name_lower = normalize_dataset_name(config.dataset_name)
+
+                # Create NormalizationStatistics object
+                from your_module import NormalizationStatistics  # Import the class
+                norm_stats = NormalizationStatistics()
+                norm_stats.mean = statistics_calculator.mean.cpu()
+                norm_stats.std = statistics_calculator.std.cpu()
+                norm_stats.per_channel_min = statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None
+                norm_stats.per_channel_max = statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None
+                norm_stats.n_samples = statistics_calculator.n_samples_used
+                norm_stats.is_fitted = True
+
+                # Save to multiple locations for easy access
+                stats_path_primary = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
+                stats_path_secondary = Path(config.data_dir) / f"{dataset_name_lower}_norm_stats.pt"
+
+                try:
+                    norm_stats.save(stats_path_primary)
+                    logger.info(f"Normalization statistics saved to {stats_path_primary}")
+                except Exception as e:
+                    logger.warning(f"Failed to save primary statistics: {e}")
+
+                try:
+                    stats_path_secondary.parent.mkdir(parents=True, exist_ok=True)
+                    norm_stats.save(stats_path_secondary)
+                    logger.info(f"Normalization statistics saved to {stats_path_secondary}")
+                except Exception as e:
+                    logger.warning(f"Failed to save secondary statistics: {e}")
+
+                # Also save legacy format for backward compatibility
+                stats_path_legacy = checkpoint_dir / 'dataset_statistics.pt'
+                torch.save({
+                    'mean': statistics_calculator.mean.cpu(),
+                    'std': statistics_calculator.std.cpu(),
+                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
+                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
+                    'n_samples_used': statistics_calculator.n_samples_used,
+                    'timestamp': datetime.now().isoformat()
+                }, stats_path_legacy)
+                logger.info(f"Legacy dataset statistics saved to {stats_path_legacy}")
+
+        # Add optional components if they exist
         if hasattr(model, 'classifier') and model.classifier is not None:
             checkpoint['classifier_state_dict'] = model.classifier.state_dict()
         if hasattr(model, 'cluster_centers') and model.cluster_centers is not None:
@@ -5754,8 +5770,11 @@ def deterministic_train(
         if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
             checkpoint['selected_feature_indices'] = model._selected_feature_indices.cpu()
 
+        # Save latest checkpoint
         torch.save(checkpoint, checkpoint_dir / 'latest.pt')
+        logger.info(f"Saved latest checkpoint (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
 
+        # Save best model only in Phase 2 when accuracy improves
         if phase == 2 and is_best:
             torch.save(checkpoint, checkpoint_dir / 'best.pt')
             nonlocal best_loss, best_accuracy, best_epoch, best_phase
@@ -5763,7 +5782,17 @@ def deterministic_train(
             best_accuracy = accuracy if accuracy else best_accuracy
             best_epoch = epoch
             best_phase = phase
-            logger.info(f"✓ Best model - Epoch {epoch+1}, Accuracy: {accuracy:.4f}")
+            logger.info(f"✓ Best model saved - Epoch {epoch+1}, Accuracy: {accuracy:.4f} ({accuracy:.2%})")
+
+            # Also save a copy with dataset name for easy loading
+            dataset_name_lower = normalize_dataset_name(config.dataset_name)
+            named_best_path = checkpoint_dir / f"{dataset_name_lower}_best.pt"
+            torch.save(checkpoint, named_best_path)
+            logger.info(f"✓ Named best model saved to {named_best_path}")
+        elif phase == 1:
+            logger.info(f"Phase 1 checkpoint saved (not eligible for best model)")
+        elif phase == 2 and not is_best:
+            logger.info(f"Phase 2 checkpoint saved (accuracy did not improve: {accuracy:.4f})")
 
     def train_phase(phase, epochs, start_epoch=0):
         nonlocal best_loss, best_accuracy, best_epoch, best_phase
@@ -5774,12 +5803,20 @@ def deterministic_train(
         patience_counter = 0
         patience_limit = 20 if phase == 2 else 15
 
+        # Track learning rate for logging
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # For tracking losses across epochs
+        epoch_train_losses = []
+        epoch_val_losses = []
+
         print(f"\n{Colors.BOLD}{'Phase ' + str(phase) + ' Vectorized Training'.center(80)}{Colors.ENDC}")
         if phase == 2:
-            print(f"{'Epoch':>6} | {'Train Loss':>10} | {'Val Loss':>10} | {'Train Acc':>9} | {'Val Acc':>9} | {'Best Acc':>9} | {'LR':>10}")
+            print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Val Loss':>12} | {'Train Acc':>10} | {'Val Acc':>10} | {'Best Acc':>10} | {'LR':>12}")
+            print(f"{Colors.BOLD}{'-'*90}{Colors.ENDC}")
         else:
-            print(f"{'Epoch':>6} | {'Train Loss':>10} | {'Val Loss':>10} | {'LR':>12}")
-        print(f"{Colors.BOLD}{'-'*90 if phase == 2 else '-'*80}{Colors.ENDC}")
+            print(f"{'Epoch':>6} | {'Train Loss':>12} | {'Val Loss':>12} | {'LR':>12}")
+            print(f"{Colors.BOLD}{'-'*80}{Colors.ENDC}")
 
         for epoch_offset in range(epochs):
             epoch = start_epoch + epoch_offset
@@ -5788,11 +5825,16 @@ def deterministic_train(
             train_acc = 0.0 if phase == 2 else None
             n_batches = 0
 
+            # Reset gradient accumulator
+            optimizer.zero_grad(set_to_none=True)
+
             # Use non-blocking data transfer and pin_memory
             pbar = tqdm(train_loader, desc=f"Phase {phase} Epoch {epoch+1}")
-            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
 
-            for inputs, labels in pbar:
+            # Gradient accumulation counter
+            accumulation_steps = 0
+
+            for batch_idx, (inputs, labels) in enumerate(pbar):
                 # Non-blocking transfer to GPU
                 inputs = inputs.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
@@ -5810,7 +5852,10 @@ def deterministic_train(
                         outputs = model(inputs_norm, labels)
                         loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, epoch)
 
+                    # Scale loss and backward
                     scaler.scale(loss).backward()
+
+                    # Update every batch (no accumulation for stability)
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
@@ -5828,15 +5873,48 @@ def deterministic_train(
                 if acc is not None:
                     train_acc += acc
                 n_batches += 1
-                pbar.set_postfix({'loss': f"{train_loss/n_batches:.4f}"})
 
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f"{train_loss/n_batches:.4f}",
+                    'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
+                })
+
+                # Diagnostic for first batch of first epoch
+                if phase == 1 and epoch == start_epoch and batch_idx == 0:
+                    logger.info("=" * 60)
+                    logger.info("DIAGNOSTIC: First Batch Statistics")
+                    logger.info(f"Input - mean: {inputs.mean().item():.6f}, std: {inputs.std().item():.6f}")
+                    logger.info(f"Input range: [{inputs.min().item():.6f}, {inputs.max().item():.6f}]")
+                    logger.info(f"Normalized - mean: {inputs_norm.mean().item():.6f}, std: {inputs_norm.std().item():.6f}")
+                    logger.info(f"Loss: {loss.item():.6f}")
+                    if 'reconstruction' in outputs:
+                        logger.info(f"Reconstruction - mean: {outputs['reconstruction'].mean().item():.6f}, std: {outputs['reconstruction'].std().item():.6f}")
+                    logger.info("=" * 60)
+
+            # Calculate averages for this epoch
             avg_train_loss = train_loss / n_batches
             avg_train_acc = train_acc / n_batches if train_acc is not None else None
+            epoch_train_losses.append(avg_train_loss)
+
+            # Validation phase
+            val_loss = None
+            val_acc = None
 
             if val_loader:
                 val_loss, val_acc = validate(val_loader, model, phase)
-                scheduler.step(val_loss)
+                epoch_val_losses.append(val_loss)
 
+                # Step scheduler with validation loss
+                if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
+
+                # Get current learning rate after scheduler step
+                current_lr = optimizer.param_groups[0]['lr']
+
+                # Phase 2: Track accuracy
                 if phase == 2 and val_acc is not None:
                     is_better = val_acc > phase_best_accuracy
                     if is_better:
@@ -5844,23 +5922,36 @@ def deterministic_train(
                         phase_best_loss = val_loss
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=True)
                         patience_counter = 0
+                        logger.info(f"  ✓ New best accuracy: {val_acc:.4f} ({val_acc:.2%})")
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+                        if patience_counter % 5 == 0:
+                            logger.info(f"  No improvement for {patience_counter} epochs. Best: {phase_best_accuracy:.4f}")
 
-                    print(f"{epoch+1:6d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {avg_train_acc:9.2%} | {val_acc:9.2%} | {phase_best_accuracy:9.2%} | {optimizer.param_groups[0]['lr']:10.2e}")
+                    # Print epoch summary
+                    print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | "
+                          f"{avg_train_acc:9.2%} | {val_acc:9.2%} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
                 else:
+                    # Phase 1: Track loss
                     is_better = val_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = val_loss
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
                         patience_counter = 0
+                        if val_loss < best_loss:
+                            best_loss = val_loss
+                        logger.info(f"  ✓ Loss improved to {val_loss:.6f}")
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
+                        if patience_counter % 5 == 0:
+                            logger.info(f"  No improvement for {patience_counter} epochs. Best loss: {phase_best_loss:.6f}")
 
-                    print(f"{epoch+1:6d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {optimizer.param_groups[0]['lr']:12.2e}")
+                    # Print epoch summary
+                    print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | {current_lr:12.2e}")
             else:
+                # No validation loader - use training metrics
                 if phase == 2 and avg_train_acc is not None:
                     is_better = avg_train_acc > phase_best_accuracy
                     if is_better:
@@ -5872,12 +5963,22 @@ def deterministic_train(
                         best_epoch = epoch
                         best_phase = phase
                         patience_counter = 0
+                        logger.info(f"  ✓ New best accuracy: {avg_train_acc:.4f} ({avg_train_acc:.2%})")
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
 
-                    print(f"{epoch+1:6d} | {avg_train_loss:10.4f} | {'N/A':>10} | {avg_train_acc:9.2%} | N/A | {phase_best_accuracy:9.2%} | {optimizer.param_groups[0]['lr']:10.2e}")
+                    # Step scheduler with training loss
+                    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(avg_train_loss)
+                    else:
+                        scheduler.step()
+                    current_lr = optimizer.param_groups[0]['lr']
+
+                    print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {'N/A':>12} | "
+                          f"{avg_train_acc:9.2%} | {'N/A':>9} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
                 else:
+                    # Phase 1 without validation
                     is_better = avg_train_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = avg_train_loss
@@ -5885,12 +5986,21 @@ def deterministic_train(
                         patience_counter = 0
                         if avg_train_loss < best_loss:
                             best_loss = avg_train_loss
+                        logger.info(f"  ✓ Loss improved to {avg_train_loss:.6f}")
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
 
-                    print(f"{epoch+1:6d} | {avg_train_loss:10.4f} | {'N/A':>10} | {optimizer.param_groups[0]['lr']:12.2e}")
+                    # Step scheduler with training loss
+                    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(avg_train_loss)
+                    else:
+                        scheduler.step()
+                    current_lr = optimizer.param_groups[0]['lr']
 
+                    print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {'N/A':>12} | {current_lr:12.2e}")
+
+            # Record history
             history['train_loss'].append(avg_train_loss)
             if avg_train_acc:
                 history['train_acc'].append(avg_train_acc)
@@ -5898,16 +6008,37 @@ def deterministic_train(
                 history['val_loss'].append(val_loss)
                 if val_acc:
                     history['val_acc'].append(val_acc)
-            history['lr'].append(optimizer.param_groups[0]['lr'])
+            history['lr'].append(current_lr)
 
+            # Early stopping check
             if patience_counter >= patience_limit:
-                print(f"\n{Colors.YELLOW}Early stopping{Colors.ENDC}")
+                print(f"\n{Colors.YELLOW}{'='*60}{Colors.ENDC}")
+                print(f"{Colors.YELLOW}Early stopping triggered after {patience_counter} epochs without improvement{Colors.ENDC}")
+                print(f"{Colors.YELLOW}Best loss: {phase_best_loss:.6f}{Colors.ENDC}")
+                if phase == 2:
+                    print(f"{Colors.YELLOW}Best accuracy: {phase_best_accuracy:.2%}{Colors.ENDC}")
+                print(f"{Colors.YELLOW}{'='*60}{Colors.ENDC}")
                 break
 
+            # Optional: Adjust learning rate if loss plateaus (additional safeguard)
+            if phase == 1 and epoch > 10:
+                recent_losses = epoch_train_losses[-5:]
+                if len(recent_losses) >= 5 and all(abs(recent_losses[i] - recent_losses[i-1]) < 0.001 for i in range(1, 5)):
+                    # Loss has plateaued, reduce learning rate
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] *= 0.8
+                    logger.info(f"  Loss plateau detected, reducing LR to {optimizer.param_groups[0]['lr']:.2e}")
+
+        # Phase completion summary
+        print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
         if phase == 1:
             logger.info(f"Phase 1 completed. Best loss: {phase_best_loss:.6f}")
+            print(f"{Colors.GREEN}Phase 1 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
         else:
-            logger.info(f"Phase 2 completed. Best accuracy: {phase_best_accuracy:.2%}")
+            logger.info(f"Phase 2 completed. Best accuracy: {phase_best_accuracy:.2%} at loss: {phase_best_loss:.6f}")
+            print(f"{Colors.GREEN}Phase 2 Best Accuracy: {phase_best_accuracy:.2%}{Colors.ENDC}")
+            print(f"{Colors.GREEN}Phase 2 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
+        print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
 
     epochs_phase1 = config.epochs // 2
     epochs_phase2 = config.epochs // 2
@@ -11088,8 +11219,8 @@ def verify_end_to_end_determinism(args) -> bool:
 
 if __name__ == '__main__':
     print("""
-    ===============================================Examples===========================================
-    # Train (with resume capability)
+===============================================Examples===========================================
+# Train (with resume capability)
 python cdbnn.py --mode train --data_name galaxy --data_type custom --data_path Images/Galaxy/
 
 # Predict with custom output
@@ -11097,5 +11228,8 @@ python cdbnn.py --mode predict --data_name galaxy --data_type custom --data_path
 
 # Extract features
 python cdbnn.py --mode extract --data_name galaxy --data_type custom --data_path Images/Galaxy/
+
+# With per-image normalisation (shape and structure based classification, not good for contrast based)
+python cdbnn.py --mode train --data_name galaxy --data_type custom --data_path Data/Galaxies/ --per_image_norm
 ===================================================================================================""")
     sys.exit(main())
