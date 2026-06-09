@@ -3790,10 +3790,17 @@ class PredictionManager:
 
         self.model = None
         self.dataset_statistics = None
-        self.normalization_stats = None  # NEW: Store training normalization statistics
+
+        # Initialize normalization statistics attributes
+        self.norm_mean = None
+        self.norm_std = None
+        self.norm_per_channel_min = None
+        self.norm_per_channel_max = None
+        self.norm_n_samples = 0
+        self.norm_is_fitted = False
 
         self._load_model()
-        self._load_normalization_stats()  # NEW: Load statistics separately
+        self._load_normalization_stats()
 
         if self.model is not None:
             self.model.set_deterministic_mode(enabled=True, single_image=True)
@@ -3811,8 +3818,8 @@ class PredictionManager:
         stats_paths = [
             self.original_checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt",
             self.saving_checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt",
-            self.original_checkpoint_dir / 'normalization_stats.pt',
-            self.saving_checkpoint_dir / 'normalization_stats.pt',
+            self.original_checkpoint_dir / 'dataset_statistics.pt',
+            self.saving_checkpoint_dir / 'dataset_statistics.pt',
             self.original_data_dir / f"{dataset_name_lower}_norm_stats.pt",
             self.saving_data_dir / f"{dataset_name_lower}_norm_stats.pt",
         ]
@@ -3820,10 +3827,24 @@ class PredictionManager:
         for stats_path in stats_paths:
             if stats_path.exists():
                 try:
-                    self.normalization_stats = NormalizationStatistics()
-                    self.normalization_stats.load(stats_path)
-                    logger.info(f"Loaded normalization statistics from {stats_path}")
-                    return
+                    stats_dict = torch.load(stats_path, map_location='cpu')
+
+                    # Store statistics as simple tensors (no extra class)
+                    if 'is_fitted' in stats_dict or ('mean' in stats_dict and 'std' in stats_dict):
+                        self.norm_mean = stats_dict['mean']
+                        self.norm_std = stats_dict['std']
+                        self.norm_per_channel_min = stats_dict.get('per_channel_min')
+                        self.norm_per_channel_max = stats_dict.get('per_channel_max')
+                        self.norm_n_samples = stats_dict.get('n_samples', stats_dict.get('n_samples_used', 0))
+                        self.norm_is_fitted = True
+
+                        logger.info(f"Loaded normalization statistics from {stats_path}")
+                        logger.info(f"  Mean: {self.norm_mean.tolist()}")
+                        logger.info(f"  Std:  {self.norm_std.tolist()}")
+                        return
+                    else:
+                        logger.warning(f"Unknown statistics format in {stats_path}")
+                        continue
                 except Exception as e:
                     logger.warning(f"Failed to load statistics from {stats_path}: {e}")
 
@@ -3834,8 +3855,28 @@ class PredictionManager:
             logger.warning("Dataset-wide normalization requires training statistics.")
             logger.warning("Please retrain the model to save statistics, or use --per_image_norm")
             logger.warning("=" * 60)
+            self.norm_is_fitted = False
         else:
             logger.info("Using per-image normalization - no statistics needed")
+            self.norm_is_fitted = False
+
+    def _normalize_with_training_stats(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize using training statistics (consistent across all images).
+        This is the recommended approach for medical, astronomy, and scientific applications.
+        """
+        # Check if we have loaded statistics
+        if self.norm_is_fitted and self.norm_mean is not None and self.norm_std is not None:
+            mean = self.norm_mean.to(x.device).view(1, -1, 1, 1)
+            std = self.norm_std.to(x.device).view(1, -1, 1, 1)
+            return (x - mean) / (std + 1e-8)
+        elif self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
+            # Fallback to legacy dataset_statistics
+            return self.dataset_statistics.normalize(x)
+        else:
+            # Last resort: use per-image normalization
+            logger.warning("No training statistics available, falling back to per-image normalization")
+            return self._per_image_normalize(x)
 
     def _per_image_normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Per-image Z-score normalization for prediction (amplitude-invariant)"""
@@ -3854,20 +3895,25 @@ class PredictionManager:
         else:
             return x
 
-    def _normalize_with_training_stats(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize using training statistics (consistent across all images).
-        This is the recommended approach for medical, astronomy, and scientific applications.
-        """
-        if self.normalization_stats is not None and self.normalization_stats.is_fitted:
-            return self.normalization_stats.normalize(x)
+    def _verify_frozen_statistics(self):
+        """Verify that frozen statistics are loaded and valid"""
+        if self.norm_is_fitted and self.norm_mean is not None and self.norm_std is not None:
+            logger.info("=" * 60)
+            logger.info("TRAINING STATISTICS VERIFIED:")
+            logger.info(f"  Mean per channel: {self.norm_mean.tolist()}")
+            logger.info(f"  Std per channel:  {self.norm_std.tolist()}")
+            logger.info("=" * 60)
+            return True
         elif self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
-            # Fallback to legacy dataset_statistics
-            return self.dataset_statistics.normalize(x)
+            logger.info("=" * 60)
+            logger.info("LEGACY STATISTICS VERIFIED:")
+            logger.info(f"  Mean per channel: {self.dataset_statistics.mean.tolist()}")
+            logger.info(f"  Std per channel:  {self.dataset_statistics.std.tolist()}")
+            logger.info("=" * 60)
+            return True
         else:
-            # Last resort: use per-image normalization
-            logger.warning("No training statistics available, falling back to per-image normalization")
-            return self._per_image_normalize(x)
+            logger.error("No frozen dataset statistics found!")
+            return False
 
     def _load_model(self):
         """Load model with dataset statistics embedded in checkpoint"""
@@ -4145,9 +4191,9 @@ class PredictionManager:
         else:
             logger.info("Normalization: TRAINING STATISTICS (consistent across all images)")
             logger.info("  This preserves absolute intensity relationships")
-            if self.normalization_stats and self.normalization_stats.is_fitted:
-                logger.info(f"  Training mean: {self.normalization_stats.mean.tolist()}")
-                logger.info(f"  Training std:  {self.normalization_stats.std.tolist()}")
+            if self.norm_is_fitted and self.norm_mean is not None:
+                logger.info(f"  Training mean: {self.norm_mean.tolist()}")
+                logger.info(f"  Training std:  {self.norm_std.tolist()}")
             elif self.dataset_statistics and self.dataset_statistics.is_calculated:
                 logger.info(f"  Training mean (legacy): {self.dataset_statistics.mean.tolist()}")
                 logger.info(f"  Training std (legacy):  {self.dataset_statistics.std.tolist()}")
@@ -4159,7 +4205,7 @@ class PredictionManager:
 
         # Verify statistics if using dataset-wide normalization
         if not use_per_image_norm:
-            has_stats = (self.normalization_stats and self.normalization_stats.is_fitted) or \
+            has_stats = (self.norm_is_fitted and self.norm_mean is not None) or \
                        (self.dataset_statistics and self.dataset_statistics.is_calculated)
             if not has_stats:
                 logger.error("Cannot predict with dataset-wide normalization - statistics missing!")
@@ -4212,7 +4258,6 @@ class PredictionManager:
                 img = PILImage.new('RGB', (256, 256), (0, 0, 0))
 
             # Convert to RGB if needed (but preserve grayscale for medical/astronomy)
-            # Note: For grayscale medical images, we want to keep them as single channel
             if img.mode != 'RGB' and img.mode != 'L':
                 img = img.convert('RGB')
 
@@ -4344,26 +4389,6 @@ class PredictionManager:
         logger.info("=" * 70)
 
         return all_predictions_dict
-
-    def _verify_frozen_statistics(self):
-        """Verify that frozen statistics are loaded and valid"""
-        if self.normalization_stats is not None and self.normalization_stats.is_fitted:
-            logger.info("=" * 60)
-            logger.info("TRAINING STATISTICS VERIFIED:")
-            logger.info(f"  Mean per channel: {self.normalization_stats.mean.tolist()}")
-            logger.info(f"  Std per channel:  {self.normalization_stats.std.tolist()}")
-            logger.info("=" * 60)
-            return True
-        elif self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
-            logger.info("=" * 60)
-            logger.info("LEGACY STATISTICS VERIFIED:")
-            logger.info(f"  Mean per channel: {self.dataset_statistics.mean.tolist()}")
-            logger.info(f"  Std per channel:  {self.dataset_statistics.std.tolist()}")
-            logger.info("=" * 60)
-            return True
-        else:
-            logger.error("No frozen dataset statistics found!")
-            return False
 
     def _save_predictions_deterministic(self, predictions: Dict, output_csv: str,
                                         targets: Optional[List[str]] = None,
@@ -5720,32 +5745,33 @@ def deterministic_train(
                     'is_calculated': statistics_calculator.is_calculated
                 }
 
-                # NEW FORMAT: Save normalization statistics in the new format
+                # NEW FORMAT: Save normalization statistics directly without external class
                 dataset_name_lower = normalize_dataset_name(config.dataset_name)
-
-                # Create NormalizationStatistics object
-                from your_module import NormalizationStatistics  # Import the class
-                norm_stats = NormalizationStatistics()
-                norm_stats.mean = statistics_calculator.mean.cpu()
-                norm_stats.std = statistics_calculator.std.cpu()
-                norm_stats.per_channel_min = statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None
-                norm_stats.per_channel_max = statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None
-                norm_stats.n_samples = statistics_calculator.n_samples_used
-                norm_stats.is_fitted = True
 
                 # Save to multiple locations for easy access
                 stats_path_primary = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
                 stats_path_secondary = Path(config.data_dir) / f"{dataset_name_lower}_norm_stats.pt"
 
+                # Create statistics dictionary (simpler format)
+                stats_dict = {
+                    'mean': statistics_calculator.mean.cpu(),
+                    'std': statistics_calculator.std.cpu(),
+                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
+                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
+                    'n_samples': statistics_calculator.n_samples_used,
+                    'is_fitted': True,
+                    'timestamp': datetime.now().isoformat()
+                }
+
                 try:
-                    norm_stats.save(stats_path_primary)
+                    torch.save(stats_dict, stats_path_primary)
                     logger.info(f"Normalization statistics saved to {stats_path_primary}")
                 except Exception as e:
                     logger.warning(f"Failed to save primary statistics: {e}")
 
                 try:
                     stats_path_secondary.parent.mkdir(parents=True, exist_ok=True)
-                    norm_stats.save(stats_path_secondary)
+                    torch.save(stats_dict, stats_path_secondary)
                     logger.info(f"Normalization statistics saved to {stats_path_secondary}")
                 except Exception as e:
                     logger.warning(f"Failed to save secondary statistics: {e}")
