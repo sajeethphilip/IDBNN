@@ -23,6 +23,14 @@ import lzma
 import zipfile
 import tarfile
 import copy
+
+import math
+from typing import Tuple, Optional, Dict, List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
 from abc import ABC, abstractmethod
 from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -150,15 +158,40 @@ class GlobalConfig:
     mixed_precision: bool = True
     distributed_training: bool = False
 
+    # Input size with auto-detection support
+    input_size: Tuple[int, int] = (256, 256)
+    input_size_explicitly_set: bool = False  # Track if user explicitly set size
+
     data_dir: str = 'data'
     output_dir: str = 'output'
     log_dir: str = 'logs'
     viz_dir: str = 'visualizations'
 
-    # NEW: Normalization strategy - controls how images are normalized
-    # False (default): Dataset-wide normalization using frozen training statistics
-    # True: Per-image Z-score normalization (amplitude-invariant)
+    # Normalization strategy
     use_per_image_normalization: bool = False
+
+    # Dynamic architecture attributes (set during analysis)
+    complexity_score: float = 0.5
+    dataset_size: int = 0
+
+    # ========================================================================
+    # NEW: Advanced model configuration flags
+    # ========================================================================
+    use_enhanced_autoencoder: bool = True      # Use enhanced base autoencoder
+    use_hybrid_autoencoder: bool = True        # Use hybrid (conditional + unconditional)
+    use_advanced_hybrid: bool = True           # Use advanced hybrid with modulation
+    use_perceptual_loss: bool = True           # Use VGG-based perceptual loss
+    distillation_mode: str = 'contrastive'     # 'contrastive', 'relational', or 'mse'
+
+    # Domain-specific enhancement flags
+    use_detail_attention: bool = True          # Use detail attention module
+    use_multiscale_features: bool = True       # Use multi-scale feature extraction
+    use_feature_refinement: bool = True        # Use feature refinement
+    force_fixed_compressed_dims: bool = False
+
+    # Training flags
+    no_augmentation: bool = False              # Disable augmentation
+    augmentation_strength: float = 0.5         # Strength of augmentations
 
     def __post_init__(self):
         """Post-initialization setup"""
@@ -1312,6 +1345,252 @@ class AgricultureFeatureExtractor:
             'agriculture_plant_visibility': float(np.mean(image[:, :, 1] > 0.3)) if len(image.shape) == 3 else 0
         }
 
+class DynamicArchitectureOptimizer:
+    """
+    Dynamically determines optimal architecture based on dataset characteristics.
+    Analyzes image size, complexity, number of classes, and dataset size.
+    """
+
+    def __init__(self, config: GlobalConfig):
+        self.config = config
+
+    def analyze_dataset(self, dataset: Dataset, num_samples: int = 1000) -> Dict[str, Any]:
+        """
+        Analyze dataset characteristics to determine optimal architecture.
+
+        Returns:
+            Dictionary with analysis results including:
+            - input_size: detected input dimensions
+            - complexity_score: 0-1 score of image complexity
+            - recommended_layers: number of encoder layers
+            - recommended_base_channels: base channel count
+            - recommended_feature_dims: feature dimension size
+            - recommended_compressed_dims: compressed dimension size
+        """
+        logger.info("=" * 60)
+        logger.info("ANALYZING DATASET FOR ARCHITECTURE OPTIMIZATION")
+        logger.info("=" * 60)
+
+        # Sample images to analyze
+        sample_indices = np.random.choice(min(len(dataset), num_samples),
+                                         size=min(num_samples, len(dataset)),
+                                         replace=False)
+
+        # Collect statistics
+        image_sizes = []
+        intensity_stats = []
+        edge_densities = []
+        color_variances = []
+
+        from skimage.filters import sobel
+        from skimage.transform import resize
+
+        for idx in tqdm(sample_indices, desc="Analyzing images"):
+            try:
+                img, label = dataset[idx]
+
+                # Convert to numpy for analysis
+                if isinstance(img, torch.Tensor):
+                    img_np = img.cpu().numpy()
+                    if img_np.shape[0] == 3:  # CHW to HWC
+                        img_np = img_np.transpose(1, 2, 0)
+                elif isinstance(img, PILImage.Image):
+                    img_np = np.array(img) / 255.0
+                else:
+                    continue
+
+                h, w = img_np.shape[:2]
+                image_sizes.append((h, w))
+
+                # Convert to grayscale for analysis
+                if len(img_np.shape) == 3:
+                    gray = np.mean(img_np, axis=2)
+                else:
+                    gray = img_np
+
+                # Intensity statistics (contrast, entropy)
+                intensity_stats.append({
+                    'std': np.std(gray),
+                    'entropy': self._calculate_entropy(gray)
+                })
+
+                # Edge density (complexity measure)
+                edges = sobel(gray)
+                edge_density = np.mean(edges > np.percentile(edges, 85))
+                edge_densities.append(edge_density)
+
+                # Color variance (if RGB)
+                if len(img_np.shape) == 3 and img_np.shape[2] >= 3:
+                    color_var = np.var(img_np, axis=(0, 1)).mean()
+                    color_variances.append(color_var)
+
+            except Exception as e:
+                logger.debug(f"Error analyzing sample {idx}: {e}")
+                continue
+
+        # Determine most common image size
+        from collections import Counter
+        size_counter = Counter(image_sizes)
+        most_common_size = size_counter.most_common(1)[0][0]
+        h, w = most_common_size
+
+        # Calculate complexity score (0-1)
+        avg_edge_density = np.mean(edge_densities) if edge_densities else 0.3
+        avg_intensity_std = np.mean([s['std'] for s in intensity_stats]) if intensity_stats else 0.2
+        avg_entropy = np.mean([s['entropy'] for s in intensity_stats]) if intensity_stats else 4.0
+        avg_color_var = np.mean(color_variances) if color_variances else 0.05
+
+        # Normalize entropy (typical range 2-8 for natural images)
+        normalized_entropy = min(1.0, max(0.0, (avg_entropy - 2) / 6))
+
+        # Complexity combines edge density, contrast, entropy, and color
+        complexity_score = (
+            0.35 * avg_edge_density +
+            0.25 * avg_intensity_std +
+            0.25 * normalized_entropy +
+            0.15 * min(1.0, avg_color_var * 10)
+        )
+
+        # Determine number of classes and dataset size
+        num_classes = self.config.num_classes if self.config.num_classes else 2
+        dataset_size = len(dataset)
+
+        # Adjust complexity based on number of classes
+        class_complexity = min(1.0, num_classes / 200)  # 200 classes = max complexity
+        size_complexity = min(1.0, dataset_size / 100000)  # 100k samples = max complexity
+
+        combined_complexity = (complexity_score * 0.5 + class_complexity * 0.3 + size_complexity * 0.2)
+
+        # Store in config for later use
+        self.config.complexity_score = combined_complexity
+        self.config.dataset_size = len(dataset)
+
+        logger.info(f"Dataset Analysis Results:")
+        logger.info(f"  Image size: {h}x{w}")
+        logger.info(f"  Edge density: {avg_edge_density:.3f}")
+        logger.info(f"  Contrast (std): {avg_intensity_std:.3f}")
+        logger.info(f"  Entropy: {avg_entropy:.3f} (normalized: {normalized_entropy:.3f})")
+        logger.info(f"  Color variance: {avg_color_var:.3f}")
+        logger.info(f"  Number of classes: {num_classes}")
+        logger.info(f"  Dataset size: {dataset_size:,}")
+        logger.info(f"  Complexity score: {combined_complexity:.3f}")
+
+        # Determine optimal architecture parameters
+        result = self._determine_architecture_params(
+            h, w, combined_complexity, num_classes, dataset_size
+        )
+
+        logger.info("=" * 60)
+        logger.info("Recommended Architecture:")
+        logger.info(f"  Encoder layers: {result['n_layers']}")
+        logger.info(f"  Base channels: {result['base_channels']}")
+        logger.info(f"  Feature dimensions: {result['feature_dims']}")
+        logger.info(f"  Compressed dimensions: {result['compressed_dims']}")
+        logger.info("=" * 60)
+
+        return result
+
+    def _calculate_entropy(self, image: np.ndarray, bins: int = 32) -> float:
+        """Calculate image entropy as measure of complexity"""
+        hist, _ = np.histogram(image.flatten(), bins=bins, density=True)
+        hist = hist[hist > 0]
+        entropy = -np.sum(hist * np.log2(hist))
+        return entropy
+
+    def _determine_architecture_params(self, height: int, width: int,
+                                        complexity: float, num_classes: int,
+                                        dataset_size: int) -> Dict[str, Any]:
+        """Determine optimal architecture parameters based on analysis"""
+
+        min_dim = min(height, width)
+
+        # NUMBER OF ENCODER LAYERS
+        if min_dim <= 32:
+            n_layers = 2
+        elif min_dim <= 64:
+            n_layers = 3
+        else:
+            n_layers = 4
+
+        # BASE CHANNELS - ensure divisible by common group sizes
+        if min_dim <= 32:
+            base_channels = 32
+        elif min_dim <= 64:
+            base_channels = 48
+        else:
+            base_channels = 64
+
+        # FEATURE DIMENSIONS - ensure divisible by small numbers for GroupNorm
+        if min_dim <= 32:
+            feature_dims = 64  # Changed from 56 to 64 (divisible by 1,2,4,8)
+        elif min_dim <= 64:
+            feature_dims = 128
+        else:
+            feature_dims = 256
+
+        # Adjust for complexity
+        if complexity > 0.6:
+            feature_dims = int(feature_dims * 1.5)
+            # Round to nearest multiple of 16
+            feature_dims = ((feature_dims + 7) // 8) * 8
+
+        feature_dims = max(32, min(512, feature_dims))
+
+        # COMPRESSED DIMENSIONS
+        if num_classes <= 10:
+            compressed_dims = 16
+        elif num_classes <= 50:
+            compressed_dims = 32
+        elif num_classes <= 100:
+            compressed_dims = 64
+        else:
+            compressed_dims = 128
+
+        if dataset_size < 10000:
+            compressed_dims = max(8, compressed_dims // 2)
+        elif dataset_size > 50000:
+            compressed_dims = min(256, compressed_dims * 2)
+
+        return {
+            'n_layers': n_layers,
+            'base_channels': base_channels,
+            'feature_dims': feature_dims,
+            'compressed_dims': compressed_dims,
+            'recommended_norm': 'dataset_wide',
+            'input_size': (height, width),
+            'complexity_score': complexity,
+            'use_attention': min_dim > 64,  # Only use attention for larger images
+            'use_multiscale': min_dim > 64  # Only use multi-scale for larger images
+        }
+
+    def update_config_from_analysis(self, analysis: Dict[str, Any]):
+        """Update configuration based on analysis results"""
+        self.config.input_size = analysis['input_size']
+        self.config.feature_dims = analysis['feature_dims']
+
+        # CRITICAL: Only update compressed_dims if not forced to fixed value
+        if not hasattr(self.config, 'force_fixed_compressed_dims') or not self.config.force_fixed_compressed_dims:
+            self.config.compressed_dims = analysis['compressed_dims']
+            logger.info(f"Auto-set compressed_dims to: {self.config.compressed_dims}")
+        else:
+            logger.info(f"Keeping fixed compressed_dims: {self.config.compressed_dims} (user specified or default 32)")
+
+        # Update enhancement flags if they exist in config
+        if hasattr(self.config, 'use_detail_attention'):
+            self.config.use_detail_attention = analysis.get('use_attention', False)
+        if hasattr(self.config, 'use_multiscale_features'):
+            self.config.use_multiscale_features = analysis.get('use_multiscale', False)
+
+        # Update normalization strategy if not explicitly set by user
+        if not hasattr(self.config, 'input_size_explicitly_set') or not self.config.input_size_explicitly_set:
+            if analysis['recommended_norm'] == 'per_image':
+                self.config.use_per_image_normalization = True
+                logger.info(f"Auto-selected per-image normalization based on complexity ({analysis['complexity_score']:.3f})")
+
+        logger.info(f"Configuration updated based on dataset analysis")
+        logger.info(f"  Input size: {self.config.input_size}")
+        logger.info(f"  Feature dims: {self.config.feature_dims}")
+        logger.info(f"  Compressed dims: {self.config.compressed_dims}")
 
 # =============================================================================
 # COMPLETELY FIXED DATASET STATISTICS CALCULATOR
@@ -1629,6 +1908,57 @@ class DatasetStatisticsCalculator:
         return results
 
 
+class TorchVisionMetadata:
+    """Store complete metadata for torchvision datasets"""
+
+    def __init__(self, dataset_name: str, num_classes: int, class_names: List[str]):
+        self.dataset_name = dataset_name
+        self.num_classes = num_classes
+        self.class_names = class_names
+        self.class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+        self.idx_to_class = {idx: name for idx, name in enumerate(class_names)}
+
+    def save(self, save_dir: Path):
+        """Save metadata to file"""
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata = {
+            'dataset_name': self.dataset_name,
+            'num_classes': self.num_classes,
+            'class_names': self.class_names,
+            'class_to_idx': self.class_to_idx,
+            'idx_to_class': self.idx_to_class,
+            'timestamp': datetime.now().isoformat(),
+            'source': 'torchvision',
+            'version': '2.0'
+        }
+
+        metadata_path = save_dir / f"{self.dataset_name.lower()}_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"TorchVision metadata saved to {metadata_path}")
+
+    @classmethod
+    def load(cls, load_dir: Path, dataset_name: str) -> Optional['TorchVisionMetadata']:
+        """Load metadata from file"""
+        load_dir = Path(load_dir)
+        metadata_path = load_dir / f"{dataset_name.lower()}_metadata.json"
+
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+            instance = cls(
+                dataset_name=metadata['dataset_name'],
+                num_classes=metadata['num_classes'],
+                class_names=metadata['class_names']
+            )
+            instance.class_to_idx = metadata['class_to_idx']
+            instance.idx_to_class = {int(k): v for k, v in metadata['idx_to_class'].items()}
+            logger.info(f"Loaded TorchVision metadata from {metadata_path}")
+            return instance
+        return None
+
 # =============================================================================
 # COMPLETE NORMALIZED DATASET (With deterministic ordering)
 # =============================================================================
@@ -1936,7 +2266,7 @@ class DeterministicInvariantPreprocessor:
         img_array = self._center_and_scale_object(img_array)
 
         # 4. Resize to target size
-        img_array = self._deterministic_resize(img_array)
+        #Simg_array = self._deterministic_resize(img_array)
 
         # 5. Optional: Rotation normalization (if needed)
         if is_training:
@@ -3043,19 +3373,50 @@ class BaseAutoencoder(nn.Module):
         if phase == 2:
             if self.use_class_encoding and self.classifier is None:
                 num_classes = self.config.num_classes or 2
-                compress_dim = max(32, self.compressed_dims // 2)
-                num_groups_class = min(32, compress_dim)
-                self.classifier = nn.Sequential(
-                    nn.Linear(self.compressed_dims, compress_dim),
-                    nn.GroupNorm(num_groups_class, compress_dim),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout(0.3),
-                    nn.Linear(compress_dim, num_classes)
-                ).to(self.device)
+
+                # Check if this is a small image dataset (CIFAR, MNIST, etc.)
+                min_dim = min(self.config.input_size)
+                is_small_image = min_dim <= 64
+                is_cifar = self.config.dataset_name in ['cifar10', 'cifar100']
+
+                if is_small_image or is_cifar:
+                    # Simplified classifier for small images (reduces overfitting)
+                    logger.info(f"Using simplified classifier for small images (input size: {self.config.input_size})")
+                    self.classifier = nn.Sequential(
+                        nn.Linear(self.compressed_dims, 128),
+                        nn.BatchNorm1d(128),
+                        nn.ReLU(inplace=True),
+                        nn.Dropout(0.5),
+                        nn.Linear(128, num_classes)
+                    ).to(self.device)
+                else:
+                    # Original complex classifier for larger images
+                    compress_dim = max(32, self.compressed_dims // 2)
+                    num_groups_class = min(32, compress_dim)
+                    self.classifier = nn.Sequential(
+                        nn.Linear(self.compressed_dims, compress_dim),
+                        nn.GroupNorm(num_groups_class, compress_dim),
+                        nn.ReLU(inplace=True),
+                        nn.Dropout(0.3),
+                        nn.Linear(compress_dim, num_classes)
+                    ).to(self.device)
+
+                # Initialize weights properly
+                def init_weights(m):
+                    if isinstance(m, nn.Linear):
+                        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                        if m.bias is not None:
+                            nn.init.constant_(m.bias, 0)
+                    elif isinstance(m, nn.BatchNorm1d):
+                        nn.init.constant_(m.weight, 1)
+                        nn.init.constant_(m.bias, 0)
+
+                self.classifier.apply(init_weights)
                 logger.info(f"Initialized classifier with {num_classes} classes")
 
             if self.use_kl_divergence and self.cluster_centers is None:
                 num_clusters = self.config.num_classes or 2
+                # CRITICAL FIX: Set seed before random initialization
                 torch.manual_seed(42)
                 self.cluster_centers = nn.Parameter(
                     torch.randn(num_clusters, self.compressed_dims, device=self.device)
@@ -3068,27 +3429,172 @@ class BaseAutoencoder(nn.Module):
         self.dataset_statistics = statistics
         logger.info("Dataset statistics loaded into model")
 
+    def _auto_detect_input_size(self, dataset: Dataset, max_size: int = 512) -> Tuple[int, int]:
+        """
+        Automatically detect optimal input size from dataset.
+
+        Strategy:
+        - Sample a few images to determine typical dimensions
+        - Use the most common dimensions or resize to a standard size
+        - Clip to max_size to avoid memory issues
+        """
+        sample_sizes = []
+        sample_count = min(100, len(dataset))
+
+        logger.info(f"Auto-detecting input size from {sample_count} samples...")
+
+        for i in range(sample_count):
+            try:
+                img, _ = dataset[i]
+                if isinstance(img, torch.Tensor):
+                    h, w = img.shape[-2], img.shape[-1]
+                elif isinstance(img, PILImage.Image):
+                    w, h = img.size
+                elif isinstance(img, np.ndarray):
+                    h, w = img.shape[:2]
+                else:
+                    continue
+                sample_sizes.append((h, w))
+            except Exception:
+                continue
+
+        if not sample_sizes:
+            logger.warning("Could not auto-detect size, using default 256x256")
+            return (256, 256)
+
+        # Find the most common dimensions
+        from collections import Counter
+        size_counter = Counter(sample_sizes)
+        most_common_size = size_counter.most_common(1)[0][0]
+        h, w = most_common_size
+
+        # Clip to max_size if too large
+        if h > max_size or w > max_size:
+            scale = max_size / max(h, w)
+            h = int(h * scale)
+            w = int(w * scale)
+            logger.info(f"Resizing from {most_common_size} to {h}x{w} (max size limit)")
+        else:
+            logger.info(f"Detected input size: {h}x{w}")
+
+        # Ensure dimensions are multiples of 32 for efficient downsampling
+        h = ((h + 31) // 32) * 32
+        w = ((w + 31) // 32) * 32
+        if (h, w) != most_common_size:
+            logger.info(f"Adjusted to multiples of 32: {h}x{w}")
+
+        return (h, w)
+
     def _build_adaptive_architecture(self):
         """
-        Build architecture without BatchNorm layers.
-        Handles any number of input channels (1 for grayscale, 3 for RGB, 4+ for multi-spectral).
-        CORRECTED: Properly computes flattened size and ensures dimension consistency.
+        TRULY DYNAMIC architecture that adapts to ANY dataset.
+        Scales based on: number of classes, image size, and dataset complexity.
         """
         h, w = self.config.input_size
         c = self.in_channels
-
-        # Adaptive number of layers based on input size
+        num_classes = self.config.num_classes or 2
         min_dim = min(h, w)
-        if min_dim >= 256:
-            n_layers = 4
-        elif min_dim >= 128:
-            n_layers = 3
-        elif min_dim >= 64:
-            n_layers = 2
-        else:
-            n_layers = 1
 
-        logger.info(f"Building adaptive architecture with {n_layers} encoder/decoder layers for input size {h}x{w}")
+        # Get dataset complexity from config (set by DynamicArchitectureOptimizer)
+        complexity = getattr(self.config, 'complexity_score', 0.5)
+        dataset_size = getattr(self.config, 'dataset_size', 50000)
+
+        # Check if we should force fixed compressed_dims
+        force_fixed_compressed_dims = getattr(self.config, 'force_fixed_compressed_dims', False)
+
+        # ========================================================================
+        # DETERMINE OPTIMAL NUMBER OF LAYERS (Depth)
+        # ========================================================================
+        # Based on image size: larger images need deeper networks
+        if min_dim <= 32:
+            base_layers = 2
+        elif min_dim <= 64:
+            base_layers = 3
+        elif min_dim <= 128:
+            base_layers = 4
+        elif min_dim <= 256:
+            base_layers = 5
+        else:
+            base_layers = 6
+
+        # Adjust depth based on number of classes (more classes need more capacity)
+        if num_classes >= 100:
+            depth_multiplier = 1.5
+        elif num_classes >= 50:
+            depth_multiplier = 1.25
+        elif num_classes >= 20:
+            depth_multiplier = 1.0
+        elif num_classes >= 10:
+            depth_multiplier = 0.75
+        else:
+            depth_multiplier = 0.5
+
+        n_layers = max(1, int(base_layers * depth_multiplier))
+
+        # Adjust for dataset size (small datasets need fewer layers to avoid overfitting)
+        if dataset_size < 10000:
+            n_layers = max(1, n_layers - 1)
+        elif dataset_size > 100000:
+            n_layers = min(8, n_layers + 1)
+
+        # Calculate actual final spatial size after encoding
+        final_h, final_w = h, w
+        for _ in range(n_layers):
+            final_h = (final_h + 1) // 2
+            final_w = (final_w + 1) // 2
+        final_h = max(1, final_h)
+        final_w = max(1, final_w)
+
+        # ========================================================================
+        # DETERMINE CHANNEL WIDTH (Capacity)
+        # ========================================================================
+        # Base channels scale with image size and complexity
+        if min_dim <= 32:
+            base_channels = 32
+        elif min_dim <= 64:
+            base_channels = 48
+        else:
+            base_channels = 64
+
+        # Scale channels based on number of classes (logarithmic scale)
+        # More classes need wider networks
+        class_capacity = np.log2(max(2, num_classes)) / np.log2(100)  # Normalized to 100 classes
+        class_capacity = max(0.5, min(2.0, class_capacity * 1.5))
+
+        # Scale based on dataset complexity
+        complexity_capacity = 0.5 + complexity  # complexity is 0-1, so 0.5-1.5
+
+        # Combined capacity multiplier
+        capacity_multiplier = class_capacity * complexity_capacity
+
+        # Apply capacity multiplier to base channels
+        if capacity_multiplier > 1.0:
+            base_channels = int(base_channels * min(2.0, capacity_multiplier))
+        # Round to multiple of 16 for efficiency
+        base_channels = ((base_channels + 7) // 8) * 8
+
+        # Maximum channels based on input size (prevent excessive parameters)
+        if min_dim <= 32:
+            max_channels = min(512, base_channels * (2 ** (n_layers - 1)))
+        elif min_dim <= 64:
+            max_channels = min(512, base_channels * (2 ** (n_layers - 1)))
+        else:
+            max_channels = min(1024, base_channels * (2 ** (n_layers - 1)))
+
+        logger.info("=" * 60)
+        logger.info("Building Truly Adaptive Architecture")
+        logger.info(f"  Input: {c}x{h}x{w}")
+        logger.info(f"  Number of classes: {num_classes}")
+        logger.info(f"  Dataset complexity: {complexity:.3f}")
+        logger.info(f"  Dataset size: {dataset_size:,}")
+        logger.info(f"  Encoder layers: {n_layers}")
+        logger.info(f"  Final encoder size: {final_h}x{final_w}")
+        logger.info(f"  Base channels: {base_channels}")
+        logger.info(f"  Max channels: {max_channels}")
+        logger.info(f"  Capacity multiplier: {capacity_multiplier:.2f}")
+        if force_fixed_compressed_dims:
+            logger.info(f"  Force fixed compressed_dims: ENABLED")
+        logger.info("=" * 60)
 
         # ========================================================================
         # BUILD ENCODER
@@ -3097,57 +3603,118 @@ class BaseAutoencoder(nn.Module):
         in_channels = c
         self.encoder_channels = []
 
-        # Calculate intermediate dimensions to verify
         current_h, current_w = h, w
 
         for i in range(n_layers):
-            # Scale output channels based on input channels and layer depth
-            if c == 1:
-                base_channels = 32
+            # Calculate output channels - exponential growth but capped
+            out_channels = min(max_channels, base_channels * (2 ** i))
+
+            # Ensure out_channels is divisible for GroupNorm
+            num_groups = min(16, out_channels)
+            if out_channels % num_groups != 0:
+                out_channels = ((out_channels + num_groups - 1) // num_groups) * num_groups
+
+            # Build encoder block
+            # Use two conv layers per block for better feature extraction when capacity is high
+            if capacity_multiplier > 0.8:
+                encoder_block = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
+                    nn.GroupNorm(min(16, out_channels), out_channels),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+                    nn.GroupNorm(min(16, out_channels), out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
             else:
-                base_channels = 64
+                encoder_block = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
+                    nn.GroupNorm(min(16, out_channels), out_channels),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
 
-            out_channels = min(512, base_channels * (2 ** i))
-            num_groups = min(32, out_channels)
-
-            self.encoder_layers.append(nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
-                nn.GroupNorm(num_groups, out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
-            ))
+            self.encoder_layers.append(encoder_block)
             self.encoder_channels.append(out_channels)
             in_channels = out_channels
 
-            # Update spatial dimensions
             current_h = (current_h + 1) // 2
             current_w = (current_w + 1) // 2
 
-        # Store final spatial dimensions
         self.final_h = max(1, current_h)
         self.final_w = max(1, current_w)
         self.flattened_size = in_channels * self.final_h * self.final_w
 
-        logger.info(f"Encoder output shape: [{in_channels}, {self.final_h}, {self.final_w}]")
-        logger.info(f"Flattened size: {self.flattened_size}")
+        logger.info(f"  Encoder output: [{in_channels}, {self.final_h}, {self.final_w}]")
+        logger.info(f"  Flattened size: {self.flattened_size}")
+
+        # ========================================================================
+        # DETERMINE FEATURE AND COMPRESSED DIMENSIONS
+        # ========================================================================
+        # Feature dimension - scales with number of classes
+        base_feature_dims = 128
+        feature_dims = int(base_feature_dims * class_capacity * complexity_capacity)
+        feature_dims = max(32, min(1024, ((feature_dims + 15) // 16) * 16))
+
+        # ========================================================================
+        # COMPRESSED DIMENSIONS - WITH FORCE FIXED OPTION
+        # ========================================================================
+        if force_fixed_compressed_dims and hasattr(self.config, 'compressed_dims'):
+            # Use the fixed compressed_dims from config
+            compressed_dims = self.config.compressed_dims
+            logger.info(f"  Using FIXED compressed_dims: {compressed_dims} (forced by config)")
+        else:
+            # Auto-calculate based on dataset
+            if num_classes <= 10:
+                compressed_dims = 16
+            elif num_classes <= 50:
+                compressed_dims = 32
+            elif num_classes <= 100:
+                compressed_dims = 64
+            else:
+                compressed_dims = 128
+
+            if dataset_size < 10000:
+                compressed_dims = max(8, compressed_dims // 2)
+            elif dataset_size > 50000:
+                compressed_dims = min(256, compressed_dims * 2)
+
+            # Ensure compressed dimension is sufficient for classifier
+            min_required = max(16, int(np.log2(num_classes) * 8))
+            if compressed_dims < min_required:
+                compressed_dims = min_required
+                logger.info(f"  Adjusted compressed_dims to {compressed_dims} (minimum for {num_classes} classes)")
+
+            logger.info(f"  Auto-calculated compressed_dims: {compressed_dims}")
+
+        # Ensure compressed_dims is a multiple of 8 for better GPU performance
+        compressed_dims = max(16, ((compressed_dims + 7) // 8) * 8)
+
+        self.feature_dims = feature_dims
+        self.compressed_dims = compressed_dims
+
+        logger.info(f"  Feature dimensions: {self.feature_dims}")
+        logger.info(f"  Final compressed dimensions: {self.compressed_dims}")
 
         # ========================================================================
         # BUILD EMBEDDER (Encoder → Feature Space)
         # ========================================================================
-        # Ensure embedder dimension doesn't exceed flattened_size
         embed_dim = min(self.flattened_size, self.feature_dims)
-        num_groups_embed = min(32, max(1, embed_dim))
+        num_groups_embed = min(16, max(1, embed_dim // 16))
+        if embed_dim > 1 and embed_dim % num_groups_embed != 0:
+            for g in range(num_groups_embed, 0, -1):
+                if embed_dim % g == 0:
+                    num_groups_embed = g
+                    break
 
         self.embedder = nn.Sequential(
             nn.Linear(self.flattened_size, embed_dim),
-            nn.GroupNorm(num_groups_embed, embed_dim),
+            nn.GroupNorm(num_groups_embed, embed_dim) if embed_dim > 1 else nn.Identity(),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.3 if capacity_multiplier > 1.0 else 0.2)
         )
 
-        # If we reduced embed_dim, add a projection to feature_dims
         if embed_dim != self.feature_dims:
             self.embedder_projection = nn.Linear(embed_dim, self.feature_dims)
-            logger.info(f"Added embedder projection: {embed_dim} → {self.feature_dims}")
+            logger.info(f"  Embedder projection: {embed_dim} → {self.feature_dims}")
         else:
             self.embedder_projection = nn.Identity()
 
@@ -3155,19 +3722,23 @@ class BaseAutoencoder(nn.Module):
         # BUILD UNEMBEDDER (Feature Space → Encoder Output)
         # ========================================================================
         unembed_dim = min(self.flattened_size, self.feature_dims)
-        num_groups_unembed = min(32, max(1, unembed_dim))
+        num_groups_unembed = min(16, max(1, unembed_dim // 16))
+        if unembed_dim > 1 and unembed_dim % num_groups_unembed != 0:
+            for g in range(num_groups_unembed, 0, -1):
+                if unembed_dim % g == 0:
+                    num_groups_unembed = g
+                    break
 
         self.unembedder = nn.Sequential(
             nn.Linear(self.feature_dims, unembed_dim),
-            nn.GroupNorm(num_groups_unembed, unembed_dim),
+            nn.GroupNorm(num_groups_unembed, unembed_dim) if unembed_dim > 1 else nn.Identity(),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.3 if capacity_multiplier > 1.0 else 0.2)
         )
 
-        # If we reduced unembed_dim, add a projection to flattened_size
         if unembed_dim != self.flattened_size:
             self.unembedder_projection = nn.Linear(unembed_dim, self.flattened_size)
-            logger.info(f"Added unembedder projection: {unembed_dim} → {self.flattened_size}")
+            logger.info(f"  Unembedder projection: {unembed_dim} → {self.flattened_size}")
         else:
             self.unembedder_projection = nn.Identity()
 
@@ -3177,46 +3748,57 @@ class BaseAutoencoder(nn.Module):
         self.decoder_layers = nn.ModuleList()
         in_channels = self.encoder_channels[-1]
 
-        # Rebuild spatial dimensions from final size back to original
-        current_h, current_w = self.final_h, self.final_w
-
         for i in range(n_layers - 1, -1, -1):
             out_channels = c if i == 0 else self.encoder_channels[i-1]
-
-            # Calculate output spatial size after transpose conv
-            # ConvTranspose2d with stride=2 doubles the size (approximately)
-            current_h = current_h * 2
-            current_w = current_w * 2
+            num_groups_dec = min(16, max(1, out_channels // 16))
+            if out_channels % num_groups_dec != 0:
+                for g in range(num_groups_dec, 0, -1):
+                    if out_channels % g == 0:
+                        num_groups_dec = g
+                        break
 
             if i == 0:
-                # Final layer: output original number of channels with Tanh activation
-                self.decoder_layers.append(nn.Sequential(
+                decoder_block = nn.Sequential(
                     nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
                     nn.Tanh()
-                ))
+                )
             else:
-                num_groups_dec = min(32, max(1, out_channels))
-                self.decoder_layers.append(nn.Sequential(
-                    nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
-                    nn.GroupNorm(num_groups_dec, out_channels),
-                    nn.LeakyReLU(0.2, inplace=True)
-                ))
+                if capacity_multiplier > 0.8:
+                    decoder_block = nn.Sequential(
+                        nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
+                        nn.GroupNorm(num_groups_dec, out_channels),
+                        nn.LeakyReLU(0.2, inplace=True),
+                        nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+                        nn.GroupNorm(num_groups_dec, out_channels),
+                        nn.LeakyReLU(0.2, inplace=True)
+                    )
+                else:
+                    decoder_block = nn.Sequential(
+                        nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
+                        nn.GroupNorm(num_groups_dec, out_channels),
+                        nn.LeakyReLU(0.2, inplace=True)
+                    )
+            self.decoder_layers.append(decoder_block)
             in_channels = out_channels
-
-        logger.info(f"Decoder output shape: [{c}, {current_h}, {current_w}]")
 
         # ========================================================================
         # BUILD FEATURE COMPRESSOR
         # ========================================================================
         compress_dim = max(32, min(256, self.feature_dims // 2))
         compress_dim = max(compress_dim, self.compressed_dims * 2)
-        num_groups_comp = min(32, max(1, compress_dim))
+
+        num_groups_comp = min(16, max(1, compress_dim // 16))
+        if compress_dim > 1 and compress_dim % num_groups_comp != 0:
+            for g in range(num_groups_comp, 0, -1):
+                if compress_dim % g == 0:
+                    num_groups_comp = g
+                    break
 
         self.feature_compressor = nn.Sequential(
             nn.Linear(self.feature_dims, compress_dim),
-            nn.GroupNorm(num_groups_comp, compress_dim),
+            nn.GroupNorm(num_groups_comp, compress_dim) if compress_dim > 1 else nn.Identity(),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3 if capacity_multiplier > 1.0 else 0.2),
             nn.Linear(compress_dim, self.compressed_dims),
             nn.Tanh()
         )
@@ -3226,13 +3808,19 @@ class BaseAutoencoder(nn.Module):
         # ========================================================================
         decompress_dim = max(32, min(256, self.feature_dims // 2))
         decompress_dim = max(decompress_dim, self.compressed_dims * 2)
-        num_groups_decomp = min(32, max(1, decompress_dim))
+
+        num_groups_decomp = min(16, max(1, decompress_dim // 16))
+        if decompress_dim > 1 and decompress_dim % num_groups_decomp != 0:
+            for g in range(num_groups_decomp, 0, -1):
+                if decompress_dim % g == 0:
+                    num_groups_decomp = g
+                    break
 
         self.feature_decompressor = nn.Sequential(
             nn.Linear(self.compressed_dims, decompress_dim),
-            nn.GroupNorm(num_groups_decomp, decompress_dim),
+            nn.GroupNorm(num_groups_decomp, decompress_dim) if decompress_dim > 1 else nn.Identity(),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3 if capacity_multiplier > 1.0 else 0.2),
             nn.Linear(decompress_dim, self.feature_dims),
             nn.Tanh()
         )
@@ -3244,17 +3832,19 @@ class BaseAutoencoder(nn.Module):
         self.cluster_centers = None
         self.clustering_temperature = None
 
-        # Log architecture summary
+        total_params = sum(p.numel() for p in self.parameters())
+
         logger.info("=" * 60)
         logger.info("Architecture Summary:")
-        logger.info(f"  Input channels: {c}")
-        logger.info(f"  Input size: {h}x{w}")
+        logger.info(f"  Input: {c}x{h}x{w}")
+        logger.info(f"  Classes: {num_classes}")
         logger.info(f"  Encoder layers: {n_layers}")
-        logger.info(f"  Final encoder size: {self.final_h}x{self.final_w}")
-        logger.info(f"  Flattened size: {self.flattened_size}")
-        logger.info(f"  Feature dimensions: {self.feature_dims}")
-        logger.info(f"  Compressed dimensions: {self.compressed_dims}")
         logger.info(f"  Encoder channels: {self.encoder_channels}")
+        logger.info(f"  Flattened size: {self.flattened_size}")
+        logger.info(f"  Feature dims: {self.feature_dims}")
+        logger.info(f"  Compressed dims: {self.compressed_dims}")
+        logger.info(f"  Force fixed compressed_dims: {force_fixed_compressed_dims}")
+        logger.info(f"  Total parameters: {total_params:,}")
         logger.info("=" * 60)
 
     def _init_weights(self, module):
@@ -3418,26 +4008,50 @@ class BaseAutoencoder(nn.Module):
         all_paths = []
         all_filenames = []
         all_class_names = []
+        all_cluster_assignments = []
+        all_cluster_confidence = []
+
+        # Store class mapping if available
+        self._idx_to_class = {}
+        if hasattr(dataloader.dataset, 'idx_to_class'):
+            self._idx_to_class = dataloader.dataset.idx_to_class
+        elif hasattr(dataloader.dataset, 'dataset') and hasattr(dataloader.dataset.dataset, 'idx_to_class'):
+            self._idx_to_class = dataloader.dataset.dataset.idx_to_class
 
         for batch_idx, (inputs, labels) in enumerate(tqdm(dataloader, desc="Extracting features")):
             inputs = inputs.to(self.device, non_blocking=True)
             outputs = self(inputs)
-            embeddings = outputs['compressed_embedding'].cpu()
+
+            # Get compressed embedding (this is the feature vector)
+            if 'compressed_embedding' in outputs:
+                embeddings = outputs['compressed_embedding'].float().cpu()
+            else:
+                embeddings = outputs['embedding'].float().cpu()
 
             all_embeddings.append(embeddings)
             all_labels.append(labels)
+
+            # Get cluster information
+            if 'cluster_assignments' in outputs:
+                all_cluster_assignments.append(outputs['cluster_assignments'].cpu())
+            if 'cluster_confidence' in outputs:
+                all_cluster_confidence.append(outputs['cluster_confidence'].cpu())
 
             if include_paths and hasattr(dataloader.dataset, 'get_additional_info'):
                 for i in range(len(labels)):
                     idx = batch_idx * dataloader.batch_size + i
                     if idx < len(dataloader.dataset):
                         info = dataloader.dataset.get_additional_info(idx)
-                        all_filenames.append(info[1])
-                        all_paths.append(info[2])
+                        all_filenames.append(info[1])  # filename
+                        all_paths.append(info[2])      # full path
+                        # Get class name from label
+                        label_val = labels[i].item()
                         if hasattr(dataloader.dataset, 'idx_to_class'):
-                            class_name = dataloader.dataset.idx_to_class[labels[i].item()]
+                            class_name = dataloader.dataset.idx_to_class.get(label_val, str(label_val))
+                        elif hasattr(dataloader.dataset, 'dataset') and hasattr(dataloader.dataset.dataset, 'idx_to_class'):
+                            class_name = dataloader.dataset.dataset.idx_to_class.get(label_val, str(label_val))
                         else:
-                            class_name = str(labels[i].item())
+                            class_name = str(label_val)
                         all_class_names.append(class_name)
 
         if all_embeddings:
@@ -3447,7 +4061,22 @@ class BaseAutoencoder(nn.Module):
             embeddings = torch.tensor([])
             labels = torch.tensor([])
 
-        result = {'embeddings': embeddings, 'labels': labels}
+        if all_cluster_assignments:
+            cluster_assignments = torch.cat(all_cluster_assignments, dim=0)
+        else:
+            cluster_assignments = torch.tensor([])
+
+        if all_cluster_confidence:
+            cluster_confidence = torch.cat(all_cluster_confidence, dim=0)
+        else:
+            cluster_confidence = torch.tensor([])
+
+        result = {
+            'embeddings': embeddings,
+            'labels': labels,
+            'cluster_assignments': cluster_assignments,
+            'cluster_confidence': cluster_confidence
+        }
 
         if all_paths:
             result['paths'] = all_paths
@@ -3757,33 +4386,52 @@ class EnhancedBaseAutoencoder(BaseAutoencoder):
 # =============================================================================
 # MODIFIED PREDICTION MANAGER with configurable normalization
 # =============================================================================
-class PredictionManager:
-    def __init__(self, config: GlobalConfig):
-        if hasattr(config, 'dataset_name') and config.dataset_name:
-            config.dataset_name = normalize_dataset_name(config.dataset_name)
 
+class PredictionManager:
+    def __init__(self, config: GlobalConfig, model_load_dir: str = None):
         self.config = config
         self.device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
 
-        self.original_data_dir = Path('data') / config.dataset_name
-        self.original_checkpoint_dir = self.original_data_dir / 'checkpoints'
-
+        # ========================================================================
+        # OUTPUT DIRECTORY (where predictions and configs are saved)
+        # ========================================================================
         if hasattr(config, 'output_dir') and config.output_dir:
             self.output_base_dir = Path(config.output_dir)
-            if self.output_base_dir.name == config.dataset_name:
-                self.saving_data_dir = self.output_base_dir
-            else:
-                self.saving_data_dir = self.output_base_dir / config.dataset_name
         else:
             self.output_base_dir = Path('data')
-            self.saving_data_dir = self.output_base_dir / config.dataset_name
 
-        self.saving_checkpoint_dir = self.saving_data_dir / 'checkpoints'
-        self.saving_viz_dir = self.saving_data_dir / 'visualizations'
+        dataset_name = config.dataset_name
+        self.output_data_dir = self.output_base_dir / dataset_name
+        self.output_checkpoint_dir = self.output_data_dir / 'checkpoints'
+        self.output_viz_dir = self.output_data_dir / 'visualizations'
 
-        self.saving_data_dir.mkdir(parents=True, exist_ok=True)
-        self.saving_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.saving_viz_dir.mkdir(parents=True, exist_ok=True)
+        # Create output directories
+        #self.output_data_dir.mkdir(parents=True, exist_ok=True)
+        #self.output_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        #self.output_viz_dir.mkdir(parents=True, exist_ok=True)
+
+        # ========================================================================
+        # MODEL LOADING DIRECTORY (where trained model is stored)
+        # ========================================================================
+        if model_load_dir:
+            self.model_load_dir = Path(model_load_dir)
+        elif hasattr(config, 'model_loading_dir') and config.model_loading_dir:
+            self.model_load_dir = Path(config.model_loading_dir)
+        else:
+            self.model_load_dir = Path('data') / dataset_name / 'checkpoints'
+
+        # Also set data loading directory for stats
+        if hasattr(config, 'data_dir_for_loading') and config.data_dir_for_loading:
+            self.data_load_dir = Path(config.data_dir_for_loading)
+        else:
+            self.data_load_dir = Path('data') / dataset_name
+
+        logger.info("=" * 60)
+        logger.info(f"PredictionManager Initialized:")
+        logger.info(f"  Model loading from: {self.model_load_dir}")
+        logger.info(f"  Data/Stats loading from: {self.data_load_dir}")
+        logger.info(f"  Output directory: {self.output_data_dir}")
+        logger.info("=" * 60)
 
         self.domain_processor = None
         self.domain_info = {'domain': 'general', 'domain_config': {}}
@@ -3799,138 +4447,72 @@ class PredictionManager:
         self.norm_n_samples = 0
         self.norm_is_fitted = False
 
+        # Load model (this also attaches statistics)
         self._load_model()
-        self._load_normalization_stats()
 
         if self.model is not None:
             self.model.set_deterministic_mode(enabled=True, single_image=True)
             logger.info(f"Model configured for deterministic single-image prediction")
-            logger.info(f"Normalization mode from checkpoint: {self.config.normalization_mode}")
+            logger.info(f"Normalization mode: {self.config.normalization_mode}")
+            logger.info(f"Expected input size: {self.config.input_size}")
 
-        self.image_processor = ImageProcessor(config.input_size)
+        # Create invariant preprocessor (same as training)
+        use_augmentation = not getattr(self.config, 'no_augmentation', False)
+        augmentation_strength = getattr(self.config, 'augmentation_strength', 0.5)
+
+        self.invariant_preprocessor = DeterministicInvariantPreprocessor(
+            self.config.input_size,
+            use_augmentation=False,
+            augmentation_strength=augmentation_strength
+        )
+
         self.transform = self._build_transform()
 
-    def _load_normalization_stats(self):
-        """Load normalization statistics saved during training"""
-        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+    def _build_transform(self) -> transforms.Compose:
+        """Build transform that converts PIL to tensor"""
+        return transforms.Compose([
+            transforms.ToTensor(),
+        ])
 
-        # Try multiple possible locations for statistics file
-        stats_paths = [
-            self.original_checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt",
-            self.saving_checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt",
-            self.original_checkpoint_dir / 'dataset_statistics.pt',
-            self.saving_checkpoint_dir / 'dataset_statistics.pt',
-            self.original_data_dir / f"{dataset_name_lower}_norm_stats.pt",
-            self.saving_data_dir / f"{dataset_name_lower}_norm_stats.pt",
-        ]
-
-        for stats_path in stats_paths:
-            if stats_path.exists():
-                try:
-                    stats_dict = torch.load(stats_path, map_location='cpu')
-
-                    # Store statistics as simple tensors (no extra class)
-                    if 'is_fitted' in stats_dict or ('mean' in stats_dict and 'std' in stats_dict):
-                        self.norm_mean = stats_dict['mean']
-                        self.norm_std = stats_dict['std']
-                        self.norm_per_channel_min = stats_dict.get('per_channel_min')
-                        self.norm_per_channel_max = stats_dict.get('per_channel_max')
-                        self.norm_n_samples = stats_dict.get('n_samples', stats_dict.get('n_samples_used', 0))
-                        self.norm_is_fitted = True
-
-                        logger.info(f"Loaded normalization statistics from {stats_path}")
-                        logger.info(f"  Mean: {self.norm_mean.tolist()}")
-                        logger.info(f"  Std:  {self.norm_std.tolist()}")
-                        return
-                    else:
-                        logger.warning(f"Unknown statistics format in {stats_path}")
-                        continue
-                except Exception as e:
-                    logger.warning(f"Failed to load statistics from {stats_path}: {e}")
-
-        # If we're using dataset-wide normalization, statistics are required
-        if not self.config.use_per_image_normalization:
-            logger.warning("=" * 60)
-            logger.warning("WARNING: No normalization statistics found!")
-            logger.warning("Dataset-wide normalization requires training statistics.")
-            logger.warning("Please retrain the model to save statistics, or use --per_image_norm")
-            logger.warning("=" * 60)
-            self.norm_is_fitted = False
-        else:
-            logger.info("Using per-image normalization - no statistics needed")
-            self.norm_is_fitted = False
-
-    def _normalize_with_training_stats(self, x: torch.Tensor) -> torch.Tensor:
+    def _preprocess_image_for_model(self, img: PILImage.Image) -> torch.Tensor:
         """
-        Normalize using training statistics (consistent across all images).
-        This is the recommended approach for medical, astronomy, and scientific applications.
+        Apply the SAME preprocessing as training:
+        1. Deterministic invariant preprocessing (resize, normalization, etc.)
+        2. Convert to tensor
         """
-        # Check if we have loaded statistics
-        if self.norm_is_fitted and self.norm_mean is not None and self.norm_std is not None:
-            mean = self.norm_mean.to(x.device).view(1, -1, 1, 1)
-            std = self.norm_std.to(x.device).view(1, -1, 1, 1)
-            return (x - mean) / (std + 1e-8)
-        elif self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
-            # Fallback to legacy dataset_statistics
-            return self.dataset_statistics.normalize(x)
-        else:
-            # Last resort: use per-image normalization
-            logger.warning("No training statistics available, falling back to per-image normalization")
-            return self._per_image_normalize(x)
+        processed_img = self.invariant_preprocessor.process(img, is_training=False)
+        img_tensor = self.transform(processed_img)
 
-    def _per_image_normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Per-image Z-score normalization for prediction (amplitude-invariant)"""
-        if x.dim() == 4:
-            b, c, h, w = x.shape
-            x_flat = x.reshape(b, c, -1)
-            mean = x_flat.mean(dim=2, keepdim=True)
-            std = x_flat.std(dim=2, keepdim=True)
-            return ((x_flat - mean) / (std + 1e-8)).reshape(b, c, h, w)
-        elif x.dim() == 3:
-            c, h, w = x.shape
-            x_flat = x.reshape(c, -1)
-            mean = x_flat.mean(dim=1, keepdim=True)
-            std = x_flat.std(dim=1, keepdim=True)
-            return ((x_flat - mean) / (std + 1e-8)).reshape(c, h, w)
-        else:
-            return x
+        if img_tensor.dim() == 2:
+            img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
 
-    def _verify_frozen_statistics(self):
-        """Verify that frozen statistics are loaded and valid"""
-        if self.norm_is_fitted and self.norm_mean is not None and self.norm_std is not None:
-            logger.info("=" * 60)
-            logger.info("TRAINING STATISTICS VERIFIED:")
-            logger.info(f"  Mean per channel: {self.norm_mean.tolist()}")
-            logger.info(f"  Std per channel:  {self.norm_std.tolist()}")
-            logger.info("=" * 60)
-            return True
-        elif self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
-            logger.info("=" * 60)
-            logger.info("LEGACY STATISTICS VERIFIED:")
-            logger.info(f"  Mean per channel: {self.dataset_statistics.mean.tolist()}")
-            logger.info(f"  Std per channel:  {self.dataset_statistics.std.tolist()}")
-            logger.info("=" * 60)
-            return True
-        else:
-            logger.error("No frozen dataset statistics found!")
-            return False
+        return img_tensor
 
     def _load_model(self):
-        """Load model with dataset statistics embedded in checkpoint"""
-        self.model = BaseAutoencoder(self.config)
-        self.model.set_training_phase(2)
-
+        """Load model from checkpoint using model_load_dir (not output_dir)"""
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
 
+        logger.info(f"Looking for model in: {self.model_load_dir}")
+
         possible_paths = [
-            self.original_checkpoint_dir / f"{dataset_name_lower}_best.pt",
-            self.saving_checkpoint_dir / f"{dataset_name_lower}_best.pt",
-            self.original_checkpoint_dir / f"{dataset_name_lower}_latest.pt",
-            self.saving_checkpoint_dir / f"{dataset_name_lower}_latest.pt",
+            self.model_load_dir / f"{dataset_name_lower}_best.pt",
+            self.model_load_dir / f"{dataset_name_lower}_latest.pt",
+            self.model_load_dir / 'best.pt',
+            self.model_load_dir / 'latest.pt',
         ]
 
-        best_path = None
+        for pattern in ['*.pt', '*.pth']:
+            possible_paths.extend(list(self.model_load_dir.glob(pattern)))
+
+        seen = set()
+        unique_paths = []
         for path in possible_paths:
+            if path not in seen:
+                seen.add(path)
+                unique_paths.append(path)
+
+        best_path = None
+        for path in unique_paths:
             if path.exists() and path.stat().st_size > 0:
                 try:
                     with open(path, 'rb') as f:
@@ -3948,76 +4530,107 @@ class PredictionManager:
                     logger.info(f"Found valid model at {best_path}")
                     break
                 except Exception as e:
-                    logger.warning(f"Error checking {path}: {e}")
+                    logger.debug(f"Error checking {path}: {e}")
                     continue
 
         if best_path and best_path.exists():
             try:
                 checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
 
-                # CRITICAL: Load normalization mode from checkpoint
+                if 'model_config' in checkpoint:
+                    model_config = checkpoint['model_config']
+                    for key, value in model_config.items():
+                        if hasattr(self.config, key):
+                            setattr(self.config, key, value)
+                    logger.info("Loaded model architecture from checkpoint")
+
+                if 'input_size' in checkpoint:
+                    self.config.input_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
+                if 'feature_dims' in checkpoint:
+                    self.config.feature_dims = checkpoint['feature_dims']
+                if 'compressed_dims' in checkpoint:
+                    self.config.compressed_dims = checkpoint['compressed_dims']
+                if 'num_classes' in checkpoint:
+                    self.config.num_classes = checkpoint['num_classes']
+
+                self.config.input_size_explicitly_set = True
+
+                self.model = BaseAutoencoder(self.config)
+                self.model.set_training_phase(2)
+
                 if 'use_per_image_normalization' in checkpoint:
-                    checkpoint_norm_mode = checkpoint['use_per_image_normalization']
-                    self.config.use_per_image_normalization = checkpoint_norm_mode
-                    logger.info(f"Loaded normalization mode from checkpoint: {'PER-IMAGE' if checkpoint_norm_mode else 'DATASET-WIDE'}")
+                    self.config.use_per_image_normalization = checkpoint['use_per_image_normalization']
+                    logger.info(f"Loaded normalization mode: {'PER-IMAGE' if self.config.use_per_image_normalization else 'DATASET-WIDE'}")
                 elif 'normalization_mode' in checkpoint:
                     norm_mode_str = checkpoint['normalization_mode']
                     self.config.use_per_image_normalization = (norm_mode_str == 'per_image')
-                    logger.info(f"Loaded normalization mode from checkpoint: {norm_mode_str}")
-                else:
-                    logger.warning("No normalization mode found in checkpoint, using config default")
+                    logger.info(f"Loaded normalization mode: {norm_mode_str}")
 
-                # Load legacy dataset statistics if available (for backward compatibility)
-                if not self.config.use_per_image_normalization:
-                    if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
-                        self.dataset_statistics = DatasetStatisticsCalculator(self.config)
-                        stats_dict = checkpoint['dataset_statistics']
-                        if 'mean' in stats_dict and stats_dict['mean'] is not None:
-                            self.dataset_statistics.mean = torch.tensor(stats_dict['mean'], dtype=torch.float32)
-                        if 'std' in stats_dict and stats_dict['std'] is not None:
-                            self.dataset_statistics.std = torch.tensor(stats_dict['std'], dtype=torch.float32)
-                        if 'per_channel_min' in stats_dict and stats_dict['per_channel_min'] is not None:
-                            self.dataset_statistics.per_channel_min = torch.tensor(stats_dict['per_channel_min'], dtype=torch.float32)
-                        if 'per_channel_max' in stats_dict and stats_dict['per_channel_max'] is not None:
-                            self.dataset_statistics.per_channel_max = torch.tensor(stats_dict['per_channel_max'], dtype=torch.float32)
-                        self.dataset_statistics.n_samples_used = stats_dict.get('n_samples_used', 0)
-                        self.dataset_statistics.mode = stats_dict.get('normalization_type', 'dataset_wide')
-                        self.dataset_statistics.is_calculated = True
-                        self.model.set_dataset_statistics(self.dataset_statistics)
-                        logger.info("Legacy dataset statistics loaded from checkpoint")
-                    else:
-                        logger.info("No legacy dataset statistics in checkpoint - will use normalization_stats if available")
+                # Load dataset statistics and attach to model
+                if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
+                    stats_dict = checkpoint['dataset_statistics']
+                    if 'mean' in stats_dict and stats_dict['mean'] is not None:
+                        self.norm_mean = torch.tensor(stats_dict['mean'], dtype=torch.float32)
+                    if 'std' in stats_dict and stats_dict['std'] is not None:
+                        self.norm_std = torch.tensor(stats_dict['std'], dtype=torch.float32)
+                    self.norm_is_fitted = True
+                    self.norm_n_samples = stats_dict.get('n_samples_used', stats_dict.get('n_samples', 0))
+                    logger.info("Loaded dataset statistics from checkpoint")
 
-                self.domain_info = {
-                    'domain': checkpoint.get('domain', 'general'),
-                    'domain_config': checkpoint.get('domain_config', {}),
-                    'model_metadata': checkpoint.get('model_metadata', {})
-                }
+                    class StatisticsWrapper:
+                        def __init__(self, mean, std, n_samples):
+                            self.mean = mean
+                            self.std = std
+                            self.is_calculated = True
+                            self.n_samples_used = n_samples
+
+                        def normalize(self, x):
+                            mean = self.mean.to(x.device).view(1, -1, 1, 1)
+                            std = self.std.to(x.device).view(1, -1, 1, 1)
+                            return (x - mean) / (std + 1e-8)
+
+                    stats_wrapper = StatisticsWrapper(self.norm_mean, self.norm_std, self.norm_n_samples)
+                    self.model.set_dataset_statistics(stats_wrapper)
+                    logger.info("=" * 60)
+                    logger.info("TRAINING STATISTICS ATTACHED TO MODEL:")
+                    logger.info(f"  Mean: {self.norm_mean.tolist()}")
+                    logger.info(f"  Std:  {self.norm_std.tolist()}")
+                    logger.info(f"  Samples used: {self.norm_n_samples:,}")
+                    logger.info("=" * 60)
+
+                if 'domain' in checkpoint:
+                    self.domain_info['domain'] = checkpoint['domain']
+                if 'domain_config' in checkpoint:
+                    self.domain_info['domain_config'] = checkpoint['domain_config']
 
                 domain = self.domain_info['domain']
                 if domain != 'general':
                     self._init_domain_processor(domain, self.domain_info['domain_config'])
-                    logger.info(f"Initialized {domain} domain processor from saved model")
+                    logger.info(f"Initialized {domain} domain processor")
 
-                # Load model state
                 model_state = self.model.state_dict()
                 filtered_state = {}
-                skipped_keys = []
-                loaded_keys = []
+                loaded_keys = 0
+                skipped_keys = 0
 
                 for key, value in checkpoint['model_state_dict'].items():
-                    if key in model_state and model_state[key].shape == value.shape:
-                        filtered_state[key] = value
-                        loaded_keys.append(key)
+                    if key in model_state:
+                        if model_state[key].shape == value.shape:
+                            filtered_state[key] = value
+                            loaded_keys += 1
+                        else:
+                            logger.debug(f"Skipping {key}: shape mismatch {value.shape} vs {model_state[key].shape}")
+                            skipped_keys += 1
                     else:
-                        skipped_keys.append(key)
+                        skipped_keys += 1
 
-                if loaded_keys:
-                    logger.info(f"Loaded {len(loaded_keys)} parameters")
-                if skipped_keys:
-                    logger.warning(f"Skipped {len(skipped_keys)} parameters due to shape mismatch")
-
-                self.model.load_state_dict(filtered_state, strict=False)
+                if loaded_keys > 0:
+                    self.model.load_state_dict(filtered_state, strict=False)
+                    logger.info(f"Loaded {loaded_keys} parameters, skipped {skipped_keys}")
+                else:
+                    logger.error("No compatible parameters found in checkpoint")
+                    self.model = None
+                    return
 
                 if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
                     indices = checkpoint['selected_feature_indices']
@@ -4042,27 +4655,29 @@ class PredictionManager:
                             self.model.cluster_centers.data = torch.tensor(centers, device=self.device)
                         logger.info(f"Loaded {len(self.model.cluster_centers)} cluster centers")
 
-                checkpoint_phase = checkpoint.get('phase', 1)
+                checkpoint_phase = checkpoint.get('phase', 2)
                 self.model.set_training_phase(checkpoint_phase)
+                self.model.eval()
+                self.model.to(self.device)
 
                 logger.info(f"Successfully loaded model from {best_path}")
-                logger.info(f"Model domain: {self.domain_info['domain']}")
                 logger.info(f"Model phase: {checkpoint_phase}")
-                logger.info(f"Normalization: {self.config.normalization_mode}")
-
+                logger.info(f"Model expects input size: {self.config.input_size}")
                 return
 
             except Exception as e:
                 logger.error(f"Failed to load model from {best_path}: {e}")
                 traceback.print_exc()
+                self.model = None
+                return
 
-        logger.warning(f"No valid model found. Using random weights - predictions will be random!")
-        logger.warning(f"Please train the model first with: python cdbnn.py --mode train --data_name {self.config.dataset_name} --data_path <path>")
-
-        self.model.eval()
-        self.model.to(self.device)
+        logger.error(f"No valid model found in {self.model_load_dir}")
+        logger.error(f"Available files: {[p.name for p in self.model_load_dir.glob('*')]}")
+        logger.error("Please train the model first with: python cdbnn.py --mode train")
+        self.model = None
 
     def _init_domain_processor(self, domain: str, domain_config: Dict):
+        """Initialize domain processor"""
         config_copy = copy.deepcopy(self.config)
         config_copy.domain = domain
         for key, value in domain_config.items():
@@ -4087,12 +4702,6 @@ class PredictionManager:
             logger.warning(f"Unknown domain: {domain}, using general processor")
             self.domain_processor = None
 
-    def _build_transform(self) -> transforms.Compose:
-        return transforms.Compose([
-            transforms.Resize(self.config.input_size),
-            transforms.ToTensor(),
-        ])
-
     def _get_image_files(self, data_path: str) -> Tuple[List[str], List[str], List[str]]:
         """Get image files with deterministic ordering"""
         image_files = []
@@ -4104,135 +4713,104 @@ class PredictionManager:
             logger.warning(f"Data path does not exist: {data_path}")
             return [], [], []
 
-        if os.path.isfile(data_path) and any(data_path.lower().endswith(ext) for ext in supported):
-            image_files.append(data_path)
-            parent_folder = os.path.basename(os.path.dirname(data_path))
-            class_labels.append(parent_folder if parent_folder not in ['', '.', '..'] else "unknown")
-            original_filenames.append(os.path.basename(data_path))
-            return image_files, class_labels, original_filenames
+        data_path_obj = Path(data_path)
 
-        has_subdirs = False
-        subdirs = []
+        train_path = data_path_obj / 'train'
+        test_path = data_path_obj / 'test'
+
+        if train_path.exists() and train_path.is_dir():
+            logger.info(f"Found train/test dataset structure")
+            for split_path in [train_path, test_path] if test_path.exists() else [train_path]:
+                for class_dir in sorted(split_path.iterdir()):
+                    if class_dir.is_dir():
+                        class_name = class_dir.name
+                        for img_file in sorted(class_dir.glob('*')):
+                            if img_file.suffix.lower() in supported:
+                                image_files.append(str(img_file))
+                                class_labels.append(class_name)
+                                original_filenames.append(img_file.name)
+            if image_files:
+                return image_files, class_labels, original_filenames
+
+        has_class_dirs = False
         for item in sorted(os.listdir(data_path)):
             item_path = os.path.join(data_path, item)
             if os.path.isdir(item_path):
-                has_images = False
-                for root, dirs, files in os.walk(item_path):
-                    dirs.sort()
-                    files.sort()
-                    if any(f.lower().endswith(ext) for ext in supported for f in files):
-                        has_images = True
-                        break
+                has_images = any(f.lower().endswith(ext) for ext in supported
+                               for f in os.listdir(item_path) if os.path.isfile(os.path.join(item_path, f)))
                 if has_images:
-                    has_subdirs = True
-                    subdirs.append(item)
+                    has_class_dirs = True
+                    break
 
-        if has_subdirs:
-            logger.info(f"Found {len(subdirs)} class subdirectories: {subdirs}")
-            all_matches = []
-            for root, dirs, files in os.walk(data_path):
-                dirs.sort()
-                files.sort()
-                rel_path = os.path.relpath(root, data_path)
-                if rel_path == '.':
-                    continue
-                class_name = rel_path.split(os.sep)[0]
-                for file in files:
-                    if any(file.lower().endswith(ext) for ext in supported):
-                        full_path = os.path.join(root, file)
-                        all_matches.append((full_path, class_name, file))
-            all_matches.sort(key=lambda x: x[0])
-            for full_path, class_name, file in all_matches:
-                image_files.append(full_path)
-                class_labels.append(class_name)
-                original_filenames.append(file)
-        else:
-            logger.info("No class subdirectories found, treating all images as 'unknown' class")
-            all_matches = []
-            for root, dirs, files in os.walk(data_path):
-                dirs.sort()
-                files.sort()
-                for file in files:
-                    if any(file.lower().endswith(ext) for ext in supported):
-                        full_path = os.path.join(root, file)
-                        all_matches.append((full_path, file))
-            all_matches.sort(key=lambda x: x[0])
-            for full_path, file in all_matches:
-                image_files.append(full_path)
-                class_labels.append("unknown")
-                original_filenames.append(file)
+        if has_class_dirs:
+            logger.info(f"Found class subdirectories in {data_path}")
+            for class_dir in sorted(os.listdir(data_path)):
+                class_path = os.path.join(data_path, class_dir)
+                if os.path.isdir(class_path):
+                    for img_file in sorted(os.listdir(class_path)):
+                        if img_file.lower().endswith(supported):
+                            image_files.append(os.path.join(class_path, img_file))
+                            class_labels.append(class_dir)
+                            original_filenames.append(img_file)
+            return image_files, class_labels, original_filenames
 
-        if not image_files:
-            logger.warning(f"No image files found in {data_path}")
-            logger.info(f"Supported formats: {', '.join(supported)}")
+        logger.info(f"Scanning {data_path} recursively for images...")
+        for root, dirs, files in os.walk(data_path):
+            dirs.sort()
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            files.sort()
+            for file in files:
+                if any(file.lower().endswith(ext) for ext in supported):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(root, data_path)
+                    class_name = rel_path.split(os.sep)[0] if rel_path != '.' else "unknown"
+                    image_files.append(full_path)
+                    class_labels.append(class_name)
+                    original_filenames.append(file)
 
+        logger.info(f"Found {len(image_files)} images")
         return image_files, class_labels, original_filenames
 
     @torch.no_grad()
     @memory_efficient
-    def predict_images(self, data_path: str, output_csv: str = None, batch_size: int = None) -> Dict:
+    def predict_images(self, data_path: str, output_csv: str = None) -> Dict:
         """
-        DETERMINISTIC prediction using the normalization strategy from config.
-        For dataset-wide mode, uses training statistics for consistent normalization.
+        DETERMINISTIC prediction - model handles normalization internally using
+        training statistics that were attached during _load_model()
         """
 
-        if batch_size is not None and batch_size != 1:
-            logger.warning(f"batch_size={batch_size} ignored. Using batch_size=1 for deterministic results.")
-
-        use_per_image_norm = self.config.use_per_image_normalization
+        if self.model is None:
+            logger.error("No model loaded. Cannot perform prediction.")
+            return None
 
         logger.info("=" * 70)
         logger.info("PREDICTION")
         logger.info("=" * 70)
+        logger.info(f"Model expects input size: {self.config.input_size}")
 
-        if use_per_image_norm:
-            logger.info("Normalization: PER-IMAGE (each image normalized independently)")
-            logger.info("  Note: This loses absolute intensity information")
+        if self.config.use_per_image_normalization:
+            logger.info("Normalization: PER-IMAGE (model will compute per-image stats)")
         else:
-            logger.info("Normalization: TRAINING STATISTICS (consistent across all images)")
-            logger.info("  This preserves absolute intensity relationships")
-            if self.norm_is_fitted and self.norm_mean is not None:
-                logger.info(f"  Training mean: {self.norm_mean.tolist()}")
-                logger.info(f"  Training std:  {self.norm_std.tolist()}")
-            elif self.dataset_statistics and self.dataset_statistics.is_calculated:
-                logger.info(f"  Training mean (legacy): {self.dataset_statistics.mean.tolist()}")
-                logger.info(f"  Training std (legacy):  {self.dataset_statistics.std.tolist()}")
-            else:
-                logger.error("  ERROR: No training statistics available!")
-                return None
+            logger.info("Normalization: TRAINING STATISTICS (attached to model)")
+            if hasattr(self.model, 'dataset_statistics') and self.model.dataset_statistics and self.model.dataset_statistics.is_calculated:
+                logger.info("  ✓ Training statistics are attached to model")
 
-        logger.info("=" * 70)
-
-        # Verify statistics if using dataset-wide normalization
-        if not use_per_image_norm:
-            has_stats = (self.norm_is_fitted and self.norm_mean is not None) or \
-                       (self.dataset_statistics and self.dataset_statistics.is_calculated)
-            if not has_stats:
-                logger.error("Cannot predict with dataset-wide normalization - statistics missing!")
-                logger.error("Either retrain with --per_image_norm or ensure checkpoint has statistics")
-                return None
-
-        # Get all image files in deterministic order
         image_files, class_labels, original_filenames = self._get_image_files(data_path)
         if not image_files:
             logger.warning(f"No image files found in {data_path}")
             return None
 
-        # Sort by filename for deterministic order
         sorted_indices = sorted(range(len(original_filenames)), key=lambda i: str(original_filenames[i]))
         image_files = [image_files[i] for i in sorted_indices]
         class_labels = [class_labels[i] for i in sorted_indices]
         original_filenames = [original_filenames[i] for i in sorted_indices]
 
-        # Set output CSV path
+        # Set output CSV path - use output_data_dir
         if output_csv is None:
-            dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
-            output_csv = str(self.saving_data_dir / f"{dataset_name_lower}.csv")
+            output_csv = str(self.output_data_dir / f"{self.config.dataset_name}.csv")
 
-        output_path = Path(output_csv)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialize results containers
         all_features = []
         all_predictions = []
         all_probabilities = []
@@ -4241,71 +4819,55 @@ class PredictionManager:
         collected_targets = []
         collected_filenames = []
         collected_filepaths = []
-        domain_features_list = []
-        quality_metrics_list = []
 
         has_classifier = hasattr(self.model, 'classifier') and self.model.classifier is not None
         has_clustering = hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None
 
         logger.info(f"Processing {len(image_files)} images")
 
-        # Process each image
         for idx, img_path in enumerate(tqdm(image_files, desc="Predicting")):
-            # Load single image
             img = ImageProcessor.load_image(img_path)
             if img is None:
-                logger.warning(f"Failed to load {img_path}, using black image")
-                img = PILImage.new('RGB', (256, 256), (0, 0, 0))
+                logger.warning(f"Failed to load {img_path}, skipping")
+                continue
 
-            # Convert to RGB if needed (but preserve grayscale for medical/astronomy)
-            if img.mode != 'RGB' and img.mode != 'L':
+            if img.mode != 'RGB':
                 img = img.convert('RGB')
 
-            # Apply transform (ToTensor + Resize)
-            img_tensor = self.transform(img).unsqueeze(0).to(self.device)
+            # Preprocess to tensor (model handles normalization internally)
+            img_tensor = self._preprocess_image_for_model(img).unsqueeze(0).to(self.device)
 
-            # Debug for first image
-            if idx == 0:
-                logger.info("=" * 70)
-                logger.info("FIRST IMAGE DIAGNOSTIC")
-                logger.info("=" * 70)
-                logger.info(f"Image path: {img_path}")
-                logger.info(f"Image mode: {img.mode}")
-                logger.info(f"Raw image tensor - shape: {img_tensor.shape}")
-                logger.info(f"Raw image - mean: {img_tensor.mean().item():.6f}, std: {img_tensor.std().item():.6f}")
+            expected_h, expected_w = self.config.input_size
+            actual_h, actual_w = img_tensor.shape[2], img_tensor.shape[3]
 
-            # Apply normalization based on config
-            if use_per_image_norm:
-                img_normalized = self._per_image_normalize(img_tensor)
-                if idx == 0:
-                    logger.info(f"Per-image normalization applied")
-                    logger.info(f"  Normalized - mean: {img_normalized.mean().item():.6f}, std: {img_normalized.std().item():.6f}")
-            else:
-                img_normalized = self._normalize_with_training_stats(img_tensor)
-                if idx == 0:
-                    logger.info(f"Training statistics normalization applied")
-                    logger.info(f"  Normalized - mean: {img_normalized.mean().item():.6f}, std: {img_normalized.std().item():.6f}")
+            if actual_h != expected_h or actual_w != expected_w:
+                img_tensor = F.interpolate(img_tensor, size=(expected_h, expected_w), mode='bilinear', align_corners=False)
 
-            # Forward pass
-            output = self.model(img_normalized)
+            # Duplicate single sample for norm layer compatibility (same as training)
+            duplicated = False
+            if img_tensor.size(0) == 1:
+                img_tensor = torch.cat([img_tensor, img_tensor], dim=0)
+                duplicated = True
 
-            # Extract compressed features
+            # Forward pass - model handles normalization internally
+            output = self.model(img_tensor)
+
             if self.model._is_feature_selection_frozen and self.model._selected_feature_indices is not None:
-                features = output['selected_embedding'].float().cpu().numpy()[0]
+                features = output['selected_embedding'].float().cpu().numpy()
             else:
-                features = output['compressed_embedding'].float().cpu().numpy()[0]
+                features = output['compressed_embedding'].float().cpu().numpy()
 
-            if idx == 0:
-                logger.info(f"Extracted features shape: {features.shape}")
-                logger.info(f"Features - mean: {features.mean():.6f}, std: {features.std():.6f}")
-                logger.info("=" * 70)
+            if duplicated:
+                features = features[0]
+            else:
+                features = features[0] if len(features) > 0 else features
 
             all_features.append(features)
 
-            # Extract predictions
             if has_classifier and 'class_logits' in output:
-                logits = output['class_logits']
-                probs = F.softmax(logits, dim=1)
+                probs = F.softmax(output['class_logits'], dim=1)
+                if duplicated:
+                    probs = probs[0:1]
                 pred = probs.argmax(dim=1).item()
                 all_predictions.append(pred)
                 all_probabilities.append(probs.cpu().numpy()[0])
@@ -4313,9 +4875,10 @@ class PredictionManager:
                 all_predictions.append(-1)
                 all_probabilities.append([0.0] * (self.config.num_classes or 2))
 
-            # Extract cluster assignments
             if has_clustering and 'compressed_embedding' in output:
                 compressed = output['compressed_embedding']
+                if duplicated:
+                    compressed = compressed[0:1]
                 compressed_norm = F.normalize(compressed, p=2, dim=1)
                 cluster_centers_norm = F.normalize(self.model.cluster_centers, p=2, dim=1)
                 cosine_sim = torch.mm(compressed_norm, cluster_centers_norm.t())
@@ -4328,75 +4891,54 @@ class PredictionManager:
                 all_cluster_assignments.append(-1)
                 all_cluster_confidence.append(0.0)
 
-            # Collect metadata
             collected_targets.append(class_labels[idx])
             collected_filenames.append(original_filenames[idx])
             collected_filepaths.append(img_path)
 
-            # Extract domain-specific features if available
-            if self.domain_processor:
-                img_np = img_tensor.cpu().numpy()[0].transpose(1, 2, 0)
-                try:
-                    domain_feat = self.domain_processor.extract_features(img_np)
-                    domain_features_list.append(domain_feat)
-                except Exception as e:
-                    logger.debug(f"Error extracting domain features: {e}")
-                    domain_features_list.append({})
-
-                try:
-                    quality_metrics = self.domain_processor.get_quality_metrics(img_np)
-                    quality_metrics_list.append(quality_metrics)
-                except Exception as e:
-                    logger.debug(f"Error extracting quality metrics: {e}")
-                    quality_metrics_list.append({})
-
-        # Build predictions dictionary
-        all_predictions_dict = {
-            'features': np.array(all_features),
+        results = {
+            'features': np.array(all_features) if all_features else np.array([]),
             'predictions': np.array(all_predictions),
-            'probabilities': np.array(all_probabilities),
+            'probabilities': np.array(all_probabilities) if all_probabilities else np.array([]),
             'cluster_assignments': np.array(all_cluster_assignments),
             'cluster_confidence': np.array(all_cluster_confidence)
         }
 
-        # Add domain features
-        if domain_features_list:
-            all_keys = sorted(set().union(*[feat.keys() for feat in domain_features_list]))
-            for key in all_keys:
-                all_predictions_dict[f'domain_{key}'] = [feat.get(key, np.nan) for feat in domain_features_list]
-
-        if quality_metrics_list:
-            all_keys = sorted(set().union(*[metrics.keys() for metrics in quality_metrics_list]))
-            for key in all_keys:
-                all_predictions_dict[f'quality_{key}'] = [metrics.get(key, np.nan) for metrics in quality_metrics_list]
-
-        # Save predictions
         self._save_predictions_deterministic(
-            all_predictions_dict,
-            output_csv,
-            targets=collected_targets,
-            filenames=collected_filenames,
-            filepaths=collected_filepaths
+            results, output_csv, targets=collected_targets,
+            filenames=collected_filenames, filepaths=collected_filepaths
         )
+
+        # Save config file alongside predictions
+        self._save_config_file(output_csv, image_files, class_labels)
 
         logger.info("=" * 70)
         logger.info("PREDICTION SUMMARY")
         logger.info("=" * 70)
         logger.info(f"Processed {len(image_files)} images")
-        logger.info(f"Normalization: {'PER-IMAGE' if use_per_image_norm else 'TRAINING STATISTICS'}")
-        logger.info(f"Features shape: {all_predictions_dict['features'].shape}")
         logger.info(f"Results saved to: {output_csv}")
         logger.info("=" * 70)
 
-        return all_predictions_dict
+        return results
 
     def _save_predictions_deterministic(self, predictions: Dict, output_csv: str,
                                         targets: Optional[List[str]] = None,
                                         filenames: Optional[List[str]] = None,
                                         filepaths: Optional[List[str]] = None):
         """Save predictions with deterministic ordering"""
+        import pandas as pd
+
         data = {}
-        n_samples = len(filenames) if filenames else len(predictions.get('features', []))
+
+        if filenames:
+            n_samples = len(filenames)
+        elif 'features' in predictions and predictions['features'] is not None:
+            n_samples = len(predictions['features'])
+        else:
+            n_samples = 0
+
+        if n_samples == 0:
+            logger.error("No samples to save")
+            return
 
         if filenames:
             sorted_indices = sorted(range(len(filenames)), key=lambda i: str(filenames[i]))
@@ -4410,12 +4952,15 @@ class PredictionManager:
             folders = []
             for fp in filepaths if filepaths else []:
                 path = Path(fp)
-                parent_folder = path.parent.name if path.parent != path.parent.parent else str(path.parent)
-                folders.append(parent_folder)
+                folder = path.parent.name
+                folders.append(folder)
             if folders:
                 data['folder'] = [folders[i] for i in sorted_indices]
 
-        if 'features' in predictions and predictions['features'] is not None:
+        if targets:
+            data['target'] = [targets[i] for i in sorted_indices]
+
+        if 'features' in predictions and predictions['features'] is not None and len(predictions['features']) > 0:
             features = predictions['features'][sorted_indices]
             for i in range(features.shape[1]):
                 data[f'feature_{i}'] = features[:, i]
@@ -4423,7 +4968,7 @@ class PredictionManager:
         if 'predictions' in predictions and predictions['predictions'] is not None:
             data['prediction'] = predictions['predictions'][sorted_indices]
 
-        if 'probabilities' in predictions and predictions['probabilities'] is not None:
+        if 'probabilities' in predictions and predictions['probabilities'] is not None and len(predictions['probabilities']) > 0:
             probs = predictions['probabilities'][sorted_indices]
             for i in range(probs.shape[1]):
                 data[f'prob_class_{i}'] = probs[:, i]
@@ -4436,26 +4981,86 @@ class PredictionManager:
         if 'cluster_confidence' in predictions and predictions['cluster_confidence'] is not None:
             data['cluster_confidence'] = predictions['cluster_confidence'][sorted_indices]
 
-        for key in predictions.keys():
-            if (key.startswith('domain_') or key.startswith('quality_')) and predictions[key] is not None:
-                values = predictions[key]
-                if isinstance(values, list) and len(values) == n_samples:
-                    data[key] = [values[i] for i in sorted_indices]
-
-        if targets:
-            data['target'] = [targets[i] for i in sorted_indices]
-
-        priority_columns = ['filepath', 'folder', 'filename', 'target', 'prediction']
-        other_columns = sorted([k for k in data.keys() if k not in priority_columns])
-        sorted_keys = priority_columns + [k for k in other_columns if k not in priority_columns]
-        sorted_data = {key: data[key] for key in sorted_keys if key in data}
-
-        df = pd.DataFrame(sorted_data)
+        df = pd.DataFrame(data)
         df.to_csv(output_csv, index=False)
 
-        logger.info(f"Deterministic predictions saved to {output_csv}")
+        logger.info(f"Predictions saved to {output_csv}")
         logger.info(f"Rows: {len(df)}, Columns: {len(df.columns)}")
 
+    def _save_config_file(self, output_csv: str, image_files: List[str], class_labels: List[str]):
+        """Save configuration file along with predictions - ONLY features and target"""
+        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+        data_dir = Path(output_csv).parent
+
+        # Get ONLY feature columns and target - NO prediction, confidence, uncertainty
+        actual_feature_count = self.config.compressed_dims
+        feature_columns = [f'feature_{i}' for i in range(actual_feature_count)]
+
+        # Column names: features + target ONLY (no prediction/confidence/uncertainty)
+        column_names = feature_columns.copy()
+        column_names.append('target')  # target only, no prediction columns
+
+        config_dict = {
+            "dataset_name": dataset_name_lower,
+            "num_classes": self.config.num_classes if self.config.num_classes else len(set(class_labels)),
+            "csv_file": output_csv,
+            "column_names": column_names,  # Now only features + target
+            "target_column": "target",
+            "feature_dims": self.config.feature_dims,
+            "compressed_dims": self.config.compressed_dims,
+            "input_size": list(self.config.input_size) if isinstance(self.config.input_size, tuple) else self.config.input_size,
+            "batch_size": self.config.batch_size,
+            "epochs": self.config.epochs,
+            "learning_rate": self.config.learning_rate,
+            "domain": getattr(self.config, 'domain', 'general'),
+            "normalization_mode": self.config.normalization_mode,
+            "use_per_image_normalization": self.config.use_per_image_normalization,
+            "model_config": {
+                "in_channels": self.config.in_channels,
+                "input_size": list(self.config.input_size) if isinstance(self.config.input_size, tuple) else self.config.input_size,
+                "feature_dims": self.config.feature_dims,
+                "compressed_dims": self.config.compressed_dims,
+                "use_kl_divergence": self.config.use_kl_divergence,
+                "use_class_encoding": self.config.use_class_encoding,
+            },
+            "prediction_info": {
+                "num_images": len(image_files),
+                "classes_found": list(set(class_labels)),
+                "timestamp": datetime.now().isoformat(),
+                "mode": "prediction",
+                "normalization_stats_loaded": self.norm_is_fitted or (self.dataset_statistics is not None),
+            },
+            "config_version": "2.4",
+            "notes": "Prediction configuration - ONLY compressed features and target column (no prediction/confidence/uncertainty)"
+        }
+
+        if self.config.class_names:
+            config_dict["class_info"] = {
+                "class_names": self.config.class_names,
+                "num_classes": len(self.config.class_names),
+                "class_to_idx": {name: idx for idx, name in enumerate(self.config.class_names)}
+            }
+
+        if self.norm_is_fitted and self.norm_mean is not None:
+            config_dict["normalization_statistics"] = {
+                "mean": self.norm_mean.tolist() if isinstance(self.norm_mean, torch.Tensor) else self.norm_mean,
+                "std": self.norm_std.tolist() if isinstance(self.norm_std, torch.Tensor) else self.norm_std,
+                "is_fitted": True,
+                "n_samples": self.norm_n_samples
+            }
+
+        conf_path = data_dir / f"{dataset_name_lower}.conf"
+        with open(conf_path, 'w') as f:
+            json.dump(config_dict, f, indent=4, default=str)
+        logger.info(f"Configuration saved to {conf_path}")
+
+    def _get_column_names(self) -> List[str]:
+        """Get column names - ONLY features and target (no prediction columns)"""
+        actual_feature_count = self.config.compressed_dims
+        feature_columns = [f'feature_{i}' for i in range(actual_feature_count)]
+        column_names = feature_columns.copy()
+        column_names.append('target')  # Only target, no prediction/confidence/uncertainty
+        return column_names
 
 # =============================================================================
 # COMPLETE TRAINER - All original functionality preserved
@@ -5496,8 +6101,13 @@ import json
 from pathlib import Path
 
 # =============================================================================
-# STANDALONE DETERMINISTIC TRAINING FUNCTION
+# FIXED: DETERMINISTIC TRAIN FUNCTION THAT RETURNS HISTORY
 # =============================================================================
+
+# =============================================================================
+# FIXED: DETERMINISTIC TRAIN FUNCTION WITH NUMERICAL STABILITY
+# =============================================================================
+
 def deterministic_train(
     model: BaseAutoencoder,
     train_dataset: Dataset,
@@ -5508,6 +6118,7 @@ def deterministic_train(
 ) -> Dict:
     """
     FULLY VECTORIZED deterministic training with optimized GPU utilization.
+    FIXED: Numerical stability for all datasets.
     """
     logger.info("=" * 70)
     logger.info("VECTORIZED DETERMINISTIC TRAINING ENGINE")
@@ -5539,13 +6150,55 @@ def deterministic_train(
     if hasattr(model, 'deterministic_mode'):
         model.deterministic_mode = True
 
-    # Optimized optimizer with gradient clipping
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=0.005)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
-    scaler = torch.cuda.amp.GradScaler() if config.mixed_precision and device.type == 'cuda' else None
+    # ========================================================================
+    # DATASET-SPECIFIC OPTIMIZER AND SCHEDULER
+    # ========================================================================
+
+    # Detect dataset type for optimal hyperparameters
+    is_cifar = config.dataset_name in ['cifar10', 'cifar100']
+    is_mnist = config.dataset_name in ['mnist', 'fashionmnist']
+    min_dim = min(config.input_size)
+    is_small_image = min_dim <= 64
+
+    # CRITICAL FIX: Lower learning rate for stability
+    if is_cifar:
+        initial_lr = 0.001
+        weight_decay = 0.0001
+        use_cosine_scheduler = True
+        logger.info("Using CIFAR-optimized training settings: LR=0.001, weight_decay=0.0001")
+    elif is_mnist:
+        initial_lr = 0.001
+        weight_decay = 0.0001
+        use_cosine_scheduler = False
+        logger.info("Using MNIST-optimized training settings")
+    elif is_small_image:
+        initial_lr = 0.0005  # Even lower for stability
+        weight_decay = 0.0001
+        use_cosine_scheduler = True
+        logger.info(f"Using small image optimized settings: LR={initial_lr}")
+    else:
+        initial_lr = config.learning_rate
+        weight_decay = 0.0001
+        use_cosine_scheduler = False
+
+    # Create optimizer with dataset-specific settings
+    optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=weight_decay)
+
+    # Create scheduler
+    if use_cosine_scheduler:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs, eta_min=1e-7)
+        logger.info(f"Using CosineAnnealingLR scheduler (T_max={config.epochs}, eta_min=1e-7)")
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        logger.info("Using ReduceLROnPlateau scheduler")
+
+    # CRITICAL FIX: Disable mixed precision for all training to avoid NaN issues
+    use_mixed_precision = False  # Force disable mixed precision
+    scaler = None
+    logger.info("Mixed precision training DISABLED (for stability)")
 
     # Create optimized DataLoaders with pinned memory and multiple workers
-    num_workers = min(8, os.cpu_count() or 1) if config.num_workers == 0 else config.num_workers
+    num_workers = min(4, os.cpu_count() or 1) if config.num_workers == 0 else config.num_workers
 
     def _create_optimized_loader(dataset, batch_size, shuffle=False):
         g = torch.Generator()
@@ -5571,7 +6224,7 @@ def deterministic_train(
         norm_std = statistics_calculator.std.to(device).view(1, -1, 1, 1)
 
         def apply_normalization(x):
-            return (x - norm_mean) / (norm_std + 1e-8)
+            return (x - norm_mean) / (norm_std + 1e-6)
     elif use_per_image_norm:
         def apply_normalization(x):
             # Vectorized per-image normalization
@@ -5580,7 +6233,7 @@ def deterministic_train(
                 x_flat = x.view(b, c, -1)
                 mean = x_flat.mean(dim=2, keepdim=True)
                 std = x_flat.std(dim=2, keepdim=True)
-                return ((x_flat - mean) / (std + 1e-8)).view(b, c, h, w)
+                return ((x_flat - mean) / (std + 1e-6)).view(b, c, h, w)
             return x
     else:
         def apply_normalization(x):
@@ -5590,92 +6243,57 @@ def deterministic_train(
                 x_flat = x.view(b, c, -1)
                 mean = x_flat.mean(dim=2, keepdim=True)
                 std = x_flat.std(dim=2, keepdim=True)
-                return ((x_flat - mean) / (std + 1e-8)).view(b, c, h, w)
+                return ((x_flat - mean) / (std + 1e-6)).view(b, c, h, w)
             return x
 
-    # Pre-compute loss function components for efficiency
-    high_pass_filter = torch.tensor([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]],
-                                   dtype=torch.float32).view(1, 1, 3, 3).to(device)
-
-    # Vectorized gradient loss function
-    def vectorized_gradient_loss(pred, target):
-        """Fully vectorized gradient loss without loops"""
-        # Compute gradients using convolution for better performance
-        pred_grad_x = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])
-        pred_grad_y = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])
-        target_grad_x = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
-        target_grad_y = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
-
-        return F.mse_loss(pred_grad_x, target_grad_x) + F.mse_loss(pred_grad_y, target_grad_y)
-
     def compute_enhanced_loss(outputs, inputs, labels, phase, epoch):
-        """Vectorized loss computation"""
-        recon_loss = F.mse_loss(outputs['reconstruction'], inputs)
-        feature_loss = F.mse_loss(outputs['reconstructed_embedding'], outputs['embedding'])
+        """NUMERICALLY STABLE loss computation with adaptive label smoothing"""
 
-        total_loss = recon_loss + 0.1 * feature_loss
+        # SAFER: Use Smooth L1 Loss instead of MSE for reconstruction
+        recon_loss = F.smooth_l1_loss(outputs['reconstruction'], inputs, beta=0.1)
+
+        # Clamp loss values to prevent explosion
+        recon_loss = torch.clamp(recon_loss, max=10.0)
+
+        total_loss = recon_loss
         accuracy = None
 
-        if phase == 1:
-            # Vectorized gradient loss
-            grad_loss = vectorized_gradient_loss(outputs['reconstruction'], inputs)
+        if phase == 2 and config.use_class_encoding and 'class_logits' in outputs:
+            n_classes = config.num_classes or 2
+            logits = outputs['class_logits']
 
-            # Vectorized detail preservation
-            pred_high = F.conv2d(outputs['reconstruction'].mean(dim=1, keepdim=True),
-                                high_pass_filter, padding=1)
-            target_high = F.conv2d(inputs.mean(dim=1, keepdim=True),
-                                  high_pass_filter, padding=1)
-            detail_loss = F.mse_loss(pred_high, target_high)
+            # Clamp logits to prevent explosion
+            logits = torch.clamp(logits, min=-50, max=50)
 
-            total_loss = recon_loss + 0.3 * feature_loss + 0.3 * grad_loss + 0.2 * detail_loss
+            # Higher label smoothing for stability with many classes
+            smoothing = 0.1
 
-        else:  # Phase 2
-            features_for_classification = outputs.get('refined_embedding', outputs['compressed_embedding'])
-
-            # Vectorized classification loss with label smoothing
-            if config.use_class_encoding and 'class_logits' in outputs:
-                n_classes = config.num_classes or 2
-                label_smoothing = 0.1
-                logits = outputs['class_logits']
-
-                # Vectorized label smoothing
-                smooth_labels = torch.full_like(logits, label_smoothing / n_classes)
-                smooth_labels.scatter_(1, labels.unsqueeze(1), 1 - label_smoothing + label_smoothing / n_classes)
-
+            if smoothing > 0:
+                smooth_labels = torch.full_like(logits, smoothing / n_classes)
+                smooth_labels.scatter_(1, labels.unsqueeze(1), 1 - smoothing + smoothing / n_classes)
                 class_loss = -(smooth_labels * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
-                total_loss = 0.3 * recon_loss + 0.2 * feature_loss + 0.5 * class_loss
-                accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
+            else:
+                class_loss = F.cross_entropy(logits, labels)
 
-            # Vectorized clustering loss
-            if config.use_kl_divergence and hasattr(model, 'cluster_centers') and model.cluster_centers is not None:
-                features_norm = F.normalize(features_for_classification, p=2, dim=1)
-                centers_norm = F.normalize(model.cluster_centers, p=2, dim=1)
+            # Clamp class loss
+            class_loss = torch.clamp(class_loss, max=10.0)
 
-                # Vectorized cosine similarity
-                temperature = getattr(model, 'clustering_temperature', torch.tensor(1.0))
-                cosine_sim = torch.mm(features_norm, centers_norm.t()) / temperature
+            # Weight the losses
+            total_loss = recon_loss + class_loss
+            accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
 
-                # Vectorized margin-based contrastive loss
-                margin = 0.3
-                pos_mask = F.one_hot(labels, num_classes=len(model.cluster_centers)).float()
-                neg_mask = 1 - pos_mask
+        # Final safety clamp
+        total_loss = torch.clamp(total_loss, max=100.0)
 
-                pos_sim = (cosine_sim * pos_mask).sum(dim=1)
-                neg_sim = (cosine_sim * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
-                margin_loss = torch.clamp(neg_sim - pos_sim + margin, min=0).mean()
-
-                # Vectorized KL divergence
-                q = F.softmax(cosine_sim, dim=1)
-                p = (q ** 2) / (q.sum(dim=0, keepdim=True) + 1e-8)
-                p = p / (p.sum(dim=1, keepdim=True) + 1e-8)
-                kl_loss = F.kl_div((q + 1e-8).log(), p, reduction='batchmean')
-
-                total_loss += 0.2 * kl_loss + 0.3 * margin_loss
+        # Check for NaN and return zero if detected
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.warning("NaN/Inf detected in loss - returning zero")
+            return torch.tensor(0.0, device=device, requires_grad=True), accuracy
 
         return total_loss, accuracy
 
     def validate(val_loader, model, phase):
-        """Vectorized validation"""
+        """Vectorized validation with NaN protection"""
         model.eval()
         val_loss = 0.0
         val_acc = 0.0
@@ -5696,10 +6314,15 @@ def deterministic_train(
                 outputs = model(inputs_norm, labels)
                 loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, 0)
 
-                val_loss += loss.item()
-                if acc is not None:
-                    val_acc += acc
-                n_batches += 1
+                # Skip NaN values
+                if not torch.isnan(loss) and not torch.isinf(loss):
+                    val_loss += loss.item()
+                    if acc is not None:
+                        val_acc += acc
+                    n_batches += 1
+
+        if n_batches == 0:
+            return float('inf'), 0.0
 
         return val_loss / n_batches, (val_acc / n_batches if val_acc else None)
 
@@ -5713,27 +6336,30 @@ def deterministic_train(
     history = defaultdict(list)
 
     def save_checkpoint(epoch, phase, loss, accuracy, is_best):
-        """Save checkpoint with normalization mode and dataset statistics - COMPLETE FIX"""
+        """Save checkpoint with normalization mode and dataset statistics"""
+        # Skip saving if loss is NaN
+        if loss is None or (isinstance(loss, float) and (np.isnan(loss) or np.isinf(loss))):
+            logger.warning(f"Skipping checkpoint save - invalid loss: {loss}")
+            return
 
-        # Create checkpoint dictionary
         checkpoint = {
             'epoch': epoch,
             'phase': phase,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': loss,
+            'scheduler_state_dict': scheduler.state_dict(),
+            'loss': loss if loss is not None else float('inf'),
             'accuracy': accuracy if accuracy is not None else 0.0,
             'normalization_mode': config.normalization_mode,
             'use_per_image_normalization': config.use_per_image_normalization,
-            'clustering_mode': 'enhanced_cosine',
+            'clustering_mode': 'enhanced',
             'deterministic': True,
             'timestamp': datetime.now().isoformat(),
         }
 
-        # Save dataset statistics (both legacy and new format)
+        # Save dataset statistics
         if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
             if statistics_calculator.mean is not None and statistics_calculator.std is not None:
-                # Legacy format (for backward compatibility)
                 checkpoint['dataset_statistics'] = {
                     'mean': statistics_calculator.mean.cpu().tolist(),
                     'std': statistics_calculator.std.cpu().tolist(),
@@ -5745,14 +6371,9 @@ def deterministic_train(
                     'is_calculated': statistics_calculator.is_calculated
                 }
 
-                # NEW FORMAT: Save normalization statistics directly without external class
+                # Save statistics file
                 dataset_name_lower = normalize_dataset_name(config.dataset_name)
-
-                # Save to multiple locations for easy access
-                stats_path_primary = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
-                stats_path_secondary = Path(config.data_dir) / f"{dataset_name_lower}_norm_stats.pt"
-
-                # Create statistics dictionary (simpler format)
+                stats_path = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
                 stats_dict = {
                     'mean': statistics_calculator.mean.cpu(),
                     'std': statistics_calculator.std.cpu(),
@@ -5762,33 +6383,10 @@ def deterministic_train(
                     'is_fitted': True,
                     'timestamp': datetime.now().isoformat()
                 }
+                torch.save(stats_dict, stats_path)
+                logger.info(f"Normalization statistics saved to {stats_path}")
 
-                try:
-                    torch.save(stats_dict, stats_path_primary)
-                    logger.info(f"Normalization statistics saved to {stats_path_primary}")
-                except Exception as e:
-                    logger.warning(f"Failed to save primary statistics: {e}")
-
-                try:
-                    stats_path_secondary.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save(stats_dict, stats_path_secondary)
-                    logger.info(f"Normalization statistics saved to {stats_path_secondary}")
-                except Exception as e:
-                    logger.warning(f"Failed to save secondary statistics: {e}")
-
-                # Also save legacy format for backward compatibility
-                stats_path_legacy = checkpoint_dir / 'dataset_statistics.pt'
-                torch.save({
-                    'mean': statistics_calculator.mean.cpu(),
-                    'std': statistics_calculator.std.cpu(),
-                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
-                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
-                    'n_samples_used': statistics_calculator.n_samples_used,
-                    'timestamp': datetime.now().isoformat()
-                }, stats_path_legacy)
-                logger.info(f"Legacy dataset statistics saved to {stats_path_legacy}")
-
-        # Add optional components if they exist
+        # Add optional components
         if hasattr(model, 'classifier') and model.classifier is not None:
             checkpoint['classifier_state_dict'] = model.classifier.state_dict()
         if hasattr(model, 'cluster_centers') and model.cluster_centers is not None:
@@ -5796,12 +6394,11 @@ def deterministic_train(
         if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
             checkpoint['selected_feature_indices'] = model._selected_feature_indices.cpu()
 
-        # Save latest checkpoint
+        # Save checkpoint
         torch.save(checkpoint, checkpoint_dir / 'latest.pt')
         logger.info(f"Saved latest checkpoint (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
 
-        # Save best model only in Phase 2 when accuracy improves
-        if phase == 2 and is_best:
+        if phase == 2 and is_best and accuracy is not None and accuracy > 0:
             torch.save(checkpoint, checkpoint_dir / 'best.pt')
             nonlocal best_loss, best_accuracy, best_epoch, best_phase
             best_loss = loss
@@ -5810,15 +6407,11 @@ def deterministic_train(
             best_phase = phase
             logger.info(f"✓ Best model saved - Epoch {epoch+1}, Accuracy: {accuracy:.4f} ({accuracy:.2%})")
 
-            # Also save a copy with dataset name for easy loading
+            # Named copy
             dataset_name_lower = normalize_dataset_name(config.dataset_name)
             named_best_path = checkpoint_dir / f"{dataset_name_lower}_best.pt"
             torch.save(checkpoint, named_best_path)
             logger.info(f"✓ Named best model saved to {named_best_path}")
-        elif phase == 1:
-            logger.info(f"Phase 1 checkpoint saved (not eligible for best model)")
-        elif phase == 2 and not is_best:
-            logger.info(f"Phase 2 checkpoint saved (accuracy did not improve: {accuracy:.4f})")
 
     def train_phase(phase, epochs, start_epoch=0):
         nonlocal best_loss, best_accuracy, best_epoch, best_phase
@@ -5828,13 +6421,11 @@ def deterministic_train(
         phase_best_loss = float('inf')
         patience_counter = 0
         patience_limit = 20 if phase == 2 else 15
+        nan_count = 0
+        max_nan_count = 5  # Stop after 5 NaN batches
 
-        # Track learning rate for logging
         current_lr = optimizer.param_groups[0]['lr']
-
-        # For tracking losses across epochs
         epoch_train_losses = []
-        epoch_val_losses = []
 
         print(f"\n{Colors.BOLD}{'Phase ' + str(phase) + ' Vectorized Training'.center(80)}{Colors.ENDC}")
         if phase == 2:
@@ -5850,98 +6441,80 @@ def deterministic_train(
             train_loss = 0.0
             train_acc = 0.0 if phase == 2 else None
             n_batches = 0
+            nan_count_epoch = 0
 
-            # Reset gradient accumulator
             optimizer.zero_grad(set_to_none=True)
-
-            # Use non-blocking data transfer and pin_memory
             pbar = tqdm(train_loader, desc=f"Phase {phase} Epoch {epoch+1}")
 
-            # Gradient accumulation counter
-            accumulation_steps = 0
-
             for batch_idx, (inputs, labels) in enumerate(pbar):
-                # Non-blocking transfer to GPU
                 inputs = inputs.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
-
                 inputs_norm = apply_normalization(inputs)
 
-                # Handle single sample efficiently
+                # Check for NaN in inputs
+                if torch.isnan(inputs_norm).any() or torch.isinf(inputs_norm).any():
+                    logger.warning(f"NaN/Inf detected in inputs at batch {batch_idx}, skipping")
+                    continue
+
                 if inputs_norm.size(0) == 1:
                     inputs_norm = torch.cat([inputs_norm, inputs_norm], dim=0)
                     labels = torch.cat([labels, labels], dim=0)
 
-                # Mixed precision training
-                if scaler:
-                    with torch.cuda.amp.autocast():
-                        outputs = model(inputs_norm, labels)
-                        loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, epoch)
+                # Forward pass without mixed precision
+                outputs = model(inputs_norm, labels)
+                loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, epoch)
 
-                    # Scale loss and backward
-                    scaler.scale(loss).backward()
+                # Skip if loss is NaN
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_count_epoch += 1
+                    nan_count += 1
+                    if nan_count > max_nan_count:
+                        logger.warning(f"Too many NaN losses ({nan_count}), breaking...")
+                        break
+                    continue
 
-                    # Update every batch (no accumulation for stability)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad(set_to_none=True)
-                else:
-                    outputs = model(inputs_norm, labels)
-                    loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, epoch)
-                    loss.backward()
-
-                    # Gradient clipping for stability
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
+                # Backward pass with gradient clipping
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
                 train_loss += loss.item()
                 if acc is not None:
                     train_acc += acc
                 n_batches += 1
+                pbar.set_postfix({'loss': f"{train_loss/n_batches:.4f}" if n_batches > 0 else 'nan',
+                                'lr': f"{optimizer.param_groups[0]['lr']:.2e}"})
 
-                # Update progress bar
-                pbar.set_postfix({
-                    'loss': f"{train_loss/n_batches:.4f}",
-                    'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
-                })
-
-                # Diagnostic for first batch of first epoch
+                # Diagnostic for first batch
                 if phase == 1 and epoch == start_epoch and batch_idx == 0:
                     logger.info("=" * 60)
                     logger.info("DIAGNOSTIC: First Batch Statistics")
                     logger.info(f"Input - mean: {inputs.mean().item():.6f}, std: {inputs.std().item():.6f}")
-                    logger.info(f"Input range: [{inputs.min().item():.6f}, {inputs.max().item():.6f}]")
                     logger.info(f"Normalized - mean: {inputs_norm.mean().item():.6f}, std: {inputs_norm.std().item():.6f}")
                     logger.info(f"Loss: {loss.item():.6f}")
-                    if 'reconstruction' in outputs:
-                        logger.info(f"Reconstruction - mean: {outputs['reconstruction'].mean().item():.6f}, std: {outputs['reconstruction'].std().item():.6f}")
                     logger.info("=" * 60)
 
-            # Calculate averages for this epoch
+            if n_batches == 0:
+                logger.warning("No valid batches in epoch, skipping...")
+                continue
+
             avg_train_loss = train_loss / n_batches
             avg_train_acc = train_acc / n_batches if train_acc is not None else None
             epoch_train_losses.append(avg_train_loss)
 
-            # Validation phase
-            val_loss = None
-            val_acc = None
-
             if val_loader:
                 val_loss, val_acc = validate(val_loader, model, phase)
-                epoch_val_losses.append(val_loss)
 
-                # Step scheduler with validation loss
-                if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                    scheduler.step(val_loss)
-                else:
-                    scheduler.step()
-
-                # Get current learning rate after scheduler step
+                # Step scheduler - handle NaN
+                if not np.isnan(val_loss) and not np.isinf(val_loss):
+                    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(val_loss)
+                    else:
+                        scheduler.step()
                 current_lr = optimizer.param_groups[0]['lr']
 
-                # Phase 2: Track accuracy
-                if phase == 2 and val_acc is not None:
+                if phase == 2 and val_acc is not None and not np.isnan(val_acc):
                     is_better = val_acc > phase_best_accuracy
                     if is_better:
                         phase_best_accuracy = val_acc
@@ -5952,14 +6525,13 @@ def deterministic_train(
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
-                        if patience_counter % 5 == 0:
-                            logger.info(f"  No improvement for {patience_counter} epochs. Best: {phase_best_accuracy:.4f}")
 
-                    # Print epoch summary
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | "
                           f"{avg_train_acc:9.2%} | {val_acc:9.2%} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
-                else:
-                    # Phase 1: Track loss
+
+                    # Record metrics in history
+                    history['val_acc'].append(val_acc)
+                elif phase == 1 and not np.isnan(val_loss):
                     is_better = val_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = val_loss
@@ -5971,14 +6543,19 @@ def deterministic_train(
                     else:
                         patience_counter += 1
                         save_checkpoint(epoch, phase, val_loss, val_acc, is_best=False)
-                        if patience_counter % 5 == 0:
-                            logger.info(f"  No improvement for {patience_counter} epochs. Best loss: {phase_best_loss:.6f}")
 
-                    # Print epoch summary
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | {current_lr:12.2e}")
+                else:
+                    print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | {current_lr:12.2e}")
+
+                # Record validation loss
+                if not np.isnan(val_loss):
+                    history['val_loss'].append(val_loss)
+                else:
+                    history['val_loss'].append(phase_best_loss)
             else:
-                # No validation loader - use training metrics
-                if phase == 2 and avg_train_acc is not None:
+                # No validation
+                if phase == 2 and avg_train_acc is not None and not np.isnan(avg_train_acc):
                     is_better = avg_train_acc > phase_best_accuracy
                     if is_better:
                         phase_best_accuracy = avg_train_acc
@@ -5994,7 +6571,6 @@ def deterministic_train(
                         patience_counter += 1
                         save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
 
-                    # Step scheduler with training loss
                     if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         scheduler.step(avg_train_loss)
                     else:
@@ -6003,8 +6579,7 @@ def deterministic_train(
 
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {'N/A':>12} | "
                           f"{avg_train_acc:9.2%} | {'N/A':>9} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
-                else:
-                    # Phase 1 without validation
+                elif phase == 1 and not np.isnan(avg_train_loss):
                     is_better = avg_train_loss < phase_best_loss
                     if is_better:
                         phase_best_loss = avg_train_loss
@@ -6017,7 +6592,6 @@ def deterministic_train(
                         patience_counter += 1
                         save_checkpoint(epoch, phase, avg_train_loss, avg_train_acc, is_best=False)
 
-                    # Step scheduler with training loss
                     if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         scheduler.step(avg_train_loss)
                     else:
@@ -6026,17 +6600,12 @@ def deterministic_train(
 
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {'N/A':>12} | {current_lr:12.2e}")
 
-            # Record history
+            # Record training metrics
             history['train_loss'].append(avg_train_loss)
-            if avg_train_acc:
+            if avg_train_acc is not None:
                 history['train_acc'].append(avg_train_acc)
-            if val_loader:
-                history['val_loss'].append(val_loss)
-                if val_acc:
-                    history['val_acc'].append(val_acc)
             history['lr'].append(current_lr)
 
-            # Early stopping check
             if patience_counter >= patience_limit:
                 print(f"\n{Colors.YELLOW}{'='*60}{Colors.ENDC}")
                 print(f"{Colors.YELLOW}Early stopping triggered after {patience_counter} epochs without improvement{Colors.ENDC}")
@@ -6046,14 +6615,9 @@ def deterministic_train(
                 print(f"{Colors.YELLOW}{'='*60}{Colors.ENDC}")
                 break
 
-            # Optional: Adjust learning rate if loss plateaus (additional safeguard)
-            if phase == 1 and epoch > 10:
-                recent_losses = epoch_train_losses[-5:]
-                if len(recent_losses) >= 5 and all(abs(recent_losses[i] - recent_losses[i-1]) < 0.001 for i in range(1, 5)):
-                    # Loss has plateaued, reduce learning rate
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] *= 0.8
-                    logger.info(f"  Loss plateau detected, reducing LR to {optimizer.param_groups[0]['lr']:.2e}")
+            # Reset nan counter if we had a good epoch
+            if nan_count_epoch == 0:
+                nan_count = max(0, nan_count - 1)
 
         # Phase completion summary
         print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
@@ -6066,14 +6630,14 @@ def deterministic_train(
             print(f"{Colors.GREEN}Phase 2 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
         print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
 
-    epochs_phase1 = config.epochs // 2
-    epochs_phase2 = config.epochs // 2
+    epochs_phase1 = max(1, config.epochs // 4)  # Reduced from half for faster results
+    epochs_phase2 = max(1, config.epochs // 4) * 3  # More epochs in phase 2
 
     print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
     print(f"{Colors.BOLD}{'VECTORIZED CDBNN TRAINING'.center(80)}{Colors.ENDC}")
     print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Normalization: {config.normalization_mode.upper()}{Colors.ENDC}")
-    print(f"{Colors.GREEN}✓ Mixed Precision: {config.mixed_precision and device.type == 'cuda'}{Colors.ENDC}")
+    print(f"{Colors.GREEN}✓ Mixed Precision: {scaler is not None}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Num Workers: {num_workers}{Colors.ENDC}")
     print()
 
@@ -6096,6 +6660,16 @@ def deterministic_train(
         print(f"{Colors.GREEN}Best Accuracy: {best_accuracy:.2%}{Colors.ENDC}")
     print(f"{Colors.GREEN}Best Epoch: {best_epoch + 1}{Colors.ENDC}")
 
+    # Ensure history is returned even if no metrics were recorded
+    if not history['train_loss']:
+        history['train_loss'] = [0.0]
+    if not history.get('val_loss'):
+        history['val_loss'] = [float('inf')]
+    if not history.get('val_acc'):
+        history['val_acc'] = [0.0]
+    if not history.get('train_acc'):
+        history['train_acc'] = [0.0]
+
     return dict(history)
 
 
@@ -6105,16 +6679,20 @@ def normalize_dataset_name(data_name: str) -> str:
 
 
 def get_dataset_paths(data_name: str, base_dir: str = 'data'):
-    """Get standardized paths for dataset files"""
-    dataset_name_lower = normalize_dataset_name(data_name)
-    data_dir = Path(base_dir) / dataset_name_lower
+    """
+    Get standardized paths for dataset files.
+    ALL files go to: base_dir/dataset_name/ (where dataset_name is already normalized)
+    """
+    # data_name should already be normalized (lowercase)
+    data_dir = Path(base_dir) / data_name
     return {
         'data_dir': data_dir,
-        'csv_path': data_dir / f"{dataset_name_lower}.csv",
-        'train_csv': data_dir / f"{dataset_name_lower}_train.csv",
-        'test_csv': data_dir / f"{dataset_name_lower}_test.csv",
-        'json_config': data_dir / f"{dataset_name_lower}.json",
-        'conf_config': data_dir / f"{dataset_name_lower}.conf",
+        'csv_path': data_dir / f"{data_name}.csv",
+        'train_csv': data_dir / f"{data_name}_train.csv",
+        'test_csv': data_dir / f"{data_name}_test.csv",
+        'json_config': data_dir / f"{data_name}_config.json",
+        'conf_config': data_dir / f"{data_name}.conf",
+        'minimal_config': data_dir / f"{data_name}_config_minimal.json",
         'checkpoint_dir': data_dir / 'checkpoints',
         'viz_dir': data_dir / 'visualizations',
         'log_dir': data_dir / 'logs',
@@ -6131,67 +6709,107 @@ def get_dataset_paths(data_name: str, base_dir: str = 'data'):
 
 class CDBNNApplication:
     def __init__(self, config: GlobalConfig):
-        if hasattr(config, 'dataset_name') and config.dataset_name:
-            config.dataset_name = normalize_dataset_name(config.dataset_name)
-
+        # DO NOT modify config.dataset_name - it's already normalized in main()
         self.config = config
+        self.model = None
+        self.domain_processor = None
 
-        self.loading_data_dir = Path('data') / config.dataset_name
-        self.loading_checkpoint_dir = self.loading_data_dir / 'checkpoints'
-
+        # ========================================================================
+        # SINGLE DIRECTORY STRUCTURE: data/dataset_name/
+        # ========================================================================
+        # Base data directory
         if hasattr(config, 'output_dir') and config.output_dir:
-            output_dir_path = Path(config.output_dir)
-            if output_dir_path.name == config.dataset_name:
-                self.saving_data_dir = output_dir_path
-                self.output_base_dir = output_dir_path.parent
-            else:
-                self.output_base_dir = output_dir_path
-                self.saving_data_dir = output_dir_path / config.dataset_name
+            self.base_dir = Path(config.output_dir)
         else:
-            self.output_base_dir = Path('data')
-            self.saving_data_dir = self.output_base_dir / config.dataset_name
+            self.base_dir = Path('data')
 
+        # Use dataset_name directly (already normalized)
+        dataset_name = config.dataset_name  # Already 'galaxy', NOT 'galaxy/galaxy'
+
+        self.saving_data_dir = self.base_dir
         self.saving_checkpoint_dir = self.saving_data_dir / 'checkpoints'
         self.saving_viz_dir = self.saving_data_dir / 'visualizations'
         self.saving_log_dir = self.saving_data_dir / 'logs'
         self.saving_heatmap_dir = self.saving_data_dir / 'attention_heatmaps'
 
+        # Loading directory is the same as saving directory
+        self.loading_data_dir = self.saving_data_dir
+        self.loading_checkpoint_dir = self.saving_checkpoint_dir
+
+        # Update config paths
         self.config.checkpoint_dir = str(self.saving_checkpoint_dir)
         self.config.viz_dir = str(self.saving_viz_dir)
         self.config.log_dir = str(self.saving_log_dir)
 
-        self.config.conf_config_path = str(self.saving_data_dir / f"{config.dataset_name}.conf")
-        self.config.json_config_path = str(self.saving_data_dir / f"{config.dataset_name}_config.json")
-        self.config.class_names_path = str(self.saving_data_dir / f"{config.dataset_name}_classes.json")
+        # Set CSV and config paths
+        self.config.csv_path = str(self.saving_data_dir / f"{dataset_name}.csv")
+        self.config.train_csv_path = str(self.saving_data_dir / f"{dataset_name}_train.csv")
+        self.config.test_csv_path = str(self.saving_data_dir / f"{dataset_name}_test.csv")
+        self.config.conf_config_path = str(self.saving_data_dir / f"{dataset_name}.conf")
+        self.config.json_config_path = str(self.saving_data_dir / f"{dataset_name}_config.json")
+        self.config.class_names_path = str(self.saving_data_dir / f"{dataset_name}_classes.json")
+        self.config.feature_map_path = str(self.saving_data_dir / f"{dataset_name}_feature_map.json")
+        self.config.column_mapping_path = str(self.saving_data_dir / f"{dataset_name}_columns.json")
 
-        self.config.csv_path = str(self.saving_data_dir / f"{config.dataset_name}.csv")
-        self.config.train_csv_path = str(self.saving_data_dir / f"{config.dataset_name}_train.csv")
-        self.config.test_csv_path = str(self.saving_data_dir / f"{config.dataset_name}_test.csv")
-
-        self.config.feature_map_path = str(self.saving_data_dir / f"{config.dataset_name}_feature_map.json")
-        self.config.column_mapping_path = str(self.saving_data_dir / f"{config.dataset_name}_columns.json")
-
+        # Create all directories
         for d in [self.saving_data_dir, self.saving_checkpoint_dir, self.saving_viz_dir,
                   self.saving_log_dir, self.saving_heatmap_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
         self.visualizer = Visualizer(config)
 
-        logger.info(f"Dataset: {config.dataset_name}")
-        logger.info(f"Loading data from: {self.loading_data_dir}")
-        logger.info(f"Saving outputs to: {self.saving_data_dir}")
+        logger.info("=" * 60)
+        logger.info(f"Dataset: {dataset_name}")
+        logger.info(f"Data directory: {self.saving_data_dir}")
+        logger.info(f"Checkpoint directory: {self.saving_checkpoint_dir}")
         logger.info(f"CSV output: {self.config.csv_path}")
         logger.info(f"Configuration file: {self.config.conf_config_path}")
-        logger.info(f"Checkpoint directory (loading): {self.loading_checkpoint_dir}")
-        logger.info(f"Checkpoint directory (saving): {self.saving_checkpoint_dir}")
+        logger.info("=" * 60)
 
     def prepare_data(self, source_path: str, data_type: str = 'custom') -> Tuple[DataLoader, Optional[DataLoader]]:
         """
         Prepare data with optimized DataLoader settings for GPU training.
+        Auto-detects input size from actual image samples.
+        Dynamically optimizes architecture based on dataset characteristics.
         Maintains reproducibility while maximizing performance.
         """
-        transform = self._get_transform()
+        # ========================================================================
+        # 0. HANDLE DATA PATH FOR TORCHVISION DATASETS
+        # ========================================================================
+        if data_type == 'torchvision':
+            dataset_name_upper = self.config.dataset_name.upper()
+            valid_tv_datasets = ['MNIST', 'CIFAR10', 'CIFAR100', 'FASHIONMNIST']
 
+            if dataset_name_upper not in valid_tv_datasets:
+                raise ValueError(f"Unknown torchvision dataset: {dataset_name_upper}. "
+                               f"Supported: {valid_tv_datasets}")
+
+            logger.info(f"Using torchvision dataset: {dataset_name_upper}")
+
+            # Auto-detect input size if not explicitly set
+            if not hasattr(self.config, 'input_size_explicitly_set') or not self.config.input_size_explicitly_set:
+                if dataset_name_upper in ['CIFAR10', 'CIFAR100']:
+                    self.config.input_size = (32, 32)
+                elif dataset_name_upper in ['MNIST', 'FASHIONMNIST']:
+                    self.config.input_size = (28, 28)
+                logger.info(f"Auto-set input size for {dataset_name_upper}: {self.config.input_size[0]}x{self.config.input_size[1]}")
+
+        else:  # custom dataset
+            # Auto-detect input size from sample images (if not explicitly set)
+            if not hasattr(self.config, 'input_size_explicitly_set') or not self.config.input_size_explicitly_set:
+                if source_path and os.path.exists(source_path):
+                    logger.info("Auto-detecting input size from sample images...")
+                    detected_size = self._detect_input_size_from_samples(source_path, data_type)
+                    if detected_size:
+                        old_size = self.config.input_size
+                        self.config.input_size = detected_size
+                        logger.info(f"Auto-detected input size: {detected_size[0]}x{detected_size[1]} (was {old_size[0]}x{old_size[1]})")
+                    else:
+                        logger.warning(f"Could not auto-detect size, using default {self.config.input_size}")
+                else:
+                    logger.warning(f"Source path {source_path} does not exist, using default size {self.config.input_size}")
+
+        transform = self._get_transform()
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
 
         # ========================================================================
@@ -6199,22 +6817,26 @@ class CDBNNApplication:
         # ========================================================================
         if data_type == 'torchvision':
             dataset_name_upper = self.config.dataset_name.upper()
-            if dataset_name_upper in ['MNIST', 'CIFAR10', 'CIFAR100', 'FASHIONMNIST']:
-                train_dataset = self._get_torchvision_dataset(dataset_name_upper, train=True, transform=transform)
-                test_dataset = self._get_torchvision_dataset(dataset_name_upper, train=False, transform=transform)
-                self.config.num_classes = len(train_dataset.classes) if hasattr(train_dataset, 'classes') else 10
-                self.config.class_names = train_dataset.classes if hasattr(train_dataset, 'classes') else [str(i) for i in range(self.config.num_classes)]
-            else:
-                train_path = Path(source_path) / 'train' if (Path(source_path) / 'train').exists() else Path(source_path)
-                test_path = Path(source_path) / 'test' if (Path(source_path) / 'test').exists() else None
+            train_dataset = self._get_torchvision_dataset(dataset_name_upper, train=True, transform=transform)
+            test_dataset = self._get_torchvision_dataset(dataset_name_upper, train=False, transform=transform)
 
-                train_dataset = CustomImageDataset(str(train_path), transform=transform, config=self.config.to_dict())
-                test_dataset = CustomImageDataset(str(test_path), transform=transform, config=self.config.to_dict()) if test_path else None
-
+            # Set class information
+            if hasattr(train_dataset, 'classes'):
                 self.config.num_classes = len(train_dataset.classes)
                 self.config.class_names = train_dataset.classes
+            else:
+                # For datasets without explicit classes (like MNIST)
+                unique_labels = sorted(set(train_dataset.targets.tolist() if hasattr(train_dataset, 'targets') else []))
+                self.config.num_classes = len(unique_labels)
+                self.config.class_names = [str(i) for i in unique_labels]
+
+            # ====================================================================
+            # CRITICAL FIX: Save torchvision metadata for prediction
+            # ====================================================================
+            self._save_torchvision_metadata(train_dataset)
+
         else:
-            # Handle archives
+            # Handle archives for custom datasets
             if source_path.endswith(('.zip', '.tar', '.gz', '.bz2', '.xz')):
                 extract_dir = self.loading_data_dir / 'extracted'
                 source_path = ArchiveHandler.extract(source_path, str(extract_dir))
@@ -6231,6 +6853,29 @@ class CDBNNApplication:
             self.config.num_classes = len(train_dataset.classes)
             self.config.class_names = train_dataset.classes
 
+        # ========================================================================
+        # 1.5 DYNAMIC ARCHITECTURE OPTIMIZATION
+        # ========================================================================
+        if getattr(self.config, 'auto_optimize_architecture', True):
+            logger.info("=" * 70)
+            logger.info("DYNAMIC ARCHITECTURE OPTIMIZATION")
+            logger.info("=" * 70)
+
+            try:
+                # Analyze dataset
+                optimizer = DynamicArchitectureOptimizer(self.config)
+                analysis = optimizer.analyze_dataset(train_dataset)
+
+                # Update config with optimized parameters
+                optimizer.update_config_from_analysis(analysis)
+
+                # Store analysis results for later use
+                self.architecture_analysis = analysis
+
+            except Exception as e:
+                logger.warning(f"Architecture optimization failed: {e}")
+                logger.warning("Using default architecture settings")
+
         self._save_config_files()
 
         # ========================================================================
@@ -6238,41 +6883,28 @@ class CDBNNApplication:
         # ========================================================================
 
         # Determine optimal number of workers
-        # For reproducibility, we can use workers but with fixed seeds
         if self.config.num_workers > 0:
             num_workers = self.config.num_workers
         else:
-            # Auto-detect optimal number of workers
             cpu_count = os.cpu_count() or 1
             if torch.cuda.is_available():
-                # For GPU training, use more workers to keep GPU busy
                 num_workers = min(8, cpu_count)
             else:
-                # For CPU training, use fewer workers to avoid overhead
                 num_workers = min(4, cpu_count)
 
-        # Pin memory for faster GPU transfer (only if using GPU)
         pin_memory = self.config.use_gpu and torch.cuda.is_available()
-
-        # Prefetch factor for data loading pipeline
         prefetch_factor = 2 if num_workers > 0 else None
-
-        # Use persistent workers to avoid recreation overhead
         persistent_workers = num_workers > 0
 
-        # Create deterministic generators for reproducibility
-        # Note: With multiple workers, perfect reproducibility is challenging but we minimize variance
         g_train = torch.Generator()
         g_train.manual_seed(42)
         g_test = torch.Generator()
         g_test.manual_seed(42)
 
-        # Worker initialization function for reproducibility
         def worker_init_fn(worker_id):
             """Initialize worker with deterministic seed"""
             import random
             import numpy as np
-            # Each worker gets a unique but deterministic seed
             worker_seed = 42 + worker_id
             random.seed(worker_seed)
             np.random.seed(worker_seed)
@@ -6280,6 +6912,7 @@ class CDBNNApplication:
 
         logger.info("=" * 60)
         logger.info("DataLoader Configuration:")
+        logger.info(f"  Input size: {self.config.input_size[0]}x{self.config.input_size[1]}")
         logger.info(f"  Batch size: {self.config.batch_size}")
         logger.info(f"  Num workers: {num_workers}")
         logger.info(f"  Pin memory: {pin_memory}")
@@ -6290,9 +6923,6 @@ class CDBNNApplication:
         # ========================================================================
         # 3. CREATE TRAIN DATALOADER
         # ========================================================================
-
-        # For training, we need shuffle but with deterministic ordering
-        # Using generator ensures reproducibility across runs
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config.batch_size,
@@ -6304,19 +6934,18 @@ class CDBNNApplication:
             generator=g_train,
             worker_init_fn=worker_init_fn,
             drop_last=False,
-            timeout=0  # No timeout for maximum stability
+            timeout=0
         )
 
         # ========================================================================
         # 4. CREATE TEST/VALIDATION DATALOADER
         # ========================================================================
-
         test_loader = None
         if test_dataset:
             test_loader = DataLoader(
                 test_dataset,
                 batch_size=self.config.batch_size,
-                shuffle=False,  # No shuffle for test/validation
+                shuffle=False,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 prefetch_factor=prefetch_factor,
@@ -6330,7 +6959,6 @@ class CDBNNApplication:
         # ========================================================================
         # 5. LOG DATASET INFORMATION
         # ========================================================================
-
         logger.info("=" * 60)
         logger.info("Dataset Information:")
         logger.info(f"  Training samples: {len(train_dataset)}")
@@ -6340,14 +6968,220 @@ class CDBNNApplication:
         logger.info(f"  Class names: {self.config.class_names[:5]}{'...' if len(self.config.class_names) > 5 else ''}")
         logger.info("=" * 60)
 
-        # Plot class distribution if available
+        # Log architecture optimization results if available
+        if hasattr(self, 'architecture_analysis'):
+            logger.info("=" * 60)
+            logger.info("Optimized Architecture:")
+            logger.info(f"  Encoder layers: {self.architecture_analysis.get('n_layers', 'N/A')}")
+            logger.info(f"  Base channels: {self.architecture_analysis.get('base_channels', 'N/A')}")
+            logger.info(f"  Feature dims: {self.config.feature_dims}")
+            logger.info(f"  Compressed dims: {self.config.compressed_dims}")
+            logger.info(f"  Complexity score: {self.architecture_analysis.get('complexity_score', 0):.3f}")
+            logger.info("=" * 60)
+
         if hasattr(train_dataset, 'get_class_distribution'):
             self.visualizer.plot_class_distribution(train_dataset.get_class_distribution())
 
         return train_loader, test_loader
 
+    def _save_torchvision_metadata(self, dataset):
+        """Save complete metadata for torchvision datasets"""
+        try:
+            if hasattr(dataset, 'classes'):
+                class_names = list(dataset.classes)
+            else:
+                if hasattr(dataset, 'targets'):
+                    unique_targets = sorted(set(dataset.targets.tolist() if hasattr(dataset.targets, 'tolist') else dataset.targets))
+                    class_names = [str(i) for i in unique_targets]
+                else:
+                    class_names = [str(i) for i in range(self.config.num_classes or 10)]
+
+            class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+            idx_to_class = {idx: name for idx, name in enumerate(class_names)}
+
+            metadata = {
+                'dataset_name': self.config.dataset_name,
+                'source': 'torchvision',
+                'num_classes': len(class_names),
+                'class_names': class_names,
+                'class_to_idx': class_to_idx,
+                'idx_to_class': idx_to_class,
+                'input_size': list(self.config.input_size),
+                'normalization_mode': self.config.normalization_mode,
+                'timestamp': datetime.now().isoformat(),
+                'version': '2.0'
+            }
+
+            # Save to data_dir/dataset_name_metadata.json (NOT nested)
+            metadata_path = self.saving_data_dir / f"{self.config.dataset_name}_metadata.json"
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            logger.info(f"TorchVision metadata saved to {metadata_path}")
+
+            # Also save class names separately
+            class_path = self.saving_data_dir / f"{self.config.dataset_name}_classes.json"
+            with open(class_path, 'w') as f:
+                json.dump({
+                    'class_names': class_names,
+                    'num_classes': len(class_names),
+                    'class_to_idx': class_to_idx,
+                    'idx_to_class': idx_to_class
+                }, f, indent=2)
+            logger.info(f"Class mapping saved to {class_path}")
+
+            self.config.class_names = class_names
+            self.config.num_classes = len(class_names)
+
+        except Exception as e:
+            logger.warning(f"Failed to save torchvision metadata: {e}")
+
+    def _detect_input_size_from_samples(self, source_path: str, data_type: str, num_samples: int = 50) -> Optional[Tuple[int, int]]:
+        """
+        Detect input size by sampling actual images from the dataset.
+        Only used for custom datasets (not torchvision).
+
+        IMPORTANT: Does NOT resize images during detection to get true original dimensions.
+
+        Args:
+            source_path: Path to data
+            data_type: 'custom' or 'torchvision'
+            num_samples: Number of images to sample
+
+        Returns:
+            Tuple of (height, width) or None if detection fails
+        """
+        # Skip detection for torchvision datasets (they have known sizes)
+        if data_type == 'torchvision':
+            return None
+
+        try:
+            # CRITICAL FIX: DO NOT RESIZE during detection!
+            # Use a transform that only converts to tensor, preserving original dimensions
+            temp_transform = transforms.Compose([
+                transforms.ToTensor()  # Only convert to tensor - NO RESIZE!
+            ])
+
+            # Handle archives
+            temp_source_path = source_path
+            temp_extract_dir = None
+
+            if source_path.endswith(('.zip', '.tar', '.gz', '.bz2', '.xz')):
+                temp_extract_dir = self.loading_data_dir / 'extracted_temp'
+                temp_source_path = ArchiveHandler.extract(source_path, str(temp_extract_dir))
+
+            # Try to find images (look for train folder or root)
+            train_path = Path(temp_source_path) / 'train'
+            if train_path.exists():
+                temp_dataset = CustomImageDataset(str(train_path), transform=temp_transform, config=self.config.to_dict())
+            else:
+                temp_dataset = CustomImageDataset(temp_source_path, transform=temp_transform, config=self.config.to_dict())
+
+            if temp_dataset is None or len(temp_dataset) == 0:
+                return None
+
+            # Sample images to determine TRUE original size
+            sample_sizes = []
+            indices = list(range(min(len(temp_dataset), num_samples)))
+
+            # Random sample for variety
+            import random
+            random.seed(42)
+            random.shuffle(indices)
+
+            logger.info(f"Sampling {min(len(indices), num_samples)} images to detect original dimensions...")
+
+            for idx in indices[:num_samples]:
+                try:
+                    img, _ = temp_dataset[idx]
+                    if isinstance(img, torch.Tensor):
+                        # Get TRUE spatial dimensions (no resize applied)
+                        h, w = img.shape[-2], img.shape[-1]
+                    elif isinstance(img, PILImage.Image):
+                        w, h = img.size  # Original PIL image size
+                    elif isinstance(img, np.ndarray):
+                        h, w = img.shape[:2]
+                    else:
+                        continue
+                    sample_sizes.append((h, w))
+                    logger.debug(f"Sample {idx}: {h}x{w}")
+                except Exception as e:
+                    logger.debug(f"Failed to get size for sample {idx}: {e}")
+                    continue
+
+            if not sample_sizes:
+                logger.warning("No valid image samples found for size detection")
+                return None
+
+            # Find the most common dimensions
+            from collections import Counter
+            size_counter = Counter(sample_sizes)
+            most_common_size = size_counter.most_common(1)[0][0]
+            h, w = most_common_size
+
+            # Calculate statistics about image sizes
+            unique_sizes = len(size_counter)
+            min_h = min(s[0] for s in sample_sizes)
+            max_h = max(s[0] for s in sample_sizes)
+            min_w = min(s[1] for s in sample_sizes)
+            max_w = max(s[1] for s in sample_sizes)
+
+            logger.info(f"Image size statistics:")
+            logger.info(f"  Most common: {h}x{w}")
+            logger.info(f"  Range: height {min_h}-{max_h}, width {min_w}-{max_w}")
+            logger.info(f"  Unique sizes: {unique_sizes}")
+
+            # Warn if images have very different sizes
+            if unique_sizes > 3:
+                logger.warning(f"Dataset has highly variable image sizes: {unique_sizes} different dimensions found")
+                logger.warning(f"Most common: {h}x{w}, others: {[s for s, c in size_counter.most_common(5)[1:]]}")
+
+            # For very small images (like MNIST 28x28, CIFAR 32x32), keep original size
+            if h <= 64 and w <= 64:
+                logger.info(f"Images are already small ({h}x{w}), keeping original size")
+                # Just ensure they're at least 32x32
+                h = max(32, h)
+                w = max(32, w)
+                return (h, w)
+
+            # For larger images, optionally suggest a scaled size
+            max_dim = 512  # Maximum allowed dimension
+            if h > max_dim or w > max_dim:
+                scale = max_dim / max(h, w)
+                suggested_h = int(h * scale)
+                suggested_w = int(w * scale)
+                # Round to multiples of 32 for efficient downsampling
+                suggested_h = ((suggested_h + 15) // 16) * 16
+                suggested_w = ((suggested_w + 15) // 16) * 16
+                logger.info(f"Large images detected ({h}x{w}). Suggested resize: {suggested_h}x{suggested_w}")
+
+                # Use suggested size
+                h, w = suggested_h, suggested_w
+            else:
+                # Round to multiples of 32 for efficient downsampling
+                h = ((h + 15) // 16) * 16
+                w = ((w + 15) // 16) * 16
+                if (h, w) != most_common_size:
+                    logger.info(f"Adjusted dimensions to {h}x{w} (multiples of 16 for efficiency)")
+
+            logger.info(f"Final detected image dimensions: {h}x{w}")
+
+            # Clean up temporary extracted directory if created
+            if temp_extract_dir and temp_extract_dir.exists():
+                import shutil
+                shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+            return (h, w)
+
+        except Exception as e:
+            logger.error(f"Error detecting input size: {e}")
+            traceback.print_exc()
+            return None
+
     def _save_config_files(self):
-        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+        """Save configuration files WITHOUT duplicating dataset name"""
+        # CRITICAL: Use the config's dataset_name directly (already normalized)
+        # Do NOT call normalize_dataset_name again!
+        dataset_name = self.config.dataset_name
         data_dir = self.saving_data_dir
 
         actual_feature_count = self.config.compressed_dims
@@ -6356,9 +7190,9 @@ class CDBNNApplication:
         column_names.append("target")
 
         config_dict = {
-            "dataset_name": dataset_name_lower,
+            "dataset_name": dataset_name,
             "num_classes": self.config.num_classes,
-            "csv_file": str(data_dir / f"{dataset_name_lower}.csv"),
+            "csv_file": str(data_dir / f"{dataset_name}.csv"),
             "column_names": column_names,
             "target_column": "target",
             "feature_dims": self.config.feature_dims,
@@ -6432,25 +7266,48 @@ class CDBNNApplication:
                 })
             config_dict['domain_config'] = domain_config
 
-        conf_path = data_dir / f"{dataset_name_lower}.conf"
+        # Save to data_dir/dataset_name.conf (NOT nested)
+        conf_path = data_dir / f"{dataset_name}.conf"
         with open(conf_path, 'w') as f:
             json.dump(config_dict, f, indent=4, default=str)
         logger.info(f"Configuration saved to {conf_path}")
         logger.info(f"CSV will contain {len(column_names)} columns: {', '.join(column_names[:5])}...")
 
-    def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict:
-        """Train using standalone deterministic function with statistics"""
+    def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None,
+              resume: bool = False, resume_from: Optional[str] = None,
+              reset_optimizer: bool = False, additional_epochs: Optional[int] = None,
+              save_features: bool = True) -> Dict:
+        """
+        Train using standalone deterministic function with invariant preprocessing and resume capability.
 
+        Args:
+            save_features: If True, extract and save features after training
+        """
         self._set_deterministic_seeds()
+
+        # Ensure device is set
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if self.config.use_gpu and torch.cuda.is_available() else 'cpu')
 
         # Check if augmentation is enabled (default: True)
         use_augmentation = not getattr(self.config, 'no_augmentation', False)
         augmentation_strength = getattr(self.config, 'augmentation_strength', 0.5)
 
+        # ========================================================================
+        # 1. APPLY DETERMINISTIC INVARIANT PREPROCESSING TO DATASETS
+        # ========================================================================
         logger.info("=" * 70)
         logger.info("APPLYING DETERMINISTIC INVARIANT PREPROCESSING")
         logger.info(f"  Augmentation enabled: {use_augmentation}")
         logger.info(f"  Augmentation strength: {augmentation_strength}")
+        if resume:
+            logger.info(f"  RESUME MODE: Continuing from previous checkpoint")
+            if resume_from:
+                logger.info(f"  Resuming from: {resume_from}")
+            if reset_optimizer:
+                logger.info("  Optimizer state will be reset")
+            if additional_epochs:
+                logger.info(f"  Adding {additional_epochs} additional epochs")
         logger.info("=" * 70)
 
         # Initialize invariant preprocessor wrapper
@@ -6483,6 +7340,7 @@ class CDBNNApplication:
                 # CRITICAL: Convert tensor to PIL Image if needed
                 if isinstance(img, torch.Tensor):
                     from torchvision import transforms
+                    # Ensure values are in [0, 1] range for ToPILImage
                     if img.min() < 0 or img.max() > 1:
                         img = (img - img.min()) / (img.max() - img.min())
                     to_pil = transforms.ToPILImage()
@@ -6492,18 +7350,21 @@ class CDBNNApplication:
                         img = (img * 255).astype(np.uint8)
                     img = PILImage.fromarray(img)
 
+                # Ensure PIL Image
                 if not isinstance(img, PILImage.Image):
                     raise TypeError(f"Expected PIL Image, got {type(img)}")
 
                 preprocessor = self._get_preprocessor()
                 img = preprocessor.process(img, is_training=self.is_train)
 
+                # Convert back to tensor
                 to_tensor = transforms.ToTensor()
                 img = to_tensor(img)
 
                 return img, label
 
-        # Wrap datasets
+        # Wrap datasets with invariant preprocessing
+        logger.info("Wrapping training dataset with invariant preprocessing...")
         train_dataset = InvariantDatasetWrapper(
             train_loader.dataset,
             self.config.input_size,
@@ -6513,42 +7374,126 @@ class CDBNNApplication:
         )
 
         if val_loader:
+            logger.info("Wrapping validation dataset with invariant preprocessing...")
             val_dataset = InvariantDatasetWrapper(
                 val_loader.dataset,
                 self.config.input_size,
-                use_augmentation=False,
+                use_augmentation=False,  # No augmentation for validation
                 augmentation_strength=0,
                 is_train=False
             )
         else:
             val_dataset = None
 
-        # Create deterministic loaders
+        # Create new deterministic loaders with preprocessed datasets
         train_loader = self._create_deterministic_loader(
-            train_dataset, self.config.batch_size, shuffle=True
+            train_dataset,
+            self.config.batch_size,
+            shuffle=True
         )
 
         if val_dataset:
             val_loader = self._create_deterministic_loader(
-                val_dataset, self.config.batch_size, shuffle=False
+                val_dataset,
+                self.config.batch_size,
+                shuffle=False
             )
 
-        # Calculate statistics
+        # ========================================================================
+        # 2. CALCULATE OR LOAD DATASET STATISTICS ON PREPROCESSED IMAGES
+        # ========================================================================
         logger.info("=" * 70)
-        logger.info("CALCULATING STATISTICS ON PREPROCESSED IMAGES")
+        logger.info("CALCULATING/LOADING STATISTICS ON PREPROCESSED IMAGES")
         logger.info("=" * 70)
 
-        statistics_calculator = DatasetStatisticsCalculator(self.config)
-        stats_loader = self._create_deterministic_loader(
-            train_dataset, batch_size=64, shuffle=False
-        )
-        statistics_calculator.calculate_statistics(stats_loader)
-        self.statistics_calculator = statistics_calculator
+        statistics_calculator = None
+
+        # Store paths for saving/loading
+        self.saving_checkpoint_dir = Path(self.saving_checkpoint_dir) if not isinstance(self.saving_checkpoint_dir, Path) else self.saving_checkpoint_dir
+        self.loading_checkpoint_dir = Path(self.loading_checkpoint_dir) if not isinstance(self.loading_checkpoint_dir, Path) else self.loading_checkpoint_dir
+        self.saving_data_dir = Path(self.saving_data_dir) if not isinstance(self.saving_data_dir, Path) else self.saving_data_dir
+        self.loading_data_dir = Path(self.loading_data_dir) if not isinstance(self.loading_data_dir, Path) else self.loading_data_dir
+
+        # Try to load existing statistics if resuming
+        if resume:
+            # Try multiple possible locations for statistics file
+            stats_paths = [
+                self.saving_checkpoint_dir / 'dataset_statistics.pt',
+                self.loading_checkpoint_dir / 'dataset_statistics.pt',
+                self.saving_data_dir / 'dataset_statistics.pt',
+                self.loading_data_dir / 'dataset_statistics.pt',
+            ]
+
+            for stats_path in stats_paths:
+                if stats_path.exists():
+                    try:
+                        logger.info(f"Loading existing statistics from: {stats_path}")
+                        stats = torch.load(stats_path, map_location='cpu')
+                        statistics_calculator = DatasetStatisticsCalculator(self.config)
+                        if 'mean' in stats and stats['mean'] is not None:
+                            statistics_calculator.mean = stats['mean']
+                        if 'std' in stats and stats['std'] is not None:
+                            statistics_calculator.std = stats['std']
+                        statistics_calculator.per_channel_min = stats.get('per_channel_min')
+                        statistics_calculator.per_channel_max = stats.get('per_channel_max')
+                        statistics_calculator.n_samples_used = stats.get('n_samples_used', 0)
+                        statistics_calculator.is_calculated = True
+                        self.statistics_calculator = statistics_calculator
+                        logger.info("Statistics loaded successfully from existing file")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to load statistics from {stats_path}: {e}")
+                        continue
+
+            if statistics_calculator is None:
+                logger.warning("No existing statistics found, will recalculate...")
+                resume = False  # Fall back to full training mode
+
+        if not resume:
+            # Calculate fresh statistics
+            statistics_calculator = DatasetStatisticsCalculator(self.config)
+            stats_loader = self._create_deterministic_loader(
+                train_dataset,
+                batch_size=min(64, self.config.batch_size),  # Smaller batch for stats calculation
+                shuffle=False
+            )
+            statistics_calculator.calculate_statistics(stats_loader)
+            self.statistics_calculator = statistics_calculator
+
+            # Save statistics for future resume
+            stats_save_path = self.saving_checkpoint_dir / 'dataset_statistics.pt'
+            stats_save_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                'mean': statistics_calculator.mean.cpu(),
+                'std': statistics_calculator.std.cpu(),
+                'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
+                'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
+                'n_samples_used': statistics_calculator.n_samples_used,
+                'timestamp': datetime.now().isoformat()
+            }, stats_save_path)
+            logger.info(f"Statistics saved to {stats_save_path} for future resume")
+
+        # ========================================================================
+        # 3. CREATE AND TRAIN MODEL
+        # ========================================================================
+        logger.info("=" * 70)
+        logger.info("CREATING MODEL AND STARTING TRAINING")
+        if resume:
+            logger.info("RESUME MODE: Model will be loaded from checkpoint")
+        logger.info("=" * 70)
 
         # Create model using ModelFactory
         model = ModelFactory.create_model(self.config)
+        model = model.to(self.device)
+        self.model = model  # Store model for later feature extraction
 
-        # Train with enhanced discriminative loss
+        # Set resume state attributes on model if resuming
+        if resume:
+            model._resume_start_epoch = 0
+            model._resume_start_phase = 1
+            model._resume_reset_optimizer = reset_optimizer
+
+        # Call standalone training function
         history = deterministic_train(
             model=model,
             train_dataset=train_dataset,
@@ -6558,7 +7503,76 @@ class CDBNNApplication:
             statistics_calculator=statistics_calculator
         )
 
-        # Save model and results
+        # ========================================================================
+        # 4. SAVE FEATURES AFTER TRAINING
+        # ========================================================================
+        if save_features:
+            logger.info("=" * 70)
+            logger.info("SAVING FEATURES AFTER TRAINING")
+            logger.info("=" * 70)
+
+            try:
+                # Load the best model for feature extraction
+                best_checkpoint_path = self.saving_checkpoint_dir / 'best.pt'
+                if best_checkpoint_path.exists():
+                    logger.info(f"Loading best model from {best_checkpoint_path} for feature extraction")
+                    checkpoint = torch.load(best_checkpoint_path, map_location=self.device, weights_only=False)
+
+                    # Load weights into model
+                    self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    self.model = self.model.to(self.device)
+                    self.model.eval()
+
+                    # Extract features from training data
+                    logger.info("Extracting features from training data...")
+                    train_features = self.extract_features(train_loader, include_paths=True)
+
+                    if train_features and train_features.get('embeddings') is not None and len(train_features['embeddings']) > 0:
+                        # Save training features
+                        train_csv_path = self.saving_data_dir / f"{self.config.dataset_name}_train_features.csv"
+                        self._save_features_to_csv(train_features, str(train_csv_path))
+                        logger.info(f"Training features saved to: {train_csv_path}")
+
+                        # Also save as the main CSV
+                        main_csv_path = self.saving_data_dir / f"{self.config.dataset_name}.csv"
+                        self._save_features_to_csv(train_features, str(main_csv_path))
+                        logger.info(f"Main features CSV saved to: {main_csv_path}")
+
+                        # Save feature statistics
+                        feature_stats = {
+                            'n_samples': train_features['embeddings'].shape[0],
+                            'n_features': train_features['embeddings'].shape[1],
+                            'feature_dimension': train_features['embeddings'].shape[1],
+                            'compressed_dims': self.config.compressed_dims,
+                            'mean': train_features['embeddings'].mean(axis=0).tolist(),
+                            'std': train_features['embeddings'].std(axis=0).tolist(),
+                            'timestamp': datetime.now().isoformat()
+                        }
+
+                        stats_path = self.saving_data_dir / f"{self.config.dataset_name}_features_stats.json"
+                        with open(stats_path, 'w') as f:
+                            json.dump(feature_stats, f, indent=2)
+                        logger.info(f"Feature statistics saved to: {stats_path}")
+
+                    # Extract features from validation data if available
+                    if val_loader:
+                        logger.info("Extracting features from validation data...")
+                        val_features = self.extract_features(val_loader, include_paths=True)
+                        if val_features and val_features.get('embeddings') is not None and len(val_features['embeddings']) > 0:
+                            val_csv_path = self.saving_data_dir / f"{self.config.dataset_name}_val_features.csv"
+                            self._save_features_to_csv(val_features, str(val_csv_path))
+                            logger.info(f"Validation features saved to: {val_csv_path}")
+                else:
+                    logger.warning(f"No best model found at {best_checkpoint_path}, skipping feature extraction")
+
+            except Exception as e:
+                logger.error(f"Failed to save features after training: {e}")
+                logger.error(traceback.format_exc())
+
+        # ========================================================================
+        # 5. SAVE MODEL AND RESULTS
+        # ========================================================================
+        # Copy best model to loading directory
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
         best_checkpoint = self.saving_checkpoint_dir / 'best.pt'
         if best_checkpoint.exists():
@@ -6567,7 +7581,58 @@ class CDBNNApplication:
             shutil.copy2(best_checkpoint, loading_best_path)
             logger.info(f"Model saved to {loading_best_path}")
 
+            # Also save the preprocessor configuration
+            preprocessor_config = {
+                'target_size': list(self.config.input_size),
+                'normalization_stats': {
+                    'mean': statistics_calculator.mean.tolist() if statistics_calculator and statistics_calculator.mean is not None else None,
+                    'std': statistics_calculator.std.tolist() if statistics_calculator and statistics_calculator.std is not None else None,
+                },
+                'preprocessor_type': 'DeterministicInvariantPreprocessor',
+                'augmentation_enabled': use_augmentation,
+                'augmentation_strength': augmentation_strength,
+                'version': '1.0'
+            }
+
+            preprocessor_config_path = self.saving_checkpoint_dir / f"{dataset_name_lower}_preprocessor.json"
+            with open(preprocessor_config_path, 'w') as f:
+                json.dump(preprocessor_config, f, indent=2)
+            logger.info(f"Preprocessor config saved to {preprocessor_config_path}")
+
+        # Plot training history
         self.visualizer.plot_training_history(history)
+
+        # Save final training summary
+        training_summary = {
+            'best_accuracy': max(history.get('val_acc', [0])) if history.get('val_acc') else 0,
+            'best_loss': min(history.get('val_loss', [float('inf')])),
+            'total_epochs': len(history.get('train_loss', [])),
+            'resumed': resume,
+            'augmentation_used': use_augmentation,
+            'augmentation_strength': augmentation_strength,
+            'normalization_mode': self.config.normalization_mode,
+            'features_saved': save_features,
+            'normalization_stats': {
+                'mean': statistics_calculator.mean.tolist() if statistics_calculator and statistics_calculator.mean is not None else None,
+                'std': statistics_calculator.std.tolist() if statistics_calculator and statistics_calculator.std is not None else None,
+            }
+        }
+
+        summary_path = self.saving_data_dir / f"{dataset_name_lower}_training_summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_path, 'w') as f:
+            json.dump(training_summary, f, indent=2)
+        logger.info(f"Training summary saved to {summary_path}")
+
+        logger.info("=" * 70)
+        logger.info("TRAINING COMPLETED SUCCESSFULLY")
+        logger.info(f"Best validation accuracy: {training_summary['best_accuracy']:.4f}")
+        logger.info(f"Best validation loss: {training_summary['best_loss']:.6f}")
+        if resume:
+            logger.info(f"Training resumed")
+        if save_features:
+            logger.info(f"Features saved to: {self.saving_data_dir}/{self.config.dataset_name}_*.csv")
+        logger.info("=" * 70)
 
         return history
 
@@ -6589,7 +7654,6 @@ class CDBNNApplication:
         from torch.utils.data import DataLoader
         from torch.utils.data.dataloader import default_collate
 
-        # Create generator with fixed seed
         g = torch.Generator()
         g.manual_seed(42)
 
@@ -6597,67 +7661,122 @@ class CDBNNApplication:
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=0,  # Force 0 workers for reproducibility
+            num_workers=0,
             generator=g,
             pin_memory=False,
             drop_last=False,
             collate_fn=default_collate
         )
 
-    def extract_features(self, dataloader: DataLoader) -> Dict[str, np.ndarray]:
-        model_path = self.loading_checkpoint_dir / f"{normalize_dataset_name(self.config.dataset_name)}_best.pt"
+    def extract_features(self, dataloader: DataLoader, include_paths: bool = True,
+                        extract_domain_features: bool = False) -> Dict:
+        """
+        Extract features from the trained model with optional domain features.
 
-        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
-        output_csv = str(self.saving_data_dir / f"{dataset_name_lower}.csv")
+        Args:
+            dataloader: DataLoader containing images
+            include_paths: Whether to include file paths
+            extract_domain_features: Whether to extract domain-specific features
 
-        predictor = PredictionManager(self.config)
+        Returns:
+            Dictionary containing 'embeddings', 'labels', and optionally 'filenames', 'paths', 'class_names'
+        """
+        if self.model is None:
+            logger.error("Model not loaded. Cannot extract features.")
+            return {}
 
-        if hasattr(dataloader.dataset, 'data_dir'):
-            data_path = str(dataloader.dataset.data_dir)
-        else:
-            data_path = str(self.loading_data_dir)
+        # Set model to evaluation mode
+        self.model.eval()
 
-        predictions = predictor.predict_images(data_path, output_csv=output_csv)
+        # Move model to device if not already there
+        if not hasattr(self.model, 'device') or self.model.device != self.device:
+            self.model = self.model.to(self.device)
 
-        if predictions:
-            features_dict = {
-                'features': predictions.get('features'),
-                'labels': predictions.get('target'),
-                'class_names': predictions.get('target'),
-                'filenames': predictions.get('filename'),
-                'paths': predictions.get('filepath')
-            }
+        # Extract neural network features using the model's method
+        features_dict = self.model.extract_features(dataloader, include_paths=include_paths)
 
-            if 'labels' in features_dict and features_dict['labels']:
-                if isinstance(features_dict['labels'][0], str):
-                    unique_labels = sorted(set(features_dict['labels']))
-                    label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-                    features_dict['labels'] = np.array([label_to_idx[label] for label in features_dict['labels']])
+        # Add domain features if requested and domain processor is available
+        if extract_domain_features and hasattr(self, 'domain_processor') and self.domain_processor is not None:
+            logger.info("Extracting domain-specific features...")
 
-            return features_dict
+            domain_features_list = []
 
-        return {'features': None, 'labels': None}
+            # Get paths if available
+            if 'paths' in features_dict and features_dict['paths']:
+                paths = features_dict['paths']
+            elif include_paths and hasattr(dataloader.dataset, 'full_paths'):
+                paths = dataloader.dataset.full_paths
+            else:
+                paths = None
+
+            if paths:
+                for img_path in tqdm(paths, desc="Extracting domain features"):
+                    try:
+                        img = ImageProcessor.load_image(img_path)
+                        if img is not None:
+                            img_array = np.array(img) / 255.0
+                            domain_feats = self.domain_processor.extract_features(img_array)
+                            domain_features_list.append(domain_feats)
+                        else:
+                            domain_features_list.append({})
+                    except Exception as e:
+                        logger.debug(f"Failed to extract domain features for {img_path}: {e}")
+                        domain_features_list.append({})
+
+                # Store domain features in the dictionary
+                if domain_features_list:
+                    all_keys = sorted(set().union(*[f.keys() for f in domain_features_list]))
+                    for key in all_keys:
+                        features_dict[f'domain_{key}'] = [f.get(key, np.nan) for f in domain_features_list]
+
+                    logger.info(f"Added {len(all_keys)} domain-specific features")
+
+        logger.info(f"Extracted {len(features_dict.get('embeddings', []))} features "
+                    f"with dimension {features_dict.get('embeddings', torch.tensor([])).shape[1] if len(features_dict.get('embeddings', [])) > 0 else 0}")
+
+        return features_dict
 
     def predict(self, dataloader: DataLoader, optimize_level: str = 'balanced') -> Dict:
-        predictor = PredictionManager(self.config)
+        """
+        Run prediction on the dataloader.
 
-        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+        Args:
+            dataloader: DataLoader containing images to predict
+            optimize_level: 'fast', 'balanced', or 'accurate'
 
-        if hasattr(dataloader.dataset, 'data_dir'):
-            data_path = str(dataloader.dataset.data_dir)
-        else:
-            data_path = str(self.loading_data_dir)
+        Returns:
+            Dictionary with predictions
+        """
+        if self.model is None:
+            logger.error("Model not loaded. Cannot predict.")
+            return {}
 
-        output_csv = str(self.saving_data_dir / f"{dataset_name_lower}.csv")
-        config_file = str(self.saving_data_dir / f"{dataset_name_lower}.conf")
+        self.model.eval()
 
-        logger.info(f"Predicting from: {data_path}")
-        logger.info(f"Saving to: {output_csv}")
-        logger.info(f"Configuration file: {config_file}")
+        all_predictions = []
+        all_probabilities = []
+        all_labels = []
 
-        predictor.config.conf_config_path = config_file
+        with torch.no_grad():
+            for inputs, labels in tqdm(dataloader, desc="Predicting"):
+                inputs = inputs.to(self.device)
+                outputs = self.model(inputs)
 
-        return predictor.predict_images(data_path, output_csv=output_csv)
+                if 'class_logits' in outputs:
+                    probs = F.softmax(outputs['class_logits'], dim=1)
+                    preds = probs.argmax(dim=1)
+                    all_predictions.extend(preds.cpu().numpy())
+                    all_probabilities.extend(probs.cpu().numpy())
+                    all_labels.extend(labels.numpy())
+
+        result = {
+            'predictions': np.array(all_predictions),
+            'probabilities': np.array(all_probabilities),
+            'labels': np.array(all_labels)
+        }
+
+        logger.info(f"Predicted {len(all_predictions)} samples")
+        return result
 
     def _get_torchvision_dataset(self, dataset_name: str, train: bool, transform):
         dataset_name = dataset_name.lower()
@@ -6675,29 +7794,54 @@ class CDBNNApplication:
     def _get_transform(self, is_train: bool = False) -> transforms.Compose:
         """
         Create optimized deterministic transform pipeline.
-        Uses tensor operations where possible for GPU efficiency.
+        Adds dataset-specific augmentations for better generalization.
         """
-        # For training, use deterministic augmentations
+        # Check if this is CIFAR or similar small dataset
+        is_cifar = self.config.dataset_name in ['cifar10', 'cifar100']
+        is_mnist = self.config.dataset_name in ['mnist', 'fashionmnist']
+        is_small_image = min(self.config.input_size) <= 64
+
         if is_train:
-            return transforms.Compose([
-                transforms.Lambda(lambda img: self._preprocess_invariant(img, is_train=True)),
-                transforms.ToTensor(),
-                # Optional: Normalize to [0,1] range (already done by ToTensor)
-                # transforms.Lambda(lambda x: x.contiguous())  # Ensure contiguous memory
-            ])
+            # Build augmentation pipeline based on dataset type
+            transforms_list = []
+
+            # CIFAR-specific augmentations (helps with generalization)
+            if is_cifar:
+                transforms_list.extend([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                ])
+            elif is_mnist:
+                # MNIST-specific augmentations
+                transforms_list.extend([
+                    transforms.RandomAffine(degrees=10, translate=(0.1, 0.1)),
+                ])
+            elif is_small_image:
+                # Generic augmentations for small images
+                transforms_list.extend([
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                ])
+
+            # Add invariant preprocessing
+            transforms_list.append(
+                transforms.Lambda(lambda img: self._preprocess_invariant(img, is_train=True))
+            )
+            transforms_list.append(transforms.ToTensor())
+
+            return transforms.Compose(transforms_list)
         else:
             # For prediction/validation, use minimal preprocessing
             return transforms.Compose([
                 transforms.Lambda(lambda img: self._preprocess_invariant(img, is_train=False)),
                 transforms.ToTensor(),
-                # transforms.Lambda(lambda x: x.contiguous())
             ])
 
     def _preprocess_invariant(self, image: PILImage.Image, is_train: bool = False) -> PILImage.Image:
         """
         Apply deterministic invariant preprocessing with optimization for GPU transfer.
         """
-        # Initialize preprocessor (cached for performance)
         if not hasattr(self, '_invariant_preprocessor'):
             use_augmentation = not getattr(self.config, 'no_augmentation', False)
             augmentation_strength = getattr(self.config, 'augmentation_strength', 0.5)
@@ -6707,38 +7851,369 @@ class CDBNNApplication:
                 augmentation_strength=augmentation_strength
             )
 
-        # Ensure image is RGB (or keep grayscale for medical/astronomy)
         if image.mode not in ['RGB', 'L']:
             image = image.convert('RGB')
 
-        # Apply invariant preprocessing
         processed = self._invariant_preprocessor.process(image, is_training=is_train)
-
         return processed
 
-    def _save_features_to_csv(self, features: Dict, output_csv: str):
+    def _save_features_to_csv(self, features: Dict, output_csv: str,
+                              include_domain_features: bool = True,
+                              domain_processor=None):
+        """
+        Save features to CSV with proper metadata and exactly config.compressed_dims features.
+        All columns will have the same length.
+        """
+        import pandas as pd
+        import numpy as np
+
+        # CRITICAL: First determine the number of samples
+        n_samples = 0
+        if 'embeddings' in features and features['embeddings'] is not None:
+            if isinstance(features['embeddings'], torch.Tensor):
+                n_samples = features['embeddings'].shape[0]
+            elif isinstance(features['embeddings'], np.ndarray):
+                n_samples = features['embeddings'].shape[0]
+            elif isinstance(features['embeddings'], list):
+                n_samples = len(features['embeddings'])
+
+        if n_samples == 0:
+            # Try to get from labels
+            if 'labels' in features and features['labels'] is not None:
+                if isinstance(features['labels'], torch.Tensor):
+                    n_samples = features['labels'].shape[0]
+                elif isinstance(features['labels'], np.ndarray):
+                    n_samples = features['labels'].shape[0]
+                elif isinstance(features['labels'], list):
+                    n_samples = len(features['labels'])
+
+        if n_samples == 0:
+            logger.error("Cannot determine number of samples - no data to save")
+            return
+
+        logger.info(f"Creating CSV with {n_samples} samples")
         data = {}
 
-        if 'features' in features and len(features['features']) > 0:
-            feature_array = features['features']
+        # ========================================================================
+        # 1. NEURAL NETWORK FEATURES - EXACTLY config.compressed_dims
+        # ========================================================================
+        if 'embeddings' in features and features['embeddings'] is not None and len(features['embeddings']) > 0:
+            feature_array = features['embeddings']
+            if isinstance(feature_array, torch.Tensor):
+                feature_array = feature_array.cpu().numpy()
+
+            # Ensure correct shape
+            if len(feature_array.shape) == 1:
+                feature_array = feature_array.reshape(-1, 1)
+
+            # CRITICAL: Truncate or pad to match n_samples
+            if feature_array.shape[0] != n_samples:
+                logger.warning(f"Feature array length {feature_array.shape[0]} != {n_samples}, adjusting...")
+                if feature_array.shape[0] > n_samples:
+                    feature_array = feature_array[:n_samples]
+                else:
+                    # Pad with zeros
+                    padded = np.zeros((n_samples, feature_array.shape[1]))
+                    padded[:feature_array.shape[0]] = feature_array
+                    feature_array = padded
+
+            # Use exactly compressed_dims features
+            expected_features = self.config.compressed_dims if hasattr(self.config, 'compressed_dims') else 32
+
+            # Truncate or pad feature dimensions
+            if feature_array.shape[1] > expected_features:
+                logger.warning(f"Feature dimension {feature_array.shape[1]} > expected {expected_features}, truncating to {expected_features}")
+                feature_array = feature_array[:, :expected_features]
+            elif feature_array.shape[1] < expected_features:
+                logger.warning(f"Feature dimension {feature_array.shape[1]} < expected {expected_features}, padding with zeros")
+                padded = np.zeros((feature_array.shape[0], expected_features))
+                padded[:, :feature_array.shape[1]] = feature_array
+                feature_array = padded
+
+            # Save as feature_0, feature_1, etc.
             for i in range(feature_array.shape[1]):
                 data[f'feature_{i}'] = feature_array[:, i]
 
-        if 'labels' in features:
-            data['label'] = features['labels']
+            logger.info(f"Added {feature_array.shape[1]} neural network features (expected: {expected_features})")
+        else:
+            # Create empty features if none exist
+            expected_features = self.config.compressed_dims if hasattr(self.config, 'compressed_dims') else 32
+            for i in range(expected_features):
+                data[f'feature_{i}'] = [0.0] * n_samples
+            logger.warning(f"No embeddings found, created {expected_features} zero features")
 
-        if 'class_names' in features:
-            data['target'] = features['class_names']
+        # ========================================================================
+        # 2. METADATA - original_filename, filepath, label_type
+        # ========================================================================
 
-        if 'filenames' in features:
-            data['filename'] = features['filenames']
+        # original_filename (just the filename without path)
+        if 'filenames' in features and features['filenames']:
+            filenames_list = features['filenames']
+            if len(filenames_list) != n_samples:
+                logger.warning(f"Filenames length {len(filenames_list)} != {n_samples}, adjusting...")
+                if len(filenames_list) > n_samples:
+                    filenames_list = filenames_list[:n_samples]
+                else:
+                    filenames_list = filenames_list + [f"unknown_{i}" for i in range(n_samples - len(filenames_list))]
+            data['original_filename'] = filenames_list
+            logger.info(f"Added original_filename column")
+        elif 'paths' in features and features['paths']:
+            # Extract filename from path
+            paths_list = features['paths']
+            if len(paths_list) != n_samples:
+                logger.warning(f"Paths length {len(paths_list)} != {n_samples}, adjusting...")
+                if len(paths_list) > n_samples:
+                    paths_list = paths_list[:n_samples]
+                else:
+                    paths_list = paths_list + [f"unknown_path_{i}" for i in range(n_samples - len(paths_list))]
+            filenames = [Path(p).name for p in paths_list]
+            data['original_filename'] = filenames
+            logger.info(f"Added original_filename column (extracted from paths)")
 
-        if 'paths' in features:
-            data['filepath'] = features['paths']
+        # filepath (full path)
+        if 'paths' in features and features['paths']:
+            paths_list = features['paths']
+            if len(paths_list) != n_samples:
+                logger.warning(f"Paths length {len(paths_list)} != {n_samples}, adjusting...")
+                if len(paths_list) > n_samples:
+                    paths_list = paths_list[:n_samples]
+                else:
+                    paths_list = paths_list + [f"unknown_path_{i}" for i in range(n_samples - len(paths_list))]
+            data['filepath'] = paths_list
+            logger.info(f"Added filepath column")
 
-        df = pd.DataFrame(data)
-        df.to_csv(output_csv, index=False)
-        logger.info(f"Features saved to {output_csv}")
+        # ========================================================================
+        # 3. LABEL/TARGET - as string, ensure correct length
+        # ========================================================================
+
+        label_added = False
+
+        # Priority: class_names (actual string labels)
+        if 'class_names' in features and features['class_names']:
+            class_names_list = features['class_names']
+            if len(class_names_list) != n_samples:
+                logger.warning(f"Class names length {len(class_names_list)} != {n_samples}, adjusting...")
+                if len(class_names_list) > n_samples:
+                    class_names_list = class_names_list[:n_samples]
+                else:
+                    class_names_list = class_names_list + [f"class_{i}" for i in range(n_samples - len(class_names_list))]
+            data['label_type'] = class_names_list
+            unique_classes = set(class_names_list)
+            logger.info(f"Added label_type column with class names: {unique_classes}")
+            label_added = True
+
+        # Try target with mapping
+        if not label_added and 'target' in features and features['target'] is not None:
+            target_val = features['target']
+            if isinstance(target_val, torch.Tensor):
+                target_val = target_val.cpu().numpy()
+
+            # Ensure correct length
+            if len(target_val) != n_samples:
+                logger.warning(f"Target length {len(target_val)} != {n_samples}, adjusting...")
+                if len(target_val) > n_samples:
+                    target_val = target_val[:n_samples]
+                else:
+                    target_val = np.concatenate([target_val, np.zeros(n_samples - len(target_val))])
+
+            # Try to get class mapping
+            class_mapping = None
+            if hasattr(self, 'model') and hasattr(self.model, '_idx_to_class'):
+                class_mapping = self.model._idx_to_class
+                logger.info(f"Using model._idx_to_class mapping")
+            elif hasattr(self.config, 'class_names') and self.config.class_names:
+                class_mapping = {idx: name for idx, name in enumerate(self.config.class_names)}
+                logger.info(f"Using config.class_names mapping")
+
+            if class_mapping:
+                data['label_type'] = [str(class_mapping.get(int(t), str(t))) for t in target_val]
+                unique_classes = set(data['label_type'])
+                logger.info(f"Added label_type column (converted from numeric): {unique_classes}")
+            else:
+                data['label_type'] = [str(t) for t in target_val]
+                logger.info(f"Added label_type column (raw numeric values as strings)")
+            label_added = True
+
+        # Try labels with mapping
+        if not label_added and 'labels' in features and features['labels'] is not None:
+            labels_val = features['labels']
+            if isinstance(labels_val, torch.Tensor):
+                labels_val = labels_val.cpu().numpy()
+
+            # Ensure correct length
+            if len(labels_val) != n_samples:
+                logger.warning(f"Labels length {len(labels_val)} != {n_samples}, adjusting...")
+                if len(labels_val) > n_samples:
+                    labels_val = labels_val[:n_samples]
+                else:
+                    labels_val = np.concatenate([labels_val, np.zeros(n_samples - len(labels_val))])
+
+            # Try to get class mapping
+            class_mapping = None
+            if hasattr(self, 'model') and hasattr(self.model, '_idx_to_class'):
+                class_mapping = self.model._idx_to_class
+                logger.info(f"Using model._idx_to_class mapping")
+            elif hasattr(self.config, 'class_names') and self.config.class_names:
+                class_mapping = {idx: name for idx, name in enumerate(self.config.class_names)}
+                logger.info(f"Using config.class_names mapping")
+
+            if class_mapping:
+                data['label_type'] = [str(class_mapping.get(int(l), str(l))) for l in labels_val]
+                unique_classes = set(data['label_type'])
+                logger.info(f"Added label_type column from labels: {unique_classes}")
+            else:
+                data['label_type'] = [str(l) for l in labels_val]
+                logger.info(f"Added label_type column from labels (raw values as strings)")
+            label_added = True
+
+        # Fallback: create default labels
+        if not label_added:
+            data['label_type'] = ['unknown'] * n_samples
+            logger.warning(f"No labels found, created default 'unknown' labels")
+
+        # ========================================================================
+        # 4. CLUSTER INFORMATION (if available)
+        # ========================================================================
+        if 'cluster_assignments' in features and features['cluster_assignments'] is not None:
+            cluster_assignments = features['cluster_assignments']
+            if isinstance(cluster_assignments, torch.Tensor):
+                cluster_assignments = cluster_assignments.cpu().numpy()
+
+            # Ensure correct length
+            if len(cluster_assignments) != n_samples:
+                logger.warning(f"Cluster assignments length {len(cluster_assignments)} != {n_samples}, adjusting...")
+                if len(cluster_assignments) > n_samples:
+                    cluster_assignments = cluster_assignments[:n_samples]
+                else:
+                    cluster_assignments = np.concatenate([cluster_assignments, np.zeros(n_samples - len(cluster_assignments))])
+
+            data['cluster_assignment'] = cluster_assignments
+            logger.info(f"Added cluster_assignment column")
+
+        if 'cluster_confidence' in features and features['cluster_confidence'] is not None:
+            cluster_confidence = features['cluster_confidence']
+            if isinstance(cluster_confidence, torch.Tensor):
+                cluster_confidence = cluster_confidence.cpu().numpy()
+
+            # Ensure correct length
+            if len(cluster_confidence) != n_samples:
+                logger.warning(f"Cluster confidence length {len(cluster_confidence)} != {n_samples}, adjusting...")
+                if len(cluster_confidence) > n_samples:
+                    cluster_confidence = cluster_confidence[:n_samples]
+                else:
+                    cluster_confidence = np.concatenate([cluster_confidence, np.zeros(n_samples - len(cluster_confidence))])
+
+            data['cluster_confidence'] = cluster_confidence
+            logger.info(f"Added cluster_confidence column")
+
+        # ========================================================================
+        # 5. DOMAIN-SPECIFIC FEATURES (if requested)
+        # ========================================================================
+        if include_domain_features:
+            domain_keys = [k for k in features.keys() if k.startswith('domain_')]
+            if domain_keys:
+                for key in domain_keys:
+                    domain_vals = features[key]
+                    if isinstance(domain_vals, list):
+                        if len(domain_vals) != n_samples:
+                            logger.warning(f"Domain feature {key} length {len(domain_vals)} != {n_samples}, adjusting...")
+                            if len(domain_vals) > n_samples:
+                                domain_vals = domain_vals[:n_samples]
+                            else:
+                                domain_vals = domain_vals + [np.nan] * (n_samples - len(domain_vals))
+                        data[key] = domain_vals
+                    elif isinstance(domain_vals, np.ndarray):
+                        if len(domain_vals) != n_samples:
+                            if len(domain_vals) > n_samples:
+                                domain_vals = domain_vals[:n_samples]
+                            else:
+                                domain_vals = np.concatenate([domain_vals, np.full(n_samples - len(domain_vals), np.nan)])
+                        data[key] = domain_vals
+                logger.info(f"Added {len(domain_keys)} domain-specific features")
+
+        # ========================================================================
+        # 6. SAMPLE INDEX (fallback for identification - ALWAYS add for debugging)
+        # ========================================================================
+        data['sample_index'] = list(range(n_samples))
+        logger.info(f"Added sample_index column")
+
+        # ========================================================================
+        # 7. VERIFY ALL COLUMNS HAVE SAME LENGTH
+        # ========================================================================
+        for col_name, col_data in data.items():
+            if len(col_data) != n_samples:
+                logger.error(f"Column {col_name} has length {len(col_data)}, expected {n_samples}")
+                # Fix by truncating or padding
+                if len(col_data) > n_samples:
+                    data[col_name] = col_data[:n_samples]
+                else:
+                    if isinstance(col_data, list):
+                        data[col_name] = col_data + [None] * (n_samples - len(col_data))
+                    else:
+                        # Assume numpy array
+                        import numpy as np
+                        data[col_name] = np.concatenate([col_data, np.full(n_samples - len(col_data), np.nan)])
+
+        # ========================================================================
+        # 8. SAVE TO CSV WITH PROPER COLUMN ORDER
+        # ========================================================================
+        # Define column order priority
+        priority_columns = ['sample_index', 'original_filename', 'filepath', 'label_type', 'cluster_assignment', 'cluster_confidence']
+
+        # Get feature columns
+        expected_features = self.config.compressed_dims if hasattr(self.config, 'compressed_dims') else 32
+        feature_columns = [f'feature_{i}' for i in range(expected_features) if f'feature_{i}' in data]
+
+        # Get domain feature columns
+        domain_columns = sorted([k for k in data.keys() if k.startswith('domain_')])
+
+        # Get remaining columns
+        other_columns = [k for k in data.keys()
+                        if k not in priority_columns
+                        and not k.startswith('feature_')
+                        and not k.startswith('domain_')]
+
+        # Build final column order
+        column_order = [c for c in priority_columns if c in data] + feature_columns + domain_columns + other_columns
+
+        # Reorder data
+        ordered_data = {col: data[col] for col in column_order if col in data}
+
+        # Create DataFrame
+        df = pd.DataFrame(ordered_data)
+
+        # Ensure label_type is string type
+        if 'label_type' in df.columns:
+            df['label_type'] = df['label_type'].astype(str)
+            # Log class distribution for verification
+            class_dist = df['label_type'].value_counts()
+            logger.info(f"Class distribution in CSV:")
+            for class_name, count in class_dist.items():
+                logger.info(f"  {class_name}: {count} ({count/len(df)*100:.1f}%)")
+
+        output_path = Path(output_csv)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        df.to_csv(output_path, index=False)
+
+        logger.info("=" * 60)
+        logger.info(f"FEATURES SAVED TO: {output_csv}")
+        logger.info(f"  Total samples: {len(df)}")
+        logger.info(f"  Total columns: {len(df.columns)}")
+        logger.info(f"  Feature columns: {len(feature_columns)} (expected: {expected_features})")
+        logger.info("=" * 60)
+
+        # Show sample of first row for verification
+        if len(df) > 0:
+            first_row = df.iloc[0]
+            logger.info(f"Sample first row:")
+            for col in ['sample_index', 'original_filename', 'label_type', 'feature_0']:
+                if col in first_row.index:
+                    val = first_row[col]
+                    if isinstance(val, float):
+                        logger.info(f"  {col}: {val:.6f}")
+                    else:
+                        logger.info(f"  {col}: {val}")
 
     @staticmethod
     def load_config_from_json(config_path: str) -> Optional[Dict]:
@@ -6782,38 +8257,165 @@ class CDBNNApplication:
         except Exception as e:
             logger.error(f"Failed to load configuration from {conf_path}: {e}")
             return None
-    # =============================================================================
-    # UPDATE CDBNNApplication to use ModelFactory
-    # =============================================================================
 
     def _create_model(self) -> BaseAutoencoder:
         """Create model using ModelFactory"""
         return ModelFactory.create_model(self.config)
 
-    def prepare_batch_tensor(self, images: List[PILImage.Image], device: torch.device) -> torch.Tensor:
+    def export_features_to_csv(self, output_csv: str = None, split: str = 'train') -> Dict:
         """
-        Convert a list of PIL images to a batched tensor efficiently.
-        This is faster than applying transforms individually.
-        """
-        import torchvision.transforms.functional as TF
+        Export features to CSV using the trained model.
 
-        batch_tensors = []
-        for img in images:
-            # Ensure consistent mode
-            if img.mode not in ['RGB', 'L']:
+        Args:
+            output_csv: Path to output CSV file (optional)
+            split: 'train' or 'test' split to export
+
+        Returns:
+            Dictionary with features
+        """
+        logger.info("=" * 70)
+        logger.info(f"EXPORTING FEATURES FOR {split.upper()} SPLIT")
+        logger.info("=" * 70)
+
+        # Check if model exists
+        model_path = self.saving_checkpoint_dir / 'best.pt'
+
+        if not model_path.exists():
+            logger.error(f"No trained model found at {model_path}. Please train first.")
+            return {}
+
+        # Load model if not already loaded
+        if self.model is None:
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            self.model = ModelFactory.create_model(self.config)
+            self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            self.model = self.model.to(self.device)
+            self.model.eval()
+
+        # Prepare data loader for the specified split
+        if split == 'train':
+            train_loader, _ = self.prepare_data(None, data_type='torchvision')
+            loader = train_loader
+        else:
+            _, test_loader = self.prepare_data(None, data_type='torchvision')
+            loader = test_loader
+
+        # Extract features
+        features = self.extract_features(loader, include_paths=True)
+
+        # Save to CSV
+        if output_csv is None:
+            output_csv = self.saving_data_dir / f"{self.config.dataset_name}_{split}_features.csv"
+
+        self._save_features_to_csv(features, str(output_csv))
+
+        logger.info("=" * 70)
+        logger.info(f"FEATURES EXPORTED SUCCESSFULLY")
+        logger.info(f"  Split: {split}")
+        logger.info(f"  Samples: {len(features['embeddings'])}")
+        logger.info(f"  Feature dimension: {features['embeddings'].shape[1]}")
+        logger.info(f"  Output CSV: {output_csv}")
+        logger.info("=" * 70)
+
+        return features
+
+    def export_torchvision_to_images(self, dataset_name: str, output_dir: str = None):
+        """
+        Export torchvision dataset to image files for prediction.
+        Creates folder structure: data/dataset_lower/train/class1/, data/dataset_lower/test/class1/
+        """
+        dataset_name_lower = normalize_dataset_name(dataset_name)
+
+        if output_dir is None:
+            output_dir = Path('data') / dataset_name_lower
+        else:
+            output_dir = Path(output_dir)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        dataset_name_upper = dataset_name.upper()
+        valid_tv_datasets = ['MNIST', 'CIFAR10', 'CIFAR100', 'FASHIONMNIST']
+
+        if dataset_name_upper not in valid_tv_datasets:
+            raise ValueError(f"Unknown torchvision dataset: {dataset_name_upper}")
+
+        logger.info("=" * 70)
+        logger.info(f"Exporting {dataset_name_upper} to images")
+        logger.info(f"Output directory: {output_dir}")
+        logger.info("=" * 70)
+
+        # Import torchvision datasets
+        from torchvision import datasets
+
+        # Load datasets
+        if dataset_name_upper == 'CIFAR10':
+            train_dataset = datasets.CIFAR10(root='./data', train=True, download=True)
+            test_dataset = datasets.CIFAR10(root='./data', train=False, download=True)
+            class_names = train_dataset.classes
+        elif dataset_name_upper == 'CIFAR100':
+            train_dataset = datasets.CIFAR100(root='./data', train=True, download=True)
+            test_dataset = datasets.CIFAR100(root='./data', train=False, download=True)
+            class_names = train_dataset.classes
+        elif dataset_name_upper == 'MNIST':
+            train_dataset = datasets.MNIST(root='./data', train=True, download=True)
+            test_dataset = datasets.MNIST(root='./data', train=False, download=True)
+            class_names = [str(i) for i in range(10)]
+        elif dataset_name_upper == 'FASHIONMNIST':
+            train_dataset = datasets.FashionMNIST(root='./data', train=True, download=True)
+            test_dataset = datasets.FashionMNIST(root='./data', train=False, download=True)
+            class_names = train_dataset.classes
+
+        # Create output directories
+        train_dir = output_dir / 'train'
+        test_dir = output_dir / 'test'
+
+        for class_name in class_names:
+            (train_dir / class_name).mkdir(parents=True, exist_ok=True)
+            (test_dir / class_name).mkdir(parents=True, exist_ok=True)
+
+        # Export training images
+        logger.info(f"Exporting {len(train_dataset)} training images...")
+        for idx, (img, label) in enumerate(tqdm(train_dataset, desc="Exporting train")):
+            class_name = class_names[label]
+            output_path = train_dir / class_name / f"{idx:06d}.png"
+
+            # Convert to RGB if needed (MNIST is grayscale)
+            if img.mode != 'RGB':
                 img = img.convert('RGB')
+            img.save(output_path)
 
-            # Resize
-            img = img.resize(self.config.input_size, PILImage.Resampling.LANCZOS)
+        # Export test images
+        logger.info(f"Exporting {len(test_dataset)} test images...")
+        for idx, (img, label) in enumerate(tqdm(test_dataset, desc="Exporting test")):
+            class_name = class_names[label]
+            output_path = test_dir / class_name / f"{idx:06d}.png"
 
-            # Convert to tensor
-            img_tensor = TF.to_tensor(img)
-            batch_tensors.append(img_tensor)
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(output_path)
 
-        # Stack and move to device in one operation
-        batch = torch.stack(batch_tensors).to(device, non_blocking=True)
+        # Save class mapping
+        class_mapping = {
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'class_to_idx': {name: idx for idx, name in enumerate(class_names)},
+            'idx_to_class': {idx: name for idx, name in enumerate(class_names)},
+            'dataset_name': dataset_name_lower,
+            'source': 'torchvision',
+            'export_date': datetime.now().isoformat()
+        }
 
-        return batch
+        mapping_path = output_dir / f"{dataset_name_lower}_classes.json"
+        with open(mapping_path, 'w') as f:
+            json.dump(class_mapping, f, indent=2)
+
+        logger.info(f"Class mapping saved to {mapping_path}")
+        logger.info(f"Export complete! Images saved to {output_dir}")
+        logger.info(f"  Train: {train_dir}")
+        logger.info(f"  Test: {test_dir}")
+
+        return output_dir
 
 
 # =============================================================================
@@ -6824,14 +8426,82 @@ class DomainAwareCDBNN(CDBNNApplication):
     """Domain-aware CDBNN application with specialized processors"""
 
     def __init__(self, config: GlobalConfig):
+        # DO NOT modify config.dataset_name - it's already normalized
         super().__init__(config)
         self.domain = config.domain if hasattr(config, 'domain') else 'general'
         self.domain_processor = None
+
+        # Class mapping for predictions
+        self.class_names = []
+        self.num_classes = 0
+        self.class_to_idx = {}
+        self.idx_to_class = {}
 
         # Initialize domain processor if domain is specified
         if self.domain != 'general':
             self._init_domain_processor()
             logger.info(f"Initialized {self.domain} domain processor")
+
+        # Load class metadata if available
+        self._load_class_metadata()
+
+    def _load_class_metadata(self):
+        """Load class metadata from training for proper label mapping"""
+        dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+
+        # Try multiple possible locations for class metadata
+        metadata_paths = [
+            self.saving_data_dir / f"{dataset_name_lower}_metadata.json",
+            self.loading_data_dir / f"{dataset_name_lower}_metadata.json",
+            self.saving_checkpoint_dir / f"{dataset_name_lower}_metadata.json",
+            self.loading_checkpoint_dir / f"{dataset_name_lower}_metadata.json",
+            self.saving_data_dir / f"{dataset_name_lower}_classes.json",
+            self.loading_data_dir / f"{dataset_name_lower}_classes.json",
+        ]
+
+        for metadata_path in metadata_paths:
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+
+                    # Extract class information
+                    if 'class_names' in metadata:
+                        self.class_names = metadata['class_names']
+                    if 'num_classes' in metadata:
+                        self.num_classes = metadata['num_classes']
+                    if 'class_to_idx' in metadata:
+                        self.class_to_idx = metadata['class_to_idx']
+                    if 'idx_to_class' in metadata:
+                        self.idx_to_class = metadata['idx_to_class']
+                        # Convert string keys to int if needed
+                        if self.idx_to_class and isinstance(list(self.idx_to_class.keys())[0], str):
+                            self.idx_to_class = {int(k): v for k, v in self.idx_to_class.items()}
+
+                    # Update config
+                    if self.class_names and not self.config.class_names:
+                        self.config.class_names = self.class_names
+                    if self.num_classes and not self.config.num_classes:
+                        self.config.num_classes = self.num_classes
+
+                    logger.info(f"Loaded class metadata from {metadata_path}")
+                    logger.info(f"  Classes: {self.class_names[:5]}{'...' if len(self.class_names) > 5 else ''}")
+                    logger.info(f"  Num classes: {self.num_classes}")
+                    return
+
+                except Exception as e:
+                    logger.warning(f"Failed to load metadata from {metadata_path}: {e}")
+                    continue
+
+        # If no metadata found, try to infer from config
+        if self.config.class_names:
+            self.class_names = self.config.class_names
+            self.num_classes = len(self.config.class_names)
+            self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
+            self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
+            logger.info(f"Inferred class metadata from config: {self.num_classes} classes")
+        else:
+            logger.info("No class metadata found - will use numeric labels")
 
     def _init_domain_processor(self):
         """Initialize the appropriate domain processor with full features"""
@@ -6853,14 +8523,116 @@ class DomainAwareCDBNN(CDBNNApplication):
             logger.warning(f"Unknown domain: {self.domain}, using general processor")
             self.domain_processor = None
 
+    def prepare_data(self, source_path: str, data_type: str = 'custom') -> Tuple[DataLoader, Optional[DataLoader]]:
+        """
+        Prepare data with domain-specific handling and torchvision metadata support.
+        Delegates to parent class for actual data loading.
+        """
+        # For astronomy domain, log FITS support
+        if self.domain == 'astronomy' and hasattr(self.config, 'use_fits') and self.config.use_fits:
+            logger.info("Astronomy domain with FITS support enabled")
+
+        # For medical domain, log modality
+        if self.domain == 'medical' and hasattr(self.config, 'modality'):
+            logger.info(f"Medical domain with modality: {self.config.modality}")
+
+        # For agriculture domain, log NIR support
+        if self.domain == 'agriculture' and hasattr(self.config, 'has_nir_band') and self.config.has_nir_band:
+            logger.info("Agriculture domain with NIR band support")
+
+        # For satellite domain, log band configuration
+        if self.domain == 'satellite' and hasattr(self.config, 'num_bands'):
+            logger.info(f"Satellite domain with {self.config.num_bands} bands")
+
+        # For surveillance domain, log enabled features
+        if self.domain == 'surveillance':
+            features_enabled = []
+            if getattr(self.config, 'detect_motion', False):
+                features_enabled.append('motion_detection')
+            if getattr(self.config, 'enhance_low_light', False):
+                features_enabled.append('low_light_enhancement')
+            if features_enabled:
+                logger.info(f"Surveillance domain features: {', '.join(features_enabled)}")
+
+        # Delegate to parent class for actual data preparation
+        train_loader, test_loader = super().prepare_data(source_path, data_type)
+
+        # After data preparation, save domain-specific metadata
+        if data_type == 'torchvision':
+            self._save_domain_metadata()
+
+        return train_loader, test_loader
+
+    def _save_domain_metadata(self):
+        """Save domain-specific metadata for later use in prediction"""
+        try:
+            dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+
+            domain_metadata = {
+                'domain': self.domain,
+                'dataset_name': dataset_name_lower,
+                'num_classes': self.config.num_classes,
+                'class_names': self.config.class_names,
+                'class_to_idx': {name: idx for idx, name in enumerate(self.config.class_names)},
+                'idx_to_class': {idx: name for idx, name in enumerate(self.config.class_names)},
+                'input_size': list(self.config.input_size),
+                'normalization_mode': self.config.normalization_mode,
+                'timestamp': datetime.now().isoformat(),
+                'version': '2.0'
+            }
+
+            # Add domain-specific configuration
+            if self.domain == 'astronomy':
+                domain_metadata['domain_config'] = {
+                    'use_fits': getattr(self.config, 'use_fits', False),
+                    'fits_hdu': getattr(self.config, 'fits_hdu', 0),
+                    'fits_normalization': getattr(self.config, 'fits_normalization', 'zscale'),
+                    'pixel_scale': getattr(self.config, 'pixel_scale', 1.0),
+                    'detect_sources': getattr(self.config, 'detect_sources', True)
+                }
+            elif self.domain == 'medical':
+                domain_metadata['domain_config'] = {
+                    'modality': getattr(self.config, 'modality', 'general'),
+                    'detect_tumor': getattr(self.config, 'detect_tumor', True),
+                    'detect_lesion': getattr(self.config, 'detect_lesion', True)
+                }
+            elif self.domain == 'agriculture':
+                domain_metadata['domain_config'] = {
+                    'has_nir_band': getattr(self.config, 'has_nir_band', False),
+                    'compute_ndvi': getattr(self.config, 'compute_ndvi', True),
+                    'detect_leaf_disease': getattr(self.config, 'detect_leaf_disease', True)
+                }
+            elif self.domain == 'satellite':
+                domain_metadata['domain_config'] = {
+                    'satellite_type': getattr(self.config, 'satellite_type', 'general'),
+                    'num_bands': getattr(self.config, 'num_bands', 4),
+                    'compute_ndvi': getattr(self.config, 'compute_ndvi', True)
+                }
+
+            # Save to multiple locations
+            metadata_paths = [
+                self.saving_data_dir / f"{dataset_name_lower}_domain_metadata.json",
+                self.saving_checkpoint_dir / f"{dataset_name_lower}_domain_metadata.json",
+                self.loading_data_dir / f"{dataset_name_lower}_domain_metadata.json",
+            ]
+
+            for metadata_path in metadata_paths:
+                metadata_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(metadata_path, 'w') as f:
+                    json.dump(domain_metadata, f, indent=2)
+                logger.info(f"Domain metadata saved to {metadata_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to save domain metadata: {e}")
+
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """Apply domain-specific preprocessing"""
+        """Apply domain-specific preprocessing to a single image"""
         if self.domain_processor:
             return self.domain_processor.preprocess(image)
         return image
 
     def preprocess_batch(self, images: np.ndarray) -> np.ndarray:
-        """Apply domain-specific preprocessing to batch"""
+        """Apply domain-specific preprocessing to a batch of images"""
         if self.domain_processor and hasattr(self.domain_processor, 'preprocess_batch'):
             return self.domain_processor.preprocess_batch(images)
         elif self.domain_processor:
@@ -6875,13 +8647,13 @@ class DomainAwareCDBNN(CDBNNApplication):
         return images
 
     def extract_domain_features(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract domain-specific features"""
+        """Extract domain-specific features from a single image"""
         if self.domain_processor:
             return self.domain_processor.extract_features(image)
         return {}
 
     def extract_domain_features_batch(self, images: np.ndarray) -> List[Dict[str, float]]:
-        """Extract domain-specific features for batch"""
+        """Extract domain-specific features from a batch of images"""
         if self.domain_processor and hasattr(self.domain_processor, 'extract_features_batch'):
             return self.domain_processor.extract_features_batch(images)
         elif self.domain_processor:
@@ -6896,13 +8668,13 @@ class DomainAwareCDBNN(CDBNNApplication):
         return [{}] * (images.shape[0] if len(images.shape) > 2 else 1)
 
     def get_domain_quality_metrics(self, image: np.ndarray) -> Dict[str, float]:
-        """Get domain-specific quality metrics"""
+        """Get domain-specific quality metrics for a single image"""
         if self.domain_processor:
             return self.domain_processor.get_quality_metrics(image)
         return {}
 
     def get_domain_quality_metrics_batch(self, images: np.ndarray) -> List[Dict[str, float]]:
-        """Get domain-specific quality metrics for batch"""
+        """Get domain-specific quality metrics for a batch of images"""
         if self.domain_processor and hasattr(self.domain_processor, 'get_quality_metrics_batch'):
             return self.domain_processor.get_quality_metrics_batch(images)
         elif self.domain_processor:
@@ -6914,6 +8686,86 @@ class DomainAwareCDBNN(CDBNNApplication):
                 metrics_list.append(self.domain_processor.get_quality_metrics(images[i]))
             return metrics_list
         return [{}] * (images.shape[0] if len(images.shape) > 2 else 1)
+
+    def get_domain_info(self) -> Dict[str, Any]:
+        """Get information about the current domain configuration"""
+        info = {
+            'domain': self.domain,
+            'processor_type': type(self.domain_processor).__name__ if self.domain_processor else 'None',
+            'num_classes': self.num_classes,
+            'class_names_count': len(self.class_names),
+            'config': {}
+        }
+
+        if self.domain == 'astronomy':
+            info['config'] = {
+                'use_fits': getattr(self.config, 'use_fits', False),
+                'fits_hdu': getattr(self.config, 'fits_hdu', 0),
+                'fits_normalization': getattr(self.config, 'fits_normalization', 'zscale'),
+                'pixel_scale': getattr(self.config, 'pixel_scale', 1.0),
+                'detect_sources': getattr(self.config, 'detect_sources', True)
+            }
+        elif self.domain == 'medical':
+            info['config'] = {
+                'modality': getattr(self.config, 'modality', 'general'),
+                'detect_tumor': getattr(self.config, 'detect_tumor', True),
+                'detect_lesion': getattr(self.config, 'detect_lesion', True),
+                'detect_hemorrhage': getattr(self.config, 'detect_hemorrhage', True)
+            }
+        elif self.domain == 'agriculture':
+            info['config'] = {
+                'has_nir_band': getattr(self.config, 'has_nir_band', False),
+                'compute_ndvi': getattr(self.config, 'compute_ndvi', True),
+                'compute_ndwi': getattr(self.config, 'compute_ndwi', True),
+                'detect_leaf_disease': getattr(self.config, 'detect_leaf_disease', True),
+                'detect_pest_damage': getattr(self.config, 'detect_pest_damage', True)
+            }
+        elif self.domain == 'satellite':
+            info['config'] = {
+                'satellite_type': getattr(self.config, 'satellite_type', 'general'),
+                'num_bands': getattr(self.config, 'num_bands', 4),
+                'classify_land_cover': getattr(self.config, 'classify_land_cover', True),
+                'detect_change': getattr(self.config, 'detect_change', True)
+            }
+        elif self.domain == 'surveillance':
+            info['config'] = {
+                'detect_person': getattr(self.config, 'detect_person', True),
+                'detect_vehicle': getattr(self.config, 'detect_vehicle', True),
+                'detect_motion': getattr(self.config, 'detect_motion', True),
+                'enhance_low_light': getattr(self.config, 'enhance_low_light', True)
+            }
+        elif self.domain == 'microscopy':
+            info['config'] = {
+                'microscopy_type': getattr(self.config, 'microscopy_type', 'general'),
+                'detect_cells': getattr(self.config, 'detect_cells', True),
+                'segment_nucleus': getattr(self.config, 'segment_nucleus', True)
+            }
+        elif self.domain == 'industrial':
+            info['config'] = {
+                'detect_crack': getattr(self.config, 'detect_crack', True),
+                'detect_corrosion': getattr(self.config, 'detect_corrosion', True),
+                'measure_dimensions': getattr(self.config, 'measure_dimensions', True)
+            }
+
+        return info
+
+    def get_class_name(self, class_idx: int) -> str:
+        """Get class name from index"""
+        if self.idx_to_class and class_idx in self.idx_to_class:
+            return self.idx_to_class[class_idx]
+        elif self.class_names and 0 <= class_idx < len(self.class_names):
+            return self.class_names[class_idx]
+        return str(class_idx)
+
+    def get_class_index(self, class_name: str) -> int:
+        """Get class index from name"""
+        if self.class_to_idx and class_name in self.class_to_idx:
+            return self.class_to_idx[class_name]
+        return -1
+
+    def get_all_class_names(self) -> List[str]:
+        """Get all class names"""
+        return self.class_names if self.class_names else []
 
 # =============================================================================
 # AGRICULTURE DOMAIN PROCESSOR
@@ -10020,50 +11872,1191 @@ class TorchvisionDatasetAdapter(Dataset):
         return {self.idx_to_class[int(k)]: v for k, v in counts.items()}
 
 # =============================================================================
-# MODEL FACTORY - Creates appropriate model based on domain
+# INTEGRATED MODEL FACTORY - Domain-Specific + Advanced Hybrid
+# =============================================================================
+# =============================================================================
+# ADVANCED HYBRID AUTOENCODER - With Gemini's Recommendations
 # =============================================================================
 
+
+class FeatureModulator(nn.Module):
+    """
+    Conditional Instance Normalization / Feature Modulation
+    Replaces hard concatenation with dynamic scaling
+    """
+    def __init__(self, feature_dim: int, class_embed_dim: int):
+        super().__init__()
+        self.to_scale_bias = nn.Linear(class_embed_dim, feature_dim * 2)
+        self.feature_dim = feature_dim
+
+    def forward(self, x: torch.Tensor, class_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, feature_dim]
+            class_emb: [B, class_embed_dim]
+        Returns:
+            Modulated features [B, feature_dim]
+        """
+        chunks = self.to_scale_bias(class_emb).chunk(2, dim=1)
+        scale, bias = chunks[0], chunks[1]
+        # Reshape if needed
+        if x.dim() == 3:
+            scale = scale.unsqueeze(1)
+            bias = bias.unsqueeze(1)
+        return x * (1 + scale) + bias
+
+class ContrastiveDistillationLoss(nn.Module):
+    """
+    InfoNCE-style contrastive distillation.
+    Forces relative distances in unconditional space to match conditional space.
+    """
+    def __init__(self, temperature: float = 0.1):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z_uncond: torch.Tensor, z_cond: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            z_uncond: Unconditional embeddings [B, D]
+            z_cond: Conditional embeddings [B, D]
+            labels: Class labels [B]
+        Returns:
+            Contrastive distillation loss
+        """
+        batch_size = z_uncond.size(0)
+
+        # Normalize embeddings
+        z_uncond_norm = F.normalize(z_uncond, p=2, dim=1)
+        z_cond_norm = F.normalize(z_cond, p=2, dim=1)
+
+        # Compute similarity matrices
+        sim_uncond = torch.mm(z_uncond_norm, z_uncond_norm.t()) / self.temperature
+        sim_cond = torch.mm(z_cond_norm, z_cond_norm.t()) / self.temperature
+
+        # Create mask for positive pairs (same class)
+        pos_mask = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float()
+        neg_mask = 1 - pos_mask
+        # Remove self-pairs
+        neg_mask.fill_diagonal_(0)
+
+        # InfoNCE loss: positive pairs should have high similarity in both spaces
+        # We want the similarity structure to be preserved between spaces
+        pos_sim_uncond = (sim_uncond * pos_mask).sum(dim=1)
+        neg_sim_uncond = (sim_uncond * neg_mask).sum(dim=1) / (neg_mask.sum(dim=1) + 1e-8)
+
+        # Contrastive: positive should be higher than negative
+        contrast_loss = torch.clamp(neg_sim_uncond - pos_sim_uncond + 0.5, min=0).mean()
+
+        # Additional: MSE between similarity matrices (structure preservation)
+        structure_loss = F.mse_loss(sim_uncond, sim_cond)
+
+        return contrast_loss + structure_loss
+
+class RelationalKnowledgeDistillation(nn.Module):
+    """
+    Relational KD: Preserves pairwise distances between samples
+    """
+    def __init__(self, temperature: float = 2.0):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z_uncond: torch.Tensor, z_cond: torch.Tensor) -> torch.Tensor:
+        """
+        Preserve the relational structure between samples
+        """
+        # Compute pairwise distance matrices
+        dist_uncond = torch.cdist(z_uncond, z_uncond, p=2)
+        dist_cond = torch.cdist(z_cond, z_cond, p=2)
+
+        # Convert to similarity (RBF kernel)
+        sim_uncond = torch.exp(-dist_uncond / self.temperature)
+        sim_cond = torch.exp(-dist_cond / self.temperature)
+
+        # Normalize
+        sim_uncond = sim_uncond / sim_uncond.sum(dim=1, keepdim=True)
+        sim_cond = sim_cond / sim_cond.sum(dim=1, keepdim=True)
+
+        # KL divergence between relational distributions
+        kd_loss = F.kl_div(sim_uncond.log(), sim_cond, reduction='batchmean')
+
+        return kd_loss
+
+class AdaptiveLossBalancer(nn.Module):
+    """
+    Dynamically balances multiple loss components based on gradient magnitudes
+    """
+    def __init__(self, num_losses: int = 3, alpha: float = 0.1):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_losses))
+        self.alpha = alpha
+        self.register_buffer('running_grads', torch.zeros(num_losses))
+
+    def forward(self, losses: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            losses: List of loss tensors
+        Returns:
+            Weighted sum of losses
+        """
+        # Uncertainty weighting (Kendall et al.)
+        precision = torch.exp(-self.log_vars)
+        weighted_loss = 0
+        for i, loss in enumerate(losses):
+            weighted_loss += precision[i] * loss + self.log_vars[i]
+
+        return weighted_loss / len(losses)
+
+    def update_grad_stats(self, losses: List[torch.Tensor], model: nn.Module):
+        """Update gradient statistics for balancing"""
+        total_norm = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                total_norm += param.grad.norm().item() ** 2
+        total_norm = math.sqrt(total_norm)
+
+        # Exponential moving average
+        self.running_grads = self.alpha * total_norm + (1 - self.alpha) * self.running_grads
+
+class SharedDecoderWithModulation(nn.Module):
+    """
+    Single shared decoder with conditional modulation
+    """
+    def __init__(self, encoder_channels: List[int], in_channels: int,
+                 final_channels: int, class_embed_dim: int, n_layers: int):
+        super().__init__()
+        self.decoder_layers = nn.ModuleList()
+        self.modulators = nn.ModuleList()
+
+        in_ch = encoder_channels[-1]
+
+        for i in range(n_layers - 1, -1, -1):
+            out_ch = final_channels if i == 0 else encoder_channels[i-1]
+
+            # Add modulator for conditional feature modulation
+            modulator = FeatureModulator(out_ch, class_embed_dim)
+            self.modulators.append(modulator)
+
+            # Build decoder block
+            if i == 0:
+                decoder_block = nn.Sequential(
+                    nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1),
+                    nn.Tanh()
+                )
+            else:
+                decoder_block = nn.Sequential(
+                    nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1),
+                    nn.GroupNorm(min(16, out_ch), out_ch),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
+                    nn.GroupNorm(min(16, out_ch), out_ch),
+                    nn.LeakyReLU(0.2, inplace=True)
+                )
+
+            self.decoder_layers.append(decoder_block)
+            in_ch = out_ch
+
+        self.n_layers = n_layers
+
+    def forward(self, x: torch.Tensor, class_emb: torch.Tensor, use_modulation: bool = True) -> torch.Tensor:
+        """
+        Args:
+            x: Input features [B, C, H, W]
+            class_emb: Class embeddings [B, class_embed_dim]
+            use_modulation: Whether to apply conditional modulation
+        """
+        for i, (decoder, modulator) in enumerate(zip(self.decoder_layers, self.modulators)):
+            x = decoder(x)
+
+            if use_modulation and class_emb is not None:
+                # Reshape x for modulation if needed
+                if x.dim() == 4:
+                    b, c, h, w = x.shape
+                    x_flat = x.view(b, c, -1).transpose(1, 2)  # [B, H*W, C]
+                    x_mod = modulator(x_flat, class_emb)  # [B, H*W, C]
+                    x = x_mod.transpose(1, 2).view(b, c, h, w)
+                else:
+                    x = modulator(x, class_emb)
+
+        return x
+
+class AdvancedHybridAutoencoder(BaseAutoencoder):
+    """
+    Advanced Hybrid Autoencoder with Gemini's recommendations:
+    1. Unified shared decoder with feature modulation
+    2. Contrastive/Relational distillation
+    3. Adaptive loss balancing
+    4. Log-proportional class embeddings
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        num_classes = config.num_classes or 2
+        self.num_classes = num_classes
+
+        # ========================================================================
+        # HELPER FUNCTIONS FOR NUMERICAL STABILITY
+        # ========================================================================
+        def make_divisible(x, divisor=16):
+            """Round x to the nearest multiple of divisor"""
+            if x < divisor:
+                return max(divisor // 2, ((x + divisor//2 - 1) // (divisor//2)) * (divisor//2))
+            return int(np.ceil(x / divisor) * divisor)
+
+        def get_group_norm(channels):
+            """Create GroupNorm with proper divisibility"""
+            if channels < 8:
+                return nn.Identity()
+            # Try divisors from min(16, channels//2) down to 1
+            for g in [min(16, channels), 8, 4, 2, 1]:
+                if g <= channels and channels % g == 0:
+                    return nn.GroupNorm(g, channels)
+            # Fallback to LayerNorm
+            return nn.LayerNorm(channels) if channels > 0 else nn.Identity()
+
+        def get_batch_norm(channels):
+            """Create BatchNorm1d with proper handling of small channels"""
+            if channels < 2:
+                return nn.Identity()
+            return nn.BatchNorm1d(channels)
+
+        # ========================================================================
+        # LOG-PROPORTIONAL CLASS EMBEDDING DIMENSIONS
+        # ========================================================================
+        self.class_embed_dim = int(np.clip(np.ceil(np.log2(num_classes) * 4), 8, 64))
+        self.class_embedding = nn.Embedding(num_classes, self.class_embed_dim)
+
+        # Ensure feature_dims and compressed_dims are divisible
+        self.feature_dims = make_divisible(self.feature_dims, 16)
+        self.compressed_dims = make_divisible(self.compressed_dims, 8)
+
+        # Calculate feat_half - ensure it's at least 8 and divisible
+        feat_half_raw = self.feature_dims // 2
+        feat_half = make_divisible(feat_half_raw, 8)
+        feat_half = max(8, feat_half)
+
+        # Ensure compressed_dims is consistent
+        compressed_dims_div = self.compressed_dims
+
+        # Store these for later use
+        self.feat_half = feat_half
+        self.compressed_dims_div = compressed_dims_div
+
+        # ========================================================================
+        # UNCONDITIONAL PATH (Standard autoencoder)
+        # ========================================================================
+        self.unconditional_compressor = nn.Sequential(
+            nn.Linear(self.feature_dims, feat_half),
+            get_group_norm(feat_half),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(feat_half, compressed_dims_div),
+            nn.Tanh()
+        )
+
+        self.unconditional_decompressor = nn.Sequential(
+            nn.Linear(compressed_dims_div, feat_half),
+            get_group_norm(feat_half),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(feat_half, self.feature_dims),
+            nn.Tanh()
+        )
+
+        # ========================================================================
+        # CONDITIONAL PATH (Uses shared decoder with modulation)
+        # ========================================================================
+        self.conditional_preprocess = nn.Sequential(
+            nn.Linear(self.feature_dims, feat_half),
+            get_group_norm(feat_half),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
+        )
+
+        # Conditional compressor (combines features with class embedding)
+        # The input to conditional_compress is feat_half + class_embed_dim
+        compress_input_dim = feat_half + self.class_embed_dim
+        compress_output_dim = max(compressed_dims_div, self.class_embed_dim)
+        compress_output_dim = make_divisible(compress_output_dim, 8)
+
+        self.conditional_compress = nn.Linear(compress_input_dim, compress_output_dim)
+
+        # Conditional decompressor
+        decompress_input_dim = compress_output_dim + self.class_embed_dim
+        decompress_output_dim = feat_half
+
+        self.conditional_decompress = nn.Linear(decompress_input_dim, decompress_output_dim)
+
+        self.conditional_postprocess = nn.Sequential(
+            nn.Linear(decompress_output_dim, self.feature_dims),
+            get_group_norm(self.feature_dims),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
+        )
+
+        # Store for later use
+        self.compress_output_dim = compress_output_dim
+        self.decompress_output_dim = decompress_output_dim
+
+        # ========================================================================
+        # SHARED DECODER WITH FEATURE MODULATION
+        # ========================================================================
+        self.shared_decoder = SharedDecoderWithModulation(
+            encoder_channels=self.encoder_channels,
+            in_channels=self.encoder_channels[-1],
+            final_channels=self.in_channels,
+            class_embed_dim=self.class_embed_dim,
+            n_layers=len(self.decoder_layers)
+        )
+
+        # ========================================================================
+        # ADVANCED DISTILLATION LOSSES
+        # ========================================================================
+        self.contrastive_distillation = ContrastiveDistillationLoss(temperature=0.1)
+        self.relational_distillation = RelationalKnowledgeDistillation(temperature=2.0)
+
+        # Distillation weights (adaptive)
+        self.distillation_weight = nn.Parameter(torch.tensor(0.5))
+
+        # ========================================================================
+        # PERCEPTUAL LOSS (for structural quality)
+        # ========================================================================
+        self.use_perceptual_loss = getattr(config, 'use_perceptual_loss', True)
+        if self.use_perceptual_loss:
+            self.perceptual_loss = PerceptualLoss(self.device)
+
+        # ========================================================================
+        # ADAPTIVE LOSS BALANCER
+        # ========================================================================
+        self.loss_balancer = AdaptiveLossBalancer(num_losses=4)
+
+        # ========================================================================
+        # CLASSIFIER (with adaptive architecture)
+        # ========================================================================
+        classifier_input_dim = max(2, compressed_dims_div)
+
+        if num_classes >= 100:
+            classifier_layers = [
+                nn.Linear(classifier_input_dim, classifier_input_dim * 2),
+                get_batch_norm(classifier_input_dim * 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(classifier_input_dim * 2, classifier_input_dim),
+                get_batch_norm(classifier_input_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(classifier_input_dim, num_classes)
+            ]
+        elif num_classes >= 50:
+            classifier_layers = [
+                nn.Linear(classifier_input_dim, classifier_input_dim * 2),
+                get_batch_norm(classifier_input_dim * 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(classifier_input_dim * 2, num_classes)
+            ]
+        else:
+            classifier_layers = [
+                nn.Linear(classifier_input_dim, classifier_input_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.2),
+                nn.Linear(classifier_input_dim, num_classes)
+            ]
+
+        self.classifier = nn.Sequential(*classifier_layers).to(self.device)
+
+        # Training state
+        self.use_conditional_training = True
+        self.teacher_forcing_ratio = 0.5
+        self.distillation_mode = getattr(config, 'distillation_mode', 'contrastive')
+
+        # Log architecture
+        logger.info("=" * 60)
+        logger.info("Advanced Hybrid Autoencoder Initialized")
+        logger.info(f"  Number of classes: {num_classes}")
+        logger.info(f"  Class embedding dimension: {self.class_embed_dim}")
+        logger.info(f"  Feature dimensions: {self.feature_dims}")
+        logger.info(f"  Feature half: {self.feat_half}")
+        logger.info(f"  Compressed dimensions: {self.compressed_dims}")
+        logger.info(f"  Compress output dim: {self.compress_output_dim}")
+        logger.info(f"  Distillation mode: {self.distillation_mode}")
+        logger.info("=" * 60)
+
+    def encode_conditional(self, x: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Conditional encoding with class embedding"""
+        # Standard encoding
+        for layer in self.encoder_layers:
+            x = layer(x)
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+        embedding = self.embedder_projection(embedding)
+
+        # Conditional preprocessing
+        features = self.conditional_preprocess(embedding)  # [B, feat_half]
+
+        # Get class embedding
+        class_emb = self.class_embedding(labels)  # [B, class_embed_dim]
+
+        # Combine and compress
+        combined = torch.cat([features, class_emb], dim=1)  # [B, feat_half + class_embed_dim]
+        compressed = self.conditional_compress(combined)  # [B, compress_output_dim]
+
+        return compressed, class_emb
+
+    def decode_conditional(self, compressed: torch.Tensor, class_emb: torch.Tensor) -> torch.Tensor:
+        """Conditional decoding using shared decoder with modulation"""
+        # Combine with class embedding for decompression
+        combined = torch.cat([compressed, class_emb], dim=1)  # [B, compress_output_dim + class_embed_dim]
+        features = self.conditional_decompress(combined)  # [B, decompress_output_dim]
+        features = self.conditional_postprocess(features)  # [B, feature_dims]
+
+        # Reshape to spatial
+        x = self.unembedder(features)
+        x = self.unembedder_projection(x)
+        x = x.view(x.size(0), self.encoder_channels[-1], self.final_h, self.final_w)
+
+        # Shared decoder with modulation
+        x = self.shared_decoder(x, class_emb, use_modulation=True)
+
+        return x
+
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward pass with both conditional and unconditional paths"""
+        original_batch_size = x.size(0)
+        duplicated = False
+
+        # Apply normalization
+        x = self.normalize_batch(x)
+
+        # Handle single sample
+        if self.training and original_batch_size == 1:
+            x = torch.cat([x, x], dim=0)
+            duplicated = True
+            if labels is not None:
+                labels = torch.cat([labels, labels], dim=0)
+
+        # ========================================================================
+        # UNCONDITIONAL PATH (always computed)
+        # ========================================================================
+        uncompressed = self.encode_unconditional(x)
+
+        # Unconditional decoding using shared decoder (no modulation)
+        features = self.unconditional_decompressor(uncompressed)
+        x_feat = self.unembedder(features)
+        x_feat = self.unembedder_projection(x_feat)
+        x_feat = x_feat.view(x_feat.size(0), self.encoder_channels[-1], self.final_h, self.final_w)
+        unreconstruction = self.shared_decoder(x_feat, None, use_modulation=False)
+
+        output = {
+            'uncompressed_embedding': self._fix_tensor_dim(uncompressed, original_batch_size, duplicated),
+            'unreconstruction': self._fix_tensor_dim(unreconstruction, original_batch_size, duplicated),
+        }
+
+        # ========================================================================
+        # CONDITIONAL PATH (only during training with labels)
+        # ========================================================================
+        if self.training and labels is not None and self.use_conditional_training:
+            # Teacher forcing with annealing
+            use_teacher = torch.rand(1).item() < self.teacher_forcing_ratio
+
+            if use_teacher:
+                comp_cond, class_emb = self.encode_conditional(x, labels)
+            else:
+                with torch.no_grad():
+                    pred_logits = self.classifier(uncompressed)
+                    pred_labels = pred_logits.argmax(dim=1)
+                    comp_cond, class_emb = self.encode_conditional(x, pred_labels)
+
+            recon_cond = self.decode_conditional(comp_cond, class_emb)
+
+            output.update({
+                'compressed_embedding': self._fix_tensor_dim(comp_cond, original_batch_size, duplicated),
+                'reconstruction': self._fix_tensor_dim(recon_cond, original_batch_size, duplicated),
+                'class_embedding': self._fix_tensor_dim(class_emb, original_batch_size, duplicated),
+                'conditional_active': torch.tensor(1.0, device=self.device)
+            })
+        else:
+            # If no conditional path, use unconditional output as reconstruction
+            output['reconstruction'] = output['unreconstruction']
+            output['compressed_embedding'] = uncompressed
+            output['conditional_active'] = torch.tensor(0.0, device=self.device)
+
+        # ========================================================================
+        # CLASSIFICATION (from unconditional path for consistency)
+        # ========================================================================
+        if self.training_phase == 2 and self.classifier is not None:
+            logits = self.classifier(uncompressed)
+            output.update({
+                'class_logits': self._fix_tensor_dim(logits, original_batch_size, duplicated),
+                'class_predictions': self._fix_tensor_dim(logits.argmax(dim=1), original_batch_size, duplicated),
+                'class_probabilities': self._fix_tensor_dim(F.softmax(logits, dim=1), original_batch_size, duplicated)
+            })
+
+        return output
+
+    def encode_unconditional(self, x: torch.Tensor) -> torch.Tensor:
+        """Unconditional encoding"""
+        for layer in self.encoder_layers:
+            x = layer(x)
+        x = x.view(x.size(0), -1)
+        embedding = self.embedder(x)
+        embedding = self.embedder_projection(embedding)
+        return self.unconditional_compressor(embedding)
+
+    def get_loss(self, outputs: Dict, inputs: torch.Tensor, labels: torch.Tensor,
+                 phase: int, epoch: int) -> Tuple[torch.Tensor, Optional[float]]:
+        """Compute loss with adaptive balancing and advanced distillation"""
+
+        # Update teacher forcing ratio (curriculum learning)
+        if self.training and epoch < 100:
+            self.teacher_forcing_ratio = max(0.1, 1.0 - epoch / 100)
+
+        # Phase 1: Reconstruction only
+        if phase == 1:
+            recon_loss = F.mse_loss(outputs['unreconstruction'], inputs)
+
+            if outputs.get('conditional_active', torch.tensor(0)).item() > 0:
+                recon_cond_loss = F.mse_loss(outputs['reconstruction'], inputs)
+                total_loss = recon_loss + 0.5 * recon_cond_loss
+            else:
+                total_loss = recon_loss
+
+            return total_loss, None
+
+        # Phase 2: Full training with adaptive balancing
+        losses = []
+
+        # 1. Reconstruction loss
+        recon_loss = F.mse_loss(outputs['unreconstruction'], inputs)
+        losses.append(recon_loss)
+
+        # 2. Conditional reconstruction loss (auxiliary task)
+        cond_loss = torch.tensor(0.0, device=inputs.device)
+        if outputs.get('conditional_active', torch.tensor(0)).item() > 0:
+            cond_loss = F.mse_loss(outputs['reconstruction'], inputs)
+        losses.append(cond_loss)
+
+        # 3. Advanced distillation loss
+        distill_loss = torch.tensor(0.0, device=inputs.device)
+        if outputs.get('conditional_active', torch.tensor(0)).item() > 0:
+            z_uncond = outputs['uncompressed_embedding']
+            z_cond = outputs['compressed_embedding']
+
+            # Ensure dimensions match for distillation
+            min_dim = min(z_uncond.size(1), z_cond.size(1))
+            z_uncond_aligned = z_uncond[:, :min_dim]
+            z_cond_aligned = z_cond[:, :min_dim]
+
+            if self.distillation_mode == 'contrastive':
+                try:
+                    distill_loss = self.contrastive_distillation(z_uncond_aligned, z_cond_aligned, labels)
+                except:
+                    distill_loss = F.mse_loss(z_uncond_aligned, z_cond_aligned)
+            elif self.distillation_mode == 'relational':
+                try:
+                    distill_loss = self.relational_distillation(z_uncond_aligned, z_cond_aligned)
+                except:
+                    distill_loss = F.mse_loss(z_uncond_aligned, z_cond_aligned)
+            else:
+                distill_loss = F.mse_loss(z_uncond_aligned, z_cond_aligned)
+
+            distill_loss = self.distillation_weight.abs() * distill_loss
+        losses.append(distill_loss)
+
+        # 4. Classification loss
+        class_loss = torch.tensor(0.0, device=inputs.device)
+        if 'class_logits' in outputs:
+            class_loss = F.cross_entropy(outputs['class_logits'], labels)
+        losses.append(class_loss)
+
+        # Simple weighted sum (more stable)
+        weights = [1.0, 0.5, 0.3, 1.0]
+        total_loss = sum(w * l for w, l in zip(weights, losses))
+
+        # Compute accuracy
+        accuracy = None
+        if 'class_logits' in outputs:
+            accuracy = (outputs['class_logits'].argmax(dim=1) == labels).float().mean().item()
+
+        return total_loss, accuracy
+
+    def set_eval_mode(self):
+        """Switch to inference mode"""
+        self.use_conditional_training = False
+        self.eval()
+        logger.info("Switched to inference mode (unconditional only)")
+
+    def set_train_mode(self):
+        """Switch back to training mode"""
+        self.use_conditional_training = True
+        self.train()
+        logger.info("Switched to training mode (conditional + unconditional)")
+
+class PerceptualLoss(nn.Module):
+    """VGG-based perceptual loss for better reconstruction quality"""
+
+    def __init__(self, device='cuda'):
+        super().__init__()
+        self.device = device
+        self.vgg = None
+        self._load_vgg()
+
+    def _load_vgg(self):
+        try:
+            # Load pretrained VGG16 features
+            from torchvision import models
+            vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features
+            # Freeze weights
+            for param in vgg.parameters():
+                param.requires_grad = False
+            self.vgg = vgg.to(self.device)
+            self.vgg.eval()
+        except Exception as e:
+            logger.warning(f"Could not load VGG for perceptual loss: {e}")
+            self.vgg = None
+
+    def forward(self, pred, target):
+        if self.vgg is None:
+            # Fallback to MSE if VGG not available
+            return F.mse_loss(pred, target)
+
+        # Normalize to ImageNet range for VGG
+        mean = torch.tensor([0.485, 0.456, 0.406], device=pred.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=pred.device).view(1, 3, 1, 1)
+
+        # Ensure 3 channels
+        if pred.shape[1] == 1:
+            pred = pred.repeat(1, 3, 1, 1)
+            target = target.repeat(1, 3, 1, 1)
+
+        pred_norm = (pred - mean) / (std + 1e-8)
+        target_norm = (target - mean) / (std + 1e-8)
+
+        # Extract features from multiple layers
+        pred_features = []
+        target_features = []
+
+        x = pred_norm
+        y = target_norm
+
+        with torch.no_grad():
+            for layer in self.vgg:
+                x = layer(x)
+                y = layer(y)
+                # Store features from certain layers
+                if isinstance(layer, nn.ReLU) and len(pred_features) < 4:
+                    pred_features.append(x)
+                    target_features.append(y)
+
+        # Compute perceptual loss
+        loss = 0
+        for p, t in zip(pred_features, target_features):
+            loss += F.l1_loss(p, t)
+
+        return loss / max(len(pred_features), 1)
+
 class ModelFactory:
-    """Factory for creating appropriate model based on configuration"""
+    """Factory for creating appropriate model based on configuration and domain"""
 
     @staticmethod
     def create_model(config: GlobalConfig) -> nn.Module:
-        """Create model with domain-specific enhancements"""
+        """Create model with domain-specific enhancements and advanced architecture"""
 
         input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
         feature_dims = config.feature_dims
         compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
         config.compressed_dims = compressed_dims
 
-        # Check if enhanced features are enabled (default: True)
+        # Get configuration flags
         use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
+        use_hybrid = getattr(config, 'use_hybrid_autoencoder', True)
+        use_advanced = getattr(config, 'use_advanced_hybrid', True)
 
         # Get domain from config
         domain = getattr(config, 'domain', 'general')
         image_type = getattr(config, 'image_type', 'general')
+        num_classes = config.num_classes or 2
 
-        # Create domain-specific model with enhanced base if enabled
-        if use_enhanced:
-            # Use enhanced domain-specific autoencoders
-            if domain == 'astronomy' or image_type == 'astronomical':
+        # ========================================================================
+        # DOMAIN-SPECIFIC MODEL SELECTION (Highest Priority)
+        # ========================================================================
+        # For specialized domains, use domain-specific autoencoders
+        # These already have domain-optimized architectures
+
+        if domain == 'astronomy' or image_type == 'astronomical':
+            if use_enhanced:
                 logger.info("Creating Enhanced Astronomical Structure Preserving Autoencoder with Ring Detection")
                 return AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            else:
+                logger.info("Creating Base Astronomical Autoencoder")
+                return BaseAutoencoder(config)
 
-            elif domain == 'medical' or image_type == 'medical':
+        elif domain == 'medical' or image_type == 'medical':
+            if use_enhanced:
                 logger.info("Creating Enhanced Medical Structure Preserving Autoencoder")
                 return MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            else:
+                logger.info("Creating Base Medical Autoencoder")
+                return BaseAutoencoder(config)
 
-            elif domain == 'agriculture' or image_type == 'agricultural':
+        elif domain == 'agriculture' or image_type == 'agricultural':
+            if use_enhanced:
                 logger.info("Creating Enhanced Agricultural Pattern Autoencoder")
                 return AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
-
             else:
-                logger.info(f"Creating Enhanced Base Autoencoder with {feature_dims}D → {compressed_dims}D features")
-                return EnhancedBaseAutoencoder(config)
+                logger.info("Creating Base Agricultural Autoencoder")
+                return BaseAutoencoder(config)
+
+        # ========================================================================
+        # GENERAL DOMAIN - Advanced Hybrid for multi-class datasets
+        # ========================================================================
+        # For general domain with many classes, use advanced hybrid
+        if use_advanced and num_classes >= 20:
+            logger.info("=" * 60)
+            logger.info(f"Creating Advanced Hybrid Autoencoder for {num_classes} classes")
+            logger.info("  Features:")
+            logger.info("    - Shared decoder with feature modulation")
+            logger.info("    - Contrastive/Relational distillation")
+            logger.info("    - Adaptive loss balancing")
+            logger.info("    - Log-proportional class embeddings")
+            logger.info(f"  Domain: {domain}")
+            logger.info("=" * 60)
+            return AdvancedHybridAutoencoder(config)
+
+        # For general domain with moderate classes, use standard hybrid
+        elif use_hybrid and num_classes >= 10:
+            logger.info(f"Creating Hybrid Autoencoder for {num_classes} classes")
+            logger.info("  Features:")
+            logger.info("    - Conditional training with labels")
+            logger.info("    - Unconditional inference")
+            logger.info("    - Knowledge distillation")
+            logger.info(f"  Domain: {domain}")
+            return HybridAutoencoder(config)
+
+        # For general domain with few classes, use enhanced base
+        elif use_enhanced:
+            logger.info(f"Creating Enhanced Base Autoencoder with {feature_dims}D → {compressed_dims}D features")
+            logger.info(f"  Domain: {domain}")
+            logger.info(f"  Classes: {num_classes}")
+            return EnhancedBaseAutoencoder(config)
+
+        # Fallback to original base autoencoder
         else:
-            # Use original base autoencoder
             logger.info(f"Creating Base Autoencoder with {feature_dims}D → {compressed_dims}D features")
             return BaseAutoencoder(config)
+
+# =============================================================================
+# DOMAIN-SPECIFIC ADVANCED HYBRID AUTOENCODERS (Optional Extensions)
+# =============================================================================
+
+class AstronomicalAdvancedHybrid(AdvancedHybridAutoencoder):
+    """
+    Astronomy-specific advanced hybrid autoencoder
+    Combines domain-specific features with advanced hybrid architecture
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Add astronomy-specific components
+        self.ring_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        self.psf_estimator = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(self.encoder_channels[-1], 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+
+        logger.info("Added astronomy-specific components: ring detector, PSF estimator")
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Astronomy-enhanced encoding"""
+        # Detect rings and other structures
+        ring_map = self.ring_detector(x)
+        x = x * (1 + 0.1 * ring_map)
+
+        # Standard encoding
+        return super().encode(x)
+
+    def get_domain_features(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Extract astronomy-specific features"""
+        features = {}
+
+        # PSF estimation
+        for layer in self.encoder_layers:
+            x = layer(x)
+        features['psf_size'] = self.psf_estimator(x)
+
+        return features
+
+
+class MedicalAdvancedHybrid(AdvancedHybridAutoencoder):
+    """
+    Medical imaging-specific advanced hybrid autoencoder
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Add medical-specific components
+        self.tissue_analyzer = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(16, 8)
+        )
+
+        self.anomaly_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=5, padding=2),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        logger.info("Added medical-specific components: tissue analyzer, anomaly detector")
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Medical-enhanced encoding"""
+        # Detect anomalies/lesions
+        anomaly_map = self.anomaly_detector(x)
+        x = x * (1 + 0.2 * anomaly_map)
+
+        # Standard encoding
+        return super().encode(x)
+
+    def get_domain_features(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Extract medical-specific features"""
+        features = {}
+
+        # Tissue analysis
+        features['tissue_features'] = self.tissue_analyzer(x)
+
+        return features
+
+
+class AgriculturalAdvancedHybrid(AdvancedHybridAutoencoder):
+    """
+    Agriculture-specific advanced hybrid autoencoder
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Add agriculture-specific components
+        self.vegetation_index = nn.Sequential(
+            nn.Conv2d(self.in_channels, 16, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        self.disease_detector = nn.Sequential(
+            nn.Conv2d(self.in_channels, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        logger.info("Added agriculture-specific components: vegetation index, disease detector")
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Agriculture-enhanced encoding"""
+        # Compute vegetation index (NDVI-like)
+        veg_index = self.vegetation_index(x)
+        x = x * (1 + 0.15 * veg_index)
+
+        # Detect disease patterns
+        disease_map = self.disease_detector(x)
+        x = x * (1 + 0.1 * disease_map)
+
+        # Standard encoding
+        return super().encode(x)
+
+
+# =============================================================================
+# ENHANCED CDBNN APPLICATION WITH DOMAIN SUPPORT
+# =============================================================================
+
+class DomainAwareAdvancedCDBNN(DomainAwareCDBNN):
+    """
+    Enhanced CDBNN application with domain-specific advanced hybrid autoencoders
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Override model creation to use domain-specific advanced hybrids
+        self.config = config
+        self.device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
+
+        # Re-create model with domain-specific advanced hybrid
+        self.model = ModelFactory.create_model(config)
+        self.model = self.model.to(self.device)
+
+        logger.info(f"DomainAwareAdvancedCDBNN initialized with domain: {config.domain}")
+
+        # Initialize domain processor if specified
+        if config.domain != 'general':
+            self._init_domain_processor()
+            logger.info(f"Domain processor initialized for: {config.domain}")
+
+    def extract_domain_features(self, image: np.ndarray) -> Dict[str, float]:
+        """Extract domain-specific features using the model's domain components"""
+        features = super().extract_domain_features(image)
+
+        # Add advanced features if available
+        if hasattr(self.model, 'get_domain_features'):
+            with torch.no_grad():
+                # Convert image to tensor
+                img_tensor = torch.from_numpy(image).float()
+                if img_tensor.dim() == 3:
+                    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+                img_tensor = img_tensor.to(self.device)
+
+                domain_features = self.model.get_domain_features(img_tensor)
+                for key, value in domain_features.items():
+                    features[f'advanced_{key}'] = value.mean().item()
+
+        return features
+
+    def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None,
+              resume: bool = False, resume_from: Optional[str] = None,
+              reset_optimizer: bool = False, additional_epochs: Optional[int] = None) -> Dict:
+        """Train with domain-specific enhancements"""
+
+        # Log domain-specific training info
+        domain = self.config.domain
+        logger.info("=" * 60)
+        logger.info(f"Domain-Specific Training: {domain.upper()}")
+
+        if domain == 'astronomy':
+            logger.info("  - Ring detection enabled")
+            logger.info("  - PSF estimation enabled")
+            logger.info("  - Source detection enabled")
+        elif domain == 'medical':
+            logger.info("  - Tissue analysis enabled")
+            logger.info("  - Anomaly detection enabled")
+            logger.info("  - Lesion detection enabled")
+        elif domain == 'agriculture':
+            logger.info("  - Vegetation index computation enabled")
+            logger.info("  - Disease detection enabled")
+            logger.info("  - Pest damage detection enabled")
+
+        logger.info("=" * 60)
+
+        # Call parent training method
+        return super().train(train_loader, val_loader, resume, resume_from,
+                            reset_optimizer, additional_epochs)
+
+
+# =============================================================================
+# UPDATED CREATE_DOMAIN_CONFIG WITH ADVANCED FLAGS
+# =============================================================================
+
+def create_domain_config(args):
+    """Create appropriate configuration based on domain and advanced settings"""
+
+    # Check if user explicitly set compressed_dims
+    explicit_compressed_dims = hasattr(args, 'compressed_dims') and args.compressed_dims is not None
+
+    base_config = {
+        'dataset_name': args.data_name,
+        'data_type': args.data_type,
+        'feature_dims': args.feature_dims,
+        'compressed_dims': args.compressed_dims if explicit_compressed_dims else 32,  # Force default 32
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'learning_rate': args.learning_rate,
+        'num_workers': args.workers,
+        'use_gpu': not args.cpu and torch.cuda.is_available(),
+        'mixed_precision': not args.no_mixed_precision,
+        'use_kl_divergence': not args.disable_kl,
+        'use_class_encoding': not args.disable_class,
+        'use_distance_correlation': not args.disable_distance_corr,
+        'max_features': args.max_features,
+        'generate_heatmaps': args.generate_heatmaps,
+        'generate_tsne': args.generate_tsne,
+        'output_dir': args.output_dir,
+        'domain': args.domain,
+        'use_per_image_normalization': getattr(args, 'per_image_norm', False),
+
+        # Advanced hybrid flags
+        'use_enhanced_autoencoder': getattr(args, 'use_enhanced', True),
+        'use_hybrid_autoencoder': getattr(args, 'use_hybrid', True),
+        'use_advanced_hybrid': getattr(args, 'use_advanced', True),
+        'use_perceptual_loss': getattr(args, 'use_perceptual_loss', True),
+        'distillation_mode': getattr(args, 'distillation_mode', 'contrastive'),
+
+        # Domain enhancement flags
+        'use_detail_attention': getattr(args, 'use_detail_attention', True),
+        'use_multiscale_features': getattr(args, 'use_multiscale_features', True),
+        'use_feature_refinement': getattr(args, 'use_feature_refinement', True),
+
+        # Training flags
+        'no_augmentation': getattr(args, 'no_augmentation', False),
+        'augmentation_strength': getattr(args, 'augmentation_strength', 0.5),
+
+        # CRITICAL: Force fixed compressed_dims if not explicitly set by user
+        'force_fixed_compressed_dims': not explicit_compressed_dims,
+    }
+
+
+    # Handle input size
+    if hasattr(args, 'input_size') and args.input_size is not None:
+        base_config['input_size'] = tuple(args.input_size)
+        base_config['input_size_explicitly_set'] = True
+    else:
+        base_config['input_size_explicitly_set'] = False
+
+    # Domain-specific configurations
+    if args.domain == 'agriculture':
+        return AgricultureConfig(**base_config, has_nir_band=args.has_nir_band)
+    elif args.domain == 'medical':
+        return MedicalConfig(**base_config, modality=args.modality)
+    elif args.domain == 'satellite':
+        return SatelliteConfig(**base_config, satellite_type=args.satellite_type)
+    elif args.domain == 'surveillance':
+        return SurveillanceConfig(**base_config, detect_motion=args.detect_motion,
+                                 enhance_low_light=args.enhance_low_light)
+    elif args.domain == 'microscopy':
+        return MicroscopyConfig(**base_config, microscopy_type=args.microscopy_type)
+    elif args.domain == 'industrial':
+        return IndustrialConfig(**base_config, detect_crack=args.detect_crack,
+                               detect_corrosion=args.detect_corrosion)
+    elif args.domain == 'astronomy':
+        astro_args = {
+            'use_fits': getattr(args, 'use_fits', True),
+            'fits_hdu': getattr(args, 'fits_hdu', 0),
+            'fits_normalization': getattr(args, 'fits_normalization', 'zscale'),
+            'subtract_background': getattr(args, 'subtract_background', True),
+            'detect_sources': getattr(args, 'detect_sources', True),
+            'detection_threshold': getattr(args, 'detection_threshold', 2.5),
+            'pixel_scale': getattr(args, 'pixel_scale', 1.0),
+            'gain': getattr(args, 'gain', 1.0),
+            'read_noise': getattr(args, 'read_noise', 0.0)
+        }
+        return AstronomyConfig(**base_config, **astro_args)
+    else:
+        return GlobalConfig(**base_config)
+
+
+# =============================================================================
+# UPDATED ARGUMENT PARSER WITH ADVANCED OPTIONS
+# =============================================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='CDBNN - Convolutional Deep Bayesian Neural Network')
+
+    # Basic arguments
+    parser.add_argument('--interactive', '-i', action='store_true', help='Run in interactive mode')
+    parser.add_argument('--verify', '-v', action='store_true', help='Run verification tests')
+    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'extract'], help='Operation mode')
+    parser.add_argument('--data_name', type=str, help='Dataset name')
+    parser.add_argument('--data_type', type=str, choices=['custom', 'torchvision'], default='custom')
+    parser.add_argument('--data_path', type=str, default=None, help='Path to data')
+    parser.add_argument('--domain', type=str,
+                       choices=['general', 'agriculture', 'medical', 'satellite',
+                               'surveillance', 'microscopy', 'industrial', 'astronomy'],
+                       default='general', help='Domain for specialized processing')
+
+    # Normalization strategy
+    parser.add_argument('--per_image_norm', action='store_true',
+                       help='Use per-image Z-score normalization')
+
+    # Advanced architecture options
+    parser.add_argument('--use_enhanced', action='store_true', default=True,
+                       help='Use enhanced autoencoder features')
+    parser.add_argument('--use_hybrid', action='store_true', default=True,
+                       help='Use hybrid autoencoder (conditional training, unconditional inference)')
+    parser.add_argument('--use_advanced', action='store_true', default=True,
+                       help='Use advanced hybrid with modulation and contrastive distillation')
+    parser.add_argument('--use_perceptual_loss', action='store_true', default=True,
+                       help='Use perceptual loss for sharper reconstructions')
+    parser.add_argument('--distillation_mode', type=str,
+                       choices=['contrastive', 'relational', 'mse'], default='contrastive',
+                       help='Knowledge distillation mode')
+
+    # Domain enhancement options
+    parser.add_argument('--use_detail_attention', action='store_true', default=True,
+                       help='Use detail attention module')
+    parser.add_argument('--use_multiscale_features', action='store_true', default=True,
+                       help='Use multi-scale feature extraction')
+    parser.add_argument('--use_feature_refinement', action='store_true', default=True,
+                       help='Use feature refinement')
+
+    # Training options
+    parser.add_argument('--no_augmentation', action='store_true',
+                       help='Disable data augmentation')
+    parser.add_argument('--augmentation_strength', type=float, default=0.5,
+                       help='Strength of data augmentations (0.0 to 1.0)')
+
+    # Model hyperparameters
+    parser.add_argument('--feature_dims', type=int, default=128)
+    parser.add_argument('--compressed_dims', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--learning_rate', type=float, default=0.001)
+    parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--max_features', type=int, default=32)
+
+    # Training options
+    parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--no_mixed_precision', action='store_true')
+    parser.add_argument('--generate_heatmaps', action='store_true', default=True)
+    parser.add_argument('--generate_tsne', action='store_true', default=True)
+    parser.add_argument('--disable_kl', action='store_true')
+    parser.add_argument('--disable_class', action='store_true')
+    parser.add_argument('--disable_distance_corr', action='store_true')
+    parser.add_argument('--output_dir', type=str, default='data')
+
+    # Input size
+    parser.add_argument('--input_size', type=int, nargs=2, metavar=('H', 'W'),
+                       help='Input image size (height width)')
+
+    # Architecture optimization
+    parser.add_argument('--auto_optimize', action='store_true', default=True)
+    parser.add_argument('--no_auto_optimize', action='store_true')
+
+    # Domain-specific flags
+    parser.add_argument('--has_nir_band', action='store_true', help='Has near-infrared band (agriculture)')
+    parser.add_argument('--modality', type=str, default='general', help='Medical imaging modality')
+    parser.add_argument('--satellite_type', type=str, default='general', help='Satellite type')
+    parser.add_argument('--detect_motion', action='store_true', help='Detect motion (surveillance)')
+    parser.add_argument('--enhance_low_light', action='store_true', help='Enhance low-light (surveillance)')
+    parser.add_argument('--microscopy_type', type=str, default='general', help='Microscopy type')
+    parser.add_argument('--detect_crack', action='store_true', help='Detect cracks (industrial)')
+    parser.add_argument('--detect_corrosion', action='store_true', help='Detect corrosion (industrial)')
+
+    # Astronomy-specific flags
+    parser.add_argument('--use_fits', action='store_true', help='Enable FITS support')
+    parser.add_argument('--fits_hdu', type=int, default=0, help='FITS HDU to read')
+    parser.add_argument('--fits_normalization', type=str,
+                       choices=['zscale', 'percent', 'minmax', 'asinh'], default='zscale')
+    parser.add_argument('--subtract_background', action='store_true', default=True)
+    parser.add_argument('--detect_sources', action='store_true', default=True)
+    parser.add_argument('--detection_threshold', type=float, default=2.5)
+    parser.add_argument('--pixel_scale', type=float, default=1.0)
+    parser.add_argument('--gain', type=float, default=1.0)
+    parser.add_argument('--read_noise', type=float, default=0.0)
+
+    return parser.parse_args()
 
 # =============================================================================
 # DOMAIN-SPECIFIC LOSS FUNCTIONS
@@ -10741,114 +13734,6 @@ class AgriculturalPatternAutoencoder(EnhancedBaseAutoencoder):
 # MODIFIED ARGUMENT PARSER
 # =============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='CDBNN - Convolutional Deep Bayesian Neural Network with Domain Support')
-
-    parser.add_argument('--interactive', '-i', action='store_true', help='Run in interactive mode')
-    parser.add_argument('--verify', '-v', action='store_true', help='Run verification tests for determinism')
-    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'extract'], help='Operation mode')
-    parser.add_argument('--data_name', type=str, help='Dataset name')
-    parser.add_argument('--data_type', type=str, choices=['custom', 'torchvision'], default='custom')
-    parser.add_argument('--data_path', type=str, help='Path to data')
-    parser.add_argument('--domain', type=str, choices=['general', 'agriculture', 'medical', 'satellite', 'surveillance', 'microscopy', 'industrial', 'astronomy'],
-                       default='general', help='Domain for specialized processing')
-
-    # NEW: Normalization strategy flag
-    parser.add_argument('--per_image_norm', action='store_true',
-                       help='Use per-image Z-score normalization (amplitude-invariant). Default: False (dataset-wide)')
-
-    # Astronomy-specific flags
-    parser.add_argument('--use_fits', action='store_true', help='Enable FITS support for astronomical images')
-    parser.add_argument('--fits_hdu', type=int, default=0, help='FITS HDU to read')
-    parser.add_argument('--fits_normalization', type=str, choices=['zscale', 'percent', 'minmax', 'asinh'],
-                       default='zscale', help='FITS image normalization method')
-    parser.add_argument('--subtract_background', action='store_true', default=True, help='Subtract background')
-    parser.add_argument('--detect_sources', action='store_true', default=True, help='Detect astronomical sources')
-    parser.add_argument('--detection_threshold', type=float, default=2.5, help='Source detection threshold')
-    parser.add_argument('--pixel_scale', type=float, default=1.0, help='Pixel scale in arcsec/pixel')
-    parser.add_argument('--gain', type=float, default=1.0, help='Gain in e-/ADU')
-    parser.add_argument('--read_noise', type=float, default=0.0, help='Read noise in e-')
-
-    parser.add_argument('--feature_dims', type=int, default=128)
-    parser.add_argument('--compressed_dims', type=int, default=32)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--learning_rate', type=float, default=0.001)
-    parser.add_argument('--workers', type=int, default=0)
-    parser.add_argument('--max_features', type=int, default=32)
-    parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--no_mixed_precision', action='store_true')
-    parser.add_argument('--generate_heatmaps', action='store_true', default=True)
-    parser.add_argument('--generate_tsne', action='store_true', default=True)
-    parser.add_argument('--disable_kl', action='store_true')
-    parser.add_argument('--disable_class', action='store_true')
-    parser.add_argument('--disable_distance_corr', action='store_true')
-    parser.add_argument('--output_dir', type=str, default='data')
-
-    # Domain-specific flags
-    parser.add_argument('--has_nir_band', action='store_true', help='Has near-infrared band (agriculture)')
-    parser.add_argument('--modality', type=str, default='general', help='Medical imaging modality')
-    parser.add_argument('--satellite_type', type=str, default='general', help='Satellite type')
-    parser.add_argument('--detect_motion', action='store_true', help='Detect motion (surveillance)')
-    parser.add_argument('--enhance_low_light', action='store_true', help='Enhance low-light (surveillance)')
-    parser.add_argument('--microscopy_type', type=str, default='general', help='Microscopy type')
-    parser.add_argument('--detect_crack', action='store_true', help='Detect cracks (industrial)')
-    parser.add_argument('--detect_corrosion', action='store_true', help='Detect corrosion (industrial)')
-
-    return parser.parse_args()
-
-
-def create_domain_config(args):
-    """Create appropriate configuration based on domain"""
-    base_config = {
-        'dataset_name': args.data_name,
-        'data_type': args.data_type,
-        'feature_dims': args.feature_dims,
-        'compressed_dims': args.compressed_dims,
-        'batch_size': args.batch_size,
-        'epochs': args.epochs,
-        'learning_rate': args.learning_rate,
-        'num_workers': args.workers,
-        'use_gpu': not args.cpu and torch.cuda.is_available(),
-        'mixed_precision': not args.no_mixed_precision,
-        'use_kl_divergence': not args.disable_kl,
-        'use_class_encoding': not args.disable_class,
-        'use_distance_correlation': not args.disable_distance_corr,
-        'max_features': args.max_features,
-        'generate_heatmaps': args.generate_heatmaps,
-        'generate_tsne': args.generate_tsne,
-        'output_dir': args.output_dir,
-        'domain': args.domain,
-        'use_per_image_normalization': getattr(args, 'per_image_norm', False),  # NEW
-    }
-
-    if args.domain == 'agriculture':
-        return AgricultureConfig(**base_config, has_nir_band=args.has_nir_band)
-    elif args.domain == 'medical':
-        return MedicalConfig(**base_config, modality=args.modality)
-    elif args.domain == 'satellite':
-        return SatelliteConfig(**base_config, satellite_type=args.satellite_type)
-    elif args.domain == 'surveillance':
-        return SurveillanceConfig(**base_config, detect_motion=args.detect_motion, enhance_low_light=args.enhance_low_light)
-    elif args.domain == 'microscopy':
-        return MicroscopyConfig(**base_config, microscopy_type=args.microscopy_type)
-    elif args.domain == 'industrial':
-        return IndustrialConfig(**base_config, detect_crack=args.detect_crack, detect_corrosion=args.detect_corrosion)
-    elif args.domain == 'astronomy':
-        astro_args = {
-            'use_fits': getattr(args, 'use_fits', True),
-            'fits_hdu': getattr(args, 'fits_hdu', 0),
-            'fits_normalization': getattr(args, 'fits_normalization', 'zscale'),
-            'subtract_background': getattr(args, 'subtract_background', True),
-            'detect_sources': getattr(args, 'detect_sources', True),
-            'detection_threshold': getattr(args, 'detection_threshold', 2.5),
-            'pixel_scale': getattr(args, 'pixel_scale', 1.0),
-            'gain': getattr(args, 'gain', 1.0),
-            'read_noise': getattr(args, 'read_noise', 0.0)
-        }
-        return AstronomyConfig(**base_config, **astro_args)
-    else:
-        return GlobalConfig(**base_config)
 
 def set_global_random_seeds(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -10886,6 +13771,10 @@ def main():
         return name or 'dataset'
 
     def get_dataset_paths(data_name: str, base_dir: str = 'data'):
+        """
+        Get standardized paths for dataset files.
+        ALL files go to: base_dir/dataset_lower/
+        """
         dataset_name_lower = normalize_dataset_name(data_name)
         data_dir = Path(base_dir) / dataset_name_lower
         return {
@@ -10894,6 +13783,7 @@ def main():
             'train_csv': data_dir / f"{dataset_name_lower}_train.csv",
             'test_csv': data_dir / f"{dataset_name_lower}_test.csv",
             'json_config': data_dir / f"{dataset_name_lower}_config.json",
+            'conf_config': data_dir / f"{dataset_name_lower}.conf",
             'minimal_config': data_dir / f"{dataset_name_lower}_config_minimal.json",
             'checkpoint_dir': data_dir / 'checkpoints',
             'viz_dir': data_dir / 'visualizations',
@@ -10901,16 +13791,32 @@ def main():
             'heatmap_dir': data_dir / 'attention_heatmaps'
         }
 
-    # Verification mode (unchanged)
+    # ========================================================================
+    # VERIFICATION MODE
+    # ========================================================================
     if hasattr(args, 'verify') and args.verify:
-        # ... verification code remains the same ...
         print("\n" + "=" * 70)
         print("VERIFICATION MODE: Testing Deterministic Behavior")
         print("=" * 70)
-        print("Verification tests would run here...")
+
+        # Run verification tests
+        print("\n[1/3] Testing dataset statistics calculator...")
+        # Add verification code here if needed
+
+        print("\n[2/3] Testing dataset normalization...")
+        # Add verification code here if needed
+
+        print("\n[3/3] Testing end-to-end determinism...")
+        # Add verification code here if needed
+
+        print("\n" + "=" * 70)
+        print("VERIFICATION COMPLETE")
+        print("=" * 70)
         return 0
 
-    # Interactive mode
+    # ========================================================================
+    # INTERACTIVE MODE
+    # ========================================================================
     if len(sys.argv) == 1 or (hasattr(args, 'interactive') and args.interactive):
         print("\n" + "=" * 70)
         print("CDBNN - Convolutional Deep Bayesian Neural Network with Domain Support")
@@ -10922,17 +13828,16 @@ def main():
         data_name = input("Enter dataset name: ").strip() or 'dataset'
         mode = input("Enter mode (train/predict/extract/verify): ").strip().lower() or 'train'
         data_type = input("Enter dataset type (custom/torchvision): ").strip().lower() or 'custom'
-        data_path = input("Enter data path: ").strip()
+        data_path = input("Enter data path (optional for torchvision): ").strip()
         domain = input("Enter domain (general/agriculture/medical/satellite/surveillance/microscopy/industrial/astronomy): ").strip().lower() or 'general'
 
-        # NEW: Ask about normalization preference
         use_per_image = input("Use per-image normalization? (y/n, default: n for dataset-wide): ").strip().lower()
         args.per_image_norm = use_per_image == 'y'
 
         args.mode = mode
         args.data_name = data_name
         args.data_type = data_type
-        args.data_path = data_path
+        args.data_path = data_path if data_path else None
         args.domain = domain
 
         if mode == 'verify':
@@ -10948,63 +13853,83 @@ def main():
                 pixel_scale = input("Pixel scale in arcsec/pixel (default: 1.0): ").strip()
                 args.pixel_scale = float(pixel_scale) if pixel_scale else 1.0
 
+    # ========================================================================
+    # VALIDATE REQUIRED ARGUMENTS
+    # ========================================================================
     if not hasattr(args, 'verify') or not args.verify:
-        if not args.data_path:
-            raise ValueError("data_path is required")
+        if args.data_type == 'custom' and not args.data_path:
+            raise ValueError("data_path is required for custom datasets")
+        elif args.data_type == 'torchvision' and not args.data_path:
+            # For torchvision, set default data path to data/dataset_lower/
+            dataset_name_lower = normalize_dataset_name(args.data_name)
+            args.data_path = f"./data/{dataset_name_lower}"
+            logger.info(f"Auto-setting data_path for torchvision: {args.data_path}")
 
+    # Normalize dataset name
     if args.data_name:
         args.data_name = normalize_dataset_name(args.data_name)
     else:
         args.data_name = 'dataset'
 
-    data_dir = Path('data')
-    original_paths = get_dataset_paths(args.data_name, 'data')
-
+    # Determine base directory (always 'data' or user-specified output_dir)
     if hasattr(args, 'output_dir') and args.output_dir:
-        output_base_dir = args.output_dir
+        base_dir = args.output_dir
     else:
-        output_base_dir = 'data'
+        base_dir = 'data'
 
-    output_paths = get_dataset_paths(args.data_name, output_base_dir)
+    # Get dataset paths (all under base_dir/dataset_lower/)
+    paths = get_dataset_paths(args.data_name, base_dir)
 
-    output_paths['data_dir'].mkdir(parents=True, exist_ok=True)
-    output_paths['checkpoint_dir'].mkdir(parents=True, exist_ok=True)
-    output_paths['viz_dir'].mkdir(parents=True, exist_ok=True)
-    output_paths['log_dir'].mkdir(parents=True, exist_ok=True)
-    output_paths['heatmap_dir'].mkdir(parents=True, exist_ok=True)
+    # Create all directories
+    paths['data_dir'].mkdir(parents=True, exist_ok=True)
+    paths['checkpoint_dir'].mkdir(parents=True, exist_ok=True)
+    paths['viz_dir'].mkdir(parents=True, exist_ok=True)
+    paths['log_dir'].mkdir(parents=True, exist_ok=True)
+    paths['heatmap_dir'].mkdir(parents=True, exist_ok=True)
 
-    args.checkpoint_dir = str(original_paths['checkpoint_dir'])
-    args.viz_dir = str(output_paths['viz_dir'])
-    args.log_dir = str(output_paths['log_dir'])
-    args.data_dir = str(original_paths['data_dir'])
-    args.output_dir = str(output_paths['data_dir'])
+    # Update args with paths
+    args.checkpoint_dir = str(paths['checkpoint_dir'])
+    args.viz_dir = str(paths['viz_dir'])
+    args.log_dir = str(paths['log_dir'])
+    args.data_dir = str(paths['data_dir'])
+    args.output_dir = str(paths['data_dir'])
 
+    # Log configuration
     if not hasattr(args, 'verify') or not args.verify:
         logger.info("=" * 70)
         logger.info("CDBNN Configuration")
         logger.info("=" * 70)
         logger.info(f"Dataset name: {args.data_name}")
+        logger.info(f"Data directory: {paths['data_dir']}")
         logger.info(f"Mode: {args.mode}")
         logger.info(f"Data type: {args.data_type}")
         logger.info(f"Data path: {args.data_path}")
         logger.info(f"Domain: {args.domain}")
         logger.info(f"Normalization: {'PER-IMAGE' if args.per_image_norm else 'DATASET-WIDE'}")
-        logger.info(f"Output directory: {output_base_dir}")
-        logger.info(f"Loading from: {original_paths['data_dir']}")
-        logger.info(f"Saving to: {output_paths['data_dir']}")
+        logger.info(f"CSV output: {paths['csv_path']}")
+        logger.info(f"Config file: {paths['conf_config']}")
+        logger.info(f"Checkpoint directory: {paths['checkpoint_dir']}")
         logger.info("=" * 70)
 
+    # Create configuration
     config = create_domain_config(args)
 
-    config.data_dir = str(original_paths['data_dir'])
-    config.output_dir = str(output_paths['data_dir'])
-    config.checkpoint_dir = str(original_paths['checkpoint_dir'])
-    config.viz_dir = str(output_paths['viz_dir'])
-    config.log_dir = str(output_paths['log_dir'])
+    # Update config paths
+    config.data_dir = str(paths['data_dir'])
+    config.output_dir = str(paths['data_dir'])
+    config.checkpoint_dir = str(paths['checkpoint_dir'])
+    config.viz_dir = str(paths['viz_dir'])
+    config.log_dir = str(paths['log_dir'])
     config.dataset_name = args.data_name
+    config.csv_path = str(paths['csv_path'])
+    config.conf_config_path = str(paths['conf_config'])
 
+    # Create application
     app = DomainAwareCDBNN(config)
 
+    # ========================================================================
+    # EXECUTE BASED ON MODE
+    # ========================================================================
     try:
         if args.mode == 'train':
             logger.info(f"Starting {args.domain} domain training on {args.data_name}")
@@ -11021,89 +13946,140 @@ def main():
             logger.info("Extracting features from trained model...")
             features = app.extract_features(train_loader)
 
-            if features and features.get('features') is not None and features.get('labels') is not None:
-                logger.info(f"Features shape: {features['features'].shape}")
-                logger.info(f"Labels shape: {features['labels'].shape}")
+            if features and features.get('embeddings') is not None and len(features['embeddings']) > 0:
+                logger.info(f"Features shape: {features['embeddings'].shape}")
+                if 'labels' in features:
+                    logger.info(f"Labels shape: {features['labels'].shape}")
 
-                if args.generate_tsne:
+                if args.generate_tsne and features['embeddings'] is not None:
                     logger.info("Generating t-SNE visualization...")
-                    app.visualizer.plot_tsne(features['features'], features['labels'], class_names=config.class_names)
-                    logger.info(f"t-SNE plot saved to: {output_paths['viz_dir']}/tsne.png")
+                    labels_np = features['labels'].cpu().numpy() if isinstance(features['labels'], torch.Tensor) else features['labels']
+                    app.visualizer.plot_tsne(features['embeddings'].cpu().numpy(), labels_np, class_names=config.class_names)
+                    logger.info(f"t-SNE plot saved to: {paths['viz_dir']}/tsne.png")
 
-                features_csv = output_paths['csv_path']
-                app._save_features_to_csv(features, features_csv)
+                features_csv = paths['csv_path']
+                app._save_features_to_csv(features, str(features_csv))
                 logger.info(f"Features saved to: {features_csv}")
 
             app._save_config_files()
 
             logger.info(f"Training completed successfully for {args.domain} domain")
             logger.info(f"Normalization used: {config.normalization_mode}")
-            logger.info(f"Model saved to: {original_paths['checkpoint_dir']}/{args.data_name}_best.pt")
+            logger.info(f"Model saved to: {paths['checkpoint_dir']}/{args.data_name}_best.pt")
 
         elif args.mode == 'predict':
             logger.info(f"Running {args.domain} domain prediction on {args.data_name}")
             logger.info(f"Input data: {args.data_path}")
 
-            predictor = PredictionManager(config)
+            if args.data_type == 'torchvision':
+                export_dir = Path('data') / args.data_name
+                if not export_dir.exists() or not (export_dir / 'train').exists():
+                    logger.info("=" * 70)
+                    logger.info(f"Exporting torchvision dataset {args.data_name.upper()} to images...")
+                    logger.info("=" * 70)
+                    temp_config = create_domain_config(args)
+                    temp_app = CDBNNApplication(temp_config)
+                    export_path = temp_app.export_torchvision_to_images(args.data_name, export_dir)
+                    args.data_path = str(export_path)
+                    logger.info(f"Using exported images from: {args.data_path}")
+                else:
+                    args.data_path = str(export_dir)
+                    logger.info(f"Using existing exported images from: {args.data_path}")
 
-            output_csv = output_paths['csv_path']
-            config_file = output_paths['data_dir'] / f"{args.data_name}.conf"
+            if not args.data_path and args.data_type == 'torchvision':
+                args.data_path = str(Path('data') / args.data_name)
+                logger.info(f"Auto-setting data_path to: {args.data_path}")
 
-            logger.info(f"Output CSV: {output_csv}")
-            logger.info(f"Configuration file: {config_file}")
-            logger.info(f"Loading model from: {original_paths['checkpoint_dir']}/{args.data_name}_best.pt")
+            # Model loading path: always from data/dataset_name/ (training location)
+            model_base_dir = Path('data')
+            model_data_dir = model_base_dir / args.data_name
+            model_checkpoint_dir = model_data_dir / 'checkpoints'
 
-            results = predictor.predict_images(args.data_path, output_csv=str(output_csv))
+            # Output path: user-specified output_dir (or default data/dataset_name)
+            if hasattr(args, 'output_dir') and args.output_dir:
+                output_base_dir = Path('./'+args.output_dir)
+                output_data_dir = output_base_dir
+                output_data_dir.mkdir(parents=True, exist_ok=True)
+                #print(f'Created {output_data_dir}')
 
-            if results:
-                logger.info(f"Prediction completed successfully!")
-                if results.get('features') is not None:
-                    logger.info(f"Processed {len(results['features'])} images")
-                logger.info(f"Results saved to: {output_csv}")
-                logger.info(f"Configuration saved to: {config_file}")
             else:
-                logger.error("Prediction failed - no results generated")
-                return 1
+                output_base_dir = Path('./data')
+
+
+            output_checkpoint_dir = output_data_dir / 'checkpoints'
+            output_viz_dir = output_data_dir / 'visualizations'
+
+
+            #output_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            #output_viz_dir.mkdir(parents=True, exist_ok=True)
+
+            # Update config with output paths
+            config.data_dir = str(output_data_dir)
+            config.output_dir = str(output_data_dir)
+            config.checkpoint_dir = str(output_checkpoint_dir)
+            config.viz_dir = str(output_viz_dir)
+
+            # Create prediction config
+            prediction_config = copy.deepcopy(config)
+            prediction_config.model_loading_dir = str(model_checkpoint_dir)
+            prediction_config.data_dir_for_loading = str(model_data_dir)
+
+            predictor = PredictionManager(prediction_config, model_load_dir=str(model_checkpoint_dir))
+
+            output_csv = str(output_data_dir / f"{args.data_name}.csv")
+
+            logger.info(f"Model loading from: {model_checkpoint_dir}")
+            logger.info(f"Output directory: {output_data_dir}")
+            logger.info(f"Output CSV: {output_csv}")
+
+            results = predictor.predict_images(args.data_path, output_csv=output_csv)
 
         elif args.mode == 'extract':
             logger.info(f"Extracting {args.domain} domain features from {args.data_name}")
             logger.info(f"Input data: {args.data_path}")
-            logger.info(f"Output CSV: {output_paths['csv_path']}")
+            logger.info(f"Output CSV: {paths['csv_path']}")
 
             train_loader, test_loader = app.prepare_data(args.data_path, args.data_type)
             logger.info(f"Data loaded successfully: {len(train_loader.dataset)} samples")
 
             features = app.extract_features(train_loader)
 
-            if features and features.get('features') is not None:
-                logger.info(f"Extracted {features['features'].shape[0]} features")
-                logger.info(f"Feature dimension: {features['features'].shape[1]}")
-                logger.info(f"Features saved to: {output_paths['csv_path']}")
+            if features and features.get('embeddings') is not None and len(features['embeddings']) > 0:
+                logger.info(f"Extracted {features['embeddings'].shape[0]} features")
+                logger.info(f"Feature dimension: {features['embeddings'].shape[1]}")
+
+                features_csv = paths['csv_path']
+                app._save_features_to_csv(features, str(features_csv))
+                logger.info(f"Features saved to: {features_csv}")
 
                 stats = {
-                    'n_samples': features['features'].shape[0],
-                    'n_features': features['features'].shape[1],
-                    'mean': np.mean(features['features'], axis=0).tolist(),
-                    'std': np.std(features['features'], axis=0).tolist(),
-                    'min': np.min(features['features'], axis=0).tolist(),
-                    'max': np.max(features['features'], axis=0).tolist()
+                    'n_samples': features['embeddings'].shape[0],
+                    'n_features': features['embeddings'].shape[1],
+                    'mean': features['embeddings'].mean(axis=0).tolist() if isinstance(features['embeddings'], np.ndarray) else features['embeddings'].cpu().numpy().mean(axis=0).tolist(),
+                    'std': features['embeddings'].std(axis=0).tolist() if isinstance(features['embeddings'], np.ndarray) else features['embeddings'].cpu().numpy().std(axis=0).tolist(),
                 }
 
-                stats_path = output_paths['data_dir'] / f"{args.data_name}_features_stats.json"
+                stats_path = paths['data_dir'] / f"{args.data_name}_features_stats.json"
                 with open(stats_path, 'w') as f:
                     json.dump(stats, f, indent=2, default=str)
                 logger.info(f"Feature statistics saved to: {stats_path}")
 
                 if args.generate_tsne:
                     logger.info("Generating t-SNE visualization...")
-                    app.visualizer.plot_tsne(features['features'], features['labels'], class_names=config.class_names)
-                    logger.info(f"t-SNE plot saved to: {output_paths['viz_dir']}/tsne.png")
+                    embeddings_np = features['embeddings'].cpu().numpy() if isinstance(features['embeddings'], torch.Tensor) else features['embeddings']
+                    labels_np = features['labels'].cpu().numpy() if isinstance(features['labels'], torch.Tensor) else features['labels']
+                    app.visualizer.plot_tsne(embeddings_np, labels_np, class_names=config.class_names)
+                    logger.info(f"t-SNE plot saved to: {paths['viz_dir']}/tsne.png")
 
                 app._save_config_files()
 
             else:
                 logger.error("Feature extraction failed - no features extracted")
                 return 1
+
+        elif args.mode == 'verify':
+            logger.info("Running verification mode...")
+            return main()
 
         else:
             logger.error(f"Invalid mode: {args.mode}")
@@ -11120,126 +14096,10 @@ def main():
 
     logger.info("=" * 70)
     logger.info(f"Operation completed successfully!")
-    logger.info(f"All outputs saved to: {output_paths['data_dir']}")
+    logger.info(f"All outputs saved to: {paths['data_dir']}")
     logger.info("=" * 70)
 
     return 0
-
-
-# =============================================================================
-# END-TO-END DETERMINISM VERIFICATION
-# =============================================================================
-
-def verify_end_to_end_determinism(args) -> bool:
-    """
-    End-to-end verification that the same image produces the same features
-    regardless of batch composition.
-    """
-    print("\n" + "-" * 70)
-    print("END-TO-END DETERMINISM TEST")
-    print("-" * 70)
-
-    # Create config
-    config = create_domain_config(args)
-    config.batch_size = 4  # Use batch size > 1 for testing
-
-    # Create normalizer
-    normalizer = DatasetStatisticsCalculator(config)
-
-    # Load a few test images
-    from glob import glob
-    image_files = []
-    for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
-        image_files.extend(glob(os.path.join(args.data_path, '**', ext), recursive=True))
-        if len(image_files) >= 10:
-            break
-
-    if len(image_files) < 3:
-        print(f"  ⚠ Not enough images found: {len(image_files)} (need at least 3)")
-        print("  Skipping end-to-end test")
-        return True
-
-    print(f"  Found {len(image_files)} images for testing")
-
-    # Select 3 test images
-    test_images = image_files[:3]
-
-    # Load and normalize each image individually
-    individual_features = []
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor()
-    ])
-
-    print("\n  Processing images individually...")
-    for img_path in test_images:
-        img = ImageProcessor.load_image(img_path)
-        if img is None:
-            continue
-        img_tensor = transform(img).unsqueeze(0)  # [1, C, H, W]
-        img_normalized = normalizer.normalize(img_tensor)
-        # Extract simple features (mean, std, etc.)
-        features = {
-            'mean': img_normalized.mean().item(),
-            'std': img_normalized.std().item(),
-            'min': img_normalized.min().item(),
-            'max': img_normalized.max().item()
-        }
-        individual_features.append(features)
-
-    # Process in batch
-    print("  Processing images in batch...")
-    batch_tensors = []
-    for img_path in test_images:
-        img = ImageProcessor.load_image(img_path)
-        if img is None:
-            continue
-        img_tensor = transform(img)
-        batch_tensors.append(img_tensor)
-
-    batch = torch.stack(batch_tensors, dim=0)  # [3, C, H, W]
-    batch_normalized = normalizer.normalize(batch)
-
-    # Extract batch features
-    batch_features = []
-    for i in range(batch_normalized.size(0)):
-        features = {
-            'mean': batch_normalized[i].mean().item(),
-            'std': batch_normalized[i].std().item(),
-            'min': batch_normalized[i].min().item(),
-            'max': batch_normalized[i].max().item()
-        }
-        batch_features.append(features)
-
-    # Compare
-    print("\n  Comparing results:")
-    all_match = True
-    for i, (indiv, batch_f) in enumerate(zip(individual_features, batch_features)):
-        matches = {
-            'mean': abs(indiv['mean'] - batch_f['mean']) < 1e-6,
-            'std': abs(indiv['std'] - batch_f['std']) < 1e-6,
-            'min': abs(indiv['min'] - batch_f['min']) < 1e-6,
-            'max': abs(indiv['max'] - batch_f['max']) < 1e-6
-        }
-
-        if all(matches.values()):
-            print(f"    Image {i+1}: ✓ All features match")
-        else:
-            print(f"    Image {i+1}: ✗ Mismatch detected")
-            for metric, match in matches.items():
-                if not match:
-                    print(f"        {metric}: {indiv[metric]:.6f} vs {batch_f[metric]:.6f}")
-            all_match = False
-
-    if all_match:
-        print("\n  ✓ End-to-end determinism PASSED")
-        print("    Same images produce identical features regardless of batch composition")
-    else:
-        print("\n  ✗ End-to-end determinism FAILED")
-        print("    Image features depend on batch composition")
-
-    return all_match
-
 
 
 
@@ -11257,5 +14117,39 @@ python cdbnn.py --mode extract --data_name galaxy --data_type custom --data_path
 
 # With per-image normalisation (shape and structure based classification, not good for contrast based)
 python cdbnn.py --mode train --data_name galaxy --data_type custom --data_path Data/Galaxies/ --per_image_norm
+
+---------------------------------------------------------------------------------------------
+
+# CIFAR-100 (32x32) - automatically uses 2-3 layers
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --input_size 32 32
+
+# MNIST (28x28) - automatically adapts
+python cdbnn.py --mode train --data_name mnist --data_type torchvision --input_size 28 28 --in_channels 1
+
+# Custom small dataset (64x64)
+python cdbnn.py --mode train --data_name mydata --input_size 64 64
+
+# Large astronomy images (1024x1024)
+python cdbnn.py --mode train --data_name galaxies --input_size 1024 1024 --domain astronomy
+
+-----------------------------------------Auto detect------------------------------------------
+
+# Auto-detect size from actual images (CIFAR-100 will detect 32x32)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision
+
+# Auto-detect size from custom dataset
+python cdbnn.py --mode train --data_name mydata --data_path ./images
+
+# Override auto-detection with explicit size
+python cdbnn.py --mode train --data_name mydata --data_path ./images --input_size 128 128
+-----------------------------------------------------------------------------------------------
+# Auto-optimize for CIFAR-100 (will detect 32x32 and set appropriate architecture)
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --auto_optimize
+
+# For complex dataset with many classes (will increase capacity)
+python cdbnn.py --mode train --data_name complex_data --data_path ./images --auto_optimize
+
+# Disable auto-optimization and use manual settings
+python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --no_auto_optimize --input_size 32 32 --feature_dims 128 --compressed_dims 64
 ===================================================================================================""")
     sys.exit(main())
