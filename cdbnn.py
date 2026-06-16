@@ -5070,6 +5070,7 @@ class Trainer:
     """
     ENHANCED DETERMINISTIC TRAINER - REPLACES the original Trainer class.
     Uses per-image normalization + Euclidean distance + Contrastive loss for proper clustering.
+    Enhanced with comprehensive resume capabilities.
     """
 
     def __init__(self, model: BaseAutoencoder, config: GlobalConfig):
@@ -5121,6 +5122,16 @@ class Trainer:
             model.deterministic_mode = True
             model._single_image_mode = False
 
+        # Resume-related attributes
+        self.is_resumed = False
+        self.resume_info = {}
+        self.saving_data_dir = None
+        self.saving_checkpoint_dir = None
+        self.loading_data_dir = None
+        self.loading_checkpoint_dir = None
+        self.visualizer = None
+        self.statistics_calculator = None
+
     def _set_deterministic_seeds(self):
         import random
         random.seed(42)
@@ -5162,6 +5173,332 @@ class Trainer:
             pin_memory=False,
             drop_last=False
         )
+
+    def _verify_model_compatibility(self, checkpoint: Dict) -> Dict:
+        """
+        Verify that checkpoint model is compatible with current model configuration.
+
+        Returns:
+            Dictionary with 'compatible' (bool) and 'reason' (str if incompatible)
+        """
+        # Check model architecture compatibility
+        model_config_keys = ['feature_dims', 'compressed_dims', 'in_channels', 'num_classes']
+
+        for key in model_config_keys:
+            if key in checkpoint:
+                checkpoint_value = checkpoint[key]
+                current_value = getattr(self.config, key, None)
+
+                if current_value is not None and checkpoint_value != current_value:
+                    return {
+                        'compatible': False,
+                        'reason': f"{key} mismatch: checkpoint={checkpoint_value}, config={current_value}"
+                    }
+
+        # Check input size compatibility
+        if 'input_size' in checkpoint:
+            checkpoint_size = tuple(checkpoint['input_size']) if isinstance(checkpoint['input_size'], list) else checkpoint['input_size']
+            if checkpoint_size != self.config.input_size:
+                logger.warning(f"Input size mismatch: checkpoint={checkpoint_size}, config={self.config.input_size}")
+                logger.warning("Attempting to adapt... (may cause issues)")
+
+        # Check normalization mode compatibility
+        if 'normalization_mode' in checkpoint:
+            checkpoint_norm = checkpoint['normalization_mode']
+            if checkpoint_norm != self.config.normalization_mode:
+                logger.warning(f"Normalization mode mismatch: checkpoint={checkpoint_norm}, config={self.config.normalization_mode}")
+                logger.warning("This may affect results. Consider using consistent normalization.")
+
+        return {'compatible': True, 'reason': None}
+
+    def load_checkpoint_for_resume(self, checkpoint_path: Optional[Path] = None, reset_optimizer: bool = False) -> Dict:
+        """
+        Load checkpoint for resuming training with comprehensive validation.
+
+        Args:
+            checkpoint_path: Path to checkpoint file (if None, finds latest or best)
+            reset_optimizer: If True, only load model weights, reset optimizer state
+
+        Returns:
+            Dictionary with resume information
+        """
+        if checkpoint_path is None:
+            # Try to find the latest checkpoint
+            possible_paths = [
+                self.checkpoint_dir / 'latest.pt',
+                self.checkpoint_dir / 'best.pt',
+                self.checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                self.checkpoint_dir / f"{self.config.dataset_name}_latest.pt",
+            ]
+            for path in possible_paths:
+                if path.exists():
+                    checkpoint_path = path
+                    break
+
+        if checkpoint_path is None or not checkpoint_path.exists():
+            logger.warning(f"No checkpoint found to resume from")
+            return {'resumed': False, 'error': 'No checkpoint found'}
+
+        try:
+            logger.info(f"=" * 60)
+            logger.info(f"RESUMING TRAINING FROM CHECKPOINT")
+            logger.info(f"Checkpoint: {checkpoint_path}")
+            logger.info(f"=" * 60)
+
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+            # ================================================================
+            # VERIFY MODEL COMPATIBILITY
+            # ================================================================
+            compatibility_check = self._verify_model_compatibility(checkpoint)
+            if not compatibility_check['compatible']:
+                logger.error(f"Model incompatible: {compatibility_check['reason']}")
+                return {'resumed': False, 'error': compatibility_check['reason']}
+
+            # ================================================================
+            # LOAD MODEL STATE
+            # ================================================================
+            # Load model state dict with strict=False for flexibility
+            missing_keys, unexpected_keys = self.model.load_state_dict(
+                checkpoint['model_state_dict'], strict=False
+            )
+
+            if missing_keys:
+                logger.warning(f"Missing keys in checkpoint: {missing_keys[:5]}...")
+            if unexpected_keys:
+                logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys[:5]}...")
+
+            logger.info(f"✓ Model state loaded successfully")
+
+            # ================================================================
+            # LOAD OPTIMIZER STATE (optional)
+            # ================================================================
+            if not reset_optimizer and 'optimizer_state_dict' in checkpoint:
+                try:
+                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    logger.info(f"✓ Optimizer state loaded")
+                except Exception as e:
+                    logger.warning(f"Could not load optimizer state: {e}, resetting...")
+                    reset_optimizer = True
+
+            if reset_optimizer:
+                logger.info("Optimizer state reset (starting fresh)")
+
+            # ================================================================
+            # LOAD SCHEDULER STATE
+            # ================================================================
+            if not reset_optimizer and 'scheduler_state_dict' in checkpoint:
+                try:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    logger.info(f"✓ Scheduler state loaded")
+                except Exception as e:
+                    logger.warning(f"Could not load scheduler state: {e}")
+
+            # ================================================================
+            # LOAD TRAINING STATE
+            # ================================================================
+            resume_info = {
+                'resumed': True,
+                'checkpoint_path': str(checkpoint_path),
+                'epoch': checkpoint.get('epoch', 0),
+                'phase': checkpoint.get('phase', 1),
+                'loss': checkpoint.get('loss', float('inf')),
+                'accuracy': checkpoint.get('accuracy', 0.0),
+                'nmi': checkpoint.get('nmi', 0.0),
+                'best_loss': checkpoint.get('best_loss', float('inf')),
+                'best_accuracy': checkpoint.get('best_accuracy', 0.0),
+                'best_epoch': checkpoint.get('best_epoch', 0),
+                'best_phase': checkpoint.get('best_phase', 1),
+                'normalization_mode': checkpoint.get('normalization_mode', 'dataset_wide'),
+                'clustering_mode': checkpoint.get('clustering_mode', 'enhanced'),
+                'timestamp': checkpoint.get('timestamp', 'unknown'),
+            }
+
+            # Load feature selection if available
+            if 'selected_feature_indices' in checkpoint and checkpoint['selected_feature_indices'] is not None:
+                indices = checkpoint['selected_feature_indices']
+                if isinstance(indices, torch.Tensor):
+                    self.model._selected_feature_indices = indices.to(self.device)
+                else:
+                    self.model._selected_feature_indices = torch.tensor(indices, device=self.device)
+                self.model._is_feature_selection_frozen = True
+                resume_info['feature_selection'] = len(indices)
+                logger.info(f"✓ Feature selection loaded ({len(indices)} features)")
+
+            # Load classifier if available
+            if 'classifier_state_dict' in checkpoint and checkpoint['classifier_state_dict']:
+                if hasattr(self.model, 'classifier') and self.model.classifier is not None:
+                    try:
+                        self.model.classifier.load_state_dict(checkpoint['classifier_state_dict'])
+                        logger.info(f"✓ Classifier state loaded")
+                    except Exception as e:
+                        logger.warning(f"Could not load classifier state: {e}")
+
+            # Load cluster centers if available
+            if 'cluster_centers' in checkpoint and checkpoint['cluster_centers'] is not None:
+                if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
+                    centers = checkpoint['cluster_centers']
+                    if isinstance(centers, torch.Tensor):
+                        self.model.cluster_centers.data = centers.to(self.device)
+                    else:
+                        self.model.cluster_centers.data = torch.tensor(centers, device=self.device)
+                    resume_info['cluster_centers'] = len(self.model.cluster_centers)
+                    logger.info(f"✓ Cluster centers loaded ({len(self.model.cluster_centers)} centers)")
+
+            # Load dataset statistics if available
+            if 'dataset_statistics' in checkpoint and checkpoint['dataset_statistics']:
+                stats_dict = checkpoint['dataset_statistics']
+                if hasattr(self.model, 'dataset_statistics'):
+                    # Create statistics wrapper
+                    class StatisticsWrapper:
+                        def __init__(self, mean, std, n_samples):
+                            self.mean = mean
+                            self.std = std
+                            self.is_calculated = True
+                            self.n_samples_used = n_samples
+
+                        def normalize(self, x):
+                            mean = self.mean.to(x.device).view(1, -1, 1, 1)
+                            std = self.std.to(x.device).view(1, -1, 1, 1)
+                            return (x - mean) / (std + 1e-8)
+
+                    if 'mean' in stats_dict and stats_dict['mean'] is not None:
+                        mean = torch.tensor(stats_dict['mean'], dtype=torch.float32)
+                        std = torch.tensor(stats_dict['std'], dtype=torch.float32)
+                        n_samples = stats_dict.get('n_samples_used', stats_dict.get('n_samples', 0))
+                        stats_wrapper = StatisticsWrapper(mean, std, n_samples)
+                        self.model.set_dataset_statistics(stats_wrapper)
+                        resume_info['dataset_statistics_loaded'] = True
+                        logger.info(f"✓ Dataset statistics loaded")
+
+            # Load history if available
+            if 'history' in checkpoint:
+                self.history = defaultdict(list, checkpoint['history'])
+                resume_info['history_epochs'] = len(self.history.get('train_loss', []))
+                logger.info(f"✓ Training history loaded ({resume_info['history_epochs']} epochs)")
+
+            # Update best metrics
+            self.best_loss = resume_info['best_loss']
+            self.best_accuracy = resume_info['best_accuracy']
+            self.best_epoch = resume_info['best_epoch']
+            self.best_phase = resume_info['best_phase']
+
+            # Update phase-specific best metrics
+            if resume_info['phase'] == 1:
+                self.best_phase1_loss = resume_info['best_loss']
+                self.best_phase1_epoch = resume_info['best_epoch']
+            else:
+                self.best_phase2_loss = resume_info['best_loss']
+                self.best_phase2_accuracy = resume_info['best_accuracy']
+                self.best_phase2_epoch = resume_info['best_epoch']
+                self.best_phase2_nmi = resume_info.get('nmi', 0.0)
+
+            self.is_resumed = True
+            self.resume_info = resume_info
+
+            # Set model to appropriate phase
+            self.model.set_training_phase(resume_info['phase'])
+
+            logger.info(f"=" * 60)
+            logger.info(f"RESUME INFORMATION:")
+            logger.info(f"  Phase: {resume_info['phase']}")
+            logger.info(f"  Epoch: {resume_info['epoch'] + 1}")
+            logger.info(f"  Loss: {resume_info['loss']:.6f}")
+            logger.info(f"  Accuracy: {resume_info['accuracy']:.2%}")
+            logger.info(f"  Best Loss: {resume_info['best_loss']:.6f}")
+            logger.info(f"  Best Accuracy: {resume_info['best_accuracy']:.2%}")
+            logger.info(f"  Normalization: {resume_info['normalization_mode']}")
+            logger.info(f"=" * 60)
+
+            return resume_info
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint for resume: {e}")
+            traceback.print_exc()
+            return {'resumed': False, 'error': str(e)}
+
+    def save_checkpoint_for_resume(self, epoch: int, phase: int, loss: float,
+                                   accuracy: float, nmi: float = 0.0,
+                                   is_best: bool = False) -> None:
+        """
+        Save checkpoint with complete resume information.
+        """
+        checkpoint = {
+            'epoch': epoch,
+            'phase': phase,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'loss': loss,
+            'accuracy': accuracy,
+            'nmi': nmi,
+            'best_loss': self.best_loss,
+            'best_accuracy': self.best_accuracy,
+            'best_epoch': self.best_epoch,
+            'best_phase': self.best_phase,
+            'history': dict(self.history),
+            'normalization_mode': self.config.normalization_mode,
+            'use_per_image_normalization': self.config.use_per_image_normalization,
+            'clustering_mode': 'enhanced',
+            'deterministic': True,
+            'feature_dims': self.config.feature_dims,
+            'compressed_dims': self.config.compressed_dims,
+            'in_channels': self.config.in_channels,
+            'num_classes': self.config.num_classes,
+            'input_size': list(self.config.input_size),
+            'timestamp': datetime.now().isoformat(),
+        }
+
+        # Save feature selection if frozen
+        if hasattr(self.model, '_is_feature_selection_frozen') and self.model._is_feature_selection_frozen:
+            if hasattr(self.model, '_selected_feature_indices') and self.model._selected_feature_indices is not None:
+                checkpoint['selected_feature_indices'] = self.model._selected_feature_indices.cpu()
+
+        # Save classifier if available
+        if hasattr(self.model, 'classifier') and self.model.classifier is not None:
+            checkpoint['classifier_state_dict'] = self.model.classifier.state_dict()
+
+        # Save cluster centers if available
+        if hasattr(self.model, 'cluster_centers') and self.model.cluster_centers is not None:
+            checkpoint['cluster_centers'] = self.model.cluster_centers.data.cpu()
+
+        # Save dataset statistics if available
+        if hasattr(self.model, 'dataset_statistics') and self.model.dataset_statistics:
+            if hasattr(self.model.dataset_statistics, 'mean') and self.model.dataset_statistics.mean is not None:
+                checkpoint['dataset_statistics'] = {
+                    'mean': self.model.dataset_statistics.mean.cpu().tolist(),
+                    'std': self.model.dataset_statistics.std.cpu().tolist(),
+                    'n_samples_used': getattr(self.model.dataset_statistics, 'n_samples_used', 0),
+                    'n_samples': getattr(self.model.dataset_statistics, 'n_samples', 0),
+                }
+
+        # Save latest checkpoint
+        latest_path = self.checkpoint_dir / 'latest.pt'
+        torch.save(checkpoint, latest_path)
+        logger.info(f"Checkpoint saved: {latest_path} (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
+
+        # Save best checkpoint if applicable
+        if is_best:
+            best_path = self.checkpoint_dir / 'best.pt'
+            torch.save(checkpoint, best_path)
+            logger.info(f"✓ Best model saved: {best_path} (Acc: {accuracy:.2%})")
+
+            # Also save named checkpoint
+            dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
+            named_best_path = self.checkpoint_dir / f"{dataset_name_lower}_best.pt"
+            torch.save(checkpoint, named_best_path)
+            logger.info(f"✓ Named best model saved: {named_best_path}")
+
+    def get_resume_status(self) -> Dict:
+        """Get current resume status"""
+        return {
+            'is_resumed': self.is_resumed,
+            'resume_info': self.resume_info,
+            'current_epoch': len(self.history.get('train_loss', [])),
+            'current_phase': self.model.training_phase if hasattr(self.model, 'training_phase') else 1,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+        }
 
     def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None,
               resume: bool = False, resume_from: Optional[str] = None,
@@ -5293,11 +5630,15 @@ class Trainer:
         if resume:
             # Try multiple possible locations for statistics file
             stats_paths = [
-                self.saving_checkpoint_dir / 'dataset_statistics.pt',
-                self.loading_checkpoint_dir / 'dataset_statistics.pt',
-                self.saving_data_dir / 'dataset_statistics.pt',
-                self.loading_data_dir / 'dataset_statistics.pt',
+                self.saving_checkpoint_dir / 'dataset_statistics.pt' if self.saving_checkpoint_dir else None,
+                self.loading_checkpoint_dir / 'dataset_statistics.pt' if self.loading_checkpoint_dir else None,
+                self.saving_data_dir / 'dataset_statistics.pt' if self.saving_data_dir else None,
+                self.loading_data_dir / 'dataset_statistics.pt' if self.loading_data_dir else None,
+                self.checkpoint_dir / 'dataset_statistics.pt',
             ]
+
+            # Filter out None paths
+            stats_paths = [p for p in stats_paths if p is not None]
 
             for stats_path in stats_paths:
                 if stats_path.exists():
@@ -5305,8 +5646,10 @@ class Trainer:
                         logger.info(f"Loading existing statistics from: {stats_path}")
                         stats = torch.load(stats_path, map_location='cpu')
                         statistics_calculator = DatasetStatisticsCalculator(self.config)
-                        statistics_calculator.mean = stats['mean']
-                        statistics_calculator.std = stats['std']
+                        if 'mean' in stats and stats['mean'] is not None:
+                            statistics_calculator.mean = stats['mean']
+                        if 'std' in stats and stats['std'] is not None:
+                            statistics_calculator.std = stats['std']
                         statistics_calculator.per_channel_min = stats.get('per_channel_min')
                         statistics_calculator.per_channel_max = stats.get('per_channel_max')
                         statistics_calculator.n_samples_used = stats.get('n_samples_used', 0)
@@ -5334,7 +5677,8 @@ class Trainer:
             self.statistics_calculator = statistics_calculator
 
             # Save statistics for future resume
-            stats_save_path = self.saving_checkpoint_dir / 'dataset_statistics.pt'
+            stats_save_path = self.saving_checkpoint_dir / 'dataset_statistics.pt' if self.saving_checkpoint_dir else self.checkpoint_dir / 'dataset_statistics.pt'
+            stats_save_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
                 'mean': statistics_calculator.mean.cpu(),
                 'std': statistics_calculator.std.cpu(),
@@ -5357,31 +5701,46 @@ class Trainer:
         # Create model using ModelFactory
         model = ModelFactory.create_model(self.config)
 
-        # Set up resume state for deterministic_train
-        # Note: We need to pass resume parameters to deterministic_train
-        # Since deterministic_train doesn't have resume params, we'll need to modify it
-        # OR we can handle checkpoint loading here before calling deterministic_train
-
+        # Initialize resume variables with defaults
         start_epoch = 0
         start_phase = 1
+        loaded_optimizer_state = None
+        loaded_scheduler_state = None
+        checkpoint_loaded = False
 
-        # Load checkpoint if resuming (handle it here before calling deterministic_train)
+        # Load checkpoint if resuming
         if resume:
             checkpoint_path = None
             if resume_from:
                 checkpoint_path = Path(resume_from)
                 if not checkpoint_path.is_absolute():
-                    checkpoint_path = self.saving_checkpoint_dir / checkpoint_path
+                    if self.saving_checkpoint_dir:
+                        checkpoint_path = self.saving_checkpoint_dir / checkpoint_path
+                    else:
+                        checkpoint_path = self.checkpoint_dir / checkpoint_path
             else:
                 # Try to find latest checkpoint
-                candidate_paths = [
-                    self.saving_checkpoint_dir / 'latest.pt',
-                    self.saving_checkpoint_dir / 'best.pt',
-                    self.loading_checkpoint_dir / 'latest.pt',
-                    self.loading_checkpoint_dir / 'best.pt',
-                ]
+                candidate_paths = []
+                if self.saving_checkpoint_dir:
+                    candidate_paths.extend([
+                        self.saving_checkpoint_dir / 'latest.pt',
+                        self.saving_checkpoint_dir / 'best.pt',
+                        self.saving_checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                    ])
+                if self.loading_checkpoint_dir:
+                    candidate_paths.extend([
+                        self.loading_checkpoint_dir / 'latest.pt',
+                        self.loading_checkpoint_dir / 'best.pt',
+                        self.loading_checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                    ])
+                candidate_paths.extend([
+                    self.checkpoint_dir / 'latest.pt',
+                    self.checkpoint_dir / 'best.pt',
+                    self.checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                ])
+
                 for path in candidate_paths:
-                    if path.exists():
+                    if path and path.exists():
                         checkpoint_path = path
                         break
 
@@ -5391,8 +5750,12 @@ class Trainer:
                     checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
                     # Load model state
-                    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-                    logger.info("Model state loaded successfully")
+                    missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    if missing_keys:
+                        logger.debug(f"Missing keys: {missing_keys[:5]}...")
+                    if unexpected_keys:
+                        logger.debug(f"Unexpected keys: {unexpected_keys[:5]}...")
+                    logger.info("✓ Model state loaded successfully")
 
                     # Record resume state
                     start_epoch = checkpoint.get('epoch', 0) + 1
@@ -5400,12 +5763,36 @@ class Trainer:
                     loaded_loss = checkpoint.get('loss', float('inf'))
                     loaded_accuracy = checkpoint.get('accuracy', 0.0)
 
+                    # Store optimizer and scheduler state for potential use
+                    if not reset_optimizer and 'optimizer_state_dict' in checkpoint:
+                        loaded_optimizer_state = checkpoint['optimizer_state_dict']
+                        logger.info("✓ Optimizer state will be restored")
+                    if not reset_optimizer and 'scheduler_state_dict' in checkpoint:
+                        loaded_scheduler_state = checkpoint['scheduler_state_dict']
+                        logger.info("✓ Scheduler state will be restored")
+
                     logger.info(f"Resuming from: Phase {start_phase}, Epoch {start_epoch}")
                     logger.info(f"Loaded loss: {loaded_loss:.6f}, Accuracy: {loaded_accuracy:.4f}")
 
                     # Set dataset statistics in model
                     if statistics_calculator and statistics_calculator.is_calculated:
                         model.set_dataset_statistics(statistics_calculator)
+                        logger.info("✓ Dataset statistics loaded into model")
+
+                    # Load best metrics if available in checkpoint
+                    if 'best_loss' in checkpoint:
+                        self.best_loss = checkpoint['best_loss']
+                    if 'best_accuracy' in checkpoint:
+                        self.best_accuracy = checkpoint['best_accuracy']
+                    if 'best_epoch' in checkpoint:
+                        self.best_epoch = checkpoint['best_epoch']
+                    if 'best_phase' in checkpoint:
+                        self.best_phase = checkpoint['best_phase']
+
+                    # Load history if available
+                    if 'history' in checkpoint:
+                        self.history = defaultdict(list, checkpoint['history'])
+                        logger.info(f"✓ Training history loaded ({len(self.history.get('train_loss', []))} epochs)")
 
                     # Adjust epochs if additional epochs specified
                     if additional_epochs:
@@ -5413,15 +5800,7 @@ class Trainer:
                         self.config.epochs = start_epoch + additional_epochs
                         logger.info(f"Extended training: {additional_epochs} additional epochs (was {original_epochs}, now {self.config.epochs})")
 
-                    # We need to modify deterministic_train to accept resume parameters
-                    # For now, we'll store the loaded state for use in the training function
-                    model._resume_start_epoch = start_epoch
-                    model._resume_start_phase = start_phase
-                    model._resume_reset_optimizer = reset_optimizer
-                    if not reset_optimizer and 'optimizer_state_dict' in checkpoint:
-                        model._resume_optimizer_state = checkpoint['optimizer_state_dict']
-                    if not reset_optimizer and 'scheduler_state_dict' in checkpoint:
-                        model._resume_scheduler_state = checkpoint['scheduler_state_dict']
+                    checkpoint_loaded = True
 
                 except Exception as e:
                     logger.error(f"Failed to load checkpoint: {e}")
@@ -5429,15 +5808,35 @@ class Trainer:
                     logger.warning("Starting training from scratch instead")
                     start_epoch = 0
                     start_phase = 1
+                    loaded_optimizer_state = None
+                    loaded_scheduler_state = None
+                    resume = False
+            else:
+                logger.warning(f"No checkpoint found to resume from")
+                resume = False
+                start_epoch = 0
+                start_phase = 1
 
-        # Call standalone training function
+        # If resume was requested but no checkpoint loaded, set resume to False
+        if resume and not checkpoint_loaded:
+            resume = False
+            start_epoch = 0
+            start_phase = 1
+
+        # Call standalone training function with resume parameters
         history = deterministic_train(
             model=model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             config=self.config,
-            checkpoint_dir=self.saving_checkpoint_dir,
-            statistics_calculator=statistics_calculator
+            checkpoint_dir=self.saving_checkpoint_dir if self.saving_checkpoint_dir else self.checkpoint_dir,
+            statistics_calculator=statistics_calculator,
+            resume=resume,
+            start_epoch=start_epoch,
+            start_phase=start_phase,
+            loaded_optimizer_state=loaded_optimizer_state,
+            loaded_scheduler_state=loaded_scheduler_state,
+            reset_optimizer=reset_optimizer
         )
 
         # ========================================================================
@@ -5445,9 +5844,12 @@ class Trainer:
         # ========================================================================
         # Copy best model to loading directory
         dataset_name_lower = normalize_dataset_name(self.config.dataset_name)
-        best_checkpoint = self.saving_checkpoint_dir / 'best.pt'
+        checkpoint_dir_to_use = self.saving_checkpoint_dir if self.saving_checkpoint_dir else self.checkpoint_dir
+        best_checkpoint = checkpoint_dir_to_use / 'best.pt'
+
         if best_checkpoint.exists():
-            loading_best_path = self.loading_checkpoint_dir / f"{dataset_name_lower}_best.pt"
+            loading_dir = self.loading_checkpoint_dir if self.loading_checkpoint_dir else self.checkpoint_dir
+            loading_best_path = loading_dir / f"{dataset_name_lower}_best.pt"
             loading_best_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(best_checkpoint, loading_best_path)
             logger.info(f"Model saved to {loading_best_path}")
@@ -5465,13 +5867,14 @@ class Trainer:
                 'version': '1.0'
             }
 
-            preprocessor_config_path = self.saving_checkpoint_dir / f"{dataset_name_lower}_preprocessor.json"
+            preprocessor_config_path = checkpoint_dir_to_use / f"{dataset_name_lower}_preprocessor.json"
             with open(preprocessor_config_path, 'w') as f:
                 json.dump(preprocessor_config, f, indent=2)
             logger.info(f"Preprocessor config saved to {preprocessor_config_path}")
 
-        # Plot training history
-        self.visualizer.plot_training_history(history)
+        # Plot training history if visualizer is available
+        if self.visualizer:
+            self.visualizer.plot_training_history(history)
 
         # Save final training summary
         training_summary = {
@@ -5488,7 +5891,9 @@ class Trainer:
             }
         }
 
-        summary_path = self.saving_data_dir / f"{dataset_name_lower}_training_summary.json"
+        data_dir_to_use = self.saving_data_dir if self.saving_data_dir else self.checkpoint_dir.parent
+        summary_path = data_dir_to_use / f"{dataset_name_lower}_training_summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
         with open(summary_path, 'w') as f:
             json.dump(training_summary, f, indent=2)
         logger.info(f"Training summary saved to {summary_path}")
@@ -5608,11 +6013,11 @@ class Trainer:
 
                 if is_better:
                     self._update_best_metrics(val_loss, val_acc, val_nmi, epoch, phase)
-                    self._save_checkpoint_enhanced(epoch, phase, val_loss, val_acc, val_nmi, is_best=True)
+                    self.save_checkpoint_for_resume(epoch, phase, val_loss, val_acc, val_nmi, is_best=True)
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    self._save_checkpoint_enhanced(epoch, phase, val_loss, val_acc, val_nmi, is_best=False)
+                    self.save_checkpoint_for_resume(epoch, phase, val_loss, val_acc, val_nmi, is_best=False)
 
                 if phase == 2:
                     print(f"Epoch {epoch+1:3d} | {avg_train_loss:.4f} | {avg_cluster_loss:.4f} | "
@@ -5788,24 +6193,8 @@ class Trainer:
                 self.best_phase2_loss = loss
 
     def _save_checkpoint_enhanced(self, epoch, phase, loss, accuracy, nmi, is_best=False):
-        checkpoint = {
-            'epoch': epoch,
-            'phase': phase,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'loss': loss,
-            'accuracy': accuracy,
-            'nmi': nmi,
-            'normalization_mode': 'per_image_zscore',
-            'clustering_mode': 'euclidean_distance',
-            'deterministic': True,
-            'timestamp': datetime.now().isoformat(),
-        }
-
-        torch.save(checkpoint, self.checkpoint_dir / 'latest.pt')
-        if is_best:
-            torch.save(checkpoint, self.checkpoint_dir / 'best.pt')
-            logger.info(f"Best model: loss={loss:.6f}, acc={accuracy:.2%}, nmi={nmi:.3f}")
+        """Legacy method - kept for backward compatibility, delegates to save_checkpoint_for_resume"""
+        self.save_checkpoint_for_resume(epoch, phase, loss, accuracy, nmi, is_best)
 
     def load_checkpoint(self, path: Optional[str] = None) -> bool:
         """Load checkpoint with backward compatibility"""
@@ -5834,115 +6223,6 @@ class Trainer:
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             return False
-
-
-    def load_checkpoint_for_resume(self, checkpoint_path: Optional[Path] = None, reset_optimizer: bool = False) -> bool:
-        """
-        Load checkpoint for resuming training.
-
-        Args:
-            checkpoint_path: Path to checkpoint file (if None, uses best.pt or latest.pt)
-            reset_optimizer: If True, only load model weights, reset optimizer state
-
-        Returns:
-            True if checkpoint loaded successfully, False otherwise
-        """
-        if checkpoint_path is None:
-            # Try to find the latest checkpoint
-            possible_paths = [
-                self.checkpoint_dir / 'latest.pt',
-                self.checkpoint_dir / 'best.pt',
-            ]
-            for path in possible_paths:
-                if path.exists():
-                    checkpoint_path = path
-                    break
-
-        if checkpoint_path is None or not checkpoint_path.exists():
-            logger.warning(f"No checkpoint found to resume from")
-            return False
-
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-
-            # Load model state
-            self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            logger.info(f"Loaded model state from {checkpoint_path}")
-
-            # Load optimizer state only if not resetting
-            if not reset_optimizer and 'optimizer_state_dict' in checkpoint:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                logger.info("Loaded optimizer state")
-            else:
-                logger.info("Optimizer state reset (starting fresh)")
-
-            # Load scheduler state if available and not resetting
-            if not reset_optimizer and 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                logger.info("Loaded scheduler state")
-
-            # Load training state
-            self.loaded_epoch = checkpoint.get('epoch', 0)
-            self.loaded_phase = checkpoint.get('phase', 1)
-            self.loaded_loss = checkpoint.get('loss', float('inf'))
-            self.loaded_accuracy = checkpoint.get('accuracy', 0.0)
-            self.model_loaded = True
-
-            # Load best metrics
-            if 'best_loss' in checkpoint:
-                self.best_loss = checkpoint['best_loss']
-            if 'best_accuracy' in checkpoint:
-                self.best_accuracy = checkpoint['best_accuracy']
-            if 'best_epoch' in checkpoint:
-                self.best_epoch = checkpoint['best_epoch']
-            if 'best_phase' in checkpoint:
-                self.best_phase = checkpoint['best_phase']
-
-            # Load history if available
-            if 'history' in checkpoint:
-                self.history = defaultdict(list, checkpoint['history'])
-                logger.info(f"Loaded training history with {len(self.history.get('train_loss', []))} epochs")
-
-            logger.info(f"Resuming from: Phase {self.loaded_phase}, Epoch {self.loaded_epoch + 1}")
-            logger.info(f"Loaded loss: {self.loaded_loss:.6f}, Accuracy: {self.loaded_accuracy:.4f}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to load checkpoint for resume: {e}")
-            traceback.print_exc()
-            return False
-
-    def save_checkpoint_for_resume(self, epoch, phase, loss, accuracy, is_best=False):
-        """
-        Save checkpoint with resume information.
-        """
-        checkpoint = {
-            'epoch': epoch,
-            'phase': phase,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'loss': loss,
-            'accuracy': accuracy,
-            'best_loss': self.best_loss,
-            'best_accuracy': self.best_accuracy,
-            'best_epoch': self.best_epoch,
-            'best_phase': self.best_phase,
-            'history': dict(self.history),
-            'nmi': getattr(self, 'best_nmi', 0.0),
-            'deterministic': True,
-            'timestamp': datetime.now().isoformat(),
-        }
-
-        # Save latest checkpoint
-        torch.save(checkpoint, self.checkpoint_dir / 'latest.pt')
-
-        if is_best:
-            torch.save(checkpoint, self.checkpoint_dir / 'best.pt')
-            logger.info(f"Best model saved: loss={loss:.6f}, acc={accuracy:.2%}")
-
-        logger.info(f"Checkpoint saved: Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f}")
 
 # =============================================================================
 # VISUALIZER
@@ -6114,17 +6394,25 @@ def deterministic_train(
     val_dataset: Optional[Dataset],
     config: GlobalConfig,
     checkpoint_dir: Optional[Path] = None,
-    statistics_calculator: Optional['DatasetStatisticsCalculator'] = None
+    statistics_calculator: Optional['DatasetStatisticsCalculator'] = None,
+    resume: bool = False,
+    start_epoch: int = 0,
+    start_phase: int = 1,
+    loaded_optimizer_state: Optional[Dict] = None,
+    loaded_scheduler_state: Optional[Dict] = None,
+    reset_optimizer: bool = False
 ) -> Dict:
     """
     FULLY VECTORIZED deterministic training with optimized GPU utilization.
-    FIXED: Numerical stability for all datasets.
+    Enhanced with proper resume capability.
     """
     logger.info("=" * 70)
     logger.info("VECTORIZED DETERMINISTIC TRAINING ENGINE")
     logger.info(f"Normalization: {config.normalization_mode.upper()}")
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"Batch size: {config.batch_size}")
+    if resume:
+        logger.info(f"RESUME MODE: Continuing from Phase {start_phase}, Epoch {start_epoch + 1}")
     logger.info("=" * 70)
 
     device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
@@ -6172,7 +6460,7 @@ def deterministic_train(
         use_cosine_scheduler = False
         logger.info("Using MNIST-optimized training settings")
     elif is_small_image:
-        initial_lr = 0.0005  # Even lower for stability
+        initial_lr = 0.0005
         weight_decay = 0.0001
         use_cosine_scheduler = True
         logger.info(f"Using small image optimized settings: LR={initial_lr}")
@@ -6184,6 +6472,17 @@ def deterministic_train(
     # Create optimizer with dataset-specific settings
     optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=weight_decay)
 
+    # Load optimizer state if resuming and not resetting
+    if resume and loaded_optimizer_state is not None and not reset_optimizer:
+        try:
+            optimizer.load_state_dict(loaded_optimizer_state)
+            logger.info("✓ Loaded optimizer state from checkpoint")
+        except Exception as e:
+            logger.warning(f"Could not load optimizer state: {e}")
+            logger.info("Using fresh optimizer")
+    elif resume and reset_optimizer:
+        logger.info("Optimizer state reset (starting fresh)")
+
     # Create scheduler
     if use_cosine_scheduler:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs, eta_min=1e-7)
@@ -6192,8 +6491,16 @@ def deterministic_train(
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         logger.info("Using ReduceLROnPlateau scheduler")
 
-    # CRITICAL FIX: Disable mixed precision for all training to avoid NaN issues
-    use_mixed_precision = False  # Force disable mixed precision
+    # Load scheduler state if resuming and not resetting
+    if resume and loaded_scheduler_state is not None and not reset_optimizer:
+        try:
+            scheduler.load_state_dict(loaded_scheduler_state)
+            logger.info("✓ Loaded scheduler state from checkpoint")
+        except Exception as e:
+            logger.warning(f"Could not load scheduler state: {e}")
+
+    # Disable mixed precision for stability
+    use_mixed_precision = False
     scaler = None
     logger.info("Mixed precision training DISABLED (for stability)")
 
@@ -6218,7 +6525,7 @@ def deterministic_train(
     train_loader = _create_optimized_loader(train_dataset, config.batch_size, shuffle=True)
     val_loader = _create_optimized_loader(val_dataset, config.batch_size, shuffle=False) if val_dataset else None
 
-    # Pre-compute normalization statistics for validation (if using dataset-wide)
+    # Pre-compute normalization statistics for validation
     if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
         norm_mean = statistics_calculator.mean.to(device).view(1, -1, 1, 1)
         norm_std = statistics_calculator.std.to(device).view(1, -1, 1, 1)
@@ -6227,7 +6534,6 @@ def deterministic_train(
             return (x - norm_mean) / (norm_std + 1e-6)
     elif use_per_image_norm:
         def apply_normalization(x):
-            # Vectorized per-image normalization
             if x.dim() == 4:
                 b, c, h, w = x.shape
                 x_flat = x.view(b, c, -1)
@@ -6237,7 +6543,6 @@ def deterministic_train(
             return x
     else:
         def apply_normalization(x):
-            # Fallback - compute on the fly (slower)
             if x.dim() == 4:
                 b, c, h, w = x.shape
                 x_flat = x.view(b, c, -1)
@@ -6248,24 +6553,15 @@ def deterministic_train(
 
     def compute_enhanced_loss(outputs, inputs, labels, phase, epoch):
         """NUMERICALLY STABLE loss computation with adaptive label smoothing"""
-
-        # SAFER: Use Smooth L1 Loss instead of MSE for reconstruction
         recon_loss = F.smooth_l1_loss(outputs['reconstruction'], inputs, beta=0.1)
-
-        # Clamp loss values to prevent explosion
         recon_loss = torch.clamp(recon_loss, max=10.0)
-
         total_loss = recon_loss
         accuracy = None
 
         if phase == 2 and config.use_class_encoding and 'class_logits' in outputs:
             n_classes = config.num_classes or 2
             logits = outputs['class_logits']
-
-            # Clamp logits to prevent explosion
             logits = torch.clamp(logits, min=-50, max=50)
-
-            # Higher label smoothing for stability with many classes
             smoothing = 0.1
 
             if smoothing > 0:
@@ -6275,17 +6571,12 @@ def deterministic_train(
             else:
                 class_loss = F.cross_entropy(logits, labels)
 
-            # Clamp class loss
             class_loss = torch.clamp(class_loss, max=10.0)
-
-            # Weight the losses
             total_loss = recon_loss + class_loss
             accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
 
-        # Final safety clamp
         total_loss = torch.clamp(total_loss, max=100.0)
 
-        # Check for NaN and return zero if detected
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             logger.warning("NaN/Inf detected in loss - returning zero")
             return torch.tensor(0.0, device=device, requires_grad=True), accuracy
@@ -6303,10 +6594,8 @@ def deterministic_train(
             for inputs, labels in val_loader:
                 inputs = inputs.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
-
                 inputs_norm = apply_normalization(inputs)
 
-                # Handle single sample
                 if inputs_norm.size(0) == 1:
                     inputs_norm = torch.cat([inputs_norm, inputs_norm], dim=0)
                     labels = torch.cat([labels, labels], dim=0)
@@ -6314,7 +6603,6 @@ def deterministic_train(
                 outputs = model(inputs_norm, labels)
                 loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, 0)
 
-                # Skip NaN values
                 if not torch.isnan(loss) and not torch.isinf(loss):
                     val_loss += loss.item()
                     if acc is not None:
@@ -6329,6 +6617,7 @@ def deterministic_train(
     checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # Define best metrics variables (these will be used in nested functions)
     best_loss = float('inf')
     best_accuracy = 0.0
     best_epoch = 0
@@ -6336,8 +6625,9 @@ def deterministic_train(
     history = defaultdict(list)
 
     def save_checkpoint(epoch, phase, loss, accuracy, is_best):
-        """Save checkpoint with normalization mode and dataset statistics"""
-        # Skip saving if loss is NaN
+        """Save checkpoint with complete state for resume"""
+        nonlocal best_loss, best_accuracy, best_epoch, best_phase
+
         if loss is None or (isinstance(loss, float) and (np.isnan(loss) or np.isinf(loss))):
             logger.warning(f"Skipping checkpoint save - invalid loss: {loss}")
             return
@@ -6350,10 +6640,20 @@ def deterministic_train(
             'scheduler_state_dict': scheduler.state_dict(),
             'loss': loss if loss is not None else float('inf'),
             'accuracy': accuracy if accuracy is not None else 0.0,
+            'best_loss': best_loss,
+            'best_accuracy': best_accuracy,
+            'best_epoch': best_epoch,
+            'best_phase': best_phase,
+            'history': dict(history),
             'normalization_mode': config.normalization_mode,
             'use_per_image_normalization': config.use_per_image_normalization,
             'clustering_mode': 'enhanced',
             'deterministic': True,
+            'feature_dims': config.feature_dims,
+            'compressed_dims': config.compressed_dims,
+            'in_channels': config.in_channels,
+            'num_classes': config.num_classes,
+            'input_size': list(config.input_size),
             'timestamp': datetime.now().isoformat(),
         }
 
@@ -6371,21 +6671,6 @@ def deterministic_train(
                     'is_calculated': statistics_calculator.is_calculated
                 }
 
-                # Save statistics file
-                dataset_name_lower = normalize_dataset_name(config.dataset_name)
-                stats_path = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
-                stats_dict = {
-                    'mean': statistics_calculator.mean.cpu(),
-                    'std': statistics_calculator.std.cpu(),
-                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
-                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
-                    'n_samples': statistics_calculator.n_samples_used,
-                    'is_fitted': True,
-                    'timestamp': datetime.now().isoformat()
-                }
-                torch.save(stats_dict, stats_path)
-                logger.info(f"Normalization statistics saved to {stats_path}")
-
         # Add optional components
         if hasattr(model, 'classifier') and model.classifier is not None:
             checkpoint['classifier_state_dict'] = model.classifier.state_dict()
@@ -6394,15 +6679,15 @@ def deterministic_train(
         if hasattr(model, '_selected_feature_indices') and model._selected_feature_indices is not None:
             checkpoint['selected_feature_indices'] = model._selected_feature_indices.cpu()
 
-        # Save checkpoint
+        # Save latest checkpoint
         torch.save(checkpoint, checkpoint_dir / 'latest.pt')
         logger.info(f"Saved latest checkpoint (Phase {phase}, Epoch {epoch+1}, Loss: {loss:.6f})")
 
-        if phase == 2 and is_best and accuracy is not None and accuracy > 0:
+        # Save best checkpoint
+        if is_best and accuracy is not None and accuracy > 0:
             torch.save(checkpoint, checkpoint_dir / 'best.pt')
-            nonlocal best_loss, best_accuracy, best_epoch, best_phase
             best_loss = loss
-            best_accuracy = accuracy if accuracy else best_accuracy
+            best_accuracy = accuracy
             best_epoch = epoch
             best_phase = phase
             logger.info(f"✓ Best model saved - Epoch {epoch+1}, Accuracy: {accuracy:.4f} ({accuracy:.2%})")
@@ -6422,7 +6707,7 @@ def deterministic_train(
         patience_counter = 0
         patience_limit = 20 if phase == 2 else 15
         nan_count = 0
-        max_nan_count = 5  # Stop after 5 NaN batches
+        max_nan_count = 5
 
         current_lr = optimizer.param_groups[0]['lr']
         epoch_train_losses = []
@@ -6451,7 +6736,6 @@ def deterministic_train(
                 labels = labels.to(device, non_blocking=True)
                 inputs_norm = apply_normalization(inputs)
 
-                # Check for NaN in inputs
                 if torch.isnan(inputs_norm).any() or torch.isinf(inputs_norm).any():
                     logger.warning(f"NaN/Inf detected in inputs at batch {batch_idx}, skipping")
                     continue
@@ -6460,11 +6744,9 @@ def deterministic_train(
                     inputs_norm = torch.cat([inputs_norm, inputs_norm], dim=0)
                     labels = torch.cat([labels, labels], dim=0)
 
-                # Forward pass without mixed precision
                 outputs = model(inputs_norm, labels)
                 loss, acc = compute_enhanced_loss(outputs, inputs_norm, labels, phase, epoch)
 
-                # Skip if loss is NaN
                 if torch.isnan(loss) or torch.isinf(loss):
                     nan_count_epoch += 1
                     nan_count += 1
@@ -6473,7 +6755,6 @@ def deterministic_train(
                         break
                     continue
 
-                # Backward pass with gradient clipping
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -6486,13 +6767,14 @@ def deterministic_train(
                 pbar.set_postfix({'loss': f"{train_loss/n_batches:.4f}" if n_batches > 0 else 'nan',
                                 'lr': f"{optimizer.param_groups[0]['lr']:.2e}"})
 
-                # Diagnostic for first batch
-                if phase == 1 and epoch == start_epoch and batch_idx == 0:
+                # Diagnostic for first batch of resumed training
+                if phase == 1 and epoch == start_epoch and batch_idx == 0 and resume:
                     logger.info("=" * 60)
-                    logger.info("DIAGNOSTIC: First Batch Statistics")
+                    logger.info("RESUME DIAGNOSTIC: First Batch Statistics")
                     logger.info(f"Input - mean: {inputs.mean().item():.6f}, std: {inputs.std().item():.6f}")
                     logger.info(f"Normalized - mean: {inputs_norm.mean().item():.6f}, std: {inputs_norm.std().item():.6f}")
                     logger.info(f"Loss: {loss.item():.6f}")
+                    logger.info(f"Current LR: {optimizer.param_groups[0]['lr']:.2e}")
                     logger.info("=" * 60)
 
             if n_batches == 0:
@@ -6506,7 +6788,6 @@ def deterministic_train(
             if val_loader:
                 val_loss, val_acc = validate(val_loader, model, phase)
 
-                # Step scheduler - handle NaN
                 if not np.isnan(val_loss) and not np.isinf(val_loss):
                     if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         scheduler.step(val_loss)
@@ -6529,7 +6810,6 @@ def deterministic_train(
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | "
                           f"{avg_train_acc:9.2%} | {val_acc:9.2%} | {phase_best_accuracy:9.2%} | {current_lr:12.2e}")
 
-                    # Record metrics in history
                     history['val_acc'].append(val_acc)
                 elif phase == 1 and not np.isnan(val_loss):
                     is_better = val_loss < phase_best_loss
@@ -6548,13 +6828,11 @@ def deterministic_train(
                 else:
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {val_loss:12.6f} | {current_lr:12.2e}")
 
-                # Record validation loss
                 if not np.isnan(val_loss):
                     history['val_loss'].append(val_loss)
                 else:
                     history['val_loss'].append(phase_best_loss)
             else:
-                # No validation
                 if phase == 2 and avg_train_acc is not None and not np.isnan(avg_train_acc):
                     is_better = avg_train_acc > phase_best_accuracy
                     if is_better:
@@ -6600,7 +6878,6 @@ def deterministic_train(
 
                     print(f"{epoch+1:6d} | {avg_train_loss:12.6f} | {'N/A':>12} | {current_lr:12.2e}")
 
-            # Record training metrics
             history['train_loss'].append(avg_train_loss)
             if avg_train_acc is not None:
                 history['train_acc'].append(avg_train_acc)
@@ -6615,11 +6892,9 @@ def deterministic_train(
                 print(f"{Colors.YELLOW}{'='*60}{Colors.ENDC}")
                 break
 
-            # Reset nan counter if we had a good epoch
             if nan_count_epoch == 0:
                 nan_count = max(0, nan_count - 1)
 
-        # Phase completion summary
         print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
         if phase == 1:
             logger.info(f"Phase 1 completed. Best loss: {phase_best_loss:.6f}")
@@ -6630,8 +6905,21 @@ def deterministic_train(
             print(f"{Colors.GREEN}Phase 2 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
         print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
 
-    epochs_phase1 = max(1, config.epochs // 4)  # Reduced from half for faster results
-    epochs_phase2 = max(1, config.epochs // 4) * 3  # More epochs in phase 2
+    # Calculate epochs based on configuration and resume position
+    total_epochs = config.epochs
+    epochs_phase1 = max(1, total_epochs // 4)
+    epochs_phase2 = max(1, total_epochs - epochs_phase1)
+
+    # Adjust epochs based on resume position
+    if resume:
+        if start_phase == 1:
+            epochs_phase1 = max(0, epochs_phase1 - start_epoch)
+            epochs_phase2 = epochs_phase2
+            logger.info(f"Resuming Phase 1 from epoch {start_epoch + 1}, remaining: {epochs_phase1} epochs")
+        elif start_phase == 2:
+            epochs_phase1 = 0
+            epochs_phase2 = max(0, epochs_phase2 - start_epoch)
+            logger.info(f"Resuming Phase 2 from epoch {start_epoch + 1}, remaining: {epochs_phase2} epochs")
 
     print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
     print(f"{Colors.BOLD}{'VECTORIZED CDBNN TRAINING'.center(80)}{Colors.ENDC}")
@@ -6639,18 +6927,23 @@ def deterministic_train(
     print(f"{Colors.GREEN}✓ Normalization: {config.normalization_mode.upper()}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Mixed Precision: {scaler is not None}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Num Workers: {num_workers}{Colors.ENDC}")
+    if resume:
+        print(f"{Colors.GREEN}✓ Resume Mode: Starting from Phase {start_phase}, Epoch {start_epoch + 1}{Colors.ENDC}")
     print()
 
-    if epochs_phase1 > 0:
+    # Train Phase 1
+    if start_phase <= 1 and epochs_phase1 > 0:
         logger.info(f"Phase 1: {epochs_phase1} epochs")
-        train_phase(1, epochs_phase1, 0)
+        train_phase(1, epochs_phase1, start_epoch if start_phase == 1 else 0)
 
-    if (config.use_kl_divergence or config.use_class_encoding) and epochs_phase2 > 0:
-        print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
-        print(f"{Colors.BOLD}{'PHASE 2: VECTORIZED CLUSTERING'.center(80)}{Colors.ENDC}")
-        print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
-        logger.info(f"Phase 2: {epochs_phase2} epochs")
-        train_phase(2, epochs_phase2, epochs_phase1)
+    # Train Phase 2
+    if start_phase <= 2 and epochs_phase2 > 0:
+        if config.use_kl_divergence or config.use_class_encoding:
+            print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{'PHASE 2: VECTORIZED CLUSTERING'.center(80)}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
+            logger.info(f"Phase 2: {epochs_phase2} epochs")
+            train_phase(2, epochs_phase2, start_epoch if start_phase == 2 else 0)
 
     print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
     print(f"{Colors.BOLD}{'TRAINING COMPLETED'.center(80)}{Colors.ENDC}")
@@ -7487,20 +7780,177 @@ class CDBNNApplication:
         model = model.to(self.device)
         self.model = model  # Store model for later feature extraction
 
-        # Set resume state attributes on model if resuming
-        if resume:
-            model._resume_start_epoch = 0
-            model._resume_start_phase = 1
-            model._resume_reset_optimizer = reset_optimizer
+        # Initialize resume variables with defaults
+        start_epoch = 0
+        start_phase = 1
+        loaded_optimizer_state = None
+        loaded_scheduler_state = None
+        checkpoint_loaded = False
 
-        # Call standalone training function
+        # Load checkpoint if resuming
+        if resume:
+            # Determine checkpoint path
+            checkpoint_path = None
+
+            if resume_from:
+                # Use explicitly provided path
+                checkpoint_path = Path(resume_from)
+                if not checkpoint_path.is_absolute():
+                    # Try relative to saving_checkpoint_dir
+                    if self.saving_checkpoint_dir:
+                        alt_path = self.saving_checkpoint_dir / resume_from
+                        if alt_path.exists():
+                            checkpoint_path = alt_path
+                    # Try relative to checkpoint_dir
+                    alt_path2 = Path(self.config.checkpoint_dir) / resume_from
+                    if alt_path2.exists():
+                        checkpoint_path = alt_path2
+            else:
+                # Try to find latest checkpoint in saving_checkpoint_dir
+                if self.saving_checkpoint_dir and self.saving_checkpoint_dir.exists():
+                    possible_checkpoints = [
+                        self.saving_checkpoint_dir / 'latest.pt',
+                        self.saving_checkpoint_dir / 'best.pt',
+                        self.saving_checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                        self.saving_checkpoint_dir / f"{self.config.dataset_name}_latest.pt",
+                    ]
+                    for cp in possible_checkpoints:
+                        if cp.exists():
+                            checkpoint_path = cp
+                            break
+
+                # If not found, try loading_checkpoint_dir
+                if checkpoint_path is None and self.loading_checkpoint_dir and self.loading_checkpoint_dir.exists():
+                    possible_checkpoints = [
+                        self.loading_checkpoint_dir / 'latest.pt',
+                        self.loading_checkpoint_dir / 'best.pt',
+                        self.loading_checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                        self.loading_checkpoint_dir / f"{self.config.dataset_name}_latest.pt",
+                    ]
+                    for cp in possible_checkpoints:
+                        if cp.exists():
+                            checkpoint_path = cp
+                            break
+
+                # If still not found, try config checkpoint_dir
+                if checkpoint_path is None:
+                    config_checkpoint_dir = Path(self.config.checkpoint_dir)
+                    if config_checkpoint_dir.exists():
+                        possible_checkpoints = [
+                            config_checkpoint_dir / 'latest.pt',
+                            config_checkpoint_dir / 'best.pt',
+                            config_checkpoint_dir / f"{self.config.dataset_name}_best.pt",
+                            config_checkpoint_dir / f"{self.config.dataset_name}_latest.pt",
+                        ]
+                        for cp in possible_checkpoints:
+                            if cp.exists():
+                                checkpoint_path = cp
+                                break
+
+            if checkpoint_path and checkpoint_path.exists():
+                try:
+                    logger.info(f"Loading checkpoint from: {checkpoint_path}")
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+                    # Load model state
+                    missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    if missing_keys:
+                        logger.debug(f"Missing keys: {missing_keys[:5]}...")
+                    if unexpected_keys:
+                        logger.debug(f"Unexpected keys: {unexpected_keys[:5]}...")
+                    logger.info("✓ Model state loaded successfully")
+
+                    # Record resume state
+                    start_epoch = checkpoint.get('epoch', 0) + 1
+                    start_phase = checkpoint.get('phase', 1)
+                    loaded_loss = checkpoint.get('loss', float('inf'))
+                    loaded_accuracy = checkpoint.get('accuracy', 0.0)
+
+                    # Store optimizer and scheduler state for potential use
+                    if not reset_optimizer and 'optimizer_state_dict' in checkpoint:
+                        loaded_optimizer_state = checkpoint['optimizer_state_dict']
+                        logger.info("✓ Optimizer state will be restored")
+                    if not reset_optimizer and 'scheduler_state_dict' in checkpoint:
+                        loaded_scheduler_state = checkpoint['scheduler_state_dict']
+                        logger.info("✓ Scheduler state will be restored")
+
+                    logger.info(f"Resuming from: Phase {start_phase}, Epoch {start_epoch}")
+                    logger.info(f"Loaded loss: {loaded_loss:.6f}, Accuracy: {loaded_accuracy:.4f}")
+
+                    # Set dataset statistics in model
+                    if statistics_calculator and statistics_calculator.is_calculated:
+                        model.set_dataset_statistics(statistics_calculator)
+                        logger.info("✓ Dataset statistics loaded into model")
+
+                    # Load best metrics if available in checkpoint (for trainer tracking)
+                    if 'best_loss' in checkpoint:
+                        self.best_loss = checkpoint['best_loss']
+                    if 'best_accuracy' in checkpoint:
+                        self.best_accuracy = checkpoint['best_accuracy']
+                    if 'best_epoch' in checkpoint:
+                        self.best_epoch = checkpoint['best_epoch']
+                    if 'best_phase' in checkpoint:
+                        self.best_phase = checkpoint['best_phase']
+
+                    # Load history if available
+                    if 'history' in checkpoint:
+                        self.history = defaultdict(list, checkpoint['history'])
+                        logger.info(f"✓ Training history loaded ({len(self.history.get('train_loss', []))} epochs)")
+
+                    checkpoint_loaded = True
+
+                except Exception as e:
+                    logger.error(f"Failed to load checkpoint: {e}")
+                    traceback.print_exc()
+                    logger.warning("Starting training from scratch instead")
+                    start_epoch = 0
+                    start_phase = 1
+                    loaded_optimizer_state = None
+                    loaded_scheduler_state = None
+                    resume = False
+            else:
+                logger.warning(f"No checkpoint found to resume from")
+                logger.info(f"Checked paths:")
+                if resume_from:
+                    logger.info(f"  - {resume_from}")
+                if self.saving_checkpoint_dir:
+                    logger.info(f"  - {self.saving_checkpoint_dir}/latest.pt")
+                    logger.info(f"  - {self.saving_checkpoint_dir}/best.pt")
+                if self.loading_checkpoint_dir:
+                    logger.info(f"  - {self.loading_checkpoint_dir}/latest.pt")
+                    logger.info(f"  - {self.loading_checkpoint_dir}/best.pt")
+                logger.info(f"  - {self.config.checkpoint_dir}/latest.pt")
+                logger.info(f"  - {self.config.checkpoint_dir}/best.pt")
+                resume = False
+                start_epoch = 0
+                start_phase = 1
+
+        # If resume was requested but no checkpoint loaded, set resume to False
+        if resume and not checkpoint_loaded:
+            resume = False
+            start_epoch = 0
+            start_phase = 1
+
+        # Adjust epochs if additional epochs specified
+        if additional_epochs and resume:
+            original_epochs = self.config.epochs
+            self.config.epochs = start_epoch + additional_epochs
+            logger.info(f"Extended training: {additional_epochs} additional epochs (was {original_epochs}, now {self.config.epochs})")
+
+        # Call standalone training function with resume parameters
         history = deterministic_train(
             model=model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             config=self.config,
             checkpoint_dir=self.saving_checkpoint_dir,
-            statistics_calculator=statistics_calculator
+            statistics_calculator=statistics_calculator,
+            resume=resume,
+            start_epoch=start_epoch,
+            start_phase=start_phase,
+            loaded_optimizer_state=loaded_optimizer_state,
+            loaded_scheduler_state=loaded_scheduler_state,
+            reset_optimizer=reset_optimizer
         )
 
         # ========================================================================
@@ -7608,6 +8058,7 @@ class CDBNNApplication:
             'best_loss': min(history.get('val_loss', [float('inf')])),
             'total_epochs': len(history.get('train_loss', [])),
             'resumed': resume,
+            'resumed_from_epoch': start_epoch - 1 if resume and start_epoch > 0 else 0,
             'augmentation_used': use_augmentation,
             'augmentation_strength': augmentation_strength,
             'normalization_mode': self.config.normalization_mode,
@@ -7629,7 +8080,7 @@ class CDBNNApplication:
         logger.info(f"Best validation accuracy: {training_summary['best_accuracy']:.4f}")
         logger.info(f"Best validation loss: {training_summary['best_loss']:.6f}")
         if resume:
-            logger.info(f"Training resumed")
+            logger.info(f"Training resumed from epoch {start_epoch}")
         if save_features:
             logger.info(f"Features saved to: {self.saving_data_dir}/{self.config.dataset_name}_*.csv")
         logger.info("=" * 70)
@@ -7863,6 +8314,13 @@ class CDBNNApplication:
         """
         Save features to CSV with proper metadata and exactly config.compressed_dims features.
         All columns will have the same length.
+        TARGET COLUMN: Always saved as string (decoded from label encoding) as 'target' column.
+
+        Gracefully handles:
+        - Predictions without targets (new/unseen classes)
+        - Missing folder structures
+        - Unknown labels not seen during training
+        - Partial or incomplete label information
         """
         import pandas as pd
         import numpy as np
@@ -7943,7 +8401,7 @@ class CDBNNApplication:
             logger.warning(f"No embeddings found, created {expected_features} zero features")
 
         # ========================================================================
-        # 2. METADATA - original_filename, filepath, label_type
+        # 2. METADATA - original_filename, filepath, folder_name
         # ========================================================================
 
         # original_filename (just the filename without path)
@@ -7982,14 +8440,74 @@ class CDBNNApplication:
             data['filepath'] = paths_list
             logger.info(f"Added filepath column")
 
+            # Extract folder name from path (useful for prediction without labels)
+            folder_names = []
+            for p in paths_list:
+                path = Path(p)
+                # Get parent folder name (could be class name or just folder)
+                folder_name = path.parent.name if path.parent.name else "root"
+                folder_names.append(folder_name)
+            data['folder_name'] = folder_names
+            logger.info(f"Added folder_name column (extracted from paths)")
+
         # ========================================================================
-        # 3. LABEL/TARGET - as string, ensure correct length
+        # 3. TARGET COLUMN - Decode from label encoding to string
+        #    Gracefully handles missing/unknown labels
         # ========================================================================
 
-        label_added = False
+        target_added = False
+        numeric_labels = None
+        class_mapping = None
+        unknown_labels_found = []
 
-        # Priority: class_names (actual string labels)
-        if 'class_names' in features and features['class_names']:
+        # Build class mapping from multiple sources (priority order)
+        def _build_class_mapping():
+            """Build class mapping from available sources"""
+            mapping = None
+
+            # Source 1: model._idx_to_class (from training)
+            if hasattr(self, 'model') and hasattr(self.model, '_idx_to_class') and self.model._idx_to_class:
+                mapping = self.model._idx_to_class
+                logger.info(f"Using model._idx_to_class mapping with {len(mapping)} classes")
+                return mapping
+
+            # Source 2: config.class_names
+            if hasattr(self.config, 'class_names') and self.config.class_names:
+                mapping = {idx: name for idx, name in enumerate(self.config.class_names)}
+                logger.info(f"Using config.class_names mapping with {len(mapping)} classes")
+                return mapping
+
+            # Source 3: dataset attribute (if available)
+            if hasattr(features, 'dataset') and hasattr(features.dataset, 'idx_to_class'):
+                mapping = features.dataset.idx_to_class
+                logger.info(f"Using dataset.idx_to_class mapping with {len(mapping)} classes")
+                return mapping
+
+            # Source 4: class_names directly in features
+            if 'class_names' in features and features['class_names']:
+                unique_names = sorted(set(features['class_names']))
+                mapping = {idx: name for idx, name in enumerate(unique_names)}
+                logger.info(f"Using features.class_names mapping with {len(mapping)} classes")
+                return mapping
+
+            logger.info("No class mapping found - will use folder names or raw values for prediction")
+            return None
+
+        class_mapping = _build_class_mapping()
+
+        # Try to get numeric labels from various sources
+        if 'labels' in features and features['labels'] is not None:
+            numeric_labels = features['labels']
+            if isinstance(numeric_labels, torch.Tensor):
+                numeric_labels = numeric_labels.cpu().numpy()
+            logger.info(f"Found 'labels' field with {len(numeric_labels)} values")
+        elif 'target' in features and features['target'] is not None:
+            numeric_labels = features['target']
+            if isinstance(numeric_labels, torch.Tensor):
+                numeric_labels = numeric_labels.cpu().numpy()
+            logger.info(f"Found 'target' field with {len(numeric_labels)} values")
+        elif 'class_names' in features and features['class_names'] and not numeric_labels:
+            # class_names are already strings, use them directly
             class_names_list = features['class_names']
             if len(class_names_list) != n_samples:
                 logger.warning(f"Class names length {len(class_names_list)} != {n_samples}, adjusting...")
@@ -7997,82 +8515,132 @@ class CDBNNApplication:
                     class_names_list = class_names_list[:n_samples]
                 else:
                     class_names_list = class_names_list + [f"class_{i}" for i in range(n_samples - len(class_names_list))]
-            data['label_type'] = class_names_list
-            unique_classes = set(class_names_list)
-            logger.info(f"Added label_type column with class names: {unique_classes}")
-            label_added = True
+            data['target'] = class_names_list
+            target_added = True
+            logger.info(f"Added target column directly from class_names")
 
-        # Try target with mapping
-        if not label_added and 'target' in features and features['target'] is not None:
-            target_val = features['target']
-            if isinstance(target_val, torch.Tensor):
-                target_val = target_val.cpu().numpy()
-
+        # Process numeric labels if found and not already added
+        if not target_added and numeric_labels is not None:
             # Ensure correct length
-            if len(target_val) != n_samples:
-                logger.warning(f"Target length {len(target_val)} != {n_samples}, adjusting...")
-                if len(target_val) > n_samples:
-                    target_val = target_val[:n_samples]
+            if len(numeric_labels) != n_samples:
+                logger.warning(f"Labels length {len(numeric_labels)} != {n_samples}, adjusting...")
+                if len(numeric_labels) > n_samples:
+                    numeric_labels = numeric_labels[:n_samples]
                 else:
-                    target_val = np.concatenate([target_val, np.zeros(n_samples - len(target_val))])
+                    numeric_labels = np.concatenate([numeric_labels, np.zeros(n_samples - len(numeric_labels))])
 
-            # Try to get class mapping
-            class_mapping = None
-            if hasattr(self, 'model') and hasattr(self.model, '_idx_to_class'):
-                class_mapping = self.model._idx_to_class
-                logger.info(f"Using model._idx_to_class mapping")
-            elif hasattr(self.config, 'class_names') and self.config.class_names:
-                class_mapping = {idx: name for idx, name in enumerate(self.config.class_names)}
-                logger.info(f"Using config.class_names mapping")
-
+            # Convert numeric labels to string class names
             if class_mapping:
-                data['label_type'] = [str(class_mapping.get(int(t), str(t))) for t in target_val]
-                unique_classes = set(data['label_type'])
-                logger.info(f"Added label_type column (converted from numeric): {unique_classes}")
+                # Decode using mapping, gracefully handling unknown labels
+                target_strings = []
+                for label in numeric_labels:
+                    # Handle both integer and float labels
+                    label_int = int(label) if not isinstance(label, str) else label
+                    if label_int in class_mapping:
+                        target_strings.append(str(class_mapping[label_int]))
+                    else:
+                        # Unknown label not seen during training
+                        unknown_label_str = f"unknown_class_{label_int}"
+                        target_strings.append(unknown_label_str)
+                        if label_int not in unknown_labels_found:
+                            unknown_labels_found.append(label_int)
+                            logger.warning(f"Unknown label {label_int} found (not in training classes)")
+                data['target'] = target_strings
+                unique_classes = set(target_strings)
+                logger.info(f"Added target column (decoded from numeric labels using mapping): {len(unique_classes)} unique classes")
+                if unknown_labels_found:
+                    logger.warning(f"Found {len(unknown_labels_found)} unknown/unseen classes: {unknown_labels_found[:10]}")
+                target_added = True
             else:
-                data['label_type'] = [str(t) for t in target_val]
-                logger.info(f"Added label_type column (raw numeric values as strings)")
-            label_added = True
+                # No mapping available, use raw values as strings
+                data['target'] = [str(l) for l in numeric_labels]
+                logger.info(f"Added target column (raw numeric values as strings - no mapping available)")
+                target_added = True
 
-        # Try labels with mapping
-        if not label_added and 'labels' in features and features['labels'] is not None:
-            labels_val = features['labels']
-            if isinstance(labels_val, torch.Tensor):
-                labels_val = labels_val.cpu().numpy()
-
-            # Ensure correct length
-            if len(labels_val) != n_samples:
-                logger.warning(f"Labels length {len(labels_val)} != {n_samples}, adjusting...")
-                if len(labels_val) > n_samples:
-                    labels_val = labels_val[:n_samples]
-                else:
-                    labels_val = np.concatenate([labels_val, np.zeros(n_samples - len(labels_val))])
-
-            # Try to get class mapping
-            class_mapping = None
-            if hasattr(self, 'model') and hasattr(self.model, '_idx_to_class'):
-                class_mapping = self.model._idx_to_class
-                logger.info(f"Using model._idx_to_class mapping")
-            elif hasattr(self.config, 'class_names') and self.config.class_names:
-                class_mapping = {idx: name for idx, name in enumerate(self.config.class_names)}
-                logger.info(f"Using config.class_names mapping")
-
+        # For prediction mode without labels: use folder names as pseudo-target
+        if not target_added and 'folder_name' in data:
+            # Use folder names as target (helpful for evaluating predictions on new data)
+            folder_targets = data['folder_name']
+            # Check if folder names correspond to known classes
             if class_mapping:
-                data['label_type'] = [str(class_mapping.get(int(l), str(l))) for l in labels_val]
-                unique_classes = set(data['label_type'])
-                logger.info(f"Added label_type column from labels: {unique_classes}")
+                # Try to map folder names to known classes (case-insensitive)
+                known_class_names = {name.lower(): name for name in class_mapping.values()}
+                mapped_targets = []
+                for folder in folder_targets:
+                    folder_lower = folder.lower()
+                    if folder_lower in known_class_names:
+                        mapped_targets.append(known_class_names[folder_lower])
+                    else:
+                        # Keep original folder name as is (new/unseen class)
+                        mapped_targets.append(folder)
+                        if folder not in unknown_labels_found:
+                            unknown_labels_found.append(folder)
+                            logger.info(f"New folder name '{folder}' - treating as potential new class")
+                data['target'] = mapped_targets
             else:
-                data['label_type'] = [str(l) for l in labels_val]
-                logger.info(f"Added label_type column from labels (raw values as strings)")
-            label_added = True
+                data['target'] = folder_targets
+            logger.info(f"Added target column from folder_name (prediction mode - no ground truth labels)")
+            target_added = True
 
-        # Fallback: create default labels
-        if not label_added:
-            data['label_type'] = ['unknown'] * n_samples
-            logger.warning(f"No labels found, created default 'unknown' labels")
+        # Final fallback: create placeholder targets
+        if not target_added:
+            data['target'] = ['unknown'] * n_samples
+            logger.warning(f"No labels or folder info found, created default 'unknown' target column")
+
+        # Log target column statistics for verification
+        if 'target' in data:
+            unique_targets = set(data['target'])
+            logger.info(f"Target column contains {len(unique_targets)} unique values: {list(unique_targets)[:10]}{'...' if len(unique_targets) > 10 else ''}")
+            # Count unknown labels
+            unknown_count = sum(1 for t in data['target'] if t.startswith('unknown'))
+            if unknown_count > 0:
+                logger.warning(f"  - {unknown_count}/{n_samples} samples have unknown/unseen labels ({unknown_count/n_samples*100:.1f}%)")
 
         # ========================================================================
-        # 4. CLUSTER INFORMATION (if available)
+        # 4. PREDICTION OUTPUTS (for predict mode)
+        # ========================================================================
+        if 'predictions' in features and features['predictions'] is not None:
+            predictions = features['predictions']
+            if isinstance(predictions, torch.Tensor):
+                predictions = predictions.cpu().numpy()
+            if len(predictions) == n_samples:
+                # Decode predictions to class names if mapping available
+                if class_mapping:
+                    pred_strings = []
+                    for p in predictions:
+                        p_int = int(p) if not isinstance(p, str) else p
+                        if p_int in class_mapping:
+                            pred_strings.append(str(class_mapping[p_int]))
+                        else:
+                            pred_strings.append(f"unknown_pred_{p_int}")
+                    data['prediction'] = pred_strings
+                    # Calculate prediction confidence vs target match
+                    if 'target' in data:
+                        matches = [data['target'][i] == data['prediction'][i] for i in range(n_samples)]
+                        accuracy = sum(matches) / n_samples if n_samples > 0 else 0
+                        logger.info(f"Prediction vs target accuracy: {accuracy:.2%} ({sum(matches)}/{n_samples})")
+                else:
+                    data['prediction'] = predictions
+                logger.info(f"Added prediction column")
+
+        if 'probabilities' in features and features['probabilities'] is not None:
+            probs = features['probabilities']
+            if isinstance(probs, torch.Tensor):
+                probs = probs.cpu().numpy()
+            if len(probs) == n_samples:
+                data['confidence'] = np.max(probs, axis=1) if probs.ndim > 1 else probs
+                data['uncertainty'] = -np.sum(probs * np.log(probs + 1e-10), axis=1) if probs.ndim > 1 else np.zeros(n_samples)
+                logger.info(f"Added confidence and uncertainty columns")
+
+                # Log confidence statistics for unknown classes
+                if 'target' in data and unknown_labels_found:
+                    unknown_mask = [t.startswith('unknown') for t in data['target']]
+                    if any(unknown_mask):
+                        unknown_confidences = data['confidence'][unknown_mask]
+                        logger.info(f"Unknown class samples - avg confidence: {np.mean(unknown_confidences):.3f}, max: {np.max(unknown_confidences):.3f}")
+
+        # ========================================================================
+        # 5. CLUSTER INFORMATION (if available)
         # ========================================================================
         if 'cluster_assignments' in features and features['cluster_assignments'] is not None:
             cluster_assignments = features['cluster_assignments']
@@ -8107,7 +8675,7 @@ class CDBNNApplication:
             logger.info(f"Added cluster_confidence column")
 
         # ========================================================================
-        # 5. DOMAIN-SPECIFIC FEATURES (if requested)
+        # 6. DOMAIN-SPECIFIC FEATURES (if requested)
         # ========================================================================
         if include_domain_features:
             domain_keys = [k for k in features.keys() if k.startswith('domain_')]
@@ -8132,13 +8700,13 @@ class CDBNNApplication:
                 logger.info(f"Added {len(domain_keys)} domain-specific features")
 
         # ========================================================================
-        # 6. SAMPLE INDEX (fallback for identification - ALWAYS add for debugging)
+        # 7. SAMPLE INDEX (always add for debugging)
         # ========================================================================
         data['sample_index'] = list(range(n_samples))
         logger.info(f"Added sample_index column")
 
         # ========================================================================
-        # 7. VERIFY ALL COLUMNS HAVE SAME LENGTH
+        # 8. VERIFY ALL COLUMNS HAVE SAME LENGTH
         # ========================================================================
         for col_name, col_data in data.items():
             if len(col_data) != n_samples:
@@ -8155,10 +8723,12 @@ class CDBNNApplication:
                         data[col_name] = np.concatenate([col_data, np.full(n_samples - len(col_data), np.nan)])
 
         # ========================================================================
-        # 8. SAVE TO CSV WITH PROPER COLUMN ORDER
+        # 9. SAVE TO CSV WITH PROPER COLUMN ORDER
         # ========================================================================
-        # Define column order priority
-        priority_columns = ['sample_index', 'original_filename', 'filepath', 'label_type', 'cluster_assignment', 'cluster_confidence']
+        # Define column order priority (target is now the main label column)
+        priority_columns = ['sample_index', 'original_filename', 'filepath', 'folder_name', 'target',
+                            'prediction', 'confidence', 'uncertainty',
+                            'cluster_assignment', 'cluster_confidence']
 
         # Get feature columns
         expected_features = self.config.compressed_dims if hasattr(self.config, 'compressed_dims') else 32
@@ -8174,7 +8744,10 @@ class CDBNNApplication:
                         and not k.startswith('domain_')]
 
         # Build final column order
-        column_order = [c for c in priority_columns if c in data] + feature_columns + domain_columns + other_columns
+        column_order = ([c for c in priority_columns if c in data] +
+                        feature_columns +
+                        domain_columns +
+                        other_columns)
 
         # Reorder data
         ordered_data = {col: data[col] for col in column_order if col in data}
@@ -8182,14 +8755,21 @@ class CDBNNApplication:
         # Create DataFrame
         df = pd.DataFrame(ordered_data)
 
-        # Ensure label_type is string type
-        if 'label_type' in df.columns:
-            df['label_type'] = df['label_type'].astype(str)
+        # Ensure target column is string type
+        if 'target' in df.columns:
+            df['target'] = df['target'].astype(str)
             # Log class distribution for verification
-            class_dist = df['label_type'].value_counts()
-            logger.info(f"Class distribution in CSV:")
-            for class_name, count in class_dist.items():
+            class_dist = df['target'].value_counts()
+            logger.info(f"Target class distribution in CSV:")
+            for class_name, count in list(class_dist.items())[:20]:  # Show top 20
                 logger.info(f"  {class_name}: {count} ({count/len(df)*100:.1f}%)")
+            if len(class_dist) > 20:
+                logger.info(f"  ... and {len(class_dist) - 20} more classes")
+
+        # Also handle legacy label_type column if present (for backward compatibility)
+        if 'label_type' in df.columns and 'target' not in df.columns:
+            df['target'] = df['label_type'].astype(str)
+            logger.info(f"Renamed label_type column to target for consistency")
 
         output_path = Path(output_csv)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -8201,19 +8781,24 @@ class CDBNNApplication:
         logger.info(f"  Total samples: {len(df)}")
         logger.info(f"  Total columns: {len(df.columns)}")
         logger.info(f"  Feature columns: {len(feature_columns)} (expected: {expected_features})")
+        logger.info(f"  Target column: present ({df['target'].nunique()} unique values)" if 'target' in df.columns else "  Target column: NOT FOUND")
+        if unknown_labels_found:
+            logger.info(f"  Unknown/unseen classes: {len(unknown_labels_found)}")
         logger.info("=" * 60)
 
         # Show sample of first row for verification
         if len(df) > 0:
             first_row = df.iloc[0]
             logger.info(f"Sample first row:")
-            for col in ['sample_index', 'original_filename', 'label_type', 'feature_0']:
+            for col in ['sample_index', 'original_filename', 'folder_name', 'target', 'prediction', 'feature_0']:
                 if col in first_row.index:
                     val = first_row[col]
                     if isinstance(val, float):
                         logger.info(f"  {col}: {val:.6f}")
                     else:
                         logger.info(f"  {col}: {val}")
+
+        return df
 
     @staticmethod
     def load_config_from_json(config_path: str) -> Optional[Dict]:
@@ -12967,7 +13552,8 @@ def parse_args():
     # Basic arguments
     parser.add_argument('--interactive', '-i', action='store_true', help='Run in interactive mode')
     parser.add_argument('--verify', '-v', action='store_true', help='Run verification tests')
-    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'extract'], help='Operation mode')
+    parser.add_argument('--mode', type=str, choices=['train', 'predict', 'extract', 'resume'],
+                           help='Operation mode (train, predict, extract, or resume)')
     parser.add_argument('--data_name', type=str, help='Dataset name')
     parser.add_argument('--data_type', type=str, choices=['custom', 'torchvision'], default='custom')
     parser.add_argument('--data_path', type=str, default=None, help='Path to data')
@@ -13055,6 +13641,15 @@ def parse_args():
     parser.add_argument('--pixel_scale', type=float, default=1.0)
     parser.add_argument('--gain', type=float, default=1.0)
     parser.add_argument('--read_noise', type=float, default=0.0)
+
+    # Resume training arguments
+    parser.add_argument('--resume', action='store_true', help='Resume training from last checkpoint')
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to specific checkpoint file to resume from')
+    parser.add_argument('--reset_optimizer', action='store_true',
+                       help='Reset optimizer state when resuming (keep only model weights)')
+    parser.add_argument('--additional_epochs', type=int, default=None,
+                       help='Add additional epochs to original training (overrides original epochs)')
 
     return parser.parse_args()
 
@@ -13313,17 +13908,67 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
         }
 
         # ================================================================
-        # BUILD CUSTOM ENCODER PATH (since we need to transform channels first)
+        # RECALCULATE FINAL SPATIAL DIMENSIONS AFTER ENCODER
+        # ================================================================
+        h, w = config.input_size
+        self.final_h, self.final_w = h, w
+        for _ in range(len(self.encoder_layers)):
+            self.final_h = (self.final_h + 1) // 2
+            self.final_w = (self.final_w + 1) // 2
+        self.final_h = max(1, self.final_h)
+        self.final_w = max(1, self.final_w)
+
+        logger.info(f"Astronomical encoder final size: {self.final_h}x{self.final_w} with {self.encoder_channels[-1]} channels")
+
+        # ================================================================
+        # REBUILD FLATTENED SIZE AND EMBEDDER/UNEMBEDDER
+        # ================================================================
+        self.flattened_size = self.encoder_channels[-1] * self.final_h * self.final_w
+
+        # Rebuild embedder with correct size
+        embed_dim = min(self.flattened_size, self.feature_dims)
+        embed_dim = max(embed_dim, 1)
+
+        self.embedder = nn.Sequential(
+            nn.Linear(self.flattened_size, embed_dim),
+            nn.GroupNorm(min(16, embed_dim), embed_dim) if embed_dim > 1 else nn.Identity(),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3)
+        )
+
+        if embed_dim != self.feature_dims:
+            self.embedder_projection = nn.Linear(embed_dim, self.feature_dims)
+        else:
+            self.embedder_projection = nn.Identity()
+
+        # Rebuild unembedder with correct size
+        unembed_dim = min(self.flattened_size, self.feature_dims)
+        unembed_dim = max(unembed_dim, 1)
+
+        self.unembedder = nn.Sequential(
+            nn.Linear(self.feature_dims, unembed_dim),
+            nn.GroupNorm(min(16, unembed_dim), unembed_dim) if unembed_dim > 1 else nn.Identity(),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3)
+        )
+
+        if unembed_dim != self.flattened_size:
+            self.unembedder_projection = nn.Linear(unembed_dim, self.flattened_size)
+        else:
+            self.unembedder_projection = nn.Identity()
+
+        # ================================================================
+        # BUILD CUSTOM ENCODER PATH
         # ================================================================
 
-        # Initial channel transformation layer (3 → encoder_channels[0])
+        # Initial channel transformation layer (in_channels → encoder_channels[0])
         self.initial_transform = nn.Sequential(
             nn.Conv2d(self.in_channels, self.encoder_channels[0], kernel_size=3, padding=1),
             nn.GroupNorm(min(32, self.encoder_channels[0]), self.encoder_channels[0]),
             nn.LeakyReLU(0.2)
         )
 
-        # Detail preservation module with multiple scales (works on encoder_channels[0])
+        # Detail preservation module with multiple scales
         self.detail_preserving = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=k, padding=k//2),
@@ -13333,7 +13978,7 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
             ) for k in [3, 5, 7]
         ])
 
-        # Star detection module (works on encoder_channels[0])
+        # Star detection module
         self.star_detector = nn.Sequential(
             nn.Conv2d(self.encoder_channels[0], self.encoder_channels[0], kernel_size=3, padding=1),
             nn.GroupNorm(min(32, self.encoder_channels[0]), self.encoder_channels[0]),
@@ -13342,12 +13987,12 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
             nn.Sigmoid()
         )
 
-        # Custom encoder layers (starting from encoder_channels[0] channels)
+        # Custom encoder layers
         self.custom_encoder_layers = nn.ModuleList()
         in_channels = self.encoder_channels[0]
         for i in range(len(self.encoder_layers)):
             out_channels = self.encoder_channels[i] if i < len(self.encoder_channels) else min(512, 64 * (2 ** i))
-            num_groups = min(32, out_channels)
+            num_groups = min(32, max(1, out_channels))
             self.custom_encoder_layers.append(nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
                 nn.GroupNorm(num_groups, out_channels),
@@ -13355,7 +14000,7 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
             ))
             in_channels = out_channels
 
-        # Galaxy feature enhancement (works on encoder channels)
+        # Galaxy feature enhancement
         self.galaxy_enhancer = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(size, size, kernel_size=3, padding=d, dilation=d),
@@ -13396,26 +14041,43 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
             self.ring_features = None
             self.discriminative_projector = None
 
-        # Rebuild decoder to match custom encoder output
+        # Rebuild decoder
         self._rebuild_decoder()
 
         self._cached_features = {}
 
+        # Log architecture info
+        logger.info("=" * 60)
+        logger.info("AstronomicalStructurePreservingAutoencoder initialized:")
+        logger.info(f"  Input: {self.in_channels}x{h}x{w}")
+        logger.info(f"  Encoder output: {self.encoder_channels[-1]}x{self.final_h}x{self.final_w}")
+        logger.info(f"  Flattened size: {self.flattened_size}")
+        logger.info(f"  Feature dims: {self.feature_dims}")
+        logger.info(f"  Compressed dims: {self.compressed_dims}")
+        logger.info("=" * 60)
+
     def _rebuild_decoder(self):
         """Rebuild decoder to match the custom encoder's output channels"""
-        # Decoder layers (reverse of custom encoder)
         self.custom_decoder_layers = nn.ModuleList()
         in_channels = self.encoder_channels[-1]
 
-        for i in range(len(self.encoder_channels) - 1, -1, -1):
-            out_channels = self.in_channels if i == 0 else self.encoder_channels[i-1]
-            if i == 0:
+        # Calculate target output size
+        target_h, target_w = self.config.input_size
+        current_h, current_w = self.final_h, self.final_w
+
+        # Determine number of upsampling steps
+        n_steps = len(self.encoder_channels)
+
+        for i in range(n_steps):
+            if i == n_steps - 1:  # Last layer (output)
+                out_channels = self.in_channels
                 self.custom_decoder_layers.append(nn.Sequential(
                     nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
                     nn.Tanh()
                 ))
             else:
-                num_groups_dec = min(32, out_channels)
+                out_channels = self.encoder_channels[n_steps - 2 - i]
+                num_groups_dec = min(32, max(1, out_channels))
                 self.custom_decoder_layers.append(nn.Sequential(
                     nn.ConvTranspose2d(in_channels, out_channels, 4, stride=2, padding=1),
                     nn.GroupNorm(num_groups_dec, out_channels),
@@ -13431,17 +14093,17 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
         if self.dataset_statistics is not None and self.dataset_statistics.is_calculated:
             x = self.dataset_statistics.normalize(x)
 
-        # Apply base enhanced encoding features (detail attention from EnhancedBaseAutoencoder)
+        # Apply base enhanced encoding features
         if hasattr(super(), 'detail_attention') and super().detail_attention is not None:
             attention = super().detail_attention(x)
             x = x * (1 + attention)
 
-        # Apply edge preservation from EnhancedBaseAutoencoder
+        # Apply edge preservation
         if hasattr(super(), 'edge_preservation') and super().edge_preservation is not None:
             edge_weights = super().edge_preservation(x)
             x = x * (0.5 + edge_weights)
 
-        # Initial channel transformation (3 → encoder_channels[0])
+        # Initial channel transformation
         x = self.initial_transform(x)
 
         if self.enhancement_config.get('detail_preservation', True):
@@ -13476,8 +14138,10 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
             features['ring_multiscale'] = sum(ring_multi_features) / len(ring_multi_features)
             x = x + 0.1 * features['ring_multiscale']
 
+        # Flatten and embed
         x = x.view(x.size(0), -1)
         embedding = self.embedder(x)
+        embedding = self.embedder_projection(embedding)
 
         # Store features for use in decode
         self._cached_features = features
@@ -13485,21 +14149,64 @@ class AstronomicalStructurePreservingAutoencoder(EnhancedBaseAutoencoder):
         return embedding
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        """Enhanced decoding with structure preservation"""
+        """Enhanced decoding with structure preservation - FIXED dimension handling"""
+
+        # Unembed to get the encoded representation
         x = self.unembedder(z)
-        x = x.view(x.size(0), self.encoder_channels[-1],
-                  self.final_h, self.final_w)
+        x = self.unembedder_projection(x)
+
+        batch_size = x.size(0)
+        expected_channels = self.encoder_channels[-1]
+        expected_height = self.final_h
+        expected_width = self.final_w
+        expected_elements = expected_channels * expected_height * expected_width
+        actual_elements = x.size(1)
+
+        # Handle dimension mismatch with multiple fallback strategies
+        if actual_elements == expected_elements:
+            # Perfect match - direct reshape
+            x = x.view(batch_size, expected_channels, expected_height, expected_width)
+        else:
+            logger.debug(f"Reshape mismatch in decode: got {actual_elements}, expected {expected_elements}")
+
+            # Strategy 1: Try to find factorable dimensions
+            reshaped = False
+            for h in range(int(actual_elements ** 0.5), 0, -1):
+                if actual_elements % h == 0:
+                    w = actual_elements // h
+                    if h <= 512 and w <= 512 and h >= 1 and w >= 1:
+                        # Try to reshape as 1-channel then adapt
+                        x = x.view(batch_size, 1, h, w)
+                        # Use adaptive pooling to target size
+                        x = F.adaptive_avg_pool2d(x, (expected_height, expected_width))
+                        # Expand channels to expected
+                        x = x.expand(-1, expected_channels, -1, -1)
+                        reshaped = True
+                        logger.debug(f"Strategy 1 succeeded: reshaped to {h}x{w} then adapted")
+                        break
+
+            if not reshaped:
+                # Strategy 2: Use linear projection
+                if not hasattr(self, '_reshape_projection'):
+                    self._reshape_projection = nn.Linear(actual_elements, expected_elements).to(x.device)
+                x = self._reshape_projection(x)
+                x = x.view(batch_size, expected_channels, expected_height, expected_width)
+                logger.debug("Strategy 2 succeeded: used linear projection")
 
         # Run through decoder layers
         for layer in self.custom_decoder_layers:
             x = layer(x)
 
-        # Ensure output has correct number of channels (3 for RGB)
+        # Ensure output has correct number of channels
         if x.shape[1] != self.in_channels:
-            # Use a learnable convolution (not a skip connection)
             if not hasattr(self, '_final_channel_adaptor'):
                 self._final_channel_adaptor = nn.Conv2d(x.shape[1], self.in_channels, kernel_size=1).to(x.device)
             x = self._final_channel_adaptor(x)
+
+        # Ensure output has correct spatial dimensions
+        target_h, target_w = self.config.input_size
+        if x.shape[-2] != target_h or x.shape[-1] != target_w:
+            x = F.interpolate(x, size=(target_h, target_w), mode='bilinear', align_corners=False)
 
         return x
 
@@ -13826,7 +14533,7 @@ def main():
         print("=" * 70)
 
         data_name = input("Enter dataset name: ").strip() or 'dataset'
-        mode = input("Enter mode (train/predict/extract/verify): ").strip().lower() or 'train'
+        mode = input("Enter mode (train/predict/extract/verify/resume): ").strip().lower() or 'train'
         data_type = input("Enter dataset type (custom/torchvision): ").strip().lower() or 'custom'
         data_path = input("Enter data path (optional for torchvision): ").strip()
         domain = input("Enter domain (general/agriculture/medical/satellite/surveillance/microscopy/industrial/astronomy): ").strip().lower() or 'general'
@@ -13928,20 +14635,138 @@ def main():
     app = DomainAwareCDBNN(config)
 
     # ========================================================================
+    # HELPER FUNCTION TO CHECK FOR RESUME
+    # ========================================================================
+    def should_resume_training():
+        """Check if we should resume training and return resume parameters"""
+        # Check if mode is 'resume' or resume flag is set
+        is_resume_mode = (args.mode == 'resume') or getattr(args, 'resume', False)
+
+        if not is_resume_mode:
+            return False, None, False, None
+
+        logger.info("=" * 70)
+        logger.info("RESUME MODE ENABLED")
+        logger.info("=" * 70)
+
+        # Get resume parameters
+        resume_from = getattr(args, 'resume_from', None)
+        reset_optimizer = getattr(args, 'reset_optimizer', False)
+        additional_epochs = getattr(args, 'additional_epochs', None)
+
+        # If resume_from is specified, use that
+        if resume_from:
+            checkpoint_path = Path(resume_from)
+            if checkpoint_path.exists():
+                logger.info(f"Using specified checkpoint: {checkpoint_path}")
+                return True, str(checkpoint_path), reset_optimizer, additional_epochs
+            else:
+                logger.warning(f"Specified checkpoint not found: {checkpoint_path}")
+                logger.info("Looking for automatic checkpoint...")
+
+        # Look for checkpoints in the checkpoint directory
+        checkpoint_dir = Path(config.checkpoint_dir)
+        if not checkpoint_dir.exists():
+            logger.warning(f"Checkpoint directory does not exist: {checkpoint_dir}")
+            return False, None, False, None
+
+        # Try to find the latest checkpoint
+        possible_checkpoints = [
+            checkpoint_dir / 'latest.pt',
+            checkpoint_dir / 'best.pt',
+            checkpoint_dir / f"{args.data_name}_best.pt",
+            checkpoint_dir / f"{args.data_name}_latest.pt",
+        ]
+
+        for cp in possible_checkpoints:
+            if cp.exists():
+                logger.info(f"Found checkpoint: {cp}")
+                return True, str(cp), reset_optimizer, additional_epochs
+
+        logger.warning("No checkpoint found to resume from")
+        return False, None, False, None
+
+    # ========================================================================
     # EXECUTE BASED ON MODE
     # ========================================================================
     try:
-        if args.mode == 'train':
-            logger.info(f"Starting {args.domain} domain training on {args.data_name}")
-            logger.info(f"Normalization mode: {config.normalization_mode}")
-            logger.info(f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.learning_rate}")
+        # Handle resume mode (explicit --mode resume)
+        if args.mode == 'resume':
+            logger.info(f"Resuming {args.domain} domain training on {args.data_name}")
 
+            # Check if we can resume
+            can_resume, resume_from, reset_optimizer, additional_epochs = should_resume_training()
+
+            if not can_resume:
+                logger.error("Cannot resume training - no valid checkpoint found")
+                logger.info("Please train the model first with: python cdbnn.py --mode train")
+                return 1
+
+            # Prepare data
             train_loader, test_loader = app.prepare_data(args.data_path, args.data_type)
             logger.info(f"Data loaded successfully: {len(train_loader.dataset)} training samples")
             if test_loader:
                 logger.info(f"Test samples: {len(test_loader.dataset)}")
 
-            history = app.train(train_loader, test_loader)
+            # Train with resume
+            history = app.train(
+                train_loader,
+                test_loader,
+                resume=True,
+                resume_from=resume_from,
+                reset_optimizer=reset_optimizer,
+                additional_epochs=additional_epochs
+            )
+
+            # Extract and save features
+            logger.info("Extracting features from trained model...")
+            features = app.extract_features(train_loader)
+
+            if features and features.get('embeddings') is not None and len(features['embeddings']) > 0:
+                logger.info(f"Features shape: {features['embeddings'].shape}")
+                if 'labels' in features:
+                    logger.info(f"Labels shape: {features['labels'].shape}")
+
+                if args.generate_tsne and features['embeddings'] is not None:
+                    logger.info("Generating t-SNE visualization...")
+                    labels_np = features['labels'].cpu().numpy() if isinstance(features['labels'], torch.Tensor) else features['labels']
+                    app.visualizer.plot_tsne(features['embeddings'].cpu().numpy(), labels_np, class_names=config.class_names)
+                    logger.info(f"t-SNE plot saved to: {paths['viz_dir']}/tsne.png")
+
+                features_csv = paths['csv_path']
+                app._save_features_to_csv(features, str(features_csv))
+                logger.info(f"Features saved to: {features_csv}")
+
+            app._save_config_files()
+
+            logger.info(f"Resume training completed successfully for {args.domain} domain")
+            logger.info(f"Normalization used: {config.normalization_mode}")
+            logger.info(f"Model saved to: {paths['checkpoint_dir']}/{args.data_name}_best.pt")
+
+        # Handle train mode (with optional --resume flag)
+        elif args.mode == 'train':
+            logger.info(f"Starting {args.domain} domain training on {args.data_name}")
+            logger.info(f"Normalization mode: {config.normalization_mode}")
+            logger.info(f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.learning_rate}")
+
+            # Check if we should resume
+            can_resume, resume_from, reset_optimizer, additional_epochs = should_resume_training()
+
+            # Prepare data
+            train_loader, test_loader = app.prepare_data(args.data_path, args.data_type)
+            logger.info(f"Data loaded successfully: {len(train_loader.dataset)} training samples")
+            if test_loader:
+                logger.info(f"Test samples: {len(test_loader.dataset)}")
+
+            # Train with or without resume
+            history = app.train(
+                train_loader,
+                test_loader,
+                resume=can_resume,
+                resume_from=resume_from,
+                reset_optimizer=reset_optimizer,
+                additional_epochs=additional_epochs
+            )
 
             logger.info("Extracting features from trained model...")
             features = app.extract_features(train_loader)
@@ -14000,18 +14825,13 @@ def main():
                 output_base_dir = Path('./'+args.output_dir)
                 output_data_dir = output_base_dir
                 output_data_dir.mkdir(parents=True, exist_ok=True)
-                #print(f'Created {output_data_dir}')
 
             else:
                 output_base_dir = Path('./data')
-
+                output_data_dir = output_base_dir
 
             output_checkpoint_dir = output_data_dir / 'checkpoints'
             output_viz_dir = output_data_dir / 'visualizations'
-
-
-            #output_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            #output_viz_dir.mkdir(parents=True, exist_ok=True)
 
             # Update config with output paths
             config.data_dir = str(output_data_dir)
@@ -14083,7 +14903,7 @@ def main():
 
         else:
             logger.error(f"Invalid mode: {args.mode}")
-            logger.info("Valid modes: train, predict, extract, verify")
+            logger.info("Valid modes: train, predict, extract, verify, resume")
             return 1
 
     except KeyboardInterrupt:
@@ -14151,5 +14971,24 @@ python cdbnn.py --mode train --data_name complex_data --data_path ./images --aut
 
 # Disable auto-optimization and use manual settings
 python cdbnn.py --mode train --data_name cifar100 --data_type torchvision --no_auto_optimize --input_size 32 32 --feature_dims 128 --compressed_dims 64
+
+------------------------------------------------------------------------------------------------
+# Initial training
+python cdbnn.py --mode train --data_name galaxy --data_type custom --data_path Data/Galaxies/ --domain astronomy
+
+# Resume training (automatically finds latest checkpoint)
+python cdbnn.py --mode resume --data_name galaxy --data_type custom --data_path Data/Galaxies/ --domain astronomy
+
+# Resume with specific checkpoint
+python cdbnn.py --mode resume --data_name galaxy --resume_from data/galaxy/checkpoints/best.pt
+
+# Resume but reset optimizer (keep only model weights)
+python cdbnn.py --mode resume --data_name galaxy --reset_optimizer
+
+# Resume and add 50 more epochs
+python cdbnn.py --mode resume --data_name galaxy --additional_epochs 50 --epochs 200
+
+# Using the --resume flag with train mode
+python cdbnn.py --mode train --data_name galaxy --resume
 ===================================================================================================""")
     sys.exit(main())
