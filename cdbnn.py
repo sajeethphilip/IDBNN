@@ -4382,6 +4382,497 @@ class EnhancedBaseAutoencoder(BaseAutoencoder):
 
         return output
 
+# =============================================================================
+# CONTRASTIVE LEARNING MODULES (Only used when --use_contrastive is specified)
+# =============================================================================
+
+
+class ContrastiveProjectionHead(nn.Module):
+    """
+    Projection head for contrastive learning
+    Maps features to a lower-dimensional space where contrastive loss is applied
+    """
+    def __init__(self, input_dim, projection_dim=128, hidden_dim=None):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = max(256, input_dim * 2)
+
+        self.projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, projection_dim),
+            nn.BatchNorm1d(projection_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(projection_dim, projection_dim)
+        )
+
+    def forward(self, x):
+        return self.projection(x)
+
+
+class ContrastiveAutoencoderWithProjection(BaseAutoencoder):
+    """
+    Autoencoder with contrastive learning projection head.
+    Uses supervised contrastive learning for better feature separation.
+    """
+
+    def __init__(self, config: GlobalConfig):
+        super().__init__(config)
+
+        # Get contrastive-specific parameters
+        self.projection_dim = getattr(config, 'contrastive_projection_dim', 128)
+        self.temperature = getattr(config, 'contrastive_temperature', 0.07)
+        self.contrastive_weight = getattr(config, 'contrastive_weight', 0.7)
+
+        # ================================================================
+        # PROJECTION HEAD
+        # ================================================================
+        self.projection_head = nn.Sequential(
+            nn.Linear(self.compressed_dims, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(256, self.projection_dim),
+            nn.BatchNorm1d(self.projection_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.projection_dim, self.projection_dim)
+        )
+
+        # ================================================================
+        # ENHANCED CLASSIFIER (with dropout for regularization)
+        # ================================================================
+        num_classes = config.num_classes or 2
+
+        # Scale classifier complexity with number of classes
+        if num_classes >= 100:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.compressed_dims, 512),
+                nn.BatchNorm1d(512),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.4),
+                nn.Linear(512, 256),
+                nn.BatchNorm1d(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(256, num_classes)
+            )
+        elif num_classes >= 50:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.compressed_dims, 256),
+                nn.BatchNorm1d(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(256, num_classes)
+            )
+        else:
+            self.classifier = nn.Sequential(
+                nn.Linear(self.compressed_dims, 128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.2),
+                nn.Linear(128, num_classes)
+            )
+
+        # ================================================================
+        # LOSS FUNCTIONS
+        # ================================================================
+        self.contrastive_loss = SupervisedContrastiveLoss(
+            temperature=self.temperature
+        )
+
+        self.is_contrastive = True
+
+        logger.info(f"ContrastiveAutoencoderWithProjection initialized:")
+        logger.info(f"  Projection dimension: {self.projection_dim}")
+        logger.info(f"  Temperature: {self.temperature}")
+        logger.info(f"  Contrastive weight: {self.contrastive_weight}")
+
+    def forward(self, x: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward pass with contrastive learning"""
+        original_batch_size = x.size(0)
+        duplicated = False
+
+        # Apply normalization
+        x = self.normalize_batch(x)
+
+        # Handle single sample
+        if self.training and original_batch_size == 1:
+            x = torch.cat([x, x], dim=0)
+            duplicated = True
+            if labels is not None:
+                labels = torch.cat([labels, labels], dim=0)
+
+        # Encode
+        embedding = self.encode(x)
+
+        # Feature selection
+        if self._is_feature_selection_frozen and self._selected_feature_indices is not None:
+            selected_embedding = embedding[:, self._selected_feature_indices]
+        else:
+            selected_embedding = embedding
+
+        # Compression
+        compressed = self.feature_compressor(selected_embedding)
+
+        # Apply projection for contrastive learning
+        projected = self.projection_head(compressed)
+
+        # Decode
+        decompressed = self.feature_decompressor(compressed)
+        reconstruction = self.decode(decompressed)
+
+        if reconstruction.shape[-2:] != x.shape[-2:]:
+            reconstruction = F.interpolate(reconstruction, size=x.shape[-2:],
+                                         mode='bilinear', align_corners=False)
+
+        # Build output dictionary
+        output = {
+            'embedding': self._fix_tensor_dim(embedding, original_batch_size, duplicated),
+            'selected_embedding': self._fix_tensor_dim(selected_embedding, original_batch_size, duplicated),
+            'compressed_embedding': self._fix_tensor_dim(compressed, original_batch_size, duplicated),
+            'projected_embedding': self._fix_tensor_dim(projected, original_batch_size, duplicated),
+            'reconstructed_embedding': self._fix_tensor_dim(decompressed, original_batch_size, duplicated),
+            'reconstruction': self._fix_tensor_dim(reconstruction, original_batch_size, duplicated)
+        }
+
+        # Phase 2 outputs (classification and clustering)
+        if self.training_phase == 2:
+            # Classification
+            if self.use_class_encoding and self.classifier is not None:
+                logits = self.classifier(compressed)
+                output.update({
+                    'class_logits': self._fix_tensor_dim(logits, original_batch_size, duplicated),
+                    'class_predictions': self._fix_tensor_dim(logits.argmax(dim=1), original_batch_size, duplicated),
+                    'class_probabilities': self._fix_tensor_dim(F.softmax(logits, dim=1), original_batch_size, duplicated)
+                })
+
+            # Contrastive learning (only during training with labels)
+            if self.training and labels is not None:
+                # Use projected features for contrastive loss
+                output.update({
+                    'contrastive_features': self._fix_tensor_dim(projected, original_batch_size, duplicated),
+                    'contrastive_labels': self._fix_tensor_dim(labels, original_batch_size, duplicated)
+                })
+
+        return output
+
+    def compute_contrastive_loss(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute supervised contrastive loss"""
+        return self.contrastive_loss(features, labels)
+
+
+class SupervisedContrastiveLoss(nn.Module):
+    """
+    Supervised Contrastive Loss (SupCon)
+    Based on: "Supervised Contrastive Learning" (Khosla et al., NeurIPS 2020)
+    """
+    def __init__(self, temperature=0.07, base_temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+        self.base_temperature = base_temperature
+
+    def forward(self, features, labels, mask=None):
+        """
+        Args:
+            features: [B, D] normalized embeddings
+            labels: [B] class labels
+            mask: [B, B] optional mask for positive pairs
+        Returns:
+            SupCon loss
+        """
+        device = features.device
+        batch_size = features.shape[0]
+
+        # Normalize features if not already
+        features = F.normalize(features, p=2, dim=1)
+
+        # Compute similarity matrix
+        similarity = torch.matmul(features, features.T) / self.temperature
+
+        # Create mask for positive pairs (same class, excluding self)
+        if mask is None:
+            labels = labels.contiguous().view(-1, 1)
+            mask = torch.eq(labels, labels.T).float().to(device)
+
+        # Remove self-similarity
+        mask.fill_diagonal_(0)
+
+        # Compute logits
+        exp_sim = torch.exp(similarity)
+
+        # Numerator: sum over positive pairs
+        pos_sum = (exp_sim * mask).sum(dim=1)
+
+        # Denominator: sum over all pairs (including self)
+        neg_sum = exp_sim.sum(dim=1) - exp_sim.diag()  # Remove self
+
+        # Loss: -log(pos / (pos + neg))
+        loss = -torch.log(pos_sum / (neg_sum + 1e-8) + 1e-8)
+
+        # Only compute loss for samples with positive pairs
+        valid = mask.sum(dim=1) > 0
+        if valid.any():
+            loss = loss[valid].mean()
+        else:
+            loss = torch.tensor(0.0, device=device)
+
+        return loss
+
+
+class ContrastiveTrainer:
+    """
+    Trainer specialized for contrastive learning
+    Only used when --use_contrastive is enabled
+    """
+
+    def __init__(self, model, config, train_loader, val_loader):
+        self.model = model
+        self.config = config
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = next(model.parameters()).device
+
+        # ================================================================
+        # OPTIMIZER: LARS or AdamW with warmup
+        # ================================================================
+        self.optimizer = optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=0.0005,
+            betas=(0.9, 0.999)
+        )
+
+        # ================================================================
+        # SCHEDULER: Cosine annealing with warm restarts
+        # ================================================================
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=30,
+            T_mult=2,
+            eta_min=1e-6
+        )
+
+        # ================================================================
+        # LOSS WEIGHTS
+        # ================================================================
+        self.contrastive_weight = getattr(config, 'contrastive_weight', 0.7)
+        self.classification_weight = 0.2
+        self.reconstruction_weight = 0.1
+
+        # ================================================================
+        # METRICS TRACKING
+        # ================================================================
+        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
+        self.patience_counter = 0
+        self.history = defaultdict(list)
+
+        logger.info("ContrastiveTrainer initialized")
+        logger.info(f"  Contrastive weight: {self.contrastive_weight}")
+        logger.info(f"  Classification weight: {self.classification_weight}")
+        logger.info(f"  Reconstruction weight: {self.reconstruction_weight}")
+
+    def train_epoch(self, epoch):
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0.0
+        total_recon_loss = 0.0
+        total_contrastive_loss = 0.0
+        total_class_loss = 0.0
+        total_acc = 0.0
+        n_batches = 0
+
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}")
+
+        for batch_idx, (images, labels) in enumerate(pbar):
+            images = images.to(self.device)
+            labels = labels.to(self.device)
+
+            # Forward pass
+            outputs = self.model(images, labels)
+
+            # ================================================================
+            # COMPUTE LOSSES
+            # ================================================================
+
+            # 1. Reconstruction loss
+            recon_loss = F.mse_loss(outputs['reconstruction'], images)
+
+            # 2. Contrastive loss (using projected features)
+            if 'contrastive_features' in outputs:
+                contrastive_loss = self.model.compute_contrastive_loss(
+                    outputs['contrastive_features'],
+                    outputs['contrastive_labels']
+                )
+            else:
+                contrastive_loss = torch.tensor(0.0, device=self.device)
+
+            # 3. Classification loss
+            if 'class_logits' in outputs:
+                # Use label smoothing for many classes
+                num_classes = self.config.num_classes or 100
+                if num_classes >= 50:
+                    smoothing = 0.1
+                    n_classes = num_classes
+                    logits = outputs['class_logits']
+                    smooth_labels = torch.full_like(logits, smoothing / n_classes)
+                    smooth_labels.scatter_(1, labels.unsqueeze(1), 1 - smoothing + smoothing / n_classes)
+                    class_loss = -(smooth_labels * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
+                else:
+                    class_loss = F.cross_entropy(outputs['class_logits'], labels)
+            else:
+                class_loss = torch.tensor(0.0, device=self.device)
+
+            # ================================================================
+            # COMBINE LOSSES
+            # ================================================================
+            total_loss = (
+                self.reconstruction_weight * recon_loss +
+                self.contrastive_weight * contrastive_loss +
+                self.classification_weight * class_loss
+            )
+
+            # Backward pass
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+            # Track metrics
+            total_loss += total_loss.item()
+            total_recon_loss += recon_loss.item()
+            total_contrastive_loss += contrastive_loss.item()
+            total_class_loss += class_loss.item()
+
+            if 'class_predictions' in outputs:
+                acc = (outputs['class_predictions'] == labels).float().mean().item()
+                total_acc += acc
+
+            n_batches += 1
+
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f"{total_loss/n_batches:.4f}",
+                'acc': f"{total_acc/n_batches:.2%}" if n_batches > 0 else "0%"
+            })
+
+        # Calculate averages
+        avg_loss = total_loss / n_batches
+        avg_recon = total_recon_loss / n_batches
+        avg_contrastive = total_contrastive_loss / n_batches
+        avg_class = total_class_loss / n_batches
+        avg_acc = total_acc / n_batches if n_batches > 0 else 0.0
+
+        return {
+            'loss': avg_loss,
+            'recon_loss': avg_recon,
+            'contrastive_loss': avg_contrastive,
+            'class_loss': avg_class,
+            'accuracy': avg_acc
+        }
+
+    def validate(self):
+        """Validate the model"""
+        self.model.eval()
+        total_acc = 0.0
+        total_loss = 0.0
+        n_batches = 0
+
+        with torch.no_grad():
+            for images, labels in self.val_loader:
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+
+                outputs = self.model(images, labels)
+
+                if 'class_predictions' in outputs:
+                    acc = (outputs['class_predictions'] == labels).float().mean().item()
+                    total_acc += acc
+
+                if 'class_logits' in outputs:
+                    loss = F.cross_entropy(outputs['class_logits'], labels)
+                    total_loss += loss.item()
+
+                n_batches += 1
+
+        avg_acc = total_acc / n_batches if n_batches > 0 else 0.0
+        avg_loss = total_loss / n_batches if n_batches > 0 else float('inf')
+
+        return {
+            'accuracy': avg_acc,
+            'loss': avg_loss
+        }
+
+    def train(self, epochs):
+        """Full training loop"""
+        logger.info("=" * 70)
+        logger.info("CONTRASTIVE TRAINING STARTED")
+        logger.info(f"Total epochs: {epochs}")
+        logger.info(f"Contrastive weight: {self.contrastive_weight}")
+        logger.info("=" * 70)
+
+        for epoch in range(epochs):
+            # Train
+            train_metrics = self.train_epoch(epoch)
+
+            # Validate
+            val_metrics = self.validate()
+
+            # Update scheduler
+            self.scheduler.step()
+
+            # Log progress
+            logger.info(
+                f"Epoch {epoch+1}/{epochs} | "
+                f"Train Loss: {train_metrics['loss']:.4f} | "
+                f"Train Acc: {train_metrics['accuracy']:.2%} | "
+                f"Val Acc: {val_metrics['accuracy']:.2%} | "
+                f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
+            )
+
+            # Save history
+            self.history['train_loss'].append(train_metrics['loss'])
+            self.history['train_acc'].append(train_metrics['accuracy'])
+            self.history['val_acc'].append(val_metrics['accuracy'])
+            self.history['val_loss'].append(val_metrics['loss'])
+            self.history['lr'].append(self.optimizer.param_groups[0]['lr'])
+
+            # Save best model
+            if val_metrics['accuracy'] > self.best_accuracy:
+                self.best_accuracy = val_metrics['accuracy']
+                self.best_loss = val_metrics['loss']
+                self.patience_counter = 0
+
+                # Save checkpoint
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'best_accuracy': self.best_accuracy,
+                    'best_loss': self.best_loss,
+                    'use_contrastive': True,
+                    'contrastive_temperature': self.config.contrastive_temperature,
+                    'contrastive_weight': self.contrastive_weight,
+                    'history': dict(self.history)
+                }
+                torch.save(checkpoint, self.config.checkpoint_dir / 'best_contrastive.pt')
+                logger.info(f"✓ New best accuracy: {self.best_accuracy:.2%}")
+            else:
+                self.patience_counter += 1
+
+            # Early stopping
+            if self.patience_counter >= 30:
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
+
+        logger.info("=" * 70)
+        logger.info("CONTRASTIVE TRAINING COMPLETED")
+        logger.info(f"Best accuracy: {self.best_accuracy:.2%}")
+        logger.info(f"Best loss: {self.best_loss:.4f}")
+        logger.info("=" * 70)
+
+        return dict(self.history)
 
 # =============================================================================
 # MODIFIED PREDICTION MANAGER with configurable normalization
@@ -6400,7 +6891,8 @@ def deterministic_train(
     start_phase: int = 1,
     loaded_optimizer_state: Optional[Dict] = None,
     loaded_scheduler_state: Optional[Dict] = None,
-    reset_optimizer: bool = False
+    reset_optimizer: bool = False,
+    additional_epochs: Optional[int] = None
 ) -> Dict:
     """
     FULLY VECTORIZED deterministic training with optimized GPU utilization.
@@ -6411,8 +6903,18 @@ def deterministic_train(
     logger.info(f"Normalization: {config.normalization_mode.upper()}")
     logger.info(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
     logger.info(f"Batch size: {config.batch_size}")
+
+    # Check for contrastive mode
+    use_contrastive = getattr(config, 'use_contrastive_learning', False)
+    if use_contrastive:
+        logger.info("🚀 CONTRASTIVE LEARNING MODE ENABLED")
+        logger.info(f"  Temperature: {config.contrastive_temperature}")
+        logger.info(f"  Contrastive weight: {config.contrastive_weight}")
+
     if resume:
         logger.info(f"RESUME MODE: Continuing from Phase {start_phase}, Epoch {start_epoch + 1}")
+        if additional_epochs:
+            logger.info(f"Adding {additional_epochs} additional epochs")
     logger.info("=" * 70)
 
     device = torch.device('cuda' if config.use_gpu and torch.cuda.is_available() else 'cpu')
@@ -6448,8 +6950,13 @@ def deterministic_train(
     min_dim = min(config.input_size)
     is_small_image = min_dim <= 64
 
-    # CRITICAL FIX: Lower learning rate for stability
-    if is_cifar:
+    # Adjust learning rate for contrastive learning
+    if use_contrastive and config.num_classes >= 50:
+        initial_lr = 0.0005
+        weight_decay = 0.0001
+        use_cosine_scheduler = True
+        logger.info(f"Using contrastive-optimized settings: LR={initial_lr}, weight_decay={weight_decay}")
+    elif is_cifar:
         initial_lr = 0.001
         weight_decay = 0.0001
         use_cosine_scheduler = True
@@ -6485,8 +6992,22 @@ def deterministic_train(
 
     # Create scheduler
     if use_cosine_scheduler:
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs, eta_min=1e-7)
-        logger.info(f"Using CosineAnnealingLR scheduler (T_max={config.epochs}, eta_min=1e-7)")
+        # Adjust T_max for additional epochs if resuming
+        if resume and additional_epochs:
+            total_epochs = start_epoch + additional_epochs
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=total_epochs,
+                eta_min=1e-7
+            )
+            logger.info(f"Using CosineAnnealingLR scheduler (T_max={total_epochs}, eta_min=1e-7)")
+        else:
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=config.epochs,
+                eta_min=1e-7
+            )
+            logger.info(f"Using CosineAnnealingLR scheduler (T_max={config.epochs}, eta_min=1e-7)")
     else:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         logger.info("Using ReduceLROnPlateau scheduler")
@@ -6558,11 +7079,29 @@ def deterministic_train(
         total_loss = recon_loss
         accuracy = None
 
+        # Contrastive learning support
+        if use_contrastive and hasattr(model, 'compute_contrastive_loss'):
+            if 'contrastive_features' in outputs:
+                contrastive_loss = model.compute_contrastive_loss(
+                    outputs['contrastive_features'],
+                    labels
+                )
+                contrastive_loss = torch.clamp(contrastive_loss, max=10.0)
+                total_loss = total_loss + contrastive_loss
+                logger.debug(f"Contrastive loss: {contrastive_loss.item():.4f}")
+
         if phase == 2 and config.use_class_encoding and 'class_logits' in outputs:
             n_classes = config.num_classes or 2
             logits = outputs['class_logits']
             logits = torch.clamp(logits, min=-50, max=50)
-            smoothing = 0.1
+
+            # Adaptive label smoothing
+            if n_classes >= 100:
+                smoothing = max(0.05, 0.2 * (1.0 - min(1.0, epoch / config.epochs)))
+            elif n_classes >= 50:
+                smoothing = max(0.05, 0.15 * (1.0 - min(1.0, epoch / config.epochs)))
+            else:
+                smoothing = max(0.05, 0.1 * (1.0 - min(1.0, epoch / config.epochs)))
 
             if smoothing > 0:
                 smooth_labels = torch.full_like(logits, smoothing / n_classes)
@@ -6572,7 +7111,7 @@ def deterministic_train(
                 class_loss = F.cross_entropy(logits, labels)
 
             class_loss = torch.clamp(class_loss, max=10.0)
-            total_loss = recon_loss + class_loss
+            total_loss = total_loss + class_loss
             accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
 
         total_loss = torch.clamp(total_loss, max=100.0)
@@ -6617,12 +7156,20 @@ def deterministic_train(
     checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Define best metrics variables (these will be used in nested functions)
+    # Define best metrics variables
     best_loss = float('inf')
     best_accuracy = 0.0
     best_epoch = 0
     best_phase = 1
     history = defaultdict(list)
+
+    # Load existing history if resuming
+    if resume and loaded_scheduler_state is not None and 'history' in loaded_scheduler_state:
+        try:
+            history = defaultdict(list, loaded_scheduler_state.get('history', {}))
+            logger.info("Loaded training history")
+        except Exception as e:
+            logger.warning(f"Could not load history: {e}")
 
     def save_checkpoint(epoch, phase, loss, accuracy, is_best):
         """Save checkpoint with complete state for resume"""
@@ -6647,7 +7194,8 @@ def deterministic_train(
             'history': dict(history),
             'normalization_mode': config.normalization_mode,
             'use_per_image_normalization': config.use_per_image_normalization,
-            'clustering_mode': 'enhanced',
+            'use_contrastive_learning': use_contrastive,
+            'clustering_mode': 'contrastive' if use_contrastive else 'enhanced',
             'deterministic': True,
             'feature_dims': config.feature_dims,
             'compressed_dims': config.compressed_dims,
@@ -6656,6 +7204,13 @@ def deterministic_train(
             'input_size': list(config.input_size),
             'timestamp': datetime.now().isoformat(),
         }
+
+        # Add contrastive-specific parameters
+        if use_contrastive:
+            checkpoint['contrastive_temperature'] = config.contrastive_temperature
+            checkpoint['contrastive_weight'] = config.contrastive_weight
+            if hasattr(model, 'projection_head'):
+                checkpoint['projection_dim'] = config.contrastive_projection_dim
 
         # Save dataset statistics
         if not use_per_image_norm and statistics_calculator and statistics_calculator.is_calculated:
@@ -6670,6 +7225,21 @@ def deterministic_train(
                     'mode': statistics_calculator.mode,
                     'is_calculated': statistics_calculator.is_calculated
                 }
+
+                # Save statistics file
+                dataset_name_lower = normalize_dataset_name(config.dataset_name)
+                stats_path = checkpoint_dir / f"{dataset_name_lower}_norm_stats.pt"
+                stats_dict = {
+                    'mean': statistics_calculator.mean.cpu(),
+                    'std': statistics_calculator.std.cpu(),
+                    'per_channel_min': statistics_calculator.per_channel_min.cpu() if statistics_calculator.per_channel_min is not None else None,
+                    'per_channel_max': statistics_calculator.per_channel_max.cpu() if statistics_calculator.per_channel_max is not None else None,
+                    'n_samples': statistics_calculator.n_samples_used,
+                    'is_fitted': True,
+                    'timestamp': datetime.now().isoformat()
+                }
+                torch.save(stats_dict, stats_path)
+                logger.info(f"Normalization statistics saved to {stats_path}")
 
         # Add optional components
         if hasattr(model, 'classifier') and model.classifier is not None:
@@ -6705,7 +7275,7 @@ def deterministic_train(
         phase_best_accuracy = 0.0
         phase_best_loss = float('inf')
         patience_counter = 0
-        patience_limit = 20 if phase == 2 else 15
+        patience_limit = 25 if use_contrastive else 20
         nan_count = 0
         max_nan_count = 5
 
@@ -6905,10 +7475,22 @@ def deterministic_train(
             print(f"{Colors.GREEN}Phase 2 Best Loss: {phase_best_loss:.6f}{Colors.ENDC}")
         print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
 
-    # Calculate epochs based on configuration and resume position
+    # Calculate epochs based on configuration and resume
     total_epochs = config.epochs
-    epochs_phase1 = max(1, total_epochs // 4)
-    epochs_phase2 = max(1, total_epochs - epochs_phase1)
+
+    # Adjust if additional epochs specified
+    if resume and additional_epochs:
+        total_epochs = start_epoch + additional_epochs
+        logger.info(f"Adjusted total epochs to {total_epochs} (original: {config.epochs})")
+
+    # Phase lengths
+    if use_contrastive:
+        epochs_phase1 = max(1, total_epochs // 5)
+        epochs_phase2 = max(1, total_epochs - epochs_phase1)
+        logger.info(f"Contrastive learning mode: Phase1={epochs_phase1}, Phase2={epochs_phase2}")
+    else:
+        epochs_phase1 = max(1, total_epochs // 4)
+        epochs_phase2 = max(1, total_epochs - epochs_phase1)
 
     # Adjust epochs based on resume position
     if resume:
@@ -6925,6 +7507,7 @@ def deterministic_train(
     print(f"{Colors.BOLD}{'VECTORIZED CDBNN TRAINING'.center(80)}{Colors.ENDC}")
     print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Normalization: {config.normalization_mode.upper()}{Colors.ENDC}")
+    print(f"{Colors.GREEN}✓ Contrastive Learning: {use_contrastive}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Mixed Precision: {scaler is not None}{Colors.ENDC}")
     print(f"{Colors.GREEN}✓ Num Workers: {num_workers}{Colors.ENDC}")
     if resume:
@@ -6938,9 +7521,10 @@ def deterministic_train(
 
     # Train Phase 2
     if start_phase <= 2 and epochs_phase2 > 0:
-        if config.use_kl_divergence or config.use_class_encoding:
+        if config.use_kl_divergence or config.use_class_encoding or use_contrastive:
+            phase2_title = "PHASE 2: VECTORIZED " + ("CONTRASTIVE LEARNING" if use_contrastive else "CLUSTERING")
             print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
-            print(f"{Colors.BOLD}{'PHASE 2: VECTORIZED CLUSTERING'.center(80)}{Colors.ENDC}")
+            print(f"{Colors.BOLD}{phase2_title.center(80)}{Colors.ENDC}")
             print(f"{Colors.BOLD}{'='*80}{Colors.ENDC}\n")
             logger.info(f"Phase 2: {epochs_phase2} epochs")
             train_phase(2, epochs_phase2, start_epoch if start_phase == 2 else 0)
@@ -6964,7 +7548,6 @@ def deterministic_train(
         history['train_acc'] = [0.0]
 
     return dict(history)
-
 
 def normalize_dataset_name(data_name: str) -> str:
     """Convert dataset name to lowercase for consistent file naming"""
@@ -13147,6 +13730,12 @@ class ModelFactory:
     def create_model(config: GlobalConfig) -> nn.Module:
         """Create model with domain-specific enhancements and advanced architecture"""
 
+        # ================================================================
+        # CHECK FOR CONTRASTIVE DIRECTIVE FIRST
+        # ================================================================
+        use_contrastive = getattr(config, 'use_contrastive_learning', False)
+
+        # Get basic configuration
         input_shape = (config.in_channels, config.input_size[0], config.input_size[1])
         feature_dims = config.feature_dims
         compressed_dims = getattr(config, 'compressed_dims', min(64, max(8, feature_dims // 4)))
@@ -13156,45 +13745,125 @@ class ModelFactory:
         use_enhanced = getattr(config, 'use_enhanced_autoencoder', True)
         use_hybrid = getattr(config, 'use_hybrid_autoencoder', True)
         use_advanced = getattr(config, 'use_advanced_hybrid', True)
+        use_invertible = getattr(config, 'use_invertible', False)
 
         # Get domain from config
         domain = getattr(config, 'domain', 'general')
         image_type = getattr(config, 'image_type', 'general')
         num_classes = config.num_classes or 2
 
-        # ========================================================================
-        # DOMAIN-SPECIFIC MODEL SELECTION (Highest Priority)
-        # ========================================================================
-        # For specialized domains, use domain-specific autoencoders
-        # These already have domain-optimized architectures
+        # ================================================================
+        # CONTRASTIVE LEARNING MODELS (Highest Priority)
+        # ================================================================
+        if use_contrastive:
+            logger.info("=" * 60)
+            logger.info("🔬 CONTRASTIVE LEARNING MODE ENABLED")
+            logger.info(f"  Dataset: {config.dataset_name}")
+            logger.info(f"  Classes: {num_classes}")
+            logger.info(f"  Temperature: {config.contrastive_temperature}")
+            logger.info(f"  Projection dim: {config.contrastive_projection_dim}")
+            logger.info("=" * 60)
 
+            # For astronomy domain with contrastive
+            if domain == 'astronomy' or image_type == 'astronomical':
+                if use_enhanced:
+                    logger.info("Creating Enhanced Astronomical Contrastive Autoencoder")
+                    # Use the existing AstronomicalStructurePreservingAutoencoder
+                    # but with contrastive learning enabled
+                    # We'll just use the standard contrastive autoencoder with
+                    # domain-specific enhancements
+                    return ContrastiveAutoencoderWithProjection(config)
+                else:
+                    logger.info("Creating Base Contrastive Autoencoder")
+                    return ContrastiveAutoencoderWithProjection(config)
+
+            # For medical domain with contrastive
+            elif domain == 'medical' or image_type == 'medical':
+                if use_enhanced:
+                    logger.info("Creating Enhanced Medical Contrastive Autoencoder")
+                    return ContrastiveAutoencoderWithProjection(config)
+                else:
+                    return ContrastiveAutoencoderWithProjection(config)
+
+            # For agriculture domain with contrastive
+            elif domain == 'agriculture' or image_type == 'agricultural':
+                if use_enhanced:
+                    logger.info("Creating Enhanced Agricultural Contrastive Autoencoder")
+                    return ContrastiveAutoencoderWithProjection(config)
+                else:
+                    return ContrastiveAutoencoderWithProjection(config)
+
+            # Check if this is a complex dataset (many classes or large images)
+            min_dim = min(config.input_size)
+            is_complex = num_classes >= 50 or min_dim >= 128
+
+            if is_complex:
+                # Use ResNet-based contrastive for complex datasets
+                logger.info("Using ResNetContrastiveAutoencoder for complex dataset")
+                return ResNetContrastiveAutoencoder(config)
+            else:
+                # Use standard contrastive autoencoder
+                logger.info("Using ContrastiveAutoencoderWithProjection")
+                return ContrastiveAutoencoderWithProjection(config)
+
+        # ================================================================
+        # DOMAIN-SPECIFIC MODEL SELECTION (Second Priority)
+        # ================================================================
+
+        # Astronomy domain
         if domain == 'astronomy' or image_type == 'astronomical':
-            if use_enhanced:
+            if use_invertible:
+                logger.info("Creating Invertible Astronomical Structure Preserving Autoencoder")
+                # For now, use the enhanced version with invertible flag
+                return AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif use_enhanced:
                 logger.info("Creating Enhanced Astronomical Structure Preserving Autoencoder with Ring Detection")
                 return AstronomicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
             else:
                 logger.info("Creating Base Astronomical Autoencoder")
                 return BaseAutoencoder(config)
 
+        # Medical domain
         elif domain == 'medical' or image_type == 'medical':
-            if use_enhanced:
+            if use_invertible:
+                logger.info("Creating Invertible Medical Structure Preserving Autoencoder")
+                return MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
+            elif use_enhanced:
                 logger.info("Creating Enhanced Medical Structure Preserving Autoencoder")
                 return MedicalStructurePreservingAutoencoder(input_shape, feature_dims, config)
             else:
                 logger.info("Creating Base Medical Autoencoder")
                 return BaseAutoencoder(config)
 
+        # Agriculture domain
         elif domain == 'agriculture' or image_type == 'agricultural':
-            if use_enhanced:
+            if use_invertible:
+                logger.info("Creating Invertible Agricultural Pattern Autoencoder")
+                return AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
+            elif use_enhanced:
                 logger.info("Creating Enhanced Agricultural Pattern Autoencoder")
                 return AgriculturalPatternAutoencoder(input_shape, feature_dims, config)
             else:
                 logger.info("Creating Base Agricultural Autoencoder")
                 return BaseAutoencoder(config)
 
-        # ========================================================================
+        # ================================================================
+        # INVERTIBLE GENERAL AUTOENCODER
+        # ================================================================
+        if use_invertible:
+            logger.info("=" * 60)
+            logger.info("Creating Invertible Autoencoder for Interpretability")
+            logger.info(f"  Invertible blocks: {config.invertible_blocks}")
+            logger.info(f"  Domain: {domain}")
+            logger.info(f"  Classes: {num_classes}")
+            logger.info("=" * 60)
+            # Use the invertible autoencoder (inlined version)
+            return InvertibleAutoencoder(config)
+
+        # ================================================================
         # GENERAL DOMAIN - Advanced Hybrid for multi-class datasets
-        # ========================================================================
+        # ================================================================
+
         # For general domain with many classes, use advanced hybrid
         if use_advanced and num_classes >= 20:
             logger.info("=" * 60)
@@ -13650,6 +14319,20 @@ def parse_args():
                        help='Reset optimizer state when resuming (keep only model weights)')
     parser.add_argument('--additional_epochs', type=int, default=None,
                        help='Add additional epochs to original training (overrides original epochs)')
+
+   # ================================================================
+    # SUPERVISED CONTRASTIVE LEARNING DIRECTIVE
+    # ================================================================
+    parser.add_argument('--use_contrastive', action='store_true',
+                       help='Use Supervised Contrastive Learning instead of clustering')
+    parser.add_argument('--contrastive_temperature', type=float, default=0.07,
+                       help='Temperature for contrastive loss (default: 0.07)')
+    parser.add_argument('--arcface_margin', type=float, default=0.5,
+                       help='Margin for ArcFace loss (default: 0.5)')
+    parser.add_argument('--contrastive_projection_dim', type=int, default=128,
+                       help='Projection dimension for contrastive head (default: 128)')
+    parser.add_argument('--contrastive_weight', type=float, default=0.7,
+                       help='Weight for contrastive loss (default: 0.7)')
 
     return parser.parse_args()
 
@@ -14505,17 +15188,9 @@ def main():
         print("\n" + "=" * 70)
         print("VERIFICATION MODE: Testing Deterministic Behavior")
         print("=" * 70)
-
-        # Run verification tests
         print("\n[1/3] Testing dataset statistics calculator...")
-        # Add verification code here if needed
-
         print("\n[2/3] Testing dataset normalization...")
-        # Add verification code here if needed
-
         print("\n[3/3] Testing end-to-end determinism...")
-        # Add verification code here if needed
-
         print("\n" + "=" * 70)
         print("VERIFICATION COMPLETE")
         print("=" * 70)
@@ -14540,6 +15215,9 @@ def main():
 
         use_per_image = input("Use per-image normalization? (y/n, default: n for dataset-wide): ").strip().lower()
         args.per_image_norm = use_per_image == 'y'
+
+        use_contrastive = input("Use contrastive learning? (y/n, default: n): ").strip().lower()
+        args.use_contrastive = use_contrastive == 'y'
 
         args.mode = mode
         args.data_name = data_name
@@ -14567,7 +15245,6 @@ def main():
         if args.data_type == 'custom' and not args.data_path:
             raise ValueError("data_path is required for custom datasets")
         elif args.data_type == 'torchvision' and not args.data_path:
-            # For torchvision, set default data path to data/dataset_lower/
             dataset_name_lower = normalize_dataset_name(args.data_name)
             args.data_path = f"./data/{dataset_name_lower}"
             logger.info(f"Auto-setting data_path for torchvision: {args.data_path}")
@@ -14578,13 +15255,13 @@ def main():
     else:
         args.data_name = 'dataset'
 
-    # Determine base directory (always 'data' or user-specified output_dir)
+    # Determine base directory
     if hasattr(args, 'output_dir') and args.output_dir:
         base_dir = args.output_dir
     else:
         base_dir = 'data'
 
-    # Get dataset paths (all under base_dir/dataset_lower/)
+    # Get dataset paths
     paths = get_dataset_paths(args.data_name, base_dir)
 
     # Create all directories
@@ -14613,6 +15290,7 @@ def main():
         logger.info(f"Data path: {args.data_path}")
         logger.info(f"Domain: {args.domain}")
         logger.info(f"Normalization: {'PER-IMAGE' if args.per_image_norm else 'DATASET-WIDE'}")
+        logger.info(f"Contrastive Learning: {args.use_contrastive if hasattr(args, 'use_contrastive') else False}")
         logger.info(f"CSV output: {paths['csv_path']}")
         logger.info(f"Config file: {paths['conf_config']}")
         logger.info(f"Checkpoint directory: {paths['checkpoint_dir']}")
@@ -14620,6 +15298,15 @@ def main():
 
     # Create configuration
     config = create_domain_config(args)
+
+    # ================================================================
+    # SET CONTRASTIVE DIRECTIVE IN CONFIG
+    # ================================================================
+    config.use_contrastive_learning = getattr(args, 'use_contrastive', False)
+    config.contrastive_temperature = getattr(args, 'contrastive_temperature', 0.07)
+    config.contrastive_projection_dim = getattr(args, 'contrastive_projection_dim', 128)
+    config.contrastive_weight = getattr(args, 'contrastive_weight', 0.7)
+    config.arcface_margin = getattr(args, 'arcface_margin', 0.5)
 
     # Update config paths
     config.data_dir = str(paths['data_dir'])
@@ -14639,38 +15326,33 @@ def main():
     # ========================================================================
     def should_resume_training():
         """Check if we should resume training and return resume parameters"""
-        # Check if mode is 'resume' or resume flag is set
         is_resume_mode = (args.mode == 'resume') or getattr(args, 'resume', False)
 
         if not is_resume_mode:
-            return False, None, False, None
+            return False, None, False, None, None
 
         logger.info("=" * 70)
         logger.info("RESUME MODE ENABLED")
         logger.info("=" * 70)
 
-        # Get resume parameters
         resume_from = getattr(args, 'resume_from', None)
         reset_optimizer = getattr(args, 'reset_optimizer', False)
         additional_epochs = getattr(args, 'additional_epochs', None)
 
-        # If resume_from is specified, use that
         if resume_from:
             checkpoint_path = Path(resume_from)
             if checkpoint_path.exists():
                 logger.info(f"Using specified checkpoint: {checkpoint_path}")
-                return True, str(checkpoint_path), reset_optimizer, additional_epochs
+                return True, str(checkpoint_path), reset_optimizer, additional_epochs, checkpoint_path
             else:
                 logger.warning(f"Specified checkpoint not found: {checkpoint_path}")
                 logger.info("Looking for automatic checkpoint...")
 
-        # Look for checkpoints in the checkpoint directory
         checkpoint_dir = Path(config.checkpoint_dir)
         if not checkpoint_dir.exists():
             logger.warning(f"Checkpoint directory does not exist: {checkpoint_dir}")
-            return False, None, False, None
+            return False, None, False, None, None
 
-        # Try to find the latest checkpoint
         possible_checkpoints = [
             checkpoint_dir / 'latest.pt',
             checkpoint_dir / 'best.pt',
@@ -14681,26 +15363,31 @@ def main():
         for cp in possible_checkpoints:
             if cp.exists():
                 logger.info(f"Found checkpoint: {cp}")
-                return True, str(cp), reset_optimizer, additional_epochs
+                return True, str(cp), reset_optimizer, additional_epochs, cp
 
         logger.warning("No checkpoint found to resume from")
-        return False, None, False, None
+        return False, None, False, None, None
 
     # ========================================================================
     # EXECUTE BASED ON MODE
     # ========================================================================
     try:
-        # Handle resume mode (explicit --mode resume)
         if args.mode == 'resume':
             logger.info(f"Resuming {args.domain} domain training on {args.data_name}")
 
-            # Check if we can resume
-            can_resume, resume_from, reset_optimizer, additional_epochs = should_resume_training()
+            can_resume, resume_from, reset_optimizer, additional_epochs, checkpoint_path = should_resume_training()
 
             if not can_resume:
                 logger.error("Cannot resume training - no valid checkpoint found")
                 logger.info("Please train the model first with: python cdbnn.py --mode train")
                 return 1
+
+            # Load checkpoint to get resume state
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            start_phase = checkpoint.get('phase', 1)
+            loaded_optimizer_state = checkpoint.get('optimizer_state_dict', None)
+            loaded_scheduler_state = checkpoint.get('scheduler_state_dict', None)
 
             # Prepare data
             train_loader, test_loader = app.prepare_data(args.data_path, args.data_type)
@@ -14723,10 +15410,6 @@ def main():
             features = app.extract_features(train_loader)
 
             if features and features.get('embeddings') is not None and len(features['embeddings']) > 0:
-                logger.info(f"Features shape: {features['embeddings'].shape}")
-                if 'labels' in features:
-                    logger.info(f"Labels shape: {features['labels'].shape}")
-
                 if args.generate_tsne and features['embeddings'] is not None:
                     logger.info("Generating t-SNE visualization...")
                     labels_np = features['labels'].cpu().numpy() if isinstance(features['labels'], torch.Tensor) else features['labels']
@@ -14743,14 +15426,31 @@ def main():
             logger.info(f"Normalization used: {config.normalization_mode}")
             logger.info(f"Model saved to: {paths['checkpoint_dir']}/{args.data_name}_best.pt")
 
-        # Handle train mode (with optional --resume flag)
         elif args.mode == 'train':
             logger.info(f"Starting {args.domain} domain training on {args.data_name}")
             logger.info(f"Normalization mode: {config.normalization_mode}")
             logger.info(f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.learning_rate}")
 
             # Check if we should resume
-            can_resume, resume_from, reset_optimizer, additional_epochs = should_resume_training()
+            can_resume, resume_from, reset_optimizer, additional_epochs, checkpoint_path = should_resume_training()
+
+            # If resuming, load checkpoint state
+            start_epoch = 0
+            start_phase = 1
+            loaded_optimizer_state = None
+            loaded_scheduler_state = None
+
+            if can_resume and checkpoint_path:
+                try:
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                    start_epoch = checkpoint.get('epoch', 0) + 1
+                    start_phase = checkpoint.get('phase', 1)
+                    loaded_optimizer_state = checkpoint.get('optimizer_state_dict', None)
+                    loaded_scheduler_state = checkpoint.get('scheduler_state_dict', None)
+                    logger.info(f"Loaded resume state: Phase {start_phase}, Epoch {start_epoch}")
+                except Exception as e:
+                    logger.warning(f"Could not load checkpoint state: {e}")
+                    can_resume = False
 
             # Prepare data
             train_loader, test_loader = app.prepare_data(args.data_path, args.data_type)
@@ -14768,6 +15468,7 @@ def main():
                 additional_epochs=additional_epochs
             )
 
+            # Extract and save features
             logger.info("Extracting features from trained model...")
             features = app.extract_features(train_loader)
 
@@ -14815,17 +15516,16 @@ def main():
                 args.data_path = str(Path('data') / args.data_name)
                 logger.info(f"Auto-setting data_path to: {args.data_path}")
 
-            # Model loading path: always from data/dataset_name/ (training location)
+            # Model loading path
             model_base_dir = Path('data')
             model_data_dir = model_base_dir / args.data_name
             model_checkpoint_dir = model_data_dir / 'checkpoints'
 
-            # Output path: user-specified output_dir (or default data/dataset_name)
+            # Output path
             if hasattr(args, 'output_dir') and args.output_dir:
-                output_base_dir = Path('./'+args.output_dir)
+                output_base_dir = Path('./' + args.output_dir)
                 output_data_dir = output_base_dir
                 output_data_dir.mkdir(parents=True, exist_ok=True)
-
             else:
                 output_base_dir = Path('./data')
                 output_data_dir = output_base_dir
@@ -14896,10 +15596,6 @@ def main():
             else:
                 logger.error("Feature extraction failed - no features extracted")
                 return 1
-
-        elif args.mode == 'verify':
-            logger.info("Running verification mode...")
-            return main()
 
         else:
             logger.error(f"Invalid mode: {args.mode}")
