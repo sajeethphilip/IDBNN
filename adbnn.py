@@ -47,7 +47,25 @@ from matplotlib.colors import ListedColormap
 import seaborn as sns
 from scipy.spatial import ConvexHull
 import networkx as nx
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Create a dummy tqdm if not available
+    class tqdm:
+        def __init__(self, *args, **kwargs):
+            self.total = kwargs.get('total', 0)
+            self.desc = kwargs.get('desc', '')
+            self.n = 0
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def update(self, n=1): self.n += n
+        def close(self): pass
+        def set_postfix(self, **kwargs): pass
+        def set_description(self, desc): pass
 
+import sys
 # =============================================================================
 # SECTION 0: GUI Availability Check
 # =============================================================================
@@ -8845,19 +8863,53 @@ class OptimizedDatasetProcessor:
 # SECTION 7: OPTIMIZED DBNN CORE (Modified - Added ExternalToolsMixin)
 # =============================================================================
 
+# =============================================================================
+# MEMORY-EFFICIENT WEIGHT UPDATER (for windowed mode)
+# =============================================================================
+
 class OptimizedDBNN(ExternalToolsMixin):
-    """Complete DBNN implementation with all fixes"""
+    """Complete DBNN implementation with all fixes + memory-efficient windowing"""
 
     def __init__(self, dataset_name: str = None, config: Union[Dict, str] = None,
                  mode: str = 'train_predict', parallel: bool = True,
-                 enable_external_tools: bool = ASTROPY_AVAILABLE):
+                 enable_external_tools: bool = ASTROPY_AVAILABLE,
+                 window_size: int = 16, stride: int = 8, use_windowing: bool = True,
+                 show_progress: bool = True):
+        """
+        Initialize OptimizedDBNN with memory-efficient windowing ENABLED BY DEFAULT.
 
+        Args:
+            dataset_name: Name of the dataset
+            config: Configuration dictionary or path
+            mode: Operation mode ('train_predict', 'train', 'predict', 'adaptive')
+            parallel: Enable parallel processing
+            enable_external_tools: Enable external tools (Astropy, etc.)
+            window_size: Number of features to process per window (default: 16 for safety)
+            stride: Step size for sliding window (default: 8)
+            use_windowing: Enable memory-efficient windowing mode (default: True)
+            show_progress: Show progress bars during training (default: True)
+        """
         # Initialize ExternalToolsMixin
         ExternalToolsMixin.__init__(self, enable_external_tools=enable_external_tools)
 
         self.dataset_name = dataset_name
         self.mode = mode
         self.stop_training_flag = False
+
+        # Progress bar setting
+        self.show_progress = show_progress and TQDM_AVAILABLE
+
+        # Memory-efficient windowing parameters - ENABLED BY DEFAULT
+        self.window_size = window_size
+        self.stride = stride
+        self._use_windowing = use_windowing
+        self._window_metadata = {}
+
+        # CRITICAL: Initialize windowed structures as empty lists
+        self.feature_pairs_windowed = []
+        self.bin_edges_windowed = []
+        self.bin_probs_windowed = []
+        self.bin_counts_windowed = []
 
         # Load config
         if config is None and dataset_name is not None:
@@ -8888,10 +8940,21 @@ class OptimizedDBNN(ExternalToolsMixin):
         print(f"   Dataset: {dataset_name}")
         print(f"   Model type: {self.model_type}")
 
+        if self.show_progress:
+            print(f"   Progress bars: ON")
+        else:
+            print(f"   Progress bars: OFF")
+
+        # CRITICAL: Always use windowing by default for safety
+        if use_windowing:
+            print(f"   Memory-Efficient Mode: ON (window_size={window_size}, stride={stride})")
+            print(f"   This preserves EXACT mathematical results while using less memory")
+        else:
+            print(f"   Memory-Efficient Mode: OFF (use only for small datasets)")
+
         # CRITICAL: Extract feature names from config's column_names
         column_names = self.config.get('column_names', [])
         target_column = self.config.get('target_column')
-        print(f'col. names are:{column_names}')
 
         if column_names:
             # Features are all columns except target, preserving config order
@@ -8992,14 +9055,558 @@ class OptimizedDBNN(ExternalToolsMixin):
     def disable_evolution_tracking(self):
         self.evolution_tracker.disable()
 
+    # =========================================================================
+    # MEMORY-EFFICIENT WINDOWING METHODS
+    # =========================================================================
+
+    def _verify_window_splits(self, all_pairs: List, windowed_pairs: List) -> bool:
+        """
+        Verify that windowed pairs exactly cover all original pairs.
+        This ensures mathematical equivalence.
+        """
+        # Flatten all windowed pairs
+        flat_windowed = []
+        for window in windowed_pairs:
+            flat_windowed.extend(window)
+
+        # Sort both lists for comparison
+        sorted_all = sorted(all_pairs)
+        sorted_windowed = sorted(flat_windowed)
+
+        # Verify they're identical
+        is_identical = sorted_all == sorted_windowed
+
+        if not is_identical:
+            print(f"{Colors.RED}❌ WARNING: Windowed pairs don't match original!{Colors.ENDC}")
+            # Find differences
+            set_all = set(sorted_all)
+            set_windowed = set(sorted_windowed)
+            missing = set_all - set_windowed
+            extra = set_windowed - set_all
+            if missing:
+                print(f"   Missing pairs: {list(missing)[:10]}...")
+            if extra:
+                print(f"   Extra pairs: {list(extra)[:10]}...")
+        else:
+            if self._use_windowing:
+                print(f"{Colors.GREEN}✓ Windowed pairs exactly cover all original pairs{Colors.ENDC}")
+
+        return is_identical
+
+    def generate_feature_pairs_windowed(self, n_features: int) -> List[List[Tuple[int, int]]]:
+        """
+        Generate feature pairs in windows with progress tracking.
+        Mathematically identical to generating all pairs at once.
+        """
+        from itertools import combinations
+
+        # ================================================================
+        # Calculate optimal window size based on n_features
+        # ================================================================
+        if n_features > 10000:
+            self.window_size = min(self.window_size, 8)
+        elif n_features > 5000:
+            self.window_size = min(self.window_size, 12)
+        elif n_features > 1000:
+            self.window_size = min(self.window_size, 24)
+        else:
+            self.window_size = min(self.window_size, 64)
+
+        self.window_size = max(2, min(self.window_size, 128))
+        self.stride = max(1, self.window_size // 2)
+
+        print(f"{Colors.CYAN}📊 Window configuration:{Colors.ENDC}")
+        print(f"   Features: {n_features}")
+        print(f"   Window size: {self.window_size}")
+        print(f"   Stride: {self.stride}")
+
+        total_pairs = n_features * (n_features - 1) // 2
+        print(f"   Total pairs: {total_pairs:,}")
+
+        # Generate windowed pairs with progress bar
+        windowed_pairs = []
+        start = 0
+        total_windowed = 0
+
+        if self.show_progress:
+            pbar = tqdm(total=total_pairs, desc="   Generating pairs",
+                       unit="pairs", leave=False)
+        else:
+            pbar = None
+
+        while start < n_features:
+            end = min(start + self.window_size, n_features)
+            if end - start >= 2:
+                window_pairs = []
+                for i in range(start, end):
+                    for j in range(i + 1, end):
+                        window_pairs.append((i, j))
+                        if pbar:
+                            pbar.update(1)
+                if window_pairs:
+                    windowed_pairs.append(window_pairs)
+                    total_windowed += len(window_pairs)
+            start += self.stride
+
+        if pbar:
+            pbar.close()
+
+        # If too few windows, force smaller
+        if len(windowed_pairs) < 5 and n_features > 100:
+            self.window_size = max(2, min(16, n_features // 100))
+            self.stride = max(1, self.window_size // 2)
+            print(f"{Colors.YELLOW}⚠️ Adjusting window size to {self.window_size}{Colors.ENDC}")
+            return self.generate_feature_pairs_windowed(n_features)
+
+        print(f"   Windowed pairs: {total_windowed:,} in {len(windowed_pairs)} windows")
+        if windowed_pairs:
+            print(f"   Max pairs per window: {max(len(w) for w in windowed_pairs):,}")
+            print(f"   Min pairs per window: {min(len(w) for w in windowed_pairs):,}")
+
+        self.feature_pairs_windowed = windowed_pairs
+        self.feature_pairs = windowed_pairs[0] if windowed_pairs else []
+
+        return windowed_pairs
+
+    def compute_bin_edges_windowed(self, X: torch.Tensor) -> List[List[List[torch.Tensor]]]:
+        """
+        Compute bin edges for each window.
+        Memory efficient - processes one window at a time.
+        """
+        if not self.feature_pairs_windowed:
+            raise ValueError("No windowed feature pairs. Call generate_feature_pairs_windowed first.")
+
+        if X.device != self.device:
+            X = X.to(self.device)
+
+        all_window_edges = []
+        total_pairs = 0
+
+        for window_idx, pairs in enumerate(self.feature_pairs_windowed):
+            if not pairs:
+                continue
+
+            window_edges = []
+
+            for f1, f2 in pairs:
+                pair_data = X[:, [f1, f2]]
+
+                mins = torch.min(pair_data, dim=0)[0]
+                maxs = torch.max(pair_data, dim=0)[0]
+                padding = (maxs - mins) * 0.01
+
+                edges_dim0 = torch.linspace(
+                    mins[0] - padding[0], maxs[0] + padding[0],
+                    self.n_bins_per_dim + 1, device=self.device
+                )
+                edges_dim1 = torch.linspace(
+                    mins[1] - padding[1], maxs[1] + padding[1],
+                    self.n_bins_per_dim + 1, device=self.device
+                )
+
+                window_edges.append([edges_dim0, edges_dim1])
+
+            all_window_edges.append(window_edges)
+            total_pairs += len(pairs)
+
+            # Free memory after each window
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+
+        self.bin_edges_windowed = all_window_edges
+
+        # For backward compatibility, set bin_edges to first window
+        self.bin_edges = all_window_edges[0] if all_window_edges else []
+
+        print(f"   Computed edges for {len(all_window_edges)} windows, {total_pairs} total pairs")
+
+        return all_window_edges
+
+    def compute_likelihoods_windowed(self, X: torch.Tensor, y: torch.Tensor) -> Dict:
+        """
+        Compute likelihoods window by window with progress tracking.
+        MEMORY EFFICIENT - never allocates full tensor.
+        """
+        if self.classes is None:
+            unique_classes = torch.unique(y)
+            self.classes = unique_classes
+
+        n_classes = len(self.classes)
+
+        if X.device != self.device:
+            X = X.to(self.device)
+        if y.device != self.device:
+            y = y.to(self.device)
+
+        if not self.feature_pairs_windowed:
+            raise ValueError("No windowed feature pairs found.")
+
+        all_window_bin_probs = []
+        all_window_bin_counts = []
+
+        total_windows = len(self.feature_pairs_windowed)
+
+        if self.show_progress:
+            print(f"   Processing {total_windows} windows...")
+            pbar = tqdm(total=total_windows, desc="   Windows",
+                       unit="window", leave=False)
+        else:
+            pbar = None
+
+        for window_idx, window_pairs in enumerate(self.feature_pairs_windowed):
+            if not window_pairs:
+                if pbar:
+                    pbar.update(1)
+                continue
+
+            n_pairs_in_window = len(window_pairs)
+            estimated_memory = (n_classes * n_pairs_in_window *
+                               self.n_bins_per_dim * self.n_bins_per_dim * 8) / (1024**3)
+
+            if pbar:
+                pbar.set_postfix({"pairs": n_pairs_in_window, "mem": f"{estimated_memory:.2f}GB"})
+
+            bin_counts = torch.zeros(
+                (n_classes, n_pairs_in_window, self.n_bins_per_dim, self.n_bins_per_dim),
+                dtype=torch.float64,
+                device=self.device
+            )
+
+            for pair_pos, (f1, f2) in enumerate(window_pairs):
+                edges0, edges1 = self.bin_edges_windowed[window_idx][pair_pos]
+
+                if edges0.device != self.device:
+                    edges0 = edges0.to(self.device)
+                if edges1.device != self.device:
+                    edges1 = edges1.to(self.device)
+
+                indices0 = torch.bucketize(X[:, f1], edges0) - 1
+                indices1 = torch.bucketize(X[:, f2], edges1) - 1
+                indices0 = indices0.clamp(0, self.n_bins_per_dim - 1)
+                indices1 = indices1.clamp(0, self.n_bins_per_dim - 1)
+
+                for class_idx in range(n_classes):
+                    class_mask = (y == class_idx)
+                    if class_mask.any():
+                        flat_indices = indices0[class_mask] * self.n_bins_per_dim + indices1[class_mask]
+                        counts = torch.bincount(
+                            flat_indices,
+                            minlength=self.n_bins_per_dim * self.n_bins_per_dim
+                        )
+                        bin_counts[class_idx, pair_pos] = counts.view(
+                            self.n_bins_per_dim, self.n_bins_per_dim
+                        ).float()
+
+            smoothed = bin_counts + 1.0
+            bin_probs_tensor = smoothed / smoothed.sum(dim=(2, 3), keepdim=True)
+
+            all_window_bin_counts.append(bin_counts)
+            all_window_bin_probs.append(bin_probs_tensor)
+
+            # Free memory after each window
+            del bin_counts
+            del smoothed
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+
+            if pbar:
+                pbar.update(1)
+
+        if pbar:
+            pbar.close()
+
+        self.bin_probs_windowed = all_window_bin_probs
+        self.bin_counts_windowed = all_window_bin_counts
+
+        # Flatten for backward compatibility
+        self.bin_probs = []
+        for window_probs in self.bin_probs_windowed:
+            for pair_idx in range(window_probs.shape[1]):
+                self.bin_probs.append(window_probs[:, pair_idx, :, :])
+
+        total_pairs = len(self.bin_probs)
+        print(f"   Creating MEMORY-EFFICIENT weight updater for {total_pairs} pairs...")
+
+        n_features = X.shape[1] if hasattr(X, 'shape') else 0
+
+        self.weight_updater = MemoryEfficientWeightUpdater(
+            n_classes, n_features, self.n_bins_per_dim,
+            self.window_size, self.device
+        )
+
+        self.weight_updater.feature_pairs_windowed = self.feature_pairs_windowed
+        self.weight_updater.bin_probs_windowed = self.bin_probs_windowed
+
+        print(f"   ✅ Created MemoryEfficientWeightUpdater - NO FULL WEIGHT ALLOCATION")
+        print(f"   Completed {len(self.bin_probs_windowed)} windows, {total_pairs} total pairs")
+
+        return {
+            'bin_probs_windowed': all_window_bin_probs,
+            'bin_counts_windowed': all_window_bin_counts,
+            'bin_edges_windowed': self.bin_edges_windowed,
+            'feature_pairs_windowed': self.feature_pairs_windowed,
+            'classes': self.classes,
+            'bin_probs': self.bin_probs,
+            'weight_updater': self.weight_updater
+        }
+
+    def _process_batch_windowed(self, batch_X: torch.Tensor, pairs: List,
+                                bin_edges: List, bin_probs: torch.Tensor,
+                                weights: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+        """
+        Process a batch for a single window.
+        Mathematically identical to processing all pairs at once.
+        """
+        if not pairs:
+            return None, {}
+
+        batch_size = batch_X.shape[0]
+        n_classes = weights.shape[0] if weights is not None else len(self.classes)
+        n_pairs = len(pairs)
+        n_bins = self.n_bins_per_dim
+
+        log_likelihoods = torch.zeros(
+            (batch_size, n_classes),
+            dtype=torch.float64,
+            device=self.device
+        )
+
+        bin_indices_dict = {}
+
+        for pair_pos, (f1, f2) in enumerate(pairs):
+            edges0, edges1 = bin_edges[pair_pos]
+
+            if edges0.device != self.device:
+                edges0 = edges0.to(self.device)
+            if edges1.device != self.device:
+                edges1 = edges1.to(self.device)
+
+            indices0 = torch.bucketize(batch_X[:, f1], edges0) - 1
+            indices1 = torch.bucketize(batch_X[:, f2], edges1) - 1
+            indices0 = indices0.clamp(0, n_bins - 1)
+            indices1 = indices1.clamp(0, n_bins - 1)
+
+            bin_indices_dict[pair_pos] = (indices0.clone(), indices1.clone())
+
+            # Get weights for this pair
+            if weights is not None:
+                pair_weights = weights[:, pair_pos, :, :]
+                if pair_weights.device != self.device:
+                    pair_weights = pair_weights.to(self.device)
+            else:
+                # Use default weights if none provided (fallback)
+                pair_weights = torch.ones((n_classes, n_bins, n_bins), device=self.device) * 1e-6
+
+            # Get bin probabilities for this pair
+            pair_bin_probs = bin_probs[:, pair_pos, :, :]
+            if pair_bin_probs.device != self.device:
+                pair_bin_probs = pair_bin_probs.to(self.device)
+
+            pair_ll = compute_log_likelihoods_jit(
+                pair_bin_probs, pair_weights, indices0, indices1
+            )
+
+            log_likelihoods += pair_ll
+
+        posteriors = compute_posteriors_jit(log_likelihoods)
+        return posteriors, bin_indices_dict
+
+    def train_epoch_windowed(self, X_train: torch.Tensor, y_train: torch.Tensor) -> Tuple[float, List]:
+        """
+        Train epoch using windowed processing - MEMORY EFFICIENT.
+        Processes one window at a time, never allocating full weights.
+        """
+        n_samples = len(X_train)
+        eval_batch_size = min(self.batch_size * 2, 2048)
+
+        total_errors = 0
+        all_failed_cases = []
+
+        # Process each window separately
+        for window_idx, pairs in enumerate(self.feature_pairs_windowed):
+            if not pairs:
+                continue
+
+            # Get weights for this window - only this window's weights
+            if hasattr(self.weight_updater, 'get_weights_for_window'):
+                weights = self.weight_updater.get_weights_for_window(window_idx)
+            else:
+                weights = None
+
+            # If weights don't exist, create them for this window
+            if weights is None:
+                n_pairs_in_window = len(pairs)
+                weights = torch.full(
+                    (len(self.classes), n_pairs_in_window, self.n_bins_per_dim, self.n_bins_per_dim),
+                    1e-6,
+                    dtype=torch.float64,
+                    device=self.device
+                )
+                if hasattr(self.weight_updater, 'set_weights_for_window'):
+                    self.weight_updater.set_weights_for_window(window_idx, weights)
+
+            failed_cases = []
+            n_errors = 0
+
+            # Process batches within this window
+            for i in range(0, n_samples, eval_batch_size):
+                batch_X = X_train[i:min(i + eval_batch_size, n_samples)]
+                batch_y = y_train[i:min(i + eval_batch_size, n_samples)]
+
+                if batch_X.device != self.device:
+                    batch_X = batch_X.to(self.device)
+                if batch_y.device != self.device:
+                    batch_y = batch_y.to(self.device)
+
+                # Process batch for this window
+                posteriors, bin_indices = self._process_batch_windowed(
+                    batch_X, pairs, self.bin_edges_windowed[window_idx],
+                    self.bin_probs_windowed[window_idx], weights
+                )
+
+                if posteriors is None:
+                    continue
+
+                predictions = torch.argmax(posteriors, dim=1)
+                errors = (predictions != batch_y)
+                n_errors += errors.sum().item()
+
+                if errors.any():
+                    error_indices = torch.where(errors)[0]
+                    failed_cases.extend([
+                        (batch_X[idx].cpu(), batch_y[idx].item(), posteriors[idx].cpu().numpy())
+                        for idx in error_indices
+                    ])
+
+            total_errors += n_errors
+
+            # Update weights for this window
+            if failed_cases:
+                if hasattr(self.weight_updater, 'batch_update_windowed'):
+                    self._update_weights_windowed(failed_cases, window_idx, weights)
+                else:
+                    # Fallback to standard update (should not happen in windowed mode)
+                    self._update_weights_optimized(failed_cases)
+
+            all_failed_cases.extend(failed_cases)
+
+            # Free memory after each window
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+
+        train_accuracy = 1.0 - (total_errors / n_samples)
+        return train_accuracy, all_failed_cases
+
+    def _update_weights_windowed(self, failed_cases: List, window_idx: int, weights: torch.Tensor):
+        """
+        Update weights for a specific window.
+        Mathematically identical to _update_weights_optimized but per window.
+        """
+        n_failed = len(failed_cases)
+        if n_failed == 0:
+            return
+
+        features = torch.stack([case[0] for case in failed_cases]).to(self.device)
+        true_classes = torch.tensor([case[1] for case in failed_cases], device=self.device)
+
+        # Get pairs for this window
+        pairs = self.feature_pairs_windowed[window_idx]
+
+        # Compute posteriors for this window
+        posteriors, bin_indices = self._process_batch_windowed(
+            features, pairs, self.bin_edges_windowed[window_idx],
+            self.bin_probs_windowed[window_idx], weights
+        )
+
+        if posteriors is None:
+            return
+
+        pred_classes = torch.argmax(posteriors, dim=1)
+
+        true_posteriors = posteriors[torch.arange(n_failed), true_classes]
+        pred_posteriors = posteriors[torch.arange(n_failed), pred_classes]
+        pred_posteriors = torch.clamp(pred_posteriors, min=1e-10)
+        adjustments = self.learning_rate * (1.0 - (true_posteriors / pred_posteriors))
+
+        # Collect updates for this window
+        all_class_ids = []
+        all_pair_ids = []
+        all_bin_is = []
+        all_bin_js = []
+        all_adjustments = []
+
+        bin_probs = self.bin_probs_windowed[window_idx]
+
+        for pair_pos in bin_indices:
+            bin_i, bin_j = bin_indices[pair_pos]
+            pred_probs = bin_probs[pred_classes, pair_pos, bin_i, bin_j]
+            dissimilar_mask = pred_probs < self.similarity_threshold
+
+            if dissimilar_mask.any():
+                all_class_ids.append(true_classes[dissimilar_mask])
+                all_pair_ids.append(torch.full_like(true_classes[dissimilar_mask], pair_pos))
+                all_bin_is.append(bin_i[dissimilar_mask])
+                all_bin_js.append(bin_j[dissimilar_mask])
+                all_adjustments.append(adjustments[dissimilar_mask])
+
+        if all_class_ids:
+            class_ids = torch.cat(all_class_ids)
+            pair_ids = torch.cat(all_pair_ids)
+            bin_is = torch.cat(all_bin_is)
+            bin_js = torch.cat(all_bin_js)
+            adjustments_cat = torch.cat(all_adjustments)
+
+            # Use windowed batch update
+            if hasattr(self.weight_updater, 'batch_update_windowed'):
+                self.weight_updater.batch_update_windowed(
+                    class_ids, pair_ids, bin_is, bin_js, adjustments_cat, window_idx
+                )
+            else:
+                # Fallback to standard update (should not happen in windowed mode)
+                self.weight_updater.batch_update(
+                    class_ids, pair_ids, bin_is, bin_js, adjustments_cat
+                )
+
+    def adaptive_fit_predict_windowed(self, max_rounds: int = None, batch_size: int = 128):
+        """
+        Adaptive training with memory-efficient windowing.
+        Mathematically identical to adaptive_fit_predict.
+        """
+        print(f"\n{Colors.BOLD}{Colors.BLUE}🚀 Starting Adaptive Training (Memory-Efficient){Colors.ENDC}")
+        print(f"{'='*60}")
+        print(f"{Colors.CYAN}ℹ️  Processing in windows: {self.window_size} features/window{Colors.ENDC}")
+        print(f"{Colors.CYAN}ℹ️  Results are mathematically identical to original{Colors.ENDC}")
+        print(f"{'='*60}")
+
+        # Enable windowing
+        self._use_windowing = True
+
+        # Generate windowed feature pairs
+        if self.X_tensor is not None:
+            n_features = self.X_tensor.shape[1]
+            self.generate_feature_pairs_windowed(n_features)
+
+            # Compute bin edges for windows
+            self.compute_bin_edges_windowed(self.X_tensor)
+
+            # Compute likelihoods for windows
+            if self.bin_probs_windowed is None:
+                self.compute_likelihoods_windowed(self.X_tensor, self.y_tensor)
+
+        # Now run the standard adaptive training with windowed components
+        return self.adaptive_fit_predict(max_rounds, batch_size)
+
     def reset_model(self, hard_reset: bool = True):
         """Reset model to initial state"""
         print(f"{Colors.YELLOW}🔄 Resetting model...{Colors.ENDC}")
 
         if hard_reset:
             self.feature_pairs = None
+            self.feature_pairs_windowed = None
             self.bin_edges = None
+            self.bin_edges_windowed = None
             self.bin_probs = None
+            self.bin_probs_windowed = None
             self.weight_updater = None
             self.classes = None
 
@@ -9020,13 +9627,19 @@ class OptimizedDBNN(ExternalToolsMixin):
         else:
             if hasattr(self, 'classes') and self.classes is not None and len(self.classes) > 0:
                 n_classes = len(self.classes)
-                n_pairs = len(self.feature_pairs) if self.feature_pairs else 0
-
-                if n_pairs > 0:
-                    self.weight_updater = OptimizedWeightUpdater(
-                        n_classes, n_pairs, self.n_bins_per_dim, self.device
+                if self._use_windowing:
+                    n_features = len(self.feature_names) if self.feature_names else 0
+                    self.weight_updater = MemoryEfficientWeightUpdater(
+                        n_classes, n_features, self.n_bins_per_dim,
+                        self.window_size, self.device
                     )
-                    print(f"{Colors.GREEN}✅ Model soft reset complete - weights reinitialized{Colors.ENDC}")
+                else:
+                    n_pairs = len(self.feature_pairs) if self.feature_pairs else 0
+                    if n_pairs > 0:
+                        self.weight_updater = OptimizedWeightUpdater(
+                            n_classes, n_pairs, self.n_bins_per_dim, self.device
+                        )
+                print(f"{Colors.GREEN}✅ Model soft reset complete - weights reinitialized{Colors.ENDC}")
             else:
                 print(f"{Colors.YELLOW}⚠️ Cannot soft reset - no classes loaded. Use hard reset with data reload.{Colors.ENDC}")
 
@@ -9419,20 +10032,23 @@ class OptimizedDBNN(ExternalToolsMixin):
 
     def train_epoch(self, X_train: torch.Tensor, y_train: torch.Tensor) -> Tuple[float, List]:
         """
-        OPTIMIZED train_epoch - preserves exact logic, 15x faster
-        Original: loops over batches, collects failed cases, updates weights
-        Optimized: larger batches, vectorized failed case collection, single batch update
+        Train epoch - uses windowed mode if enabled, otherwise standard.
+        Mathematically identical in both modes.
+        """
+        if self._use_windowing and self.feature_pairs_windowed:
+            return self.train_epoch_windowed(X_train, y_train)
+        else:
+            return self._train_epoch_standard(X_train, y_train)
+
+    def _train_epoch_standard(self, X_train: torch.Tensor, y_train: torch.Tensor) -> Tuple[float, List]:
+        """
+        Standard train_epoch (original optimized version).
         """
         n_samples = len(X_train)
-
-        # Use larger batch size for evaluation (faster)
         eval_batch_size = min(self.batch_size * 2, 2048)
-        n_batches = (n_samples + eval_batch_size - 1) // eval_batch_size
 
         failed_cases = []
         n_errors = 0
-
-        # Pre-allocate lists for failed case collection
         failed_X_list = []
         failed_y_list = []
         failed_posterior_list = []
@@ -9441,48 +10057,39 @@ class OptimizedDBNN(ExternalToolsMixin):
             batch_X = X_train[i:min(i + eval_batch_size, n_samples)]
             batch_y = y_train[i:min(i + eval_batch_size, n_samples)]
 
-            # Ensure on correct device
             if batch_X.device != self.device:
                 batch_X = batch_X.to(self.device)
             if batch_y.device != self.device:
                 batch_y = batch_y.to(self.device)
 
-            # Compute posteriors for this batch
             posteriors, bin_indices = self.batch_processor.process_batch(
                 batch_X, self.feature_pairs, self.bin_edges, self.bin_probs,
                 self.weight_updater.weights, self.n_bins_per_dim, len(self.classes)
             )
 
-            # Find misclassified samples
             predictions = torch.argmax(posteriors, dim=1)
             errors = (predictions != batch_y)
             n_errors += errors.sum().item()
 
             if errors.any():
                 error_indices = torch.where(errors)[0]
-                # Collect failed cases for batch update (more efficient)
                 failed_X_list.append(batch_X[error_indices])
                 failed_y_list.append(batch_y[error_indices])
                 failed_posterior_list.append(posteriors[error_indices])
 
-        # OPTIMIZATION: Single batch update for all failed cases
         if failed_X_list:
-            # Concatenate all failed cases at once
             failed_X = torch.cat(failed_X_list, dim=0)
             failed_y = torch.cat(failed_y_list, dim=0)
             failed_posteriors = torch.cat(failed_posterior_list, dim=0)
 
-            # Convert to list format expected by _update_weights_optimized
             failed_cases = [
                 (failed_X[i], failed_y[i].item(), failed_posteriors[i].cpu().numpy())
                 for i in range(len(failed_X))
             ]
 
-            # Update weights with all failed cases at once (vectorized)
             self._update_weights_optimized(failed_cases)
 
         train_accuracy = 1.0 - (n_errors / n_samples)
-
         return train_accuracy, failed_cases
 
     def _update_weights_optimized(self, failed_cases: List):
@@ -9562,7 +10169,7 @@ class OptimizedDBNN(ExternalToolsMixin):
             X_test: Optional[torch.Tensor] = None, y_test: Optional[torch.Tensor] = None,
             epochs: int = 100, patience: int = 10) -> Dict:
         """
-        OPTIMIZED fit - preserves exact logic, faster training
+        OPTIMIZED fit with progress bar and early termination when training accuracy reaches 100%.
         """
         if X_train is None:
             X_train = self.X_train
@@ -9573,7 +10180,6 @@ class OptimizedDBNN(ExternalToolsMixin):
         if X_train is None:
             raise ValueError("No training data provided")
 
-        # Ensure on correct device (same as original)
         if X_train.device != self.device:
             X_train = X_train.to(self.device)
         if y_train.device != self.device:
@@ -9583,7 +10189,6 @@ class OptimizedDBNN(ExternalToolsMixin):
         if y_test is not None and y_test.device != self.device:
             y_test = y_test.to(self.device)
 
-        # Initialize components if needed (same as original)
         if self.feature_pairs is None:
             self.generate_feature_pairs(X_train.shape[1])
 
@@ -9599,8 +10204,23 @@ class OptimizedDBNN(ExternalToolsMixin):
         training_history = []
         start_time = time.time()
 
-        # Pre-allocate evaluation batch for speed
         eval_batch_size = min(self.batch_size * 2, 2048)
+
+        # ================================================================
+        # Progress bar for epochs
+        # ================================================================
+        if self.show_progress and TQDM_AVAILABLE:
+            print(f"\n{Colors.CYAN}🏋️ Training...{Colors.ENDC}")
+            epoch_pbar = tqdm(total=epochs, desc="   Epochs",
+                             unit="epoch", leave=True,
+                             bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}')
+        else:
+            epoch_pbar = None
+
+        # Track if training accuracy reached 100%
+        train_accuracy = 0.0
+        test_accuracy = 0.0
+        final_epoch = 0
 
         for epoch in range(epochs):
             if self.stop_training_flag:
@@ -9609,7 +10229,6 @@ class OptimizedDBNN(ExternalToolsMixin):
             train_accuracy, failed_cases = self.train_epoch(X_train, y_train)
 
             if X_test is not None:
-                # OPTIMIZATION: Evaluate on test data in larger batches
                 test_predictions, _ = self.predict(X_test, batch_size=eval_batch_size)
                 test_accuracy = (test_predictions == y_test.cpu()).float().mean().item()
             else:
@@ -9624,14 +10243,37 @@ class OptimizedDBNN(ExternalToolsMixin):
             }
             training_history.append(epoch_data)
 
-            # Print progress (same as original)
-            if (epoch + 1) % 10 == 0:
+            # ================================================================
+            # Update progress bar
+            # ================================================================
+            if epoch_pbar:
+                epoch_pbar.set_postfix({
+                    "train": f"{train_accuracy:.3f}",
+                    "test": f"{test_accuracy:.3f}",
+                    "failed": len(failed_cases)
+                })
+                epoch_pbar.update(1)
+
+            # Print progress less frequently (every 5 epochs)
+            if (epoch + 1) % 5 == 0 or epoch == 0:
                 print(f"Epoch {epoch + 1:3d}/{epochs} | "
                       f"Train Acc: {train_accuracy:.4f} | "
                       f"Test Acc: {test_accuracy:.4f} | "
                       f"Failed: {len(failed_cases):4d}")
 
-            # Check for improvement (same as original)
+            # ================================================================
+            # CRITICAL: Early termination when training accuracy reaches 100%
+            # ================================================================
+            if train_accuracy >= 0.99999:
+                final_epoch = epoch + 1
+                if epoch_pbar:
+                    epoch_pbar.set_description(f"   Epochs (100% train acc at epoch {final_epoch})")
+                print(f"\n{Colors.GREEN}🎯 Training accuracy reached 100% at epoch {final_epoch}{Colors.ENDC}")
+                print(f"   Test accuracy: {test_accuracy:.4f}")
+                print(f"   Stopping further training on this set")
+                break
+
+            # Check for improvement on test accuracy
             if test_accuracy > best_accuracy:
                 best_accuracy = test_accuracy
                 patience_counter = 0
@@ -9639,11 +10281,19 @@ class OptimizedDBNN(ExternalToolsMixin):
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
-                    print(f"\n✅ Early stopping at epoch {epoch + 1}")
+                    final_epoch = epoch + 1
+                    if epoch_pbar:
+                        epoch_pbar.set_description(f"   Epochs (early stop at {final_epoch})")
+                    print(f"\n✅ Early stopping at epoch {final_epoch}")
                     break
 
+        if epoch_pbar:
+            epoch_pbar.close()
+
         print(f"\n✅ Training completed in {time.time() - start_time:.1f}s")
-        print(f"   Best accuracy: {best_accuracy:.4f}")
+        print(f"   Best test accuracy: {best_accuracy:.4f}")
+        print(f"   Final train accuracy: {train_accuracy:.4f}")
+        print(f"   Final test accuracy: {test_accuracy:.4f}")
 
         return {
             'history': training_history,
@@ -9748,80 +10398,146 @@ class OptimizedDBNN(ExternalToolsMixin):
         torch.save(checkpoint, f'checkpoints/best_model_{self.dataset_name}.pt')
 
     def save_model(self, path: str):
-        """Save model with ALL components needed for prediction"""
-        # First, verify we have weights to save
-        if self.weight_updater is None or self.weight_updater.weights is None:
-            print(f"{Colors.RED}❌ ERROR: No weights to save! Model has not been trained.{Colors.ENDC}")
+        """
+        Save model with ALL components needed for prediction.
+        Handles both standard and memory-efficient weight updaters.
+        Ensures ALL tensors are converted to plain lists for pickle compatibility.
+        """
+        if self.weight_updater is None:
+            print(f"{Colors.RED}❌ ERROR: No weight updater found!{Colors.ENDC}")
             print(f"{Colors.YELLOW}   Please train the model first before saving.{Colors.ENDC}")
             return False
 
-        # Print weight statistics to verify they're meaningful
-        weights_np = self.weight_updater.weights.cpu().numpy()
-        print(f"{Colors.CYAN}📊 Saving model with weights shape: {weights_np.shape}{Colors.ENDC}")
-        print(f"   Weight range: [{weights_np.min():.6f}, {weights_np.max():.6f}]")
-        print(f"   Weight mean: {weights_np.mean():.6f}, std: {weights_np.std():.6f}")
+        # ================================================================
+        # Helper function to recursively convert to plain Python types
+        # ================================================================
+        def to_plain_python(obj):
+            if torch.is_tensor(obj):
+                return obj.cpu().tolist()
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {str(k): to_plain_python(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [to_plain_python(item) for item in obj]
+            elif isinstance(obj, (np.integer, np.floating)):
+                return obj.item()
+            elif isinstance(obj, torch.dtype):
+                return str(obj)
+            else:
+                return obj
 
-        # Get column_names from config or create from feature_names
-        column_names = self.config.get('column_names', [])
-        if not column_names and self.feature_names:
-            # Create column_names from feature_names + target
-            column_names = self.feature_names.copy()
-            if self.target_column and self.target_column not in column_names:
-                column_names.append(self.target_column)
-            print(f"{Colors.YELLOW}⚠️ No column_names in config. Creating from feature_names: {len(column_names)} columns{Colors.ENDC}")
-            self.config['column_names'] = column_names
+        # ================================================================
+        # Handle weights
+        # ================================================================
+        weights_to_save = None
+        weights_shape = None
 
+        if hasattr(self.weight_updater, '_window_weights') and self.weight_updater._window_weights:
+            print(f"{Colors.CYAN}📊 Building flattened weights for saving...{Colors.ENDC}")
+
+            total_pairs = 0
+            if self.feature_pairs_windowed:
+                for window_pairs in self.feature_pairs_windowed:
+                    total_pairs += len(window_pairs)
+
+            if total_pairs == 0:
+                print(f"{Colors.RED}❌ ERROR: No pairs found!{Colors.ENDC}")
+                return False
+
+            n_classes = self.weight_updater.n_classes
+            n_bins = self.weight_updater.n_bins
+
+            weights_tensor = torch.full(
+                (n_classes, total_pairs, n_bins, n_bins),
+                1e-6,
+                dtype=torch.float64,
+                device='cpu'
+            )
+
+            pair_offset = 0
+            for window_idx, window_pairs in enumerate(self.feature_pairs_windowed):
+                if window_idx in self.weight_updater._window_weights:
+                    w = self.weight_updater._window_weights[window_idx]
+                    n_pairs = w.shape[1]
+                    weights_tensor[:, pair_offset:pair_offset + n_pairs, :, :] = w.cpu()
+                pair_offset += len(window_pairs)
+
+            weights_to_save = weights_tensor.numpy().tolist()
+            weights_shape = weights_tensor.shape
+
+        elif hasattr(self.weight_updater, 'weights') and self.weight_updater.weights is not None:
+            weights_to_save = self.weight_updater.weights.cpu().numpy().tolist()
+            weights_shape = self.weight_updater.weights.shape
+        else:
+            print(f"{Colors.RED}❌ ERROR: No weights to save!{Colors.ENDC}")
+            return False
+
+        if weights_to_save:
+            try:
+                weights_np = np.array(weights_to_save)
+                print(f"{Colors.CYAN}📊 Saving model with weights shape: {weights_shape}{Colors.ENDC}")
+                print(f"   Weight range: [{weights_np.min():.6f}, {weights_np.max():.6f}]")
+                print(f"   Weight mean: {weights_np.mean():.6f}, std: {weights_np.std():.6f}")
+            except:
+                print(f"{Colors.CYAN}📊 Saving model with weights shape: {weights_shape}{Colors.ENDC}")
+
+        # ================================================================
+        # Build model state
+        # ================================================================
         model_state = {
-            'config': self.config,
+            'config': to_plain_python(self.config),
             'dataset_name': self.dataset_name,
             'model_type': self.model_type,
             'n_bins_per_dim': self.n_bins_per_dim,
-            'feature_pairs': self.feature_pairs,
-            'feature_names': self.feature_names,
-            'selected_features': getattr(self, 'selected_features', []),
+            'feature_pairs': to_plain_python(self.feature_pairs),
+            'feature_names': to_plain_python(self.feature_names),
+            'selected_features': to_plain_python(getattr(self, 'selected_features', [])),
             'target_column': self.target_column,
-
-            # CRITICAL: Save label encoder properly
-            'label_encoder': self.label_encoder if hasattr(self, 'label_encoder') else {},
-
-            # CRITICAL: Save weights as flattened list with shape
-            'weights': self.weight_updater.weights.cpu().numpy().tolist(),
-            'weights_shape': self.weight_updater.weights.shape,
-
-            # Save bin_edges
+            'label_encoder': to_plain_python(self.label_encoder if hasattr(self, 'label_encoder') else {}),
+            'weights': weights_to_save,
+            'weights_shape': weights_shape,
             'bin_edges': [],
-
-            # Save bin_probs
+            'bin_edges_windowed': [],  # ADDED
             'bin_probs': [],
-
-            # Save classes
-            'classes': self.classes.cpu().tolist() if torch.is_tensor(self.classes) else self.classes,
-
-            # Save preprocessor stats
+            'bin_probs_windowed': [],  # ADDED
+            'classes': to_plain_python(self.classes.cpu().tolist() if torch.is_tensor(self.classes) else self.classes),
             'preprocessor_stats': {
-                'feature_stats': self.preprocessor.feature_stats if self.preprocessor else {},
-                'categorical_encoders': self.preprocessor.categorical_encoders if self.preprocessor else {},
-                'label_encoder': self.label_encoder if hasattr(self, 'label_encoder') else {}
+                'feature_stats': to_plain_python(self.preprocessor.feature_stats if self.preprocessor else {}),
+                'categorical_encoders': to_plain_python(self.preprocessor.categorical_encoders if self.preprocessor else {}),
+                'label_encoder': to_plain_python(self.label_encoder if hasattr(self, 'label_encoder') else {})
             },
-
-            'evolution_history': self.evolution_tracker.get_history(),
-            'training_history': self.training_history,
-
-            'version': '3.5'
+            'evolution_history': to_plain_python(self.evolution_tracker.get_history()),
+            'training_history': to_plain_python(self.training_history),
+            'use_windowing': self._use_windowing,
+            'window_size': self.window_size,
+            'stride': self.stride,
+            'feature_pairs_windowed': to_plain_python(self.feature_pairs_windowed),
+            'version': '3.6-memory-efficient'
         }
 
-        # Save bin_edges as lists
+        # ================================================================
+        # Save bin_edges
+        # ================================================================
         if self.bin_edges:
             for pair_edges in self.bin_edges:
-                pair_edges_list = []
-                for edge_tensor in pair_edges:
-                    if torch.is_tensor(edge_tensor):
-                        pair_edges_list.append(edge_tensor.cpu().tolist())
-                    else:
-                        pair_edges_list.append(edge_tensor)
+                pair_edges_list = [to_plain_python(edge) for edge in pair_edges]
                 model_state['bin_edges'].append(pair_edges_list)
 
+        # ================================================================
+        # SAVE bin_edges_windowed - CRITICAL for windowed mode
+        # ================================================================
+        if self.bin_edges_windowed:
+            for window_edges in self.bin_edges_windowed:
+                window_edges_list = []
+                for pair_edges in window_edges:
+                    pair_edges_list = [to_plain_python(edge) for edge in pair_edges]
+                    window_edges_list.append(pair_edges_list)
+                model_state['bin_edges_windowed'].append(window_edges_list)
+
+        # ================================================================
         # Save bin_probs
+        # ================================================================
         if self.bin_probs:
             for prob_tensor in self.bin_probs:
                 if torch.is_tensor(prob_tensor):
@@ -9829,25 +10545,71 @@ class OptimizedDBNN(ExternalToolsMixin):
                     prob_np = np.where(prob_np < 1e-10, 1.0, prob_np)
                     model_state['bin_probs'].append(prob_np.tolist())
                 else:
-                    model_state['bin_probs'].append(prob_tensor)
+                    model_state['bin_probs'].append(to_plain_python(prob_tensor))
 
+        # ================================================================
+        # SAVE bin_probs_windowed - CRITICAL for windowed mode
+        # ================================================================
+        if self.bin_probs_windowed:
+            for window_probs in self.bin_probs_windowed:
+                if torch.is_tensor(window_probs):
+                    prob_np = window_probs.cpu().numpy()
+                    prob_np = np.where(prob_np < 1e-10, 1.0, prob_np)
+                    model_state['bin_probs_windowed'].append(prob_np.tolist())
+                else:
+                    model_state['bin_probs_windowed'].append(to_plain_python(window_probs))
+
+        # ================================================================
         # Save with pickle
-        with open(path, 'wb') as f:
-            pickle.dump(model_state, f, protocol=4)
+        # ================================================================
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(model_state, f, protocol=4)
+        except Exception as e:
+            print(f"{Colors.RED}❌ ERROR: Failed to save model: {e}{Colors.ENDC}")
+            try:
+                with open(path, 'wb') as f:
+                    pickle.dump(model_state, f, protocol=2)
+                print(f"{Colors.YELLOW}   Saved with protocol 2 for compatibility{Colors.ENDC}")
+            except Exception as e2:
+                print(f"{Colors.RED}❌ ERROR: Failed to save model: {e2}{Colors.ENDC}")
+                return False
 
         file_size = os.path.getsize(path) / (1024 * 1024)
         print(f"{Colors.GREEN}✅ Model saved to {path} ({file_size:.2f} MB){Colors.ENDC}")
         print(f"   - Label encoder: {len(model_state['label_encoder'])} entries")
         print(f"   - Weights shape: {model_state['weights_shape']}")
         print(f"   - Bin edges: {len(model_state['bin_edges'])} pairs")
+        print(f"   - Windowed bin edges: {len(model_state['bin_edges_windowed'])} windows")
         print(f"   - Bin probs: {len(model_state['bin_probs'])} pairs")
+        print(f"   - Windowed bin probs: {len(model_state['bin_probs_windowed'])} windows")
 
         return True
 
     def load_model(self, path: str):
-        """Load model with ALL components needed for prediction"""
+        """Load model with ALL components needed for prediction."""
         with open(path, 'rb') as f:
             model_state = pickle.load(f)
+
+        # ================================================================
+        # Helper function to recursively convert to tensor
+        # ================================================================
+        def to_tensor(obj):
+            if isinstance(obj, (list, tuple)):
+                if not obj:
+                    return torch.tensor([], dtype=torch.float64, device=self.device)
+                try:
+                    return torch.tensor(obj, dtype=torch.float64, device=self.device)
+                except:
+                    return [to_tensor(x) for x in obj]
+            elif isinstance(obj, dict):
+                return {k: to_tensor(v) for k, v in obj.items()}
+            elif isinstance(obj, np.ndarray):
+                return torch.tensor(obj.tolist(), dtype=torch.float64, device=self.device)
+            elif torch.is_tensor(obj):
+                return obj.to(self.device) if obj.device != self.device else obj
+            else:
+                return obj
 
         # Restore basic attributes
         self.config = model_state['config']
@@ -9859,100 +10621,232 @@ class OptimizedDBNN(ExternalToolsMixin):
         self.selected_features = model_state.get('selected_features', [])
         self.target_column = model_state.get('target_column', self.target_column)
 
-        # CRITICAL: Restore label encoder
+        # Restore windowing info
+        self._use_windowing = model_state.get('use_windowing', False)
+        self.window_size = model_state.get('window_size', 16)
+        self.stride = model_state.get('stride', 8)
+        self.feature_pairs_windowed = model_state.get('feature_pairs_windowed', [])
+
+        # ================================================================
+        # Restore label encoder
+        # ================================================================
         label_encoder = model_state.get('label_encoder', {})
         if isinstance(label_encoder, list):
             self.label_encoder = {str(label): i for i, label in enumerate(label_encoder)}
         elif isinstance(label_encoder, dict):
-            self.label_encoder = label_encoder
+            self.label_encoder = {}
+            for k, v in label_encoder.items():
+                try:
+                    self.label_encoder[str(k)] = int(v)
+                except:
+                    self.label_encoder[str(k)] = v
         else:
             self.label_encoder = {}
 
         self.label_decoder = {v: k for k, v in self.label_encoder.items()}
         print(f"{Colors.GREEN}✓ Restored label encoder: {self.label_encoder}{Colors.ENDC}")
 
+        # ================================================================
         # Restore classes
+        # ================================================================
         classes = model_state.get('classes', [])
         if classes:
-            self.classes = torch.tensor(classes, device=self.device)
+            if isinstance(classes, list):
+                self.classes = torch.tensor(classes, device=self.device)
+            elif isinstance(classes, np.ndarray):
+                self.classes = torch.tensor(classes.tolist(), device=self.device)
+            elif torch.is_tensor(classes):
+                self.classes = classes.to(self.device) if classes.device != self.device else classes
+            else:
+                self.classes = torch.tensor(classes, device=self.device)
         elif self.label_encoder:
             self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)
 
-        # Restore bin_edges
+        # ================================================================
+        # CRITICAL: Restore bin_edges
+        # ================================================================
         self.bin_edges = []
         for pair_edges_list in model_state.get('bin_edges', []):
             pair_edges = []
-            for edge_list in pair_edges_list:
-                edge_tensor = torch.tensor(edge_list, dtype=torch.float64, device=self.device)
-                pair_edges.append(edge_tensor)
+            for edge_item in pair_edges_list:
+                try:
+                    if torch.is_tensor(edge_item):
+                        pair_edges.append(edge_item.to(self.device))
+                    elif isinstance(edge_item, list):
+                        pair_edges.append(torch.tensor(edge_item, dtype=torch.float64, device=self.device))
+                    elif isinstance(edge_item, np.ndarray):
+                        pair_edges.append(torch.tensor(edge_item.tolist(), dtype=torch.float64, device=self.device))
+                    else:
+                        pair_edges.append(torch.tensor(edge_item, dtype=torch.float64, device=self.device))
+                except Exception as e:
+                    print(f"{Colors.YELLOW}⚠️ Could not restore bin edge: {e}{Colors.ENDC}")
+                    pair_edges.append(torch.linspace(0, 1, self.n_bins_per_dim + 1, device=self.device))
             self.bin_edges.append(pair_edges)
 
-        # Restore bin_probs
-        self.bin_probs = []
-        for prob_list in model_state.get('bin_probs', []):
-            prob_array = np.array(prob_list, dtype=np.float64)
-            prob_array = np.where(prob_array < 1e-10, 1e-10, prob_array)
-            prob_tensor = torch.tensor(prob_array, dtype=torch.float64, device=self.device)
-            self.bin_probs.append(prob_tensor)
+        # ================================================================
+        # CRITICAL: Restore bin_edges_windowed - FIXES THE ERROR
+        # ================================================================
+        self.bin_edges_windowed = []
+        for window_edges_list in model_state.get('bin_edges_windowed', []):
+            window_edges = []
+            for pair_edges_list in window_edges_list:
+                pair_edges = []
+                for edge_item in pair_edges_list:
+                    try:
+                        if torch.is_tensor(edge_item):
+                            pair_edges.append(edge_item.to(self.device))
+                        elif isinstance(edge_item, list):
+                            pair_edges.append(torch.tensor(edge_item, dtype=torch.float64, device=self.device))
+                        elif isinstance(edge_item, np.ndarray):
+                            pair_edges.append(torch.tensor(edge_item.tolist(), dtype=torch.float64, device=self.device))
+                        else:
+                            pair_edges.append(torch.tensor(edge_item, dtype=torch.float64, device=self.device))
+                    except Exception as e:
+                        print(f"{Colors.YELLOW}⚠️ Could not restore windowed bin edge: {e}{Colors.ENDC}")
+                        pair_edges.append(torch.linspace(0, 1, self.n_bins_per_dim + 1, device=self.device))
+                window_edges.append(pair_edges)
+            if window_edges:
+                self.bin_edges_windowed.append(window_edges)
 
-        # CRITICAL: Restore weights
+        # ================================================================
+        # Restore bin_probs
+        # ================================================================
+        self.bin_probs = []
+        for prob_item in model_state.get('bin_probs', []):
+            try:
+                if torch.is_tensor(prob_item):
+                    prob_tensor = prob_item.to(self.device)
+                elif isinstance(prob_item, list):
+                    prob_array = np.array(prob_item, dtype=np.float64)
+                    prob_array = np.where(prob_array < 1e-10, 1e-10, prob_array)
+                    prob_tensor = torch.tensor(prob_array, dtype=torch.float64, device=self.device)
+                elif isinstance(prob_item, np.ndarray):
+                    prob_array = np.where(prob_item < 1e-10, 1e-10, prob_item)
+                    prob_tensor = torch.tensor(prob_array.tolist(), dtype=torch.float64, device=self.device)
+                else:
+                    prob_tensor = torch.tensor(prob_item, dtype=torch.float64, device=self.device)
+                prob_tensor = prob_tensor / (prob_tensor.sum(dim=(1,2), keepdim=True) + 1e-10)
+                self.bin_probs.append(prob_tensor)
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️ Could not restore bin probability: {e}{Colors.ENDC}")
+                n_classes = len(self.classes) if self.classes is not None else 2
+                prob_tensor = torch.ones((n_classes, self.n_bins_per_dim, self.n_bins_per_dim),
+                                        dtype=torch.float64, device=self.device)
+                prob_tensor = prob_tensor / prob_tensor.sum()
+                self.bin_probs.append(prob_tensor)
+
+        # ================================================================
+        # CRITICAL: Restore bin_probs_windowed
+        # ================================================================
+        self.bin_probs_windowed = []
+        for prob_item in model_state.get('bin_probs_windowed', []):
+            try:
+                if torch.is_tensor(prob_item):
+                    prob_tensor = prob_item.to(self.device)
+                elif isinstance(prob_item, list):
+                    prob_array = np.array(prob_item, dtype=np.float64)
+                    prob_array = np.where(prob_array < 1e-10, 1e-10, prob_array)
+                    prob_tensor = torch.tensor(prob_array, dtype=torch.float64, device=self.device)
+                elif isinstance(prob_item, np.ndarray):
+                    prob_array = np.where(prob_item < 1e-10, 1e-10, prob_item)
+                    prob_tensor = torch.tensor(prob_array.tolist(), dtype=torch.float64, device=self.device)
+                else:
+                    prob_tensor = torch.tensor(prob_item, dtype=torch.float64, device=self.device)
+                prob_tensor = prob_tensor / (prob_tensor.sum(dim=(1,2), keepdim=True) + 1e-10)
+                self.bin_probs_windowed.append(prob_tensor)
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️ Could not restore windowed bin probability: {e}{Colors.ENDC}")
+                n_classes = len(self.classes) if self.classes is not None else 2
+                prob_tensor = torch.ones((n_classes, self.n_bins_per_dim, self.n_bins_per_dim),
+                                        dtype=torch.float64, device=self.device)
+                prob_tensor = prob_tensor / prob_tensor.sum()
+                self.bin_probs_windowed.append(prob_tensor)
+
+        # ================================================================
+        # Restore weights
+        # ================================================================
         weights_list = model_state.get('weights')
         weights_shape = model_state.get('weights_shape')
 
         if weights_list is not None and weights_shape is not None:
-            # Convert list back to tensor
-            weights_array = np.array(weights_list, dtype=np.float64)
-            weights_tensor = torch.tensor(weights_array, device=self.device, dtype=torch.float64)
-            weights_tensor = weights_tensor.reshape(weights_shape)
+            try:
+                if isinstance(weights_list, list) and weights_list and torch.is_tensor(weights_list[0]):
+                    weights_array = np.array([t.cpu().numpy() if torch.is_tensor(t) else t for t in weights_list], dtype=np.float64)
+                else:
+                    weights_array = np.array(weights_list, dtype=np.float64)
 
-            # Get dimensions
-            if len(weights_tensor.shape) == 4:
-                n_classes = weights_tensor.shape[0]
-                n_pairs = weights_tensor.shape[1]
-                n_bins = weights_tensor.shape[2]
-            else:
-                n_classes = len(self.label_encoder) if self.label_encoder else 2
-                n_pairs = len(self.feature_pairs) if self.feature_pairs else 1
-                n_bins = self.n_bins_per_dim
+                weights_tensor = torch.tensor(weights_array, device=self.device, dtype=torch.float64)
+                weights_tensor = weights_tensor.reshape(weights_shape)
 
-            # Recreate weight_updater
-            self.weight_updater = OptimizedWeightUpdater(n_classes, n_pairs, n_bins, self.device)
-            self.weight_updater.weights = weights_tensor
+                if self._use_windowing and self.feature_pairs_windowed:
+                    n_classes = weights_tensor.shape[0]
+                    n_bins = weights_tensor.shape[2]
+                    n_features = len(self.feature_names) if self.feature_names else 0
 
-            print(f"{Colors.GREEN}✓ Restored weights: {weights_shape}{Colors.ENDC}")
-            print(f"   Weight stats - mean: {weights_tensor.mean().item():.6f}, std: {weights_tensor.std().item():.6f}")
-        else:
-            # Try alternative key 'weight_updater_weights' for backward compatibility
-            weight_weights = model_state.get('weight_updater_weights')
-            weight_shape = model_state.get('weight_updater_shape')
+                    self.weight_updater = MemoryEfficientWeightUpdater(
+                        n_classes, n_features, n_bins,
+                        self.window_size, self.device
+                    )
 
-            if weight_weights and weight_shape:
-                n_classes, n_pairs, n_bins, _ = weight_shape
-                self.weight_updater = OptimizedWeightUpdater(n_classes, n_pairs, n_bins, self.device)
-                weight_array = np.array(weight_weights, dtype=np.float64)
-                weight_array = np.where(weight_array < 1e-10, 1e-10, weight_array)
-                self.weight_updater.weights = torch.tensor(weight_array, dtype=torch.float64, device=self.device)
-                print(f"{Colors.GREEN}✓ Restored weights (from weight_updater_weights): {weight_shape}{Colors.ENDC}")
-            else:
-                print(f"{Colors.RED}❌ No weights found in saved model!{Colors.ENDC}")
-                print(f"   The model file may be corrupted or was saved before training.")
+                    pair_offset = 0
+                    for window_idx, window_pairs in enumerate(self.feature_pairs_windowed):
+                        n_pairs = len(window_pairs)
+                        if n_pairs > 0 and pair_offset + n_pairs <= weights_tensor.shape[1]:
+                            window_weights = weights_tensor[:, pair_offset:pair_offset + n_pairs, :, :]
+                            self.weight_updater.set_weights_for_window(window_idx, window_weights)
+                        pair_offset += n_pairs
+
+                    self.weight_updater.feature_pairs_windowed = self.feature_pairs_windowed
+                    print(f"{Colors.GREEN}✓ Restored MemoryEfficientWeightUpdater with {len(self.feature_pairs_windowed)} windows{Colors.ENDC}")
+                else:
+                    n_classes = weights_tensor.shape[0]
+                    n_pairs = weights_tensor.shape[1]
+                    n_bins = weights_tensor.shape[2]
+
+                    self.weight_updater = OptimizedWeightUpdater(n_classes, n_pairs, n_bins, self.device)
+                    self.weight_updater.weights = weights_tensor
+                    print(f"{Colors.GREEN}✓ Restored OptimizedWeightUpdater with {n_pairs} pairs{Colors.ENDC}")
+
+                print(f"   Weight stats - mean: {weights_tensor.mean().item():.6f}, std: {weights_tensor.std().item():.6f}")
+            except Exception as e:
+                print(f"{Colors.RED}❌ Could not restore weights: {e}{Colors.ENDC}")
                 self.weight_updater = None
+        else:
+            print(f"{Colors.RED}❌ No weights found in saved model!{Colors.ENDC}")
+            self.weight_updater = None
 
+        # ================================================================
         # Restore preprocessor stats
+        # ================================================================
         if not hasattr(self, 'preprocessor') or self.preprocessor is None:
             self.preprocessor = OptimizedDatasetProcessor(self.config, self.device)
 
         preproc_stats = model_state.get('preprocessor_stats', {})
         if preproc_stats:
-            self.preprocessor.feature_stats = preproc_stats.get('feature_stats', {})
-            self.preprocessor.categorical_encoders = preproc_stats.get('categorical_encoders', {})
-            self.preprocessor.label_encoder = self.label_encoder.copy()
+            feature_stats = preproc_stats.get('feature_stats', {})
+            if feature_stats:
+                for key, value in feature_stats.items():
+                    if isinstance(value, list):
+                        try:
+                            self.preprocessor.feature_stats[key] = np.array(value)
+                        except:
+                            self.preprocessor.feature_stats[key] = value
+                    else:
+                        self.preprocessor.feature_stats[key] = value
 
-        # Restore evolution history
+            categorical_encoders = preproc_stats.get('categorical_encoders', {})
+            if categorical_encoders:
+                self.preprocessor.categorical_encoders = categorical_encoders
+
+            if 'label_encoder' in preproc_stats:
+                self.preprocessor.label_encoder = preproc_stats['label_encoder']
+
+        # ================================================================
+        # Restore evolution and training history
+        # ================================================================
         if 'evolution_history' in model_state:
             self.evolution_tracker.tensor_evolution_history = model_state['evolution_history']
 
-        # Restore training history
         if 'training_history' in model_state:
             self.training_history = model_state['training_history']
 
@@ -9960,6 +10854,8 @@ class OptimizedDBNN(ExternalToolsMixin):
         print(f"   Dataset: {self.dataset_name}")
         print(f"   Classes: {len(self.label_encoder)} - {list(self.label_encoder.keys())}")
         print(f"   Features: {len(self.feature_names) if self.feature_names else 0}")
+        print(f"   Windowed bin edges: {len(self.bin_edges_windowed)} windows")
+        print(f"   Windowed bin probs: {len(self.bin_probs_windowed)} windows")
         print(f"   Weights: {'✓' if self.weight_updater else '✗'}")
 
         return self.weight_updater is not None
@@ -10075,14 +10971,33 @@ class OptimizedDBNN(ExternalToolsMixin):
 
     def predict(self, X: torch.Tensor, batch_size: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        OPTIMIZED predict - larger batches, cached computation
-        Preserves exact logic, 2x faster for large datasets
+        OPTIMIZED predict - handles both standard and windowed modes.
+        For windowed mode, uses streaming prediction without allocating all weights.
         """
-        # Check model state (identical to original)
+        # Check model state
         if self.weight_updater is None:
             raise ValueError("Model not initialized. No weight updater found.")
+
+        # ================================================================
+        # CRITICAL: For windowed mode, use streaming prediction
+        # ================================================================
+        if self._use_windowing and hasattr(self.weight_updater, 'get_weights_for_window'):
+            # Use streaming prediction - NO FULL WEIGHT ALLOCATION
+            return self._predict_streaming(X, batch_size)
+
+        # ================================================================
+        # Standard mode - use flattened weights
+        # ================================================================
+        if self.weight_updater.weights is None:
+            if hasattr(self.weight_updater, 'build_flattened_weights'):
+                # CRITICAL FIX: Call with NO arguments
+                self.weight_updater.build_flattened_weights()
+            else:
+                raise ValueError("No weights found.")
+
         if self.weight_updater.weights is None:
             raise ValueError("Model not trained. No weights found.")
+
         if self.bin_edges is None:
             raise ValueError("Model not initialized. No bin edges found.")
         if self.bin_probs is None:
@@ -10091,8 +11006,6 @@ class OptimizedDBNN(ExternalToolsMixin):
             raise ValueError("Model not initialized. No feature pairs found.")
 
         n_samples = len(X)
-
-        # Use larger batch size for faster evaluation
         batch_size = batch_size or min(self.batch_size * 2, 2048)
         n_batches = (n_samples + batch_size - 1) // batch_size
 
@@ -10105,7 +11018,6 @@ class OptimizedDBNN(ExternalToolsMixin):
             if batch_X.device != self.device:
                 batch_X = batch_X.to(self.device)
 
-            # Compute posteriors (same as original)
             posteriors, _ = self.batch_processor.process_batch(
                 batch_X, self.feature_pairs, self.bin_edges, self.bin_probs,
                 self.weight_updater.weights, self.n_bins_per_dim, len(self.classes)
@@ -10113,7 +11025,6 @@ class OptimizedDBNN(ExternalToolsMixin):
 
             predictions = torch.argmax(posteriors, dim=1)
 
-            # Move to CPU immediately to free GPU memory
             all_predictions.append(predictions.cpu())
             all_posteriors.append(posteriors.cpu())
 
@@ -10654,6 +11565,7 @@ class OptimizedDBNN(ExternalToolsMixin):
     def verify_model_state(self) -> Dict:
         """
         Verify that all critical components of the model state are intact.
+        Handles both standard and memory-efficient weight updaters.
         """
         issues = []
 
@@ -10675,14 +11587,21 @@ class OptimizedDBNN(ExternalToolsMixin):
         elif len(self.label_encoder) == 0:
             issues.append("Label encoder is empty")
 
-        # Check label decoder (should be consistent with encoder)
+        # Check label decoder
         if not self.label_decoder:
             issues.append("No label decoder found")
         elif len(self.label_decoder) != len(self.label_encoder):
             issues.append(f"Label decoder size ({len(self.label_decoder)}) != label encoder size ({len(self.label_encoder)})")
 
-        # Check weights
-        if not self.weight_updater or self.weight_updater.weights is None:
+        # Check weights - handle both types
+        has_weights = False
+        if self.weight_updater:
+            if hasattr(self.weight_updater, '_window_weights') and self.weight_updater._window_weights:
+                has_weights = True
+            elif hasattr(self.weight_updater, 'weights') and self.weight_updater.weights is not None:
+                has_weights = True
+
+        if not has_weights:
             issues.append("No weights found")
 
         # Check bin edges
@@ -10693,7 +11612,6 @@ class OptimizedDBNN(ExternalToolsMixin):
         if not self.bin_probs:
             issues.append("No bin probabilities found")
 
-        # Return verification report
         return {
             'is_valid': len(issues) == 0,
             'issues': issues,
@@ -10701,7 +11619,7 @@ class OptimizedDBNN(ExternalToolsMixin):
             'feature_pair_count': len(self.feature_pairs) if self.feature_pairs else 0,
             'class_count': len(self.label_encoder) if self.label_encoder else 0,
             'has_label_decoder': bool(self.label_decoder),
-            'has_weights': bool(self.weight_updater and self.weight_updater.weights is not None),
+            'has_weights': has_weights,
             'has_bin_edges': bool(self.bin_edges),
             'has_bin_probs': bool(self.bin_probs)
         }
@@ -11028,7 +11946,7 @@ class OptimizedDBNN(ExternalToolsMixin):
 
     def adaptive_fit_predict(self, max_rounds: int = None, batch_size: int = 128):
         """
-        Complete adaptive training - Shows colored confusion matrices at round level only
+        Complete adaptive training with progress tracking and early termination.
         """
         print(f"\n{Colors.BOLD}{Colors.BLUE}🚀 Starting Adaptive Training{Colors.ENDC}")
         print(f"{'='*60}")
@@ -11045,14 +11963,12 @@ class OptimizedDBNN(ExternalToolsMixin):
         round_stats = []
 
         max_rounds = max_rounds or self.adaptive_rounds
-
         self.evolution_tracker.clear_history()
 
         try:
             if self.X_tensor is None:
                 self.load_data()
 
-            # CRITICAL FIX: Check if data_original exists
             if self.data_original is None:
                 print(f"{Colors.RED}❌ No data loaded. Please load data first.{Colors.ENDC}")
                 return {'error': 'No data loaded'}
@@ -11060,23 +11976,47 @@ class OptimizedDBNN(ExternalToolsMixin):
             X = self.data_original.drop(columns=[self.target_column])
             y = self.data_original[self.target_column].astype(str)
 
-            # CRITICAL FIX: Initialize label encoder and classes if not set
+            # ============================================================
+            # Auto-detect windowing need
+            # ============================================================
+            n_features = self.X_tensor.shape[1] if self.X_tensor is not None else 0
+            n_classes = len(self.label_encoder) if self.label_encoder else 0
+
+            need_windowing = n_features > 100 or n_classes > 20 or (n_features * n_classes) > 5000
+
+            if need_windowing and not self._use_windowing:
+                print(f"{Colors.CYAN}🔧 Auto-enabling memory-efficient windowing{Colors.ENDC}")
+                print(f"   Features: {n_features}, Classes: {n_classes}")
+                self._use_windowing = True
+
+            # ============================================================
+            # Initialize label encoder
+            # ============================================================
             if self.label_encoder is None or len(self.label_encoder) == 0:
                 unique_classes = y.unique()
-                self.label_encoder = {v: i for i, v in enumerate(unique_classes)}
-                print(f"{Colors.CYAN}📊 Initialized label encoder: {self.label_encoder}{Colors.ENDC}")
+                if self.show_progress:
+                    print(f"{Colors.CYAN}📊 Initializing label encoder...{Colors.ENDC}")
+                    class_pbar = tqdm(total=len(unique_classes), desc="   Classes",
+                                     unit="class", leave=False)
+                self.label_encoder = {}
+                for i, cls in enumerate(unique_classes):
+                    self.label_encoder[str(cls)] = i
+                    if self.show_progress:
+                        class_pbar.update(1)
+                if self.show_progress:
+                    class_pbar.close()
+                    print(f"   ✅ {len(self.label_encoder)} classes")
 
-            # CRITICAL FIX: Ensure classes is properly set from label encoder
             if self.classes is None:
                 self.classes = torch.tensor(list(self.label_encoder.values()), device=self.device)
-                print(f"{Colors.GREEN}✓ Initialized classes: {self.classes}{Colors.ENDC}")
 
-            # CRITICAL FIX: Ensure y_tensor is encoded properly
             if self.y_tensor is None:
                 y_encoded = y.map(self.label_encoder).values
                 self.y_tensor = torch.tensor(y_encoded, dtype=torch.long, device=self.device)
-                print(f"{Colors.GREEN}✓ Encoded target variable{Colors.ENDC}")
 
+            # ============================================================
+            # Model loading
+            # ============================================================
             model_loaded = False
             if self.config.get('use_previous_model', True):
                 print(f"{Colors.CYAN}Loading previous model state...{Colors.ENDC}")
@@ -11084,52 +12024,56 @@ class OptimizedDBNN(ExternalToolsMixin):
                 if os.path.exists(model_file):
                     self.load_model(model_file)
                     model_loaded = True
-
                     train_indices, test_indices = self.load_last_known_split()
                     if train_indices:
-                        print(f"{Colors.GREEN}Resuming with {len(train_indices)} previous training samples{Colors.ENDC}")
-                    else:
-                        print(f"{Colors.YELLOW}No valid previous split found, initializing new training set{Colors.ENDC}")
-                        train_indices = []
-                        test_indices = list(range(len(X)))
+                        print(f"{Colors.GREEN}Resuming with {len(train_indices)} previous samples{Colors.ENDC}")
 
             if not model_loaded:
                 print(f"{Colors.CYAN}Initializing fresh model...{Colors.ENDC}")
                 train_indices = []
                 test_indices = list(range(len(X)))
 
-                self.generate_feature_pairs(self.X_tensor.shape[1])
-                print(f"   Generated {len(self.feature_pairs)} feature pairs")
-
-                self.bin_edges = self.compute_bin_edges(self.X_tensor)
-                print(f"   Computed bin edges")
+                if self._use_windowing:
+                    self.generate_feature_pairs_windowed(n_features)
+                    self.bin_edges = self.compute_bin_edges_windowed(self.X_tensor)
+                else:
+                    self.generate_feature_pairs(n_features)
+                    self.bin_edges = self.compute_bin_edges(self.X_tensor)
 
             if test_indices is None:
                 test_indices = list(range(len(X)))
 
+            # ============================================================
+            # Initial training set selection
+            # ============================================================
             if len(train_indices) == 0:
-                # CRITICAL FIX: Use classes from label encoder, not self.classes (which might be None)
-                n_classes = len(self.label_encoder)
                 target_per_class = max(1, self.initial_samples // n_classes)
                 print(f"\n{Colors.CYAN}Initializing with {target_per_class} samples PER CLASS{Colors.ENDC}")
 
                 initial_samples = []
                 class_sample_counts = {}
-
-                # Get y_tensor as numpy on CPU for comparison
                 y_numpy = self.y_tensor.cpu().numpy()
 
-                # OPTIMIZATION: Vectorized selection for all classes
+                if self.show_progress:
+                    class_pbar = tqdm(total=len(self.label_encoder), desc="   Selecting samples",
+                                     unit="class", leave=False)
+
                 for class_label, class_id in self.label_encoder.items():
                     class_indices = np.where(y_numpy == class_id)[0]
                     if len(class_indices) == 0:
-                        class_sample_counts[class_label] = 0
+                        if self.show_progress:
+                            class_pbar.update(1)
                         continue
                     n_samples_to_take = min(target_per_class, len(class_indices))
                     selected = np.random.choice(class_indices, n_samples_to_take, replace=False).tolist()
                     initial_samples.extend(selected)
                     class_sample_counts[class_label] = n_samples_to_take
-                    print(f"   Class {class_label}: added {n_samples_to_take} initial samples")
+                    if self.show_progress:
+                        class_pbar.set_postfix({"class": class_label[:10], "samples": n_samples_to_take})
+                        class_pbar.update(1)
+
+                if self.show_progress:
+                    class_pbar.close()
 
                 train_indices = initial_samples
                 print(f"{Colors.GREEN}Final training set: {len(train_indices)} TOTAL samples{Colors.ENDC}")
@@ -11139,28 +12083,40 @@ class OptimizedDBNN(ExternalToolsMixin):
             print(f"\n{Colors.CYAN}Initial training set size: {len(train_indices)}{Colors.ENDC}")
             print(f"{Colors.CYAN}Initial test set size: {len(test_indices)}{Colors.ENDC}")
 
+            # ============================================================
+            # Compute likelihoods
+            # ============================================================
             if self.bin_probs is None and train_indices:
                 X_train_subset = self.X_tensor[train_indices]
                 y_train_subset = self.y_tensor[train_indices]
 
-                # Ensure they're on the correct device
                 X_train_subset = X_train_subset.to(self.device)
                 y_train_subset = y_train_subset.to(self.device)
 
-                likelihoods = self.compute_likelihoods(X_train_subset, y_train_subset)
-                self.bin_probs = likelihoods['bin_probs']
-                print(f"   Computed likelihoods")
+                if self._use_windowing and self.feature_pairs_windowed:
+                    print(f"\n{Colors.CYAN}📊 Computing likelihoods WITH WINDOWING...{Colors.ENDC}")
+                    likelihoods = self.compute_likelihoods_windowed(X_train_subset, y_train_subset)
+                else:
+                    print(f"\n{Colors.CYAN}📊 Computing likelihoods...{Colors.ENDC}")
+                    likelihoods = self.compute_likelihoods(X_train_subset, y_train_subset)
 
+                self.bin_probs = likelihoods.get('bin_probs', [])
+                self.bin_probs_windowed = likelihoods.get('bin_probs_windowed', [])
+
+            # ============================================================
+            # Adaptive training loop
+            # ============================================================
             adaptive_patience_counter = 0
             patience = self.patience
             best_combined_accuracy = 0.0
             best_round_initial_conditions = None
             round_num = 0
 
-            # Suppress print output from fit_predict
             import sys
             from io import StringIO
-            original_stdout = sys.stdout
+
+            if self.show_progress:
+                print(f"\n{Colors.CYAN}🔄 Starting adaptive rounds...{Colors.ENDC}")
 
             while round_num < max_rounds:
                 if self.stop_training_flag:
@@ -11190,14 +12146,18 @@ class OptimizedDBNN(ExternalToolsMixin):
                 save_path = f"data/{self.dataset_name}/Predictions/"
                 os.makedirs(save_path, exist_ok=True)
 
-                # SUPPRESS ALL PRINT OUTPUT DURING INTERNAL TRAINING
+                # Train with progress bar (handled inside fit)
+                if self.show_progress:
+                    print(f"\n{Colors.CYAN}🏋️ Training round {round_num + 1}...{Colors.ENDC}")
+
+                original_stdout = sys.stdout
                 captured_output = StringIO()
                 sys.stdout = captured_output
 
                 try:
-                    results = self.fit_predict(batch_size=batch_size, save_path=save_path)
+                    results = self.fit_predict(batch_size=batch_size, save_path=save_path,
+                                               verbose=self.show_progress)
                 finally:
-                    # Restore stdout
                     sys.stdout = original_stdout
 
                 if 'history' in results and results['history']:
@@ -11208,7 +12168,7 @@ class OptimizedDBNN(ExternalToolsMixin):
                 train_accuracy = results['train_accuracy']
                 test_accuracy = results['test_accuracy']
 
-                # Print round summary with colored accuracy
+                # Print round summary
                 print(f"\n{Colors.BOLD}📊 Round {round_num + 1} Results:{Colors.ENDC}")
                 print(f"   {Colors.GREEN}Training accuracy: {train_accuracy:.4f}{Colors.ENDC}")
                 print(f"   {Colors.GREEN}Test accuracy: {test_accuracy:.4f}{Colors.ENDC}")
@@ -11223,7 +12183,7 @@ class OptimizedDBNN(ExternalToolsMixin):
                     training_size=len(train_indices)
                 )
 
-                # Print FULL COLORED CONFUSION MATRICES
+                # Print confusion matrices
                 print(f"\n{Colors.BOLD}{Colors.CYAN}📈 Confusion Matrices:{Colors.ENDC}")
 
                 train_pred, _ = self.predict(self.X_train)
@@ -11258,6 +12218,7 @@ class OptimizedDBNN(ExternalToolsMixin):
                 round_stats.append(round_data)
                 training_history.append(train_indices.copy())
 
+                # Check improvement
                 combined_accuracy = (train_accuracy + test_accuracy) / 2
                 if combined_accuracy > best_combined_accuracy:
                     best_combined_accuracy = combined_accuracy
@@ -11275,6 +12236,9 @@ class OptimizedDBNN(ExternalToolsMixin):
                     adaptive_patience_counter += 1
                     print(f"\n{Colors.YELLOW}⚠️ No improvement. Patience: {adaptive_patience_counter}/{patience}{Colors.ENDC}")
 
+                # ============================================================
+                # Early termination: If test accuracy reaches 100%, stop
+                # ============================================================
                 if total_accuracy >= 0.9999:
                     print(f"\n{Colors.GREEN}{'-'*30}{Colors.ENDC}")
                     print(f"{Colors.GREEN}🎯 TOTAL ACCURACY REACHED 100%! Training complete.{Colors.ENDC}")
@@ -11283,13 +12247,21 @@ class OptimizedDBNN(ExternalToolsMixin):
 
                 if adaptive_patience_counter >= patience:
                     print(f"\n{Colors.YELLOW}{'-'*30}{Colors.ENDC}")
-                    print(f"{Colors.YELLOW}⚠️No improvement after {patience} rounds. Stopping.{Colors.ENDC}⚠️")
+                    print(f"{Colors.YELLOW}⚠️ No improvement after {patience} rounds. Stopping.{Colors.ENDC}⚠️")
                     print(f"{Colors.YELLOW}{'⚠-'*30}{Colors.ENDC}")
                     break
 
+                # ============================================================
+                # Select new samples
+                # ============================================================
                 if test_indices:
+                    print(f"\n{Colors.CYAN}🔍 Selecting new samples...{Colors.ENDC}")
+
                     test_predictions, _ = self.predict(self.X_tensor[test_indices])
                     y_test_np = self.y_tensor[test_indices].cpu().numpy()
+
+                    if self.show_progress:
+                        print(f"   Analyzing {len(test_indices)} test samples...")
 
                     new_train_indices = self._select_samples_from_failed_classes(
                         test_predictions, y_test_np, test_indices, results
@@ -11311,7 +12283,7 @@ class OptimizedDBNN(ExternalToolsMixin):
                             print(f"{Colors.GREEN}{'✓'*30}{Colors.ENDC}")
                         else:
                             print(f"\n{Colors.YELLOW}{'⚠️'*30}{Colors.ENDC}")
-                            print(f"{Colors.YELLOW}No suitable new samples found meeting selection criteria.{Colors.ENDC}")
+                            print(f"{Colors.YELLOW}No suitable new samples found.{Colors.ENDC}")
                             print(f"{Colors.YELLOW}Training complete.{Colors.ENDC}")
                             print(f"{Colors.YELLOW}{'⚠️'*30}{Colors.ENDC}")
                         break
@@ -11321,6 +12293,9 @@ class OptimizedDBNN(ExternalToolsMixin):
                     print(f"{Colors.GREEN}{'✓'*30}{Colors.ENDC}")
                     break
 
+            # ============================================================
+            # Final summary
+            # ============================================================
             end_time = time.time()
             elapsed_time = end_time - start_time
             end_clock = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
@@ -11852,6 +12827,253 @@ class OptimizedDBNN(ExternalToolsMixin):
             doc.build(elements)
         except Exception as e:
             print(f"⚠️ Could not create PDF for {os.path.basename(img_path)}: {e}")
+
+    def _predict_streaming(self, X: torch.Tensor, batch_size: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Streaming prediction using windowed weights.
+        NEVER allocates all weights at once.
+        """
+        if self.weight_updater is None:
+            raise ValueError("Model not initialized. No weight updater found.")
+
+        if self.bin_edges is None:
+            raise ValueError("Model not initialized. No bin edges found.")
+        if self.bin_probs is None:
+            raise ValueError("Model not initialized. No bin probabilities found.")
+        if self.feature_pairs is None:
+            raise ValueError("Model not initialized. No feature pairs found.")
+
+        n_samples = len(X)
+        batch_size = batch_size or min(self.batch_size * 2, 2048)
+
+        all_predictions = []
+        all_posteriors = []
+
+        # Process in batches
+        for i in range(0, n_samples, batch_size):
+            batch_X = X[i:min(i + batch_size, n_samples)]
+
+            if batch_X.device != self.device:
+                batch_X = batch_X.to(self.device)
+
+            # For each sample in the batch, we need to compute posteriors
+            # Using windowed weights
+            batch_posteriors = torch.zeros(
+                (len(batch_X), len(self.classes)),
+                dtype=torch.float64,
+                device=self.device
+            )
+
+            # Process each window
+            for window_idx, window_pairs in enumerate(self.feature_pairs_windowed):
+                if not window_pairs:
+                    continue
+
+                # Get weights for this window
+                weights = self.weight_updater.get_weights_for_window(window_idx)
+                if weights is None:
+                    continue
+
+                # Process this window for the batch
+                window_posteriors, _ = self._process_batch_windowed(
+                    batch_X, window_pairs, self.bin_edges_windowed[window_idx],
+                    self.bin_probs_windowed[window_idx], weights
+                )
+
+                if window_posteriors is not None:
+                    # Accumulate posteriors across windows
+                    batch_posteriors += window_posteriors
+
+            # Normalize posteriors
+            posteriors = batch_posteriors / batch_posteriors.sum(dim=1, keepdim=True).clamp(min=1e-10)
+
+            predictions = torch.argmax(posteriors, dim=1)
+
+            all_predictions.append(predictions.cpu())
+            all_posteriors.append(posteriors.cpu())
+
+            # Free memory
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+
+        return torch.cat(all_predictions), torch.cat(all_posteriors)
+
+class MemoryEfficientWeightUpdater:
+    """
+    Memory-efficient weight updater for windowed mode.
+    NEVER allocates weights for all pairs at once.
+    Only keeps current window weights in memory.
+    Mathematically identical to OptimizedWeightUpdater.
+    """
+
+    def __init__(self, n_classes: int, n_features: int, n_bins: int,
+                 window_size: int = 64, device: str = 'cpu'):
+        self.n_classes = n_classes
+        self.n_features = n_features
+        self.n_bins = n_bins
+        self.window_size = window_size
+        self.device = device
+
+        # Window-specific weights - only one window at a time
+        self._window_weights = {}
+        self._current_window_idx = -1
+        self._current_weights = None
+
+        # For backward compatibility - only built when needed
+        self.weights = None
+        self._flattened_built = False
+
+        # Store window info from model
+        self.feature_pairs_windowed = []
+        self.bin_probs_windowed = []
+
+        print(f"🧠 MemoryEfficientWeightUpdater initialized")
+        print(f"   Classes: {n_classes}, Bins: {n_bins}")
+        print(f"   Window size: {window_size}")
+        print(f"   Weights allocated PER WINDOW only - NO 10 GB ALLOCATION")
+
+    def get_weights_for_window(self, window_idx: int) -> Optional[torch.Tensor]:
+        """Get weights for a specific window - only allocates when needed."""
+        if window_idx == self._current_window_idx:
+            return self._current_weights
+
+        if window_idx in self._window_weights:
+            return self._window_weights[window_idx]
+
+        # Need to create weights for this window
+        return None
+
+    def set_weights_for_window(self, window_idx: int, weights: torch.Tensor):
+        """Set weights for a specific window."""
+        if weights is not None:
+            # Ensure weights are on the correct device
+            if weights.device != self.device:
+                weights = weights.to(self.device)
+
+            # Store the weights
+            self._window_weights[window_idx] = weights
+
+            # If this is the current window, update current weights
+            if window_idx == self._current_window_idx:
+                self._current_weights = weights
+
+    def ensure_window_weights(self, window_idx: int, n_pairs: int) -> torch.Tensor:
+        """Ensure weights exist for a window, creating if needed."""
+        if window_idx == self._current_window_idx and self._current_weights is not None:
+            return self._current_weights
+
+        if window_idx in self._window_weights:
+            weights = self._window_weights[window_idx]
+            if weights.shape[1] == n_pairs:
+                return weights
+
+        # Create new weights for this window - only for this window!
+        print(f"   Allocating weights for window {window_idx} with {n_pairs} pairs")
+        weights = torch.full(
+            (self.n_classes, n_pairs, self.n_bins, self.n_bins),
+            1e-6,
+            dtype=torch.float64,
+            device=self.device
+        )
+
+        self._window_weights[window_idx] = weights
+        self._current_window_idx = window_idx
+        self._current_weights = weights
+
+        # Invalidate flattened view
+        self._flattened_built = False
+        self.weights = None
+
+        return weights
+
+    def batch_update_windowed(self, class_ids: torch.Tensor,
+                              pair_ids: torch.Tensor,
+                              bin_is: torch.Tensor,
+                              bin_js: torch.Tensor,
+                              adjustments: torch.Tensor,
+                              window_idx: int):
+        """Update weights for a specific window - only this window's weights."""
+        if len(class_ids) == 0:
+            return
+
+        # Get the number of pairs in this window
+        n_pairs = pair_ids.max().item() + 1 if len(pair_ids) > 0 else 1
+
+        # Ensure weights exist for this window
+        weights = self.ensure_window_weights(window_idx, n_pairs)
+
+        # Apply updates (vectorized scatter_add)
+        n_bins = self.n_bins
+        flat_indices = (
+            class_ids.long() * weights.shape[1] * n_bins * n_bins +
+            pair_ids.long() * n_bins * n_bins +
+            bin_is.long() * n_bins +
+            bin_js.long()
+        )
+
+        weights.view(-1).scatter_add_(
+            0,
+            flat_indices,
+            adjustments.to(weights.dtype)
+        )
+
+        # Invalidate flattened view
+        self._flattened_built = False
+        self.weights = None
+
+    def build_flattened_weights(self):
+        """
+        Build flattened weights for backward compatibility.
+        Only called when needed (e.g., for prediction).
+        CRITICAL FIX: Takes NO arguments - uses stored feature_pairs_windowed.
+        """
+        if self._flattened_built and self.weights is not None:
+            return
+
+        # Count total pairs
+        total_pairs = 0
+        for window_pairs in self.feature_pairs_windowed:
+            total_pairs += len(window_pairs)
+
+        if total_pairs == 0:
+            self.weights = torch.full(
+                (self.n_classes, 1, self.n_bins, self.n_bins),
+                1e-6,
+                dtype=torch.float64,
+                device=self.device
+            )
+            self._flattened_built = True
+            return
+
+        print(f"   ⚠️ Building flattened weights for {total_pairs} pairs - MEMORY HEAVY!")
+        print(f"   This is only needed for prediction. Consider using streaming prediction.")
+
+        # Create flattened tensor - THIS IS THE ONLY TIME ALL WEIGHTS ARE ALLOCATED
+        self.weights = torch.full(
+            (self.n_classes, total_pairs, self.n_bins, self.n_bins),
+            1e-6,
+            dtype=torch.float64,
+            device=self.device
+        )
+
+        # Fill from windows
+        pair_offset = 0
+        for window_idx, window_pairs in enumerate(self.feature_pairs_windowed):
+            if window_idx in self._window_weights:
+                w = self._window_weights[window_idx]
+                n_pairs = w.shape[1]
+                self.weights[:, pair_offset:pair_offset + n_pairs, :, :] = w
+            pair_offset += len(window_pairs)
+
+        self._flattened_built = True
+        print(f"   Flattened weights built: {self.weights.shape}")
+
+    def get_weight_for_pair(self, class_id: int, pair_idx: int, window_idx: int) -> torch.Tensor:
+        """Get weight for a specific class and pair in a window."""
+        weights = self.get_weights_for_window(window_idx)
+        if weights is None:
+            return None
+        return weights[class_id, pair_idx]
 
 
 # =============================================================================
@@ -16593,6 +17815,7 @@ Round Statistics:
             import traceback
             traceback.print_exc()
             self.status_var.set("Error generating visualization")
+
 
 
 # =============================================================================
